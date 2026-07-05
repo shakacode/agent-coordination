@@ -1016,7 +1016,7 @@ git add -A && git commit -m "Teach doctor the HTTP backend"
 - Consumes: everything above.
 - Produces: one command that proves the #3 acceptance criteria: contention refusal (exit 3), dead-holder takeover, two-concurrent-claims single winner, heartbeat/status/release parity.
 
-- [ ] **Step 1: Write the harness**
+- [x] **Step 1: Write the harness**
 
 `bin/test-http-integration`:
 
@@ -1046,7 +1046,7 @@ echo INTEGRATION_OK
 chmod +x bin/test-http-integration
 ```
 
-- [ ] **Step 2: Write the integration test**
+- [x] **Step 2: Write the integration test**
 
 `test/http_backend_integration_test.rb`:
 
@@ -1115,12 +1115,12 @@ class HttpBackendIntegrationTest < Minitest::Test
 end
 ```
 
-- [ ] **Step 3: Run it**
+- [x] **Step 3: Run it**
 
 Run: `bin/test-http-integration`
 Expected: both tests pass, then `INTEGRATION_OK`.
 
-- [ ] **Step 4: Commit**
+- [x] **Step 4: Commit**
 
 ```bash
 bundle exec rubocop && git add -A && git commit -m "Add end-to-end HTTP backend parity harness"

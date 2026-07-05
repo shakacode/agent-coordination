@@ -1,0 +1,26 @@
+#!/usr/bin/env bash
+set -euo pipefail
+cd "$(dirname "$0")/.."
+TMP_ROOT=$(mktemp -d "${TMPDIR:-/tmp}/agent-coord-wrangler.XXXXXX")
+export XDG_CONFIG_HOME="$TMP_ROOT/config"
+export XDG_CACHE_HOME="$TMP_ROOT/cache"
+export WRANGLER_LOG_PATH="$TMP_ROOT/logs"
+export WRANGLER_SEND_METRICS=false
+export WRANGLER_SEND_ERROR_REPORTS=false
+mkdir -p "$XDG_CONFIG_HOME" "$XDG_CACHE_HOME" "$WRANGLER_LOG_PATH"
+TOKEN="integration-token-$$"
+HASH=$(printf %s "$TOKEN" | shasum -a 256 | cut -d' ' -f1)
+(cd worker && npx wrangler d1 migrations apply agent-coord --local >/dev/null)
+(cd worker && npx wrangler d1 execute agent-coord --local --command \
+  "INSERT OR REPLACE INTO machines (machine, token_hash, created_at) VALUES ('integration', '${HASH}', '2026-07-04T00:00:00Z')" >/dev/null)
+(cd worker && npx wrangler dev --local --port 8787 >/tmp/wrangler-integration.log 2>&1) &
+WRANGLER_PID=$!
+trap 'kill "$WRANGLER_PID" 2>/dev/null || true; wait "$WRANGLER_PID" 2>/dev/null || true; rm -rf "$TMP_ROOT"' EXIT
+for _ in $(seq 1 60); do
+  curl -fs http://127.0.0.1:8787/v1/health >/dev/null 2>&1 && break
+  sleep 0.5
+done
+curl -fs http://127.0.0.1:8787/v1/health >/dev/null || { echo "wrangler dev never became healthy"; exit 1; }
+AGENT_COORD_API_URL=http://127.0.0.1:8787 AGENT_COORD_API_TOKEN="$TOKEN" \
+  bundle exec ruby test/http_backend_integration_test.rb
+echo INTEGRATION_OK
