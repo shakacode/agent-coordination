@@ -14,4 +14,4 @@ jobs:
         with:
           ruby-version: "3.4"
       - run: gem install minitest rake
-      - run: .agents/bin/validate
+      - run: .agents/bin/ci

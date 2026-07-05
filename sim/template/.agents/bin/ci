@@ -1,0 +1,12 @@
+#!/usr/bin/env bash
+set -euo pipefail
+root="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
+cd "$root"
+
+if [ "${GITHUB_EVENT_NAME:-}" = "pull_request" ] && [ -n "${GITHUB_BASE_REF:-}" ]; then
+  git fetch --quiet origin "$GITHUB_BASE_REF" --depth=1
+  AGENT_SIM_BASE_REF="$(git rev-parse FETCH_HEAD)" "$root/.agents/bin/validate"
+  exit 0
+fi
+
+"$root/.agents/bin/validate"

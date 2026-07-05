@@ -2,5 +2,6 @@
 
 | Script | Purpose |
 | --- | --- |
-| `validate` | Full pre-push gate (runs test). |
+| `ci` | GitHub Actions entrypoint. |
+| `validate` | Sim-aware gate: exactly one changed task file runs its matching test; non-task diffs are rejected. |
 | `test` | Run minitest suite. |

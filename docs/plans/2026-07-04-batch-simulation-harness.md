@@ -25,7 +25,7 @@
 **Files:**
 - Create: `sim/template/lib/task_one.rb`, `sim/template/lib/task_two.rb`, `sim/template/lib/task_three.rb`
 - Create: `sim/template/test/task_one_test.rb`, `sim/template/test/task_two_test.rb`, `sim/template/test/task_three_test.rb`
-- Create: `sim/template/.agents/agent-workflow.yml`, `sim/template/.agents/bin/validate`, `sim/template/.agents/bin/test`, `sim/template/.agents/bin/README.md`
+- Create: `sim/template/.agents/agent-workflow.yml`, `sim/template/.agents/bin/validate`, `sim/template/.agents/bin/test`, `sim/template/.agents/bin/ci`, `sim/template/.agents/bin/README.md`
 - Create: `sim/template/AGENTS.md`, `sim/template/README.md`, `sim/template/Rakefile`
 - Create: `sim/template/.github/workflows/ci.yml`
 - Create: `sim/issues.json`
@@ -154,17 +154,75 @@ exec rake test "$@"
 set -euo pipefail
 root="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
 cd "$root"
+
+base_ref="${AGENT_SIM_BASE_REF:-}"
+if [ -z "$base_ref" ] && [ -n "${GITHUB_BASE_REF:-}" ]; then
+  git fetch --quiet origin "$GITHUB_BASE_REF" --depth=1
+  base_ref="$(git rev-parse FETCH_HEAD)"
+elif [ -z "$base_ref" ] && [ "$(git branch --show-current)" != "main" ]; then
+  if git rev-parse --verify -q main >/dev/null; then
+    base_ref="main"
+  elif git rev-parse --verify -q origin/main >/dev/null; then
+    base_ref="origin/main"
+  fi
+fi
+
+if [ -n "$base_ref" ]; then
+  changed="$(git diff --name-only "$base_ref")"
+  changed_count="$(printf '%s\n' "$changed" | sed '/^$/d' | wc -l | tr -d ' ')"
+  tests="$(printf '%s\n' "$changed" |
+    sed -n 's#^lib/\(task_.*\)\.rb$#test/\1_test.rb#p' |
+    sort -u)"
+  test_count="$(printf '%s\n' "$tests" | sed '/^$/d' | wc -l | tr -d ' ')"
+
+  if [ "$changed_count" -gt 0 ]; then
+    invalid="$(printf '%s\n' "$changed" |
+      sed '/^$/d' |
+      grep -Ev '^lib/task_(one|two|three)\.rb$' || true)"
+    if [ -n "$invalid" ]; then
+      printf 'Unexpected changed files for single-task validation:\n%s\n' "$invalid" >&2
+      exit 1
+    fi
+    if [ "$test_count" -ne 1 ]; then
+      printf 'Expected exactly one changed task file, found %s.\n' "$test_count" >&2
+      exit 1
+    fi
+    for test_file in $tests; do
+      ruby "$test_file"
+    done
+    exit 0
+  fi
+fi
+
 "$root/.agents/bin/test"
 ```
 
-(`chmod +x` both.) `sim/template/.agents/bin/README.md`:
+`sim/template/.agents/bin/ci`:
+
+```bash
+#!/usr/bin/env bash
+set -euo pipefail
+root="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
+cd "$root"
+
+if [ "${GITHUB_EVENT_NAME:-}" = "pull_request" ] && [ -n "${GITHUB_BASE_REF:-}" ]; then
+  git fetch --quiet origin "$GITHUB_BASE_REF" --depth=1
+  AGENT_SIM_BASE_REF="$(git rev-parse FETCH_HEAD)" "$root/.agents/bin/validate"
+  exit 0
+fi
+
+"$root/.agents/bin/validate"
+```
+
+(`chmod +x` all three scripts.) `sim/template/.agents/bin/README.md`:
 
 ```markdown
 # Commands
 
 | Script | Purpose |
 | --- | --- |
-| `validate` | Full pre-push gate (runs test). |
+| `ci` | GitHub Actions entrypoint. |
+| `validate` | Sim-aware gate: exactly one changed task file runs its matching test; non-task diffs are rejected. |
 | `test` | Run minitest suite. |
 ```
 
@@ -195,7 +253,7 @@ generated from `sim/template/`; do not hand-edit outside a simulation run.
 ## Agent Workflow Configuration
 
 Portable shared skills resolve this repo's commands and policy through:
-- **Commands** — run `.agents/bin/<name>` (`validate`, `test`); see `.agents/bin/README.md`. A missing script means that capability is n/a here.
+- **Commands** — run `.agents/bin/<name>` (`setup`, `validate`, `test`, ...); see `.agents/bin/README.md`. A missing script means that capability is n/a here.
 - **Policy / config** — `.agents/agent-workflow.yml`.
 ```
 
@@ -228,7 +286,7 @@ jobs:
         with:
           ruby-version: "3.4"
       - run: gem install minitest rake
-      - run: .agents/bin/validate
+      - run: .agents/bin/ci
 ```
 
 - [x] **Step 3: Write the issue manifest**
@@ -269,7 +327,7 @@ jobs:
 cd sim/template && rake test; echo "exit=$?"
 ```
 
-Expected: 3 failures (one per task test), non-zero exit — the bugs are real and the tests catch them.
+Expected: 4 failures (Task One has two assertions; Tasks Two and Three have one each), non-zero exit — the bugs are real and the tests catch them.
 
 - [x] **Step 5: Commit**
 
@@ -310,11 +368,11 @@ git remote add origin "https://github.com/$REPO"
 git push -q --force origin main
 
 if [ "$RESET" = "--reset" ]; then
-  gh issue list --repo "$REPO" --label sim-batch --state open --json number \
+  gh issue list --repo "$REPO" --label sim-batch --state open --limit 1000 --json number \
     --jq '.[].number' | while read -r n; do
     gh issue close "$n" --repo "$REPO" --comment "Reseeded."
   done
-  gh api "repos/$REPO/branches" --jq '.[].name' | grep -v '^main$' | while read -r b; do
+  gh api --paginate "repos/$REPO/branches" --jq '.[].name' | { grep -v '^main$' || true; } | while read -r b; do
     gh api -X DELETE "repos/$REPO/git/refs/heads/$b" || true
   done
 fi
@@ -326,6 +384,10 @@ count=$(python3 -c 'import json;print(len(json.load(open("'"$HERE"'/issues.json"
 for i in $(seq 0 $((count - 1))); do
   TITLE=$(python3 -c 'import json;print(json.load(open("'"$HERE"'/issues.json"))["issues"]['"$i"']["title"])')
   BODY=$(python3 -c 'import json;print(json.load(open("'"$HERE"'/issues.json"))["issues"]['"$i"']["body"])')
+  if gh issue list --repo "$REPO" --label sim-batch --state open --json title \
+    --jq '.[].title' | grep -Fxq "$TITLE"; then
+    continue
+  fi
   gh issue create --repo "$REPO" --title "$TITLE" --body "$BODY" --label sim-batch
 done
 echo "SEEDED $REPO with $count issues"
