@@ -49,3 +49,6 @@ jobs:
 
       - name: Run tests
         run: bundle exec ruby -Itest test/agent_coord_test.rb
+
+      - run: bundle exec ruby sim/test/scripted_worker_test.rb
+      - run: bundle exec ruby sim/test/race_test.rb

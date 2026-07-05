@@ -1,0 +1,99 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+AGENT_ID=""
+REPO_SLUG=""
+CLONE_URL=""
+ISSUE_KEY=""
+WORKDIR=""
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --agent-id) AGENT_ID="$2"; shift 2 ;;
+    --repo-slug) REPO_SLUG="$2"; shift 2 ;;
+    --clone-url) CLONE_URL="$2"; shift 2 ;;
+    --issue-key) ISSUE_KEY="$2"; shift 2 ;;
+    --workdir) WORKDIR="$2"; shift 2 ;;
+    *) echo "unknown arg: $1"; exit 1 ;;
+  esac
+done
+
+[ -n "$AGENT_ID" ] && [ -n "$REPO_SLUG" ] && [ -n "$CLONE_URL" ] &&
+  [ -n "$ISSUE_KEY" ] && [ -n "$WORKDIR" ] || { echo "missing args"; exit 1; }
+
+CLI="$(cd "$(dirname "$0")/../.." && pwd)/bin/agent-coord"
+BRANCH="sim/${ISSUE_KEY}-${AGENT_ID}"
+
+beat() {
+  "$CLI" heartbeat --agent-id "$AGENT_ID" --repo "$REPO_SLUG" \
+    --target "$ISSUE_KEY" --branch "$BRANCH" --status "$1"
+}
+
+set +e
+"$CLI" claim --agent-id "$AGENT_ID" --repo "$REPO_SLUG" --target "$ISSUE_KEY" --branch "$BRANCH"
+CODE=$?
+set -e
+if [ "$CODE" -eq 3 ]; then
+  echo "WORKER_REFUSED ${ISSUE_KEY}"
+  exit 3
+fi
+[ "$CODE" -eq 0 ] || exit 2
+beat claimed
+
+mkdir -p "$WORKDIR"
+cd "$WORKDIR"
+git clone -q --branch main "$CLONE_URL" repo
+cd repo
+git config user.name "agent-coord sim worker"
+git config user.email "agent-coord-sim@example.invalid"
+git checkout -q -b "$BRANCH"
+beat implementing
+
+case "$ISSUE_KEY" in
+  task_one)
+    cat > lib/task_one.rb <<'RB'
+# frozen_string_literal: true
+
+module TaskOne
+  def self.positive_sum(numbers)
+    numbers.select(&:positive?).sum
+  end
+end
+RB
+    ;;
+  task_two)
+    cat > lib/task_two.rb <<'RB'
+# frozen_string_literal: true
+
+module TaskTwo
+  def self.title_case(text)
+    text.split.map(&:capitalize).join(" ")
+  end
+end
+RB
+    ;;
+  task_three)
+    cat > lib/task_three.rb <<'RB'
+# frozen_string_literal: true
+
+module TaskThree
+  def self.inclusive_count(first, last)
+    last - first + 1
+  end
+end
+RB
+    ;;
+  *) echo "unknown issue key: $ISSUE_KEY"; exit 2 ;;
+esac
+
+beat validating
+ruby "test/${ISSUE_KEY}_test.rb"
+
+beat pushing
+git add lib
+git commit -qm "Fix ${ISSUE_KEY} (scripted sim worker ${AGENT_ID})"
+git push -q origin "$BRANCH"
+
+beat done
+"$CLI" release --agent-id "$AGENT_ID" --repo "$REPO_SLUG" --target "$ISSUE_KEY"
+echo "WORKER_DONE ${BRANCH}"

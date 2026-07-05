@@ -451,7 +451,7 @@ bundle exec rubocop && git add sim/bin/seed && git commit -m "Add sim repo seedi
 - Consumes: the `agent-coord` CLI (any backend via env), a git remote (local bare repo in CI mode), `sim/issues.json` keys.
 - Produces: `sim/bin/scripted-worker --agent-id ID --repo-slug OWNER/REPO --clone-url URL --issue-key task_one --workdir DIR` which performs, in order: `claim` (hard-stops on exit 3 printing `WORKER_REFUSED`), `git worktree add`, branch `sim/<issue-key>-<agent-id>`, applies the canonical fix, runs the acceptance test, commits, pushes, heartbeats at each phase (`claimed`, `implementing`, `validating`, `pushing`, `done`), `release`, prints `WORKER_DONE <branch>`. Exit 0 on done, 3 on refused, 2 otherwise.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 `sim/test/scripted_worker_test.rb`:
 
@@ -529,12 +529,12 @@ Note: the second test's `claim` invocation uses `--repo sim/local --target task_
            "--target", "task_one", exception: true)
 ```
 
-- [ ] **Step 2: Run to verify failure**
+- [x] **Step 2: Run to verify failure**
 
 Run: `bundle exec ruby sim/test/scripted_worker_test.rb`
 Expected: FAIL — `sim/bin/scripted-worker` does not exist.
 
-- [ ] **Step 3: Implement the automaton**
+- [x] **Step 3: Implement the automaton**
 
 `sim/bin/scripted-worker`:
 
@@ -626,12 +626,12 @@ echo "WORKER_DONE ${BRANCH}"
 chmod +x sim/bin/scripted-worker
 ```
 
-- [ ] **Step 4: Run to verify pass**
+- [x] **Step 4: Run to verify pass**
 
 Run: `bundle exec ruby sim/test/scripted_worker_test.rb`
 Expected: `2 runs ... 0 failures, 0 errors`.
 
-- [ ] **Step 5: Lint and commit**
+- [x] **Step 5: Lint and commit**
 
 ```bash
 bundle exec rubocop && git add sim && git commit -m "Add scripted protocol-automaton worker with tests"
@@ -649,7 +649,7 @@ bundle exec rubocop && git add sim && git commit -m "Add scripted protocol-autom
 - Consumes: Task 3's automaton.
 - Produces: CI-enforced proof that concurrent scripted workers on the same target yield exactly one `WORKER_DONE` and one `WORKER_REFUSED` (or operational loser), and exactly one branch on origin.
 
-- [ ] **Step 1: Write the test**
+- [x] **Step 1: Write the test**
 
 `sim/test/race_test.rb`:
 
@@ -700,12 +700,12 @@ class RaceTest < Minitest::Test
 end
 ```
 
-- [ ] **Step 2: Run it**
+- [x] **Step 2: Run it**
 
 Run: `bundle exec ruby sim/test/race_test.rb`
 Expected: PASS (exactly one winner).
 
-- [ ] **Step 3: Add sim tests to CI**
+- [x] **Step 3: Add sim tests to CI**
 
 In `.github/workflows/ci.yml`, in the existing `test` job, after the current test command add two run lines:
 
@@ -714,7 +714,7 @@ In `.github/workflows/ci.yml`, in the existing `test` job, after the current tes
       - run: bundle exec ruby sim/test/race_test.rb
 ```
 
-- [ ] **Step 4: Lint, commit, push, watch CI**
+- [x] **Step 4: Lint, commit, push, watch CI**
 
 ```bash
 bundle exec rubocop && git add -A && git commit -m "Add scripted-worker race test to CI"
