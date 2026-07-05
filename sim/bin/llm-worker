@@ -1,0 +1,31 @@
+#!/usr/bin/env bash
+# Usage: sim/bin/llm-worker (codex|claude) <owner/repo> <issue-number> <batch-id>
+set -euo pipefail
+
+HOST="${1:?usage: llm-worker (codex|claude) <owner/repo> <issue> <batch-id>}"
+REPO="${2:?}"
+ISSUE="${3:?}"
+BATCH="${4:?}"
+AGENT_ID="sim-${HOST}-${ISSUE}"
+HERE="$(cd "$(dirname "$0")/.." && pwd)"
+PROMPT=$(sed -e "s|{{REPO}}|$REPO|g" -e "s|{{ISSUE_NUMBER}}|$ISSUE|g" \
+  -e "s|{{AGENT_ID}}|$AGENT_ID|g" -e "s|{{BATCH_ID}}|$BATCH|g" \
+  "$HERE/prompts/worker-prompt.md")
+WORK="$(mktemp -d)"
+cd "$WORK"
+
+case "$HOST" in
+  codex)
+    codex exec --full-auto "$PROMPT"
+    ;;
+  claude)
+    claude -p "$PROMPT" --permission-mode acceptEdits \
+      --allowedTools "Bash,Read,Edit,Write,Glob,Grep"
+    ;;
+  *)
+    echo "host must be codex or claude"
+    exit 1
+    ;;
+esac
+
+echo "LLM_WORKER_EXIT host=$HOST issue=$ISSUE workdir=$WORK"

@@ -1,0 +1,93 @@
+#!/usr/bin/env ruby
+# frozen_string_literal: true
+
+require "json"
+require "open3"
+
+args = ARGV.dup
+repo_slug = nil
+live = false
+while (arg = args.shift)
+  case arg
+  when "--repo-slug"
+    repo_slug = args.shift
+  when "--live"
+    live = true
+  else
+    abort "unknown arg: #{arg}"
+  end
+end
+abort "usage: verify-batch --repo-slug OWNER/REPO [--live]" unless repo_slug
+
+sim_root = File.expand_path("..", __dir__)
+cli = File.join(sim_root, "..", "bin", "agent-coord")
+manifest = JSON.parse(File.read(File.join(sim_root, "issues.json"))).fetch("issues")
+
+stdout, stderr, status = Open3.capture3("ruby", cli, "status", "--json")
+abort "agent-coord status failed: #{stderr}" unless status.success?
+
+claims = JSON.parse(stdout).fetch("claims")
+
+class BatchVerifier
+  def initialize(repo_slug:, live:, manifest:, claims:)
+    @repo_slug = repo_slug
+    @live = live
+    @manifest = manifest
+    @claims = claims
+  end
+
+  def success?
+    passes = @manifest.count { |issue| pass?(issue) }
+    puts "SCORE #{passes}/#{@manifest.length}"
+    passes == @manifest.length
+  end
+
+  private
+
+  def pass?(issue)
+    key = issue.fetch("key")
+    claim = @claims.find { |candidate| candidate["repo"] == @repo_slug && candidate["target"] == key }
+    return fail_row(key, "no claim recorded") unless claim
+    return fail_row(key, "claim status=#{claim['status']} (expected released)") unless claim["status"] == "released"
+
+    columns = live_columns(issue, claim)
+    return false unless columns
+
+    puts "PASS #{key} claim=released branch=#{columns.fetch(:branch)} " \
+         "pr=#{columns.fetch(:pr)} ci=#{columns.fetch(:ci)}"
+    true
+  end
+
+  def live_columns(issue, claim)
+    branch_col = claim.fetch("branch", "UNKNOWN")
+    pr_col = "SKIPPED"
+    ci_col = "SKIPPED"
+    return { branch: branch_col, pr: pr_col, ci: ci_col } unless @live
+
+    branch_out, = Open3.capture3(
+      "gh", "pr", "list", "--repo", @repo_slug, "--state", "all",
+      "--search", "#{issue.fetch('title')} in:title", "--json", "url,headRefName,number"
+    )
+    pr = JSON.parse(branch_out).first
+    return fail_row(issue.fetch("key"), "no PR found") if pr.nil?
+
+    branch_col = pr.fetch("headRefName", branch_col)
+    pr_col = pr.fetch("url")
+    checks_out, = Open3.capture3(
+      "gh", "pr", "checks", pr.fetch("number").to_s, "--repo", @repo_slug,
+      "--json", "bucket", "--jq", "[.[].bucket] | unique | join(\",\")"
+    )
+    ci_col = checks_out.strip.empty? ? "none" : checks_out.strip
+    return fail_row(issue.fetch("key"), "CI failing (#{ci_col}) #{pr_col}") if ci_col.include?("fail")
+
+    { branch: branch_col, pr: pr_col, ci: ci_col }
+  end
+
+  def fail_row(key, reason)
+    puts "FAIL #{key} #{reason}"
+    nil
+  end
+end
+
+success = BatchVerifier.new(repo_slug: repo_slug, live: live, manifest: manifest, claims: claims).success?
+exit(success ? 0 : 1)

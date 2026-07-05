@@ -797,7 +797,7 @@ bundle exec rubocop && git add -A && git commit -m "Add scripted-worker race tes
 - Consumes: coordination state (any backend via env) + `gh` for live-repo mode.
 - Produces: `sim/bin/verify-batch --repo-slug OWNER/REPO [--live]` printing one line per manifest issue — `PASS <key> claim=released branch=<b> pr=<url|SKIPPED> ci=<state|SKIPPED>` or `FAIL <key> <reason>` — and a final `SCORE n/m`. Exit 0 only when n == m. Without `--live`, PR/CI columns are `SKIPPED` (CI mode); with `--live`, it queries `gh pr list --head <branch>` and the PR's checks.
 
-- [ ] **Step 1: Write the failing test** (CI mode against LocalStore fixtures)
+- [x] **Step 1: Write the failing test** (CI mode against LocalStore fixtures)
 
 `sim/test/verify_batch_test.rb`:
 
@@ -853,12 +853,12 @@ class VerifyBatchTest < Minitest::Test
 end
 ```
 
-- [ ] **Step 2: Run to verify failure**
+- [x] **Step 2: Run to verify failure**
 
 Run: `bundle exec ruby sim/test/verify_batch_test.rb`
 Expected: FAIL — verify-batch missing.
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
 
 `sim/bin/verify-batch` (Ruby for JSON handling):
 
@@ -938,7 +938,7 @@ exit(passes == manifest.length ? 0 : 1)
 chmod +x sim/bin/verify-batch
 ```
 
-- [ ] **Step 4: Run tests, lint, commit**
+- [x] **Step 4: Run tests, lint, commit**
 
 Run: `bundle exec ruby sim/test/verify_batch_test.rb`
 Expected: PASS.
@@ -960,7 +960,7 @@ bundle exec rubocop && git add sim && git commit -m "Add batch verifier scorecar
 - Consumes: real sim repos (Task 2), real `codex` / `claude` CLIs on the operator machine, coordination backend via env.
 - Produces: one command per lane that launches a real headless agent session on a seeded issue, and a written playbook for the three canonical scenarios.
 
-- [ ] **Step 1: Write the worker prompt template**
+- [x] **Step 1: Write the worker prompt template**
 
 `sim/prompts/worker-prompt.md`:
 
@@ -985,7 +985,7 @@ Repo: {{REPO}}   Issue: #{{ISSUE_NUMBER}}   Agent id: {{AGENT_ID}}   Batch: {{BA
 7. Final message: issue number, branch, PR URL, one-line result.
 ```
 
-- [ ] **Step 2: Write the launcher**
+- [x] **Step 2: Write the launcher**
 
 `sim/bin/llm-worker`:
 
@@ -1015,7 +1015,7 @@ echo "LLM_WORKER_EXIT host=$HOST issue=$ISSUE workdir=$WORK"
 chmod +x sim/bin/llm-worker
 ```
 
-- [ ] **Step 3: Write the playbook**
+- [x] **Step 3: Write the playbook**
 
 `sim/PLAYBOOK.md`:
 
@@ -1056,7 +1056,7 @@ hold real work.
 
 Expected: PR opened referencing the issue, `verify-batch --live` shows `PASS` for that key.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 bundle exec rubocop && git add sim && git commit -m "Add LLM batch runner, worker prompt, and simulation playbook"
