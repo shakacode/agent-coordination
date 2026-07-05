@@ -1189,7 +1189,7 @@ Expected: all jobs green including `worker-integration`.
 **Interfaces:**
 - Produces: deployed Worker URL, one provisioned token per machine.
 
-- [ ] **Step 1: Write the provisioning script**
+- [x] **Step 1: Write the provisioning script**
 
 `worker/bin/provision-token`:
 
@@ -1198,15 +1198,49 @@ Expected: all jobs green including `worker-integration`.
 # Usage: worker/bin/provision-token <machine-name> [--local]
 # Prints a fresh token once; stores only its SHA-256 hash in D1.
 set -euo pipefail
-MACHINE="${1:?usage: provision-token <machine-name> [--local]}"
+
+usage() {
+  echo "usage: worker/bin/provision-token <machine-name> [--local]" >&2
+  exit 1
+}
+
+[ "$#" -ge 1 ] && [ "$#" -le 2 ] || usage
+
+MACHINE="$1"
+case "$MACHINE" in
+  --*) usage ;;
+esac
+
 SCOPE="${2:---remote}"
-TOKEN=$(openssl rand -hex 24)
-HASH=$(printf %s "$TOKEN" | shasum -a 256 | cut -d' ' -f1)
-FLAG=""
-[ "$SCOPE" = "--local" ] && FLAG="--local"
+
+if [[ ! "$MACHINE" =~ ^[A-Za-z0-9._:-]+$ ]]; then
+  echo "machine name may contain only letters, numbers, dots, underscores, colons, and hyphens" >&2
+  exit 1
+fi
+
+case "$SCOPE" in
+  --remote) ;;
+  --local) ;;
+  *) usage ;;
+esac
+
+OPENSSL_BIN="${OPENSSL_BIN:-openssl}"
+NPX_BIN="${NPX_BIN:-npx}"
+
+TOKEN=$("$OPENSSL_BIN" rand -hex 24)
+HASH=$(printf %s "$TOKEN" | "$OPENSSL_BIN" dgst -sha256 -r | cut -d' ' -f1)
+SQL="INSERT INTO machines (machine, token_hash, created_at) VALUES ('${MACHINE}', '${HASH}', strftime('%Y-%m-%dT%H:%M:%SZ','now'))"
+
 cd "$(dirname "$0")/.."
-npx wrangler d1 execute agent-coord $FLAG --command \
-  "INSERT INTO machines (machine, token_hash, created_at) VALUES ('${MACHINE}', '${HASH}', strftime('%Y-%m-%dT%H:%M:%SZ','now'))"
+COMMAND=("$NPX_BIN" wrangler d1 execute agent-coord)
+COMMAND+=("$SCOPE")
+COMMAND+=(--command "$SQL")
+if ! "${COMMAND[@]}"; then
+  echo "wrangler d1 execute failed while provisioning ${MACHINE}; see wrangler output above" >&2
+  echo "If this was a duplicate machine or token constraint, delete or update the existing D1 machines row before re-provisioning" >&2
+  exit 1
+fi
+
 echo "machine:  ${MACHINE}"
 echo "token:    ${TOKEN}"
 echo "Set on that machine:"
@@ -1232,11 +1266,11 @@ curl -s <worker-url>/v1/health
 
 Expected: `{"status":"ok"}`
 
-- [ ] **Step 3: Document**
+- [x] **Step 3: Document**
 
 Add to `README.md` a section “HTTP backend” containing: the selection precedence from Task 9 verbatim, the two env vars, `worker/bin/provision-token` usage, and the rollback line: “unset `AGENT_COORD_API_URL` to fall back to the GitHub store.”
 
-- [ ] **Step 4: Commit**
+- [x] **Step 4: Commit**
 
 ```bash
 bundle exec rubocop && git add -A && git commit -m "Add token provisioning script and HTTP backend docs"

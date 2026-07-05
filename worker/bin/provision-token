@@ -1,0 +1,52 @@
+#!/usr/bin/env bash
+# Usage: worker/bin/provision-token <machine-name> [--local]
+# Prints a fresh token once; stores only its SHA-256 hash in D1.
+set -euo pipefail
+
+usage() {
+  echo "usage: worker/bin/provision-token <machine-name> [--local]" >&2
+  exit 1
+}
+
+[ "$#" -ge 1 ] && [ "$#" -le 2 ] || usage
+
+MACHINE="$1"
+case "$MACHINE" in
+  --*) usage ;;
+esac
+
+SCOPE="${2:---remote}"
+
+if [[ ! "$MACHINE" =~ ^[A-Za-z0-9._:-]+$ ]]; then
+  echo "machine name may contain only letters, numbers, dots, underscores, colons, and hyphens" >&2
+  exit 1
+fi
+
+case "$SCOPE" in
+  --remote) ;;
+  --local) ;;
+  *) usage ;;
+esac
+
+OPENSSL_BIN="${OPENSSL_BIN:-openssl}"
+NPX_BIN="${NPX_BIN:-npx}"
+
+TOKEN=$("$OPENSSL_BIN" rand -hex 24)
+HASH=$(printf %s "$TOKEN" | "$OPENSSL_BIN" dgst -sha256 -r | cut -d' ' -f1)
+SQL="INSERT INTO machines (machine, token_hash, created_at) VALUES ('${MACHINE}', '${HASH}', strftime('%Y-%m-%dT%H:%M:%SZ','now'))"
+
+cd "$(dirname "$0")/.."
+COMMAND=("$NPX_BIN" wrangler d1 execute agent-coord)
+COMMAND+=("$SCOPE")
+COMMAND+=(--command "$SQL")
+if ! "${COMMAND[@]}"; then
+  echo "wrangler d1 execute failed while provisioning ${MACHINE}; see wrangler output above" >&2
+  echo "If this was a duplicate machine or token constraint, delete or update the existing D1 machines row before re-provisioning" >&2
+  exit 1
+fi
+
+echo "machine:  ${MACHINE}"
+echo "token:    ${TOKEN}"
+echo "Set on that machine:"
+echo "  export AGENT_COORD_API_URL=<worker-url>"
+echo "  export AGENT_COORD_API_TOKEN=${TOKEN}"

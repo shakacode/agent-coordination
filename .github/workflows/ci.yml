@@ -55,6 +55,7 @@ jobs:
           bundle exec ruby sim/test/race_test.rb
           bundle exec ruby sim/test/verify_batch_test.rb
           bundle exec ruby sim/test/llm_worker_test.rb
+          bundle exec ruby -Itest test/provision_token_test.rb
 
   worker-typecheck:
     runs-on: ubuntu-latest
