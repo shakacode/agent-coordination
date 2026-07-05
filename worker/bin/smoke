@@ -1,0 +1,21 @@
+#!/usr/bin/env bash
+# Requires wrangler dev already running on :8787 with token 'devtoken' provisioned.
+set -euo pipefail
+BASE=http://127.0.0.1:8787
+AUTH="Authorization: Bearer devtoken"
+P="claims/shakacode/demo/smoke-$(date +%s)-$$.json"
+fail() { echo "SMOKE FAIL: $1"; exit 1; }
+expect() { [ "$2" = "$3" ] || fail "$1: expected $3 got $2"; }
+
+expect create   "$(curl -s -o /dev/null -w %{http_code} -X PUT "$BASE/v1/state/$P" -H "$AUTH" -H 'If-None-Match: *' -d '{"data":{"schema_version":1,"agent_id":"a1"}}')" 201
+expect recreate "$(curl -s -o /dev/null -w %{http_code} -X PUT "$BASE/v1/state/$P" -H "$AUTH" -H 'If-None-Match: *' -d '{"data":{}}')" 409
+expect get      "$(curl -s "$BASE/v1/state/$P" -H "$AUTH" | python3 -c 'import json,sys; print(json.load(sys.stdin)["version"])')" 1
+expect casok    "$(curl -s -o /dev/null -w %{http_code} -X PUT "$BASE/v1/state/$P" -H "$AUTH" -H 'If-Match: 1' -d '{"data":{"agent_id":"a2"}}')" 200
+expect casstale "$(curl -s -o /dev/null -w %{http_code} -X PUT "$BASE/v1/state/$P" -H "$AUTH" -H 'If-Match: 1' -d '{"data":{"agent_id":"a3"}}')" 409
+expect nohdr    "$(curl -s -o /dev/null -w %{http_code} -X PUT "$BASE/v1/state/$P" -H "$AUTH" -d '{"data":{}}')" 400
+expect nullbody "$(curl -s -o /dev/null -w %{http_code} -X PUT "$BASE/v1/state/$P" -H "$AUTH" -H 'If-Match: 2' -d 'null')" 400
+expect badmatch "$(curl -s -o /dev/null -w %{http_code} -X PUT "$BASE/v1/state/$P" -H "$AUTH" -H 'If-Match: 2x' -d '{"data":{"agent_id":"a4"}}')" 400
+expect badpath  "$(curl -s -o /dev/null -w %{http_code} "$BASE/v1/state/etc/passwd" -H "$AUTH")" 400
+expect badenc   "$(curl -s -o /dev/null -w %{http_code} "$BASE/v1/state/claims/%E0%A4%A.json" -H "$AUTH")" 400
+expect list     "$(curl -s "$BASE/v1/state?prefix=claims" -H "$AUTH" | python3 -c 'import json,sys; print(len(json.load(sys.stdin)["entries"]) >= 1)')" True
+echo SMOKE_OK

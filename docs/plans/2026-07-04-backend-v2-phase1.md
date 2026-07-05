@@ -362,7 +362,7 @@ cd .. && git add worker/src/index.ts && git commit -m "Add per-machine bearer-to
   - `GET /v1/state?prefix=<claims|heartbeats|batches>` → `200 {"entries":[{"path","data","version"},...]}`
   - Path rule: `^(claims|heartbeats|batches)/[A-Za-z0-9_.:/-]+\.json$`, no `..`, no empty segment → else `400 {"error":"invalid_path"}`.
 
-- [ ] **Step 1: Add path validation and the three handlers**
+- [x] **Step 1: Add path validation and the three handlers**
 
 Add above `export default`:
 
@@ -444,7 +444,7 @@ Replace the trailing `return json(404, ...)` in `fetch` with:
     return json(404, { error: "not_found" });
 ```
 
-- [ ] **Step 2: Write the smoke test**
+- [x] **Step 2: Write the smoke test**
 
 `worker/bin/smoke`:
 
@@ -473,7 +473,7 @@ echo SMOKE_OK
 chmod +x worker/bin/smoke
 ```
 
-- [ ] **Step 3: Run it**
+- [x] **Step 3: Run it**
 
 ```bash
 cd worker && npx wrangler dev --local --port 8787 & sleep 3
@@ -483,7 +483,7 @@ kill %1
 
 Expected: `SMOKE_OK`
 
-- [ ] **Step 4: Commit**
+- [x] **Step 4: Commit**
 
 ```bash
 git add worker && git commit -m "Add versioned state GET/PUT/LIST with If-Match CAS"
