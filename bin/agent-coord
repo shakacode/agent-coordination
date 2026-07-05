@@ -5,10 +5,12 @@ require "base64"
 require "digest"
 require "fileutils"
 require "json"
+require "net/http"
 require "open3"
 require "optparse"
 require "shellwords"
 require "time"
+require "uri"
 
 module AgentCoord
   VERSION = "0.1.0"
@@ -1261,6 +1263,80 @@ module AgentCoord
       GhResult.new(stdout: stdout, stderr: stderr, status: status)
     rescue SystemCallError => e
       raise OperationalError, "gh api #{args.join(' ')} failed: #{e.message}"
+    end
+  end
+
+  class HttpStore
+    OPEN_TIMEOUT = 5
+    READ_TIMEOUT = 10
+
+    def initialize(base_url:, token:)
+      @base = base_url.to_s.chomp("/")
+      @token = token
+    end
+
+    def read_json(path)
+      AgentCoord.safe_path!(path)
+      response = request(Net::HTTP::Get, "/v1/state/#{path}")
+      return nil if response.code == "404"
+      raise OperationalError, http_error("read #{path}", response) unless response.code == "200"
+
+      body = JSON.parse(response.body)
+      StoredJson.new(path: path, data: body.fetch("data"), sha: body.fetch("version").to_s)
+    end
+
+    def list_json(prefix)
+      AgentCoord.safe_path!(prefix)
+      response = request(Net::HTTP::Get, "/v1/state?prefix=#{prefix}")
+      raise OperationalError, http_error("list #{prefix}", response) unless response.code == "200"
+
+      JSON.parse(response.body).fetch("entries").map do |entry|
+        StoredJson.new(path: entry.fetch("path"), data: entry.fetch("data"),
+                       sha: entry.fetch("version").to_s)
+      end
+    end
+
+    def verify_readable!
+      response = request(Net::HTTP::Get, "/v1/state?prefix=claims")
+      raise OperationalError, http_error("verify readable", response) unless response.code == "200"
+    end
+
+    def verify_layout!(_prefixes)
+      response = request(Net::HTTP::Get, "/v1/health")
+      raise OperationalError, http_error("health", response) unless response.code == "200"
+    end
+
+    private
+
+    def request(klass, request_path, body: nil, headers: {})
+      uri = URI.parse("#{@base}#{request_path}")
+      http_request = klass.new(uri)
+      http_request["Authorization"] = "Bearer #{@token}"
+      headers.each { |name, value| http_request[name] = value }
+      if body
+        http_request["Content-Type"] = "application/json"
+        http_request.body = JSON.generate(body)
+      end
+      Net::HTTP.start(
+        uri.host,
+        uri.port,
+        use_ssl: uri.scheme == "https",
+        open_timeout: OPEN_TIMEOUT,
+        read_timeout: READ_TIMEOUT
+      ) do |http|
+        http.request(http_request)
+      end
+    rescue URI::InvalidURIError, ArgumentError, SocketError, SystemCallError, Timeout::Error, IOError => e
+      raise OperationalError, "http backend unreachable: #{e.message}"
+    end
+
+    def http_error(action, response)
+      detail = begin
+        JSON.parse(response.body).fetch("error", response.body)
+      rescue JSON::ParserError
+        response.body.to_s[0, 200]
+      end
+      "http backend #{action} failed: #{response.code} #{detail}"
     end
   end
 

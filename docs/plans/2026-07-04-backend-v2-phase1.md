@@ -501,7 +501,7 @@ git add worker && git commit -m "Add versioned state GET/PUT/LIST with If-Match 
 - Consumes: transport contract from Task 6.
 - Produces: `AgentCoord::HttpStore.new(base_url:, token:)` with `read_json(path) -> StoredJson|nil`, `list_json(prefix) -> [StoredJson]`, `verify_layout!(prefixes)`, `verify_readable!` — the same duck type as `LocalStore`/`GitHubStore`. `StoredJson#sha` carries the version as a String.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 `test/http_store_test.rb`:
 
@@ -582,12 +582,12 @@ class HttpStoreReadTest < Minitest::Test
 end
 ```
 
-- [ ] **Step 2: Run to verify it fails**
+- [x] **Step 2: Run to verify it fails**
 
 Run: `bundle exec ruby test/http_store_test.rb`
 Expected: FAIL with `uninitialized constant AgentCoord::HttpStore`.
 
-- [ ] **Step 3: Implement `HttpStore` reads**
+- [x] **Step 3: Implement `HttpStore` reads**
 
 In `bin/agent-coord`, add `require "net/http"` and `require "uri"` to the requires, then after the `GitHubStore` class:
 
@@ -662,12 +662,12 @@ In `bin/agent-coord`, add `require "net/http"` and `require "uri"` to the requir
   end
 ```
 
-- [ ] **Step 4: Run to verify it passes**
+- [x] **Step 4: Run to verify it passes**
 
 Run: `bundle exec ruby test/http_store_test.rb`
 Expected: `4 runs ... 0 failures, 0 errors`.
 
-- [ ] **Step 5: Lint and commit**
+- [x] **Step 5: Lint and commit**
 
 ```bash
 bundle exec rubocop && git add -A && git commit -m "Add HttpStore reads with stub-server tests"
