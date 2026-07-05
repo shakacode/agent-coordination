@@ -290,7 +290,7 @@ cd .. && git add worker && git commit -m "Add Worker scaffold: wrangler config, 
 **Interfaces:**
 - Produces: `authenticate(request, env)` returning `machine: string | null`; every non-health route returns `401 {"error":"unauthorized"}` without a valid token. Tokens verified as SHA-256 hex against `machines.token_hash` where `revoked_at IS NULL`.
 
-- [ ] **Step 1: Add the auth function and wire it in**
+- [x] **Step 1: Add the auth function and wire it in**
 
 Add to `worker/src/index.ts` above `export default`:
 
@@ -326,7 +326,7 @@ Replace the `fetch` body with:
     return json(404, { error: "not_found" });
 ```
 
-- [ ] **Step 2: Verify 401 and 200 paths**
+- [x] **Step 2: Verify 401 and 200 paths**
 
 ```bash
 cd worker
@@ -341,7 +341,7 @@ kill %1
 
 Expected: `401` then `404`.
 
-- [ ] **Step 3: Commit**
+- [x] **Step 3: Commit**
 
 ```bash
 cd .. && git add worker/src/index.ts && git commit -m "Add per-machine bearer-token auth to Worker"
