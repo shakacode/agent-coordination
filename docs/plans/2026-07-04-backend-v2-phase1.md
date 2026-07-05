@@ -684,7 +684,7 @@ bundle exec rubocop && git add -A && git commit -m "Add HttpStore reads with stu
 **Interfaces:**
 - Produces: `write_json(path, data, message:, sha: nil, create: false)` — 201/200 → success; 409 → `Conflict` with the exact strings the other stores use: `"state already exists at #{path}"` (create) / `"state changed at #{path}"` (update). This preserves claim/heartbeat/release behavior in `Runner` unchanged.
 
-- [ ] **Step 1: Write the failing tests** (append to `HttpStoreReadTest`’s file as a new class)
+- [x] **Step 1: Write the failing tests** (append to `HttpStoreReadTest`’s file as a new class)
 
 ```ruby
 class HttpStoreWriteTest < Minitest::Test
@@ -728,12 +728,12 @@ class HttpStoreWriteTest < Minitest::Test
 end
 ```
 
-- [ ] **Step 2: Run to verify failure**
+- [x] **Step 2: Run to verify failure**
 
 Run: `bundle exec ruby test/http_store_test.rb`
 Expected: FAIL with `NoMethodError: undefined method 'write_json'`.
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
 
 Inside `HttpStore` (public section, after `list_json`):
 
@@ -755,12 +755,12 @@ Inside `HttpStore` (public section, after `list_json`):
     end
 ```
 
-- [ ] **Step 4: Run full suite**
+- [x] **Step 4: Run full suite**
 
 Run: `bundle exec ruby test/http_store_test.rb && bundle exec ruby test/agent_coord_test.rb`
 Expected: all green.
 
-- [ ] **Step 5: Lint and commit**
+- [x] **Step 5: Lint and commit**
 
 ```bash
 bundle exec rubocop && git add -A && git commit -m "Add HttpStore CAS writes mapped to Conflict semantics"

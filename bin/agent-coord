@@ -1296,6 +1296,22 @@ module AgentCoord
       end
     end
 
+    # message is accepted for interface parity; the HTTP backend has no commit messages.
+    def write_json(path, data, message:, sha: nil, create: false) # rubocop:disable Lint/UnusedMethodArgument
+      AgentCoord.safe_path!(path)
+      raise Error, "write_json requires sha or create" if sha.nil? && !create
+
+      headers = sha ? { "If-Match" => sha } : { "If-None-Match" => "*" }
+      response = request(Net::HTTP::Put, "/v1/state/#{path}", body: { "data" => data }, headers: headers)
+      case response.code
+      when "200", "201" then nil
+      when "409"
+        raise Conflict, (create ? "state already exists at #{path}" : "state changed at #{path}")
+      else
+        raise OperationalError, http_error("write #{path}", response)
+      end
+    end
+
     def verify_readable!
       response = request(Net::HTTP::Get, "/v1/state?prefix=claims")
       raise OperationalError, http_error("verify readable", response) unless response.code == "200"
