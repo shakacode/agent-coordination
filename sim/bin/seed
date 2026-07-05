@@ -1,0 +1,36 @@
+#!/usr/bin/env bash
+# Usage: sim/bin/seed <owner/repo> [--reset]
+set -euo pipefail
+REPO="${1:?usage: seed <owner/repo> [--reset]}"
+RESET="${2:-}"
+HERE="$(cd "$(dirname "$0")/.." && pwd)"
+WORK="$(mktemp -d)"
+trap 'rm -rf "$WORK"' EXIT
+
+cp -R "$HERE/template/." "$WORK/"
+cd "$WORK"
+git init -q -b main && git add -A
+git commit -qm "Seed sim content $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+git remote add origin "https://github.com/$REPO"
+git push -q --force origin main
+
+if [ "$RESET" = "--reset" ]; then
+  gh issue list --repo "$REPO" --label sim-batch --state open --json number \
+    --jq '.[].number' | while read -r n; do
+    gh issue close "$n" --repo "$REPO" --comment "Reseeded."
+  done
+  gh api "repos/$REPO/branches" --jq '.[].name' | grep -v '^main$' | while read -r b; do
+    gh api -X DELETE "repos/$REPO/git/refs/heads/$b" || true
+  done
+fi
+
+gh label create sim-batch --repo "$REPO" --color 5319e7 \
+  --description "Seeded simulation issue" 2>/dev/null || true
+
+count=$(python3 -c 'import json;print(len(json.load(open("'"$HERE"'/issues.json"))["issues"]))')
+for i in $(seq 0 $((count - 1))); do
+  TITLE=$(python3 -c 'import json;print(json.load(open("'"$HERE"'/issues.json"))["issues"]['"$i"']["title"])')
+  BODY=$(python3 -c 'import json;print(json.load(open("'"$HERE"'/issues.json"))["issues"]['"$i"']["body"])')
+  gh issue create --repo "$REPO" --title "$TITLE" --body "$BODY" --label sim-batch
+done
+echo "SEEDED $REPO with $count issues"

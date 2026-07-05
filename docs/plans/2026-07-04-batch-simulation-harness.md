@@ -288,7 +288,7 @@ cd ../.. && bundle exec rubocop && git add sim && git commit -m "Add sim templat
 - Consumes: `sim/template/`, `sim/issues.json`.
 - Produces: `sim/bin/seed <owner/repo> [--reset]` — force-pushes template content to `main` and (re)creates one labeled issue per manifest entry. Idempotent; `--reset` also closes old sim issues and deletes non-main branches.
 
-- [ ] **Step 1: Write it**
+- [x] **Step 1: Write it**
 
 `sim/bin/seed`:
 
@@ -345,7 +345,7 @@ sim/bin/seed shakacode/agent-coord-sim-alpha
 
 Expected: `SEEDED shakacode/agent-coord-sim-alpha with 3 issues`, and the repo shows red CI on main (the seeded bugs) with 3 open `sim-batch` issues.
 
-- [ ] **Step 3: Commit**
+- [x] **Step 3: Commit**
 
 ```bash
 bundle exec rubocop && git add sim/bin/seed && git commit -m "Add sim repo seeding script"
