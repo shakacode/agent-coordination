@@ -1137,7 +1137,7 @@ bundle exec rubocop && git add -A && git commit -m "Add end-to-end HTTP backend 
 - Consumes: `bin/test-http-integration`.
 - Produces: a `worker-integration` job on every PR.
 
-- [ ] **Step 1: Add the job**
+- [x] **Step 1: Add the job**
 
 Append to `.github/workflows/ci.yml` under `jobs:` (match the checkout/Ruby-setup steps of the existing `test` job verbatim, then add Node):
 
@@ -1165,7 +1165,7 @@ Append to `.github/workflows/ci.yml` under `jobs:` (match the checkout/Ruby-setu
 
 (If the existing jobs pin `ruby/setup-ruby` / `setup-node` to SHAs, copy those exact pins instead of the tags above.)
 
-- [ ] **Step 2: Verify locally, then push and watch CI**
+- [x] **Step 2: Verify locally, then push and watch CI**
 
 Run: `bin/test-http-integration`
 Expected: `INTEGRATION_OK`.

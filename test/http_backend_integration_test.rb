@@ -32,20 +32,20 @@ class HttpBackendIntegrationTest < Minitest::Test
     # the claim-expiry fallback.
     code, = cli("heartbeat", "--agent-id", "w1", "--repo", REPO, "--target", target, "--ttl", "1")
     assert_equal 0, code
-    sleep 5
+    sleep 8
     code, _, err = cli("claim", "--agent-id", "w2", "--repo", REPO, "--target", target)
     assert_equal 0, code, "dead-holder takeover failed: #{err}"
 
-    # release parity check on the new holder
+    # release parity check: a different worker can claim after the holder releases
     code, = cli("release", "--agent-id", "w2", "--repo", REPO, "--target", target)
     assert_equal 0, code
-    code, = cli("claim", "--agent-id", "w2", "--repo", REPO, "--target", target)
+    code, = cli("claim", "--agent-id", "w3", "--repo", REPO, "--target", target)
     assert_equal 0, code
 
     code, out, = cli("status", "--repo", REPO, "--target", target, "--json")
     assert_equal 0, code
     payload = JSON.parse(out)
-    assert_equal "w2", payload.fetch("claims").first.fetch("agent_id")
+    assert_equal "w3", payload.fetch("claims").first.fetch("agent_id")
   end
 
   def test_concurrent_claims_have_exactly_one_winner

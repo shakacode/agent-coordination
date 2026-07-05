@@ -2,25 +2,74 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 TMP_ROOT=$(mktemp -d "${TMPDIR:-/tmp}/agent-coord-wrangler.XXXXXX")
+WRANGLER_PID=""
+
+collect_tree() {
+  local pid="$1"
+  local child
+  if command -v pgrep >/dev/null 2>&1; then
+    for child in $(pgrep -P "$pid" 2>/dev/null || true); do
+      collect_tree "$child"
+    done
+  fi
+  printf '%s\n' "$pid"
+}
+
+signal_pids() {
+  local signal="$1"
+  local pid
+  while IFS= read -r pid; do
+    [ -n "$pid" ] || continue
+    kill "$signal" "$pid" 2>/dev/null || true
+  done
+}
+
+cleanup() {
+  local status=$?
+  if [ -n "$WRANGLER_PID" ]; then
+    local wrangler_tree
+    wrangler_tree=$(collect_tree "$WRANGLER_PID")
+    signal_pids -TERM <<<"$wrangler_tree"
+    sleep 1
+    signal_pids -KILL <<<"$wrangler_tree"
+    wait "$WRANGLER_PID" 2>/dev/null || true
+  fi
+  ruby -rfileutils -e 'FileUtils.rm_rf(ARGV.fetch(0))' "$TMP_ROOT"
+  return "$status"
+}
+trap cleanup EXIT
+trap 'exit 130' INT TERM
+
 export XDG_CONFIG_HOME="$TMP_ROOT/config"
 export XDG_CACHE_HOME="$TMP_ROOT/cache"
 export WRANGLER_LOG_PATH="$TMP_ROOT/logs"
+export WRANGLER_OUTPUT_LOG="$TMP_ROOT/wrangler-integration.log"
 export WRANGLER_SEND_METRICS=false
 export WRANGLER_SEND_ERROR_REPORTS=false
 mkdir -p "$XDG_CONFIG_HOME" "$XDG_CACHE_HOME" "$WRANGLER_LOG_PATH"
 TOKEN="integration-token-$$"
-HASH=$(printf %s "$TOKEN" | shasum -a 256 | cut -d' ' -f1)
+HASH=$(ruby -rdigest -e 'print Digest::SHA256.hexdigest(ARGV.fetch(0))' "$TOKEN")
+
+health_ready() {
+  ruby -rnet/http -ruri -e '
+    uri = URI("http://127.0.0.1:8787/v1/health")
+    response = Net::HTTP.start(uri.host, uri.port, open_timeout: 1, read_timeout: 1) do |http|
+      http.get(uri.request_uri)
+    end
+    exit(response.is_a?(Net::HTTPSuccess) ? 0 : 1)
+  ' >/dev/null 2>&1
+}
+
 (cd worker && npx wrangler d1 migrations apply agent-coord --local >/dev/null)
 (cd worker && npx wrangler d1 execute agent-coord --local --command \
   "INSERT OR REPLACE INTO machines (machine, token_hash, created_at) VALUES ('integration', '${HASH}', '2026-07-04T00:00:00Z')" >/dev/null)
-(cd worker && npx wrangler dev --local --port 8787 >/tmp/wrangler-integration.log 2>&1) &
+(cd worker && npx wrangler dev --local --port 8787 >"$WRANGLER_OUTPUT_LOG" 2>&1) &
 WRANGLER_PID=$!
-trap 'kill "$WRANGLER_PID" 2>/dev/null || true; wait "$WRANGLER_PID" 2>/dev/null || true; rm -rf "$TMP_ROOT"' EXIT
 for _ in $(seq 1 60); do
-  curl -fs http://127.0.0.1:8787/v1/health >/dev/null 2>&1 && break
+  health_ready && break
   sleep 0.5
 done
-curl -fs http://127.0.0.1:8787/v1/health >/dev/null || { echo "wrangler dev never became healthy"; exit 1; }
+health_ready || { echo "wrangler dev never became healthy"; cat "$WRANGLER_OUTPUT_LOG"; exit 1; }
 AGENT_COORD_API_URL=http://127.0.0.1:8787 AGENT_COORD_API_TOKEN="$TOKEN" \
   bundle exec ruby test/http_backend_integration_test.rb
 echo INTEGRATION_OK

@@ -13,9 +13,71 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
   ROOT = File.expand_path("..", __dir__)
   BIN = File.join(ROOT, "bin", "agent-coord")
   UNDERSCORE_BIN = File.join(ROOT, "bin", "agent_coord")
+  HTTP_INTEGRATION_BIN = File.join(ROOT, "bin", "test-http-integration")
   LAUNCHD_HEARTBEAT_TEMPLATE = File.join(ROOT, "launchd", "com.shakacode.agent-coord-heartbeat.plist.example")
   LAUNCHD_REFRESH_TEMPLATE = File.join(ROOT, "launchd", "com.shakacode.agent-coord-refresh.plist.example")
   SYSTEMD_TEMPLATE = File.join(ROOT, "systemd", "agent-coord-heartbeat.service.example")
+  FAKE_SHASUM = <<~RUBY
+    #!/usr/bin/env ruby
+    warn "shasum should not be used by bin/test-http-integration"
+    exit 127
+  RUBY
+  FAKE_BUNDLE = <<~RUBY
+    #!/usr/bin/env ruby
+    File.write(ENV.fetch("FAKE_BUNDLE_LOG"), ARGV.join(" "))
+    exit Integer(ENV.fetch("FAKE_BUNDLE_EXIT", "0")) if ARGV == %w[exec ruby test/http_backend_integration_test.rb]
+
+    warn "unexpected bundle command: \#{ARGV.join(" ")}"
+    exit 1
+  RUBY
+  FAKE_NPX = <<~RUBY
+    #!/usr/bin/env ruby
+    require "json"
+
+    def write_event(event)
+      File.open(ENV.fetch("FAKE_NPX_LOG"), "a") { |file| file.puts(JSON.generate(event)) }
+    end
+
+    write_event(
+      "argv" => ARGV,
+      "pwd" => Dir.pwd,
+      "wrangler_output_log" => ENV["WRANGLER_OUTPUT_LOG"],
+      "xdg_config_home" => ENV["XDG_CONFIG_HOME"],
+      "xdg_cache_home" => ENV["XDG_CACHE_HOME"],
+      "wrangler_log_path" => ENV["WRANGLER_LOG_PATH"]
+    )
+
+    case ARGV
+    when %w[wrangler d1 migrations apply agent-coord --local]
+      exit 0
+    when %w[wrangler dev --local --port 8787]
+      require "webrick"
+
+      File.write(ENV.fetch("FAKE_WRANGLER_PID"), Process.pid.to_s)
+      trap("TERM") { write_event("signal" => "TERM") }
+
+      server = WEBrick::HTTPServer.new(
+        BindAddress: "127.0.0.1",
+        Port: 8787,
+        Logger: WEBrick::Log.new($stderr, WEBrick::Log::FATAL),
+        AccessLog: []
+      )
+      server.mount_proc("/v1/health") do |_request, response|
+        response.status = 200
+        response.body = "ok"
+      end
+      server.start
+    else
+      if ARGV[0, 5] == %w[wrangler d1 execute agent-coord --local] && (index = ARGV.index("--command"))
+        command = ARGV.fetch(index + 1)
+        write_event("argv" => ARGV, "command" => command)
+        exit 0 if command.match?(/\\b[0-9a-f]{64}\\b/) && !command.include?("integration-token-")
+      end
+
+      warn "unexpected npx command: \#{ARGV.join(" ")}"
+      exit 1
+    end
+  RUBY
   load BIN
 
   def setup
@@ -61,6 +123,31 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
 
     assert_equal 0, result.status.exitstatus, result.stderr
     assert_includes result.stdout, "agent-coord <command>"
+  end
+
+  def test_http_integration_harness_uses_portable_hashing_and_cleans_up_wrangler
+    with_fake_http_harness do |env, paths|
+      result = run_command(
+        env,
+        "bash",
+        HTTP_INTEGRATION_BIN
+      )
+
+      assert_fake_http_harness_run(result, paths)
+    end
+  end
+
+  def test_http_integration_harness_preserves_backend_test_failure_status
+    with_fake_http_harness do |env, paths|
+      result = run_command(
+        env.merge("FAKE_BUNDLE_EXIT" => "42"),
+        "bash",
+        HTTP_INTEGRATION_BIN
+      )
+
+      assert_equal 42, result.status.exitstatus, "#{result.stdout}\n#{result.stderr}"
+      assert_fake_harness_cleanup(paths)
+    end
   end
 
   def test_version_json_exposes_cli_contract_version
@@ -1971,6 +2058,87 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
       FileUtils.cp(BIN, copied_bin)
       yield copied_bin
     end
+  end
+
+  def with_fake_http_harness
+    Dir.mktmpdir("agent-coord-http-harness") do |root|
+      fake_bin = File.join(root, "bin")
+      paths = fake_http_harness_paths(root)
+      FileUtils.mkdir_p([fake_bin, paths.fetch(:tmpdir)])
+      write_fake_http_harness_commands(fake_bin)
+
+      yield fake_http_harness_env(fake_bin, paths), paths
+    end
+  end
+
+  def fake_http_harness_paths(root)
+    {
+      tmpdir: File.join(root, "tmp"),
+      npx_log: File.join(root, "npx.jsonl"),
+      bundle_log: File.join(root, "bundle.log"),
+      wrangler_pid: File.join(root, "wrangler.pid")
+    }
+  end
+
+  def fake_http_harness_env(fake_bin, paths)
+    {
+      "BASH_ENV" => nil,
+      "PATH" => [fake_bin, ENV.fetch("PATH")].join(File::PATH_SEPARATOR),
+      "TMPDIR" => "#{paths.fetch(:tmpdir)}/",
+      "FAKE_NPX_LOG" => paths.fetch(:npx_log),
+      "FAKE_BUNDLE_LOG" => paths.fetch(:bundle_log),
+      "FAKE_WRANGLER_PID" => paths.fetch(:wrangler_pid)
+    }
+  end
+
+  def assert_fake_http_harness_run(result, paths)
+    assert_equal 0, result.status.exitstatus, "#{result.stdout}\n#{result.stderr}"
+    assert_includes result.stdout, "INTEGRATION_OK"
+    assert File.exist?(paths.fetch(:bundle_log)), fake_harness_diagnostics(result, paths)
+    assert_equal "exec ruby test/http_backend_integration_test.rb", File.read(paths.fetch(:bundle_log))
+    assert_fake_harness_events(paths)
+  end
+
+  def fake_harness_diagnostics(result, paths)
+    events = File.exist?(paths.fetch(:npx_log)) ? File.read(paths.fetch(:npx_log)) : ""
+    "#{result.stdout}\n#{result.stderr}\n#{events}"
+  end
+
+  def assert_fake_harness_events(paths)
+    events = fake_harness_events(paths)
+    execute = events.find { |event| event.key?("command") }
+    assert_match(/\b[0-9a-f]{64}\b/, execute.fetch("command"))
+    refute_includes execute.fetch("command"), "integration-token-"
+
+    dev = events.find { |event| event["argv"] == %w[wrangler dev --local --port 8787] }
+    assert_includes dev.fetch("wrangler_output_log"), paths.fetch(:tmpdir)
+    assert_fake_harness_cleanup(paths)
+  end
+
+  def assert_fake_harness_cleanup(paths)
+    events = fake_harness_events(paths)
+    assert_includes events, { "signal" => "TERM" }
+    refute process_alive?(Integer(File.read(paths.fetch(:wrangler_pid)))), "fake wrangler survived cleanup"
+  end
+
+  def fake_harness_events(paths)
+    File.readlines(paths.fetch(:npx_log), chomp: true).map { |line| JSON.parse(line) }
+  end
+
+  def write_fake_http_harness_commands(fake_bin)
+    File.write(File.join(fake_bin, "shasum"), FAKE_SHASUM)
+    File.write(File.join(fake_bin, "bundle"), FAKE_BUNDLE)
+    File.write(File.join(fake_bin, "npx"), FAKE_NPX)
+    %w[shasum bundle npx].each { |name| FileUtils.chmod(0o755, File.join(fake_bin, name)) }
+  end
+
+  def process_alive?(pid)
+    Process.kill(0, pid)
+    true
+  rescue Errno::ESRCH
+    false
+  rescue Errno::EPERM
+    true
   end
 
   def write_fake_gh(fake_bin)
