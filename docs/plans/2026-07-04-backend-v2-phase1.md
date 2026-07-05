@@ -176,7 +176,7 @@ git commit -m "Move live state to agent-coordination-state; this repo is code-on
 **Interfaces:**
 - Produces: `GET /v1/health` → `200 {"status":"ok"}`; D1 tables `state` and `machines`; the `Env` type `{ DB: D1Database }` used by Tasks 5–6.
 
-- [ ] **Step 1: Write the config and migration**
+- [x] **Step 1: Write the config and migration**
 
 `worker/wrangler.toml`:
 
@@ -234,7 +234,7 @@ node_modules/
 .wrangler/
 ```
 
-- [ ] **Step 2: Write the skeleton with only the health route**
+- [x] **Step 2: Write the skeleton with only the health route**
 
 `worker/src/index.ts`:
 
@@ -261,7 +261,7 @@ export default {
 };
 ```
 
-- [ ] **Step 3: Verify locally**
+- [x] **Step 3: Verify locally**
 
 ```bash
 cd worker && npm install
@@ -274,7 +274,7 @@ kill %1
 
 Expected: `{"status":"ok"}`
 
-- [ ] **Step 4: Commit**
+- [x] **Step 4: Commit**
 
 ```bash
 cd .. && git add worker && git commit -m "Add Worker scaffold: wrangler config, D1 migration, health route"
