@@ -934,7 +934,7 @@ bundle exec rubocop && git add -A && git commit -m "Add HTTP backend selection w
 **Interfaces:**
 - Produces: `agent-coord doctor` with the HTTP backend reports `backend: http` and `backend_url`, checks `/v1/health` and a claims list; `--deep` lists all three prefixes.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 ```ruby
 class HttpDoctorTest < Minitest::Test
@@ -960,12 +960,12 @@ class HttpDoctorTest < Minitest::Test
 end
 ```
 
-- [ ] **Step 2: Run to verify failure**
+- [x] **Step 2: Run to verify failure**
 
 Run: `bundle exec ruby test/http_store_test.rb`
 Expected: FAIL — doctor reports `backend: github` and tries `gh auth status`.
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
 
 In `doctor`, before the current `backend_kind` logic:
 
@@ -995,7 +995,7 @@ The existing `store.verify_layout!(JSON_PREFIXES)` call after the branch stays w
 
 Extend the payload and text output with `"backend_url" => doctor_options[:api_url]` and a `backend_url:` line when backend is http.
 
-- [ ] **Step 4: Run, lint, commit**
+- [x] **Step 4: Run, lint, commit**
 
 Run: `bundle exec ruby test/http_store_test.rb && bundle exec ruby test/agent_coord_test.rb && bundle exec rubocop`
 Expected: green.

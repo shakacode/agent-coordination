@@ -118,7 +118,17 @@ class HttpStoreWriteTest < HttpStoreTestCase
   end
 end
 
-class HttpBackendSelectionTest < Minitest::Test
+class HttpEnvTestCase < Minitest::Test
+  def with_env(pairs)
+    saved = pairs.keys.to_h { |key| [key, ENV.fetch(key, nil)] }
+    pairs.each { |key, value| value.nil? ? ENV.delete(key) : ENV[key] = value }
+    yield
+  ensure
+    saved.each { |key, value| value.nil? ? ENV.delete(key) : ENV[key] = value }
+  end
+end
+
+class HttpBackendSelectionTest < HttpEnvTestCase
   def run_cli(args, _env)
     stdout = StringIO.new
     stderr = StringIO.new
@@ -189,14 +199,23 @@ class HttpBackendSelectionTest < Minitest::Test
   ensure
     stub.shutdown
   end
+end
 
-  private
-
-  def with_env(pairs)
-    saved = pairs.keys.to_h { |key| [key, ENV.fetch(key, nil)] }
-    pairs.each { |key, value| value.nil? ? ENV.delete(key) : ENV[key] = value }
-    yield
+class HttpDoctorTest < HttpEnvTestCase
+  def test_doctor_reports_http_backend
+    responses = [
+      [200, { "entries" => [] }],
+      [200, { "status" => "ok" }]
+    ]
+    stub = HttpStoreStub.new(responses)
+    with_env("AGENT_COORD_API_URL" => stub.base_url, "AGENT_COORD_API_TOKEN" => "tok") do
+      stdout = StringIO.new
+      code = AgentCoord::Runner.new(["doctor"], stdout: stdout, stderr: StringIO.new).run
+      assert_equal 0, code
+      assert_includes stdout.string, "backend: http"
+      assert_includes stdout.string, stub.base_url
+    end
   ensure
-    saved.each { |key, value| value.nil? ? ENV.delete(key) : ENV[key] = value }
+    stub.shutdown
   end
 end

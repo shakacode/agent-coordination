@@ -336,9 +336,16 @@ module AgentCoord
     def doctor(options)
       doctor_options = options.dup
       doctor_options[:state_root] ||= default_status_state_root unless doctor_options[:api_url]
-      backend_kind = doctor_options[:state_root] ? "local" : "github"
+      backend_kind =
+        if doctor_options[:api_url] && !doctor_options[:state_root] then "http"
+        elsif doctor_options[:state_root] then "local"
+        else "github"
+        end
       begin
-        if doctor_options[:state_root]
+        if backend_kind == "http"
+          store = build_store(doctor_options)
+          store.verify_readable!
+        elsif doctor_options[:state_root]
           store = LocalStore.new(doctor_options.fetch(:state_root))
           store.verify_root!
         else
@@ -357,6 +364,7 @@ module AgentCoord
         "version" => VERSION,
         "backend" => backend_kind,
         "backend_repo" => doctor_options.fetch(:backend),
+        "backend_url" => doctor_options[:api_url],
         "state_root" => doctor_options[:state_root],
         "deep" => !options[:deep].nil?,
         "status" => "ok"
@@ -366,6 +374,7 @@ module AgentCoord
         @stdout.puts "version: #{VERSION}"
         @stdout.puts "backend: #{backend_kind}"
         @stdout.puts "backend_repo: #{doctor_options.fetch(:backend)}"
+        @stdout.puts "backend_url: #{doctor_options[:api_url]}" if backend_kind == "http"
         @stdout.puts "state_root: #{doctor_options[:state_root] || '-'}"
         @stdout.puts "mode: #{options[:deep] ? 'deep' : 'lightweight'}"
         @stdout.puts "status: ok"
