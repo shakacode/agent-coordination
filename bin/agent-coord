@@ -118,6 +118,7 @@ module AgentCoord
           --backend OWNER/REPO       backend repository (default: #{DEFAULT_BACKEND})
           --ref REF                  backend branch/ref (default: #{DEFAULT_REF})
           --state-root PATH          use local files instead of GitHub API
+          --api-url URL              use the HTTP backend at URL
           --json                     emit JSON for supported commands
           -h, --help                 show command help
       HELP
@@ -129,12 +130,7 @@ module AgentCoord
     end
 
     def parse_options(command, argv)
-      options = {
-        backend: ENV.fetch("AGENT_COORD_BACKEND", DEFAULT_BACKEND),
-        ref: ENV.fetch("AGENT_COORD_REF", DEFAULT_REF),
-        state_root: ENV.fetch("AGENT_COORD_STATE_ROOT", nil),
-        status: "in_progress"
-      }
+      options = default_options
 
       parser = OptionParser.new do |opts|
         opts.banner = "Usage: agent-coord #{command} [options]"
@@ -143,6 +139,7 @@ module AgentCoord
         opts.on("--backend OWNER/REPO", "backend repository") { |value| options[:backend] = value }
         opts.on("--ref REF", "backend branch/ref") { |value| options[:ref] = value }
         opts.on("--state-root PATH", "use local files instead of GitHub API") { |value| options[:state_root] = value }
+        opts.on("--api-url URL", "use the HTTP backend at URL") { |value| options[:api_url] = value }
         opts.on("--json", "emit JSON for supported commands") { options[:json] = true }
         opts.on("--agent-id ID", "stable agent identifier") { |value| options[:agent_id] = value }
         opts.on("--repo OWNER/REPO", "target repository") { |value| options[:repo] = value }
@@ -168,7 +165,34 @@ module AgentCoord
       parser.parse!(argv)
       raise Error, "unexpected arguments: #{argv.join(' ')}" unless argv.empty?
 
+      resolve_backend_env(options)
       options
+    end
+
+    def default_options
+      {
+        backend: ENV.fetch("AGENT_COORD_BACKEND", DEFAULT_BACKEND),
+        ref: ENV.fetch("AGENT_COORD_REF", DEFAULT_REF),
+        state_root: nil,
+        api_url: nil,
+        status: "in_progress"
+      }
+    end
+
+    def resolve_backend_env(options)
+      return if options[:state_root]
+
+      env_api = ENV.fetch("AGENT_COORD_API_URL", nil)
+      env_root = ENV.fetch("AGENT_COORD_STATE_ROOT", nil)
+      options[:api_url] ||= env_api
+      if options[:api_url]
+        if env_root && !env_root.empty?
+          @stderr.puts "warning: AGENT_COORD_API_URL and AGENT_COORD_STATE_ROOT are both set; " \
+                       "using the HTTP backend. Pass --state-root to force local."
+        end
+        return
+      end
+      options[:state_root] = env_root
     end
 
     def add_command_help(opts, command)
@@ -195,7 +219,7 @@ module AgentCoord
     def deep_option_token?(argv)
       # Keep this in sync with value-taking opts.on definitions in parse_options.
       value_options = %w[
-        --backend --ref --state-root --agent-id --repo --target --batch-id --branch
+        --backend --ref --state-root --api-url --agent-id --repo --target --batch-id --branch
         --ttl --status --install-dir --profile
       ]
       skip_next = false
@@ -311,7 +335,7 @@ module AgentCoord
 
     def doctor(options)
       doctor_options = options.dup
-      doctor_options[:state_root] ||= default_status_state_root
+      doctor_options[:state_root] ||= default_status_state_root unless doctor_options[:api_url]
       backend_kind = doctor_options[:state_root] ? "local" : "github"
       begin
         if doctor_options[:state_root]
@@ -410,7 +434,7 @@ module AgentCoord
 
     def render_status(options)
       status_options = options.dup
-      status_options[:state_root] ||= default_status_state_root
+      status_options[:state_root] ||= default_status_state_root unless status_options[:api_url]
       store = build_store(status_options)
       now = now_utc
       payload =
@@ -874,6 +898,13 @@ module AgentCoord
 
     def build_store(options)
       return LocalStore.new(options.fetch(:state_root)) if options[:state_root]
+
+      if options[:api_url]
+        token = ENV.fetch("AGENT_COORD_API_TOKEN", nil)
+        raise OperationalError, "AGENT_COORD_API_TOKEN is required when using the HTTP backend" if token.to_s.empty?
+
+        return HttpStore.new(base_url: options[:api_url], token: token)
+      end
 
       GitHubStore.new(backend: options.fetch(:backend), ref: options.fetch(:ref))
     end

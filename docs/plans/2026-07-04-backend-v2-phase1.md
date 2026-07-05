@@ -782,7 +782,7 @@ bundle exec rubocop && git add -A && git commit -m "Add HttpStore CAS writes map
   4. otherwise → `GitHubStore`
   - When both `AGENT_COORD_API_URL` and `AGENT_COORD_STATE_ROOT` env vars are set, warn once on stderr: `warning: AGENT_COORD_API_URL and AGENT_COORD_STATE_ROOT are both set; using the HTTP backend. Pass --state-root to force local.`
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 ```ruby
 class HttpBackendSelectionTest < Minitest::Test
@@ -847,12 +847,12 @@ end
 
 Note: `Runner.new` currently accepts `stdout:`/`stderr:` keywords (`stderr` is stored but unused for warnings). The warning in Step 3 writes to `@stderr`.
 
-- [ ] **Step 2: Run to verify failure**
+- [x] **Step 2: Run to verify failure**
 
 Run: `bundle exec ruby test/http_store_test.rb`
 Expected: FAIL — status hits the GitHub/local path instead of the stub (first test), no token error (second), no warning (third).
 
-- [ ] **Step 3: Implement selection**
+- [x] **Step 3: Implement selection**
 
 In `parse_options`, change the initial options hash: `state_root: nil, api_url: nil` (drop the direct env fetch for `state_root`), and add the flag:
 
@@ -912,12 +912,12 @@ In `render_status` and `doctor`, guard the mirror default so HTTP wins:
 
 (and the equivalent line in `doctor` for `doctor_options`).
 
-- [ ] **Step 4: Run the full suite**
+- [x] **Step 4: Run the full suite**
 
 Run: `bundle exec ruby test/http_store_test.rb && bundle exec ruby test/agent_coord_test.rb`
 Expected: all green. If an existing test set `AGENT_COORD_STATE_ROOT` via ENV and relied on the old fetch location, it still passes — the env fallback moved but kept identical effect.
 
-- [ ] **Step 5: Lint and commit**
+- [x] **Step 5: Lint and commit**
 
 ```bash
 bundle exec rubocop && git add -A && git commit -m "Add HTTP backend selection with precedence and both-set warning"

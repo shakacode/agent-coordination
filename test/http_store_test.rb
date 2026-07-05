@@ -3,6 +3,7 @@
 require "json"
 require "minitest/autorun"
 require "net/http"
+require "stringio"
 require "webrick"
 
 load File.expand_path("../bin/agent-coord", __dir__)
@@ -114,5 +115,88 @@ class HttpStoreWriteTest < HttpStoreTestCase
         store.write_json("claims/o/r/1.json", {}, message: "m")
       end
     end
+  end
+end
+
+class HttpBackendSelectionTest < Minitest::Test
+  def run_cli(args, _env)
+    stdout = StringIO.new
+    stderr = StringIO.new
+    code = begin
+      AgentCoord::Runner.new(args, stdout: stdout, stderr: stderr).run
+    rescue AgentCoord::Error => e
+      stderr.puts e.message
+      e.exit_code
+    end
+    [code, stdout.string, stderr.string]
+  end
+
+  def test_status_uses_http_backend_when_api_env_set
+    responses = [
+      [200, { "entries" => [] }],
+      [200, { "entries" => [] }],
+      [200, { "entries" => [] }]
+    ]
+    stub = HttpStoreStub.new(responses)
+    env = { "AGENT_COORD_API_URL" => stub.base_url, "AGENT_COORD_API_TOKEN" => "tok" }
+    with_env(env) do
+      code, out, = run_cli(["status"], env)
+      assert_equal 0, code
+      assert_includes out, "claims"
+    end
+    assert_equal 3, stub.requests.length
+  ensure
+    stub.shutdown
+  end
+
+  def test_missing_token_is_operational_error
+    with_env("AGENT_COORD_API_URL" => "http://127.0.0.1:9", "AGENT_COORD_API_TOKEN" => nil) do
+      code, _, err = run_cli(["status"], {})
+      assert_equal 2, code
+      assert_includes err, "AGENT_COORD_API_TOKEN"
+    end
+  end
+
+  def test_malformed_api_url_is_operational_error
+    with_env("AGENT_COORD_API_URL" => "http://[bad", "AGENT_COORD_API_TOKEN" => "tok") do
+      code, _, err = run_cli(["status"], {})
+      assert_equal 2, code
+      assert_includes err, "http backend unreachable"
+    end
+  end
+
+  def test_empty_api_url_is_operational_error
+    with_env("AGENT_COORD_API_URL" => "", "AGENT_COORD_API_TOKEN" => "tok") do
+      code, _, err = run_cli(["status"], {})
+      assert_equal 2, code
+      assert_includes err, "http backend unreachable"
+    end
+  end
+
+  def test_both_env_vars_warns_and_uses_http
+    responses = [
+      [200, { "entries" => [] }],
+      [200, { "entries" => [] }],
+      [200, { "entries" => [] }]
+    ]
+    stub = HttpStoreStub.new(responses)
+    with_env("AGENT_COORD_API_URL" => stub.base_url, "AGENT_COORD_API_TOKEN" => "tok",
+             "AGENT_COORD_STATE_ROOT" => "/tmp/nonexistent-root") do
+      code, _, err = run_cli(["status"], {})
+      assert_equal 0, code
+      assert_includes err, "both set"
+    end
+  ensure
+    stub.shutdown
+  end
+
+  private
+
+  def with_env(pairs)
+    saved = pairs.keys.to_h { |key| [key, ENV.fetch(key, nil)] }
+    pairs.each { |key, value| value.nil? ? ENV.delete(key) : ENV[key] = value }
+    yield
+  ensure
+    saved.each { |key, value| value.nil? ? ENV.delete(key) : ENV[key] = value }
   end
 end
