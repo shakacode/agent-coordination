@@ -1,0 +1,11 @@
+base_branch: main
+follow_up_prefix: "Follow-up:"
+review_gate: none (sim repo)
+approval_exempt: all (sim repo)
+coordination_backend: agent-coord
+changelog: n/a
+benchmark_labels: n/a
+merge_ledger: n/a
+ci_parity_environment: n/a
+hosted_ci_trigger: n/a
+ci_change_detector: n/a

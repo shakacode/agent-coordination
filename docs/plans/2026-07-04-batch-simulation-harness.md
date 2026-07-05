@@ -33,7 +33,7 @@
 **Interfaces:**
 - Produces: a complete consumer-repo tree with three deliberately buggy functions, three tests that FAIL until fixed, and the seam files real skills resolve. `sim/issues.json` is the single source of truth for issue seeding and verification.
 
-- [ ] **Step 1: Write the buggy libs and their tests**
+- [x] **Step 1: Write the buggy libs and their tests**
 
 Each task file has one bug; each test currently fails. `sim/template/lib/task_one.rb`:
 
@@ -125,7 +125,7 @@ class TaskThreeTest < Minitest::Test
 end
 ```
 
-- [ ] **Step 2: Write the seam and CI files**
+- [x] **Step 2: Write the seam and CI files**
 
 `sim/template/Rakefile`:
 
@@ -231,7 +231,7 @@ jobs:
       - run: .agents/bin/validate
 ```
 
-- [ ] **Step 3: Write the issue manifest**
+- [x] **Step 3: Write the issue manifest**
 
 `sim/issues.json`:
 
@@ -263,7 +263,7 @@ jobs:
 }
 ```
 
-- [ ] **Step 4: Verify the template is self-consistently broken**
+- [x] **Step 4: Verify the template is self-consistently broken**
 
 ```bash
 cd sim/template && rake test; echo "exit=$?"
@@ -271,7 +271,7 @@ cd sim/template && rake test; echo "exit=$?"
 
 Expected: 3 failures (one per task test), non-zero exit — the bugs are real and the tests catch them.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 cd ../.. && bundle exec rubocop && git add sim && git commit -m "Add sim template project with three seeded bugs and seam files"
