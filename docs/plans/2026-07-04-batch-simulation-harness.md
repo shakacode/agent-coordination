@@ -597,7 +597,8 @@ done
 CLI="$(cd "$(dirname "$0")/../.." && pwd)/bin/agent-coord"
 BRANCH="sim/${ISSUE_KEY}-${AGENT_ID}"
 CLAIM_ACQUIRED=0
-WORK_DONE=0
+WORK_PUSHED=0
+DONE_RECORDED=0
 
 apply_issue_fix() {
   local issue_key="$1"
@@ -663,10 +664,19 @@ cleanup_claim() {
   local status=$?
   trap - EXIT
   if [ "$status" -ne 0 ] && [ "$CLAIM_ACQUIRED" -eq 1 ]; then
-    if [ "$WORK_DONE" -eq 0 ]; then
+    if [ "$WORK_PUSHED" -eq 1 ]; then
+      if [ "$DONE_RECORDED" -eq 0 ]; then
+        beat done >/dev/null || echo "warning: failed to record done heartbeat for ${ISSUE_KEY}" >&2
+      fi
+      if release_claim >/dev/null; then
+        echo "WORKER_DONE ${BRANCH}"
+        exit 0
+      fi
+      echo "warning: failed to release claim for ${ISSUE_KEY}" >&2
+    else
       beat failed >/dev/null || echo "warning: failed to record failed heartbeat for ${ISSUE_KEY}" >&2
+      release_claim >/dev/null || echo "warning: failed to release claim for ${ISSUE_KEY}" >&2
     fi
-    release_claim >/dev/null || echo "warning: failed to release claim for ${ISSUE_KEY}" >&2
     status=2
   fi
   exit "$status"
@@ -700,9 +710,10 @@ beat pushing
 git add lib
 git commit -qm "Fix ${ISSUE_KEY} (scripted sim worker ${AGENT_ID})"
 git push -q origin "$BRANCH"
+WORK_PUSHED=1
 
 beat done
-WORK_DONE=1
+DONE_RECORDED=1
 release_claim
 echo "WORKER_DONE ${BRANCH}"
 ```
