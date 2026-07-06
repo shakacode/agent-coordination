@@ -1,1 +1,375 @@
-# agent-coordination
+# Agent Coordination
+
+CLI, workflow helpers, and backend protocol code for coordinating concurrent
+agent work.
+
+Runtime JSON coordination records live in the private
+`shakacode/agent-coordination-state` repository on its `state` branch. This
+public repository should contain code, docs, tests, templates, and simulation
+fixtures only. Do not commit live `claims/`, `heartbeats/`, `batches/`, secrets,
+environment files, customer data, credentials, or source-code patches here.
+
+## Setup
+
+```bash
+gh auth status
+gh repo clone shakacode/agent-coordination
+cd agent-coordination
+bundle install
+git config core.hooksPath .githooks
+bundle exec rubocop
+ruby -Itest test/agent_coord_test.rb
+bin/agent-coord --help
+bin/agent-coord bootstrap
+export PATH="$HOME/.local/bin:$PATH"
+agent-coord --help
+agent_coord --help
+agent-coord doctor
+agent-coord doctor --deep
+```
+
+The versioned pre-commit hook in `.githooks/pre-commit` runs RuboCop on staged
+Ruby files before each commit after `core.hooksPath` is configured. CI runs the
+full RuboCop check on every pull request.
+
+The CLI defaults to the private `shakacode/agent-coordination-state` backend on
+the `state` branch and uses `gh api` for GitHub Contents API writes. `status`
+prefers a local state checkout: first `AGENT_COORD_STATE_ROOT` or
+`--state-root`, then `AGENT_COORD_STATUS_STATE_ROOT`, then the repo containing
+the installed `agent-coord` command if it has `claims`, `heartbeats`, and
+`batches`. This keeps normal status checks fast while preserving GitHub-backed
+writes for `claim`, `release`, and `heartbeat`.
+
+Production GitHub-store state lives in `shakacode/agent-coordination-state` on
+the `state` branch. Keep this repository code-only. Machines may still set
+`AGENT_COORD_REF=state` explicitly for clarity, but the CLI default already
+points at the state branch:
+
+```bash
+export AGENT_COORD_REF=state
+```
+
+For local smoke checks, set `AGENT_COORD_STATE_ROOT` or pass `--state-root` to
+use a temporary filesystem state directory instead of GitHub.
+
+React on Rails workflow docs assume `agent-coord` is available on `PATH`.
+`bin/agent-coord bootstrap` installs both `agent-coord` and the compatibility
+alias `agent_coord` into `$HOME/.local/bin` by default and appends that directory
+to the current shell profile. Use `--install-dir PATH` to choose another
+directory or `--no-profile` to skip profile edits. If the shell has not reloaded
+the profile yet, export the path in the active terminal:
+
+```bash
+export PATH="$HOME/.local/bin:$PATH"
+```
+
+Run `agent-coord doctor` after setup. The default doctor is intentionally
+lightweight: it verifies `gh` auth, private backend/ref readability, and the
+expected state layout without downloading and parsing every JSON record. Use
+`agent-coord doctor --deep` for a full audit that parses every claim, heartbeat,
+and batch file. For a local `--state-root`, doctor also rejects missing,
+non-directory, or non-writable roots so the setup gate does not certify a backend
+that cannot later accept claims or heartbeats. If doctor fails, agents should
+report private state as `UNKNOWN` and use the public claim-comment fallback until
+the operator fixes bootstrap or auth.
+
+For fast global `agent-coord status`, point the installed shim at one durable
+state checkout and refresh that checkout periodically:
+
+```bash
+git clone --branch state --single-branch \
+  git@github.com:shakacode/agent-coordination-state.git \
+  "$HOME/src/agent-coordination-status"
+bin/agent-coord bootstrap \
+  --status-state-root "$HOME/src/agent-coordination-status" \
+  --no-profile
+mkdir -p "$HOME/Library/LaunchAgents"
+sed "s#__AGENT_COORD_REPO__#$HOME/src/agent-coordination-status#g" \
+  launchd/com.shakacode.agent-coord-refresh.plist.example \
+  > "$HOME/Library/LaunchAgents/com.shakacode.agent-coord-refresh.plist"
+launchctl bootstrap "gui/$(id -u)" \
+  "$HOME/Library/LaunchAgents/com.shakacode.agent-coord-refresh.plist"
+```
+
+```bash
+STATE_ROOT=$(mktemp -d)
+AGENT_COORD_STATE_ROOT="$STATE_ROOT" agent-coord heartbeat \
+  --agent-id worker-3969 \
+  --repo shakacode/react_on_rails \
+  --target 3969 \
+  --batch-id batch-2026-06-13 \
+  --branch jg-codex/3969-agent-coord-backend
+AGENT_COORD_STATE_ROOT="$STATE_ROOT" agent-coord status
+rm -rf "$STATE_ROOT"
+```
+
+## CLI
+
+```text
+bin/agent-coord claim     --agent-id ID --repo OWNER/REPO --target ISSUE_OR_PR [--batch-id ID] [--branch BRANCH] [--ttl SECONDS]
+bin/agent-coord release   --agent-id ID --repo OWNER/REPO --target ISSUE_OR_PR
+bin/agent-coord heartbeat --agent-id ID [--repo OWNER/REPO] [--target ISSUE_OR_PR] [--batch-id ID] [--branch BRANCH] [--status STATUS]
+bin/agent-coord status [--json]
+bin/agent-coord status --repo OWNER/REPO --target ISSUE_OR_PR [--json]
+bin/agent-coord status --batch-id ID [--json]
+bin/agent-coord version [--json]
+bin/agent-coord config [show] [--json]
+bin/agent-coord doctor [--json] [--deep] [--state-root PATH]
+bin/agent-coord bootstrap [--install-dir PATH] [--profile PATH] [--no-profile]
+```
+
+`claim` acquires or renews a lease. If an active claim exists for another agent,
+the holder's heartbeat is the normal liveness source: `live` or `stale`
+heartbeats refuse takeover, while a `dead` heartbeat allows takeover. If the
+holder heartbeat is missing or invalid, `expires_at` is the safe fallback and the
+claim can be taken over only after that fallback has passed. Existing claim
+updates use the GitHub Contents API `sha` precondition, so competing updates fail
+instead of silently overwriting each other. Creating a new claim relies on the
+Contents API create-file behavior, which rejects a path that appeared after the
+local read.
+
+`heartbeat` upserts `heartbeats/<agent-id>.json`. `status` renders coordination
+state in text or JSON. Full `status` renders compact claims, heartbeats, batch
+lanes, lane dependencies, and blocked-on refs for broad audits. Scoped status is
+the preferred batch-workflow path:
+
+- `status --repo OWNER/REPO --target ISSUE_OR_PR` reads only
+  `claims/<owner>/<repo>/<issue-or-pr>.json` and that claim holder's heartbeat
+  when a holder exists.
+- `status --batch-id ID` reads only `batches/<id>.json`, lane-owner heartbeats,
+  and dependency batch files plus referenced lane-owner heartbeats needed to
+  compute `blocked_on`.
+
+Scoped JSON payloads include `scope` and `degraded` fields. A scoped command can
+show `degraded` notes for intentionally omitted unrelated state, such as claims
+not checked in batch scope; that is different from exit 2. Exit 2 means the
+private backend result is `UNKNOWN` for that command. Text status renders the
+same degraded notes as a footer when rows are present. In large backends, prefer
+target or batch scoped status for React on Rails batch lanes and treat a timed
+out full private coordination read as degraded/`UNKNOWN` rather than guessing.
+`release` marks a claim released while preserving the record for auditability.
+`version` prints the CLI contract version. `config show --json` prints runtime
+defaults and machine-readable exit codes. Default `doctor` verifies the current
+backend without writing state or parsing every record; `doctor --deep` adds full
+JSON validation. `bootstrap` installs the command shims used by public workflow
+docs.
+
+`agent_coord` is a compatibility alias for launchers, humans, and prompts that
+prefer underscore command names. It delegates to the same implementation as
+`agent-coord`.
+
+## CLI Contract And Exit Codes
+
+Use `agent-coord version --json` and `agent-coord config show --json` as the
+stable contract for public workflow docs. Public repos should avoid copying
+private implementation defaults when they can point agents at these commands.
+
+Current exit code contract:
+
+| Exit | Meaning                                  | Agent behavior                                                                 |
+| ---- | ---------------------------------------- | ------------------------------------------------------------------------------ |
+| 0    | Command succeeded                         | Use the returned state.                                                        |
+| 1    | Usage error                               | Fix the command invocation before proceeding.                                  |
+| 2    | Operational failure                       | Report private state as `UNKNOWN`; use advisory fallback when safe.            |
+| 3    | `CLAIM_REFUSED` by live/stale/active hold | Hard stop for machine agents; report holder/liveness instead of competing.     |
+
+A refused claim is intentionally different from a bootstrap/auth/network
+failure. A machine agent may not override exit 3 on its own. Exit 2 means the
+backend could not be trusted for that command, including storage-level compare
+and-swap contention; dependency-sensitive lanes should stop with `UNKNOWN` until
+the coordinator restores backend access.
+
+## Heartbeat Liveness
+
+Heartbeat liveness is derived from timestamps:
+
+- `now < expires_at` -> `live`
+- `expires_at <= now < updated_at + 4 * ttl` -> `stale`
+- `now >= updated_at + 4 * ttl` -> `dead`
+
+`ttl` is the interval between `updated_at` and `expires_at`. Use short heartbeat
+TTLs, normally 15 minutes. A stale heartbeat is a warning that the agent may be
+thinking, offline, or between tool calls. A dead heartbeat means claims held by
+that agent are recoverable.
+
+Workers should refresh heartbeats at every phase transition: item start, branch
+or PR update, review pass, blocked state, and done state. Long-running desktop
+sessions should also use the platform scheduler templates so liveness does not
+depend on the agent being between tool calls.
+
+## Scheduler Renewal
+
+### macOS launchd
+
+The `launchd/com.shakacode.agent-coord-heartbeat.plist.example` template refreshes
+one heartbeat every 5 minutes. Install one heartbeat job per live batch lane:
+
+```bash
+export AGENT_ID=m5-codex-batch2
+export TARGET_REPO=shakacode/react_on_rails
+export TARGET=3970
+export BATCH_ID=agent-coord-2026-06-13
+export BRANCH=jg-codex/3969-agent-coord-backend
+export AGENT_COORD_REPO="$(pwd)"
+perl -pe 's#__AGENT_ID__#$ENV{AGENT_ID}#g;
+          s#__TARGET_REPO__#$ENV{TARGET_REPO}#g;
+          s#__TARGET__#$ENV{TARGET}#g;
+          s#__BATCH_ID__#$ENV{BATCH_ID}#g;
+          s#__BRANCH__#$ENV{BRANCH}#g;
+          s#__AGENT_COORD_REPO__#$ENV{AGENT_COORD_REPO}#g' \
+  launchd/com.shakacode.agent-coord-heartbeat.plist.example \
+  > "$HOME/Library/LaunchAgents/com.shakacode.agent-coord-heartbeat.${AGENT_ID}.plist"
+launchctl bootstrap "gui/$(id -u)" \
+  "$HOME/Library/LaunchAgents/com.shakacode.agent-coord-heartbeat.${AGENT_ID}.plist"
+```
+
+You can also replace the `__PLACEHOLDER__` values manually. Do not put secrets
+in the plist. The heartbeat command uses the existing `gh` auth available to the
+desktop session and pins `AGENT_COORD_REF=state` inline because launchd jobs do
+not reliably inherit interactive shell profile exports.
+
+### Linux systemd --user
+
+The `systemd/agent-coord-heartbeat.service.example` template runs the same
+heartbeat loop under `systemd --user`. Install one service per live batch lane,
+substituting the same placeholders used by the launchd template:
+
+```bash
+mkdir -p "$HOME/.config/systemd/user"
+sed -e "s#__AGENT_ID__#${AGENT_ID}#g" \
+    -e "s#__TARGET_REPO__#${TARGET_REPO}#g" \
+    -e "s#__TARGET__#${TARGET}#g" \
+    -e "s#__BATCH_ID__#${BATCH_ID}#g" \
+    -e "s#__BRANCH__#${BRANCH}#g" \
+    -e "s#__AGENT_COORD_REPO__#${AGENT_COORD_REPO}#g" \
+    systemd/agent-coord-heartbeat.service.example \
+    > "$HOME/.config/systemd/user/agent-coord-heartbeat.${AGENT_ID}.service"
+systemctl --user daemon-reload
+systemctl --user enable --now "agent-coord-heartbeat.${AGENT_ID}.service"
+```
+
+The systemd template also pins `AGENT_COORD_REF=state` inline so user services
+write to the live state branch even when interactive shell profile exports are
+not loaded.
+
+## State Layout
+
+Runtime state lives in these directories:
+
+```text
+claims/<owner>/<repo>/<issue-or-pr>.json
+heartbeats/<agent-id>.json
+batches/<batch-id>.json
+```
+
+The checked-in `.gitkeep` files only preserve the directories. Schema examples
+are documented below rather than committed as live JSON records, so `status`
+does not show fake work.
+
+## Claim Schema
+
+```json
+{
+  "schema_version": 1,
+  "repo": "shakacode/react_on_rails",
+  "target": "3969",
+  "agent_id": "worker-3969",
+  "batch_id": "batch-2026-06-13",
+  "branch": "jg-codex/3969-agent-coord-backend",
+  "status": "active",
+  "claimed_at": "2026-06-13T00:30:00Z",
+  "updated_at": "2026-06-13T00:30:00Z",
+  "expires_at": "2026-06-13T04:30:00Z"
+}
+```
+
+Required fields: `schema_version`, `repo`, `target`, `agent_id`, `status`,
+`claimed_at`, `updated_at`, `expires_at`.
+
+Allowed `status` values for the initial lifecycle are `active` and `released`.
+Coordinators should treat a claim holder with a `dead` heartbeat as recoverable
+even if the claim `expires_at` timestamp is still in the future. `expires_at`
+remains useful for audit and as the fallback when the heartbeat is missing or
+invalid.
+
+## Heartbeat Schema
+
+```json
+{
+  "schema_version": 1,
+  "agent_id": "worker-3969",
+  "repo": "shakacode/react_on_rails",
+  "target": "3969",
+  "batch_id": "batch-2026-06-13",
+  "branch": "jg-codex/3969-agent-coord-backend",
+  "status": "in_progress",
+  "updated_at": "2026-06-13T00:40:00Z",
+  "expires_at": "2026-06-13T00:55:00Z"
+}
+```
+
+Required fields: `schema_version`, `agent_id`, `status`, `updated_at`,
+`expires_at`.
+
+## Batch Schema
+
+```json
+{
+  "schema_version": 1,
+  "batch_id": "batch-2026-06-13",
+  "repo": "shakacode/react_on_rails",
+  "lanes": [
+    {
+      "name": "backend",
+      "owner": "worker-3969",
+      "targets": ["3969"],
+      "depends_on": []
+    },
+    {
+      "name": "docs",
+      "owner": "worker-3972",
+      "targets": ["3972"],
+      "depends_on": ["batch-2026-06-13:backend"]
+    }
+  ],
+  "updated_at": "2026-06-13T00:30:00Z"
+}
+```
+
+Required fields: `schema_version`, `batch_id`, `lanes`, `updated_at`.
+
+Each lane should include `name`, `owner`, and `targets`. `owner` is the stable
+agent id used by `heartbeat`, so `status` can attach the lane's latest heartbeat
+status and liveness. Lane names must not contain `:`; batch ids may contain `:`.
+`depends_on` is optional and accepts a string or array of lane refs in the form
+`<batch-id>:<lane-name>`, split at the last colon.
+
+`status` is intentionally read-only in v1. A dependency is considered met when
+the referenced lane owner's heartbeat reports a terminal status such as `done`,
+`complete`, `completed`, `merged`, or `ready`. A released claim is preserved for
+auditability and does not unblock dependent lanes by itself. Unmet dependencies
+appear in the lane's `blocked_on` field:
+
+```text
+batches
+- batch-2026-06-13
+  - lane backend owner worker-3969 targets 3969 status in_progress live deps - blocked_on -
+  - lane docs owner worker-3972 targets 3972 status blocked live deps batch-2026-06-13:backend blocked_on batch-2026-06-13:backend
+```
+
+Workers with unmet dependencies should set their own heartbeat to `blocked`,
+switch to another independent lane, and check `agent-coord status` again before
+resuming, rebasing, or pushing dependency-sensitive work.
+
+## Lifecycle
+
+1. Coordinator creates or updates a batch file describing lanes and dependencies.
+2. Worker acquires a claim for its issue or PR target.
+3. Worker refreshes a heartbeat during active work.
+4. Coordinator uses targeted `status --repo ... --target ...` or
+   `status --batch-id ...` for lane decisions, and full `status` only for broad
+   audits where an all-state scan is acceptable.
+5. Worker releases the claim or lets the lease expire if the session is lost.
+
+Keep leases short enough that abandoned work is recoverable, usually 2-4 hours
+for active batch claims and 15 minutes for heartbeats.

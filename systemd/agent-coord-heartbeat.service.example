@@ -1,0 +1,21 @@
+[Unit]
+Description=ShakaCode agent-coord heartbeat for __AGENT_ID__
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+Environment="PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin"
+Environment="AGENT_ID=__AGENT_ID__"
+Environment="TARGET_REPO=__TARGET_REPO__"
+Environment="TARGET=__TARGET__"
+Environment="BATCH_ID=__BATCH_ID__"
+Environment="BRANCH=__BRANCH__"
+Environment="AGENT_COORD_STATUS=in_progress"
+WorkingDirectory=__AGENT_COORD_REPO__
+ExecStart=/bin/bash -lc 'while true; do AGENT_COORD_REF=state bin/agent-coord heartbeat --agent-id "$$AGENT_ID" --repo "$$TARGET_REPO" --target "$$TARGET" --batch-id "$$BATCH_ID" --branch "$$BRANCH" --status "$$AGENT_COORD_STATUS"; sleep 300; done'
+Restart=always
+RestartSec=15
+
+[Install]
+WantedBy=default.target

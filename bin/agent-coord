@@ -1,0 +1,1346 @@
+#!/usr/bin/env ruby
+# frozen_string_literal: true
+
+require "base64"
+require "digest"
+require "fileutils"
+require "json"
+require "open3"
+require "optparse"
+require "shellwords"
+require "time"
+
+module AgentCoord
+  VERSION = "0.1.0"
+  SCHEMA_VERSION = 1
+  DEFAULT_BACKEND = "shakacode/agent-coordination-state"
+  DEFAULT_REF = "state"
+  DEFAULT_CLAIM_TTL = 4 * 60 * 60
+  DEFAULT_HEARTBEAT_TTL = 15 * 60
+  HEARTBEAT_DEAD_AFTER_TTL_MULTIPLIER = 4
+  STATUS_STATE_ROOT_ENV = "AGENT_COORD_STATUS_STATE_ROOT"
+  JSON_PREFIXES = %w[claims heartbeats batches].freeze
+  DEPENDENCY_DONE_STATUSES = %w[complete completed done merged ready].freeze
+  EXIT_USAGE = 1
+  EXIT_OPERATIONAL = 2
+  EXIT_CLAIM_REFUSED = 3
+  EXIT_CODES = {
+    "usage" => EXIT_USAGE,
+    "operational" => EXIT_OPERATIONAL,
+    "claim_refused" => EXIT_CLAIM_REFUSED
+  }.freeze
+
+  class Error < StandardError
+    attr_reader :exit_code
+
+    def initialize(message, exit_code: EXIT_USAGE)
+      super(message)
+      @exit_code = exit_code
+    end
+  end
+
+  class OperationalError < Error
+    def initialize(message, exit_code: EXIT_OPERATIONAL)
+      super
+    end
+  end
+
+  class ClaimRefused < Error
+    def initialize(message, exit_code: EXIT_CLAIM_REFUSED)
+      super(message.start_with?("CLAIM_REFUSED") ? message : "CLAIM_REFUSED: #{message}", exit_code: exit_code)
+    end
+  end
+
+  class PathValidationError < Error
+  end
+
+  class Conflict < OperationalError
+  end
+
+  StoredJson = Struct.new(:path, :data, :sha, keyword_init: true)
+
+  class Runner # rubocop:disable Metrics/ClassLength
+    def initialize(argv, stdout: $stdout, stderr: $stderr, clock: Time)
+      @argv = argv
+      @stdout = stdout
+      @stderr = stderr
+      @clock = clock
+    end
+
+    def run
+      return print_help if @argv.empty? || help_request?(@argv.first)
+
+      command = @argv.shift
+      case command
+      when "claim"
+        claim(parse_options(command, @argv))
+      when "release"
+        release(parse_options(command, @argv))
+      when "heartbeat"
+        heartbeat(parse_options(command, @argv))
+      when "status"
+        render_status(parse_options(command, @argv))
+      when "version"
+        render_version(parse_options(command, @argv))
+      when "config"
+        @argv.shift if @argv.first == "show"
+        render_config(parse_options(command, @argv))
+      when "doctor"
+        doctor(parse_options(command, @argv))
+      when "bootstrap"
+        bootstrap(parse_options(command, @argv))
+      else
+        raise Error, "unknown command: #{command}"
+      end
+    rescue OptionParser::ParseError => e
+      raise Error, e.message
+    end
+
+    private
+
+    def print_help
+      @stdout.puts <<~HELP
+        Usage: agent-coord <command> [options]
+
+        Commands:
+          claim      acquire or renew a claim lease
+          release    mark a claim lease released
+          heartbeat  upsert an agent heartbeat
+          status     render full or scoped coordination state
+          version    print CLI contract version
+          config     print runtime defaults and exit-code contract
+          doctor     verify backend access and state layout
+          bootstrap  install agent-coord and agent_coord shims
+
+        Common options:
+          --backend OWNER/REPO       backend repository (default: #{DEFAULT_BACKEND})
+          --ref REF                  backend branch/ref (default: #{DEFAULT_REF})
+          --state-root PATH          use local files instead of GitHub API
+          --json                     emit JSON for supported commands
+          -h, --help                 show command help
+      HELP
+      0
+    end
+
+    def help_request?(value)
+      ["-h", "--help", "help"].include?(value)
+    end
+
+    def parse_options(command, argv)
+      options = {
+        backend: ENV.fetch("AGENT_COORD_BACKEND", DEFAULT_BACKEND),
+        ref: ENV.fetch("AGENT_COORD_REF", DEFAULT_REF),
+        state_root: ENV.fetch("AGENT_COORD_STATE_ROOT", nil),
+        status: "in_progress"
+      }
+
+      parser = OptionParser.new do |opts|
+        opts.banner = "Usage: agent-coord #{command} [options]"
+        add_command_help(opts, command)
+
+        opts.on("--backend OWNER/REPO", "backend repository") { |value| options[:backend] = value }
+        opts.on("--ref REF", "backend branch/ref") { |value| options[:ref] = value }
+        opts.on("--state-root PATH", "use local files instead of GitHub API") { |value| options[:state_root] = value }
+        opts.on("--json", "emit JSON for supported commands") { options[:json] = true }
+        opts.on("--agent-id ID", "stable agent identifier") { |value| options[:agent_id] = value }
+        opts.on("--repo OWNER/REPO", "target repository") { |value| options[:repo] = value }
+        opts.on("--target ISSUE_OR_PR", "target issue or PR id") { |value| options[:target] = value }
+        opts.on("--batch-id ID", "batch identifier") { |value| options[:batch_id] = value }
+        opts.on("--branch BRANCH", "branch for the target") { |value| options[:branch] = value }
+        opts.on("--ttl SECONDS", Integer, "lease/heartbeat TTL in seconds") { |value| options[:ttl] = value }
+        opts.on("--status STATUS", "heartbeat status") { |value| options[:status] = value }
+        opts.on("--deep", "doctor only: parse every JSON state record") { options[:deep] = true } if command == "doctor"
+        opts.on("--install-dir PATH", "bootstrap install directory") { |value| options[:install_dir] = value }
+        opts.on("--status-state-root PATH", "install shims with a local status state root") do |value|
+          options[:status_state_root] = value
+        end
+        opts.on("--profile PATH", "shell profile to update during bootstrap") { |value| options[:profile] = value }
+        opts.on("--no-profile", "do not update shell profile during bootstrap") { options[:no_profile] = true }
+        opts.on("-h", "--help", "show command help") do
+          @stdout.puts parser
+          exit 0
+        end
+      end
+      raise Error, "--deep is only valid for doctor" if command != "doctor" && deep_option_token?(argv)
+
+      parser.parse!(argv)
+      raise Error, "unexpected arguments: #{argv.join(' ')}" unless argv.empty?
+
+      options
+    end
+
+    def add_command_help(opts, command)
+      case command
+      when "status"
+        opts.separator ""
+        opts.separator "Status scopes:"
+        opts.separator "    no scope                      full audit; scans claims, heartbeats, and batches"
+        opts.separator "    --repo OWNER/REPO --target N  target read; claim plus holder heartbeat only"
+        opts.separator "    --batch-id ID                 batch read; batch, lane heartbeats, dependencies"
+        opts.separator "Scoped JSON includes a degraded array for intentionally omitted state."
+        opts.separator "Exit 2 means the private state for that command is UNKNOWN."
+        opts.separator ""
+      when "doctor"
+        opts.separator ""
+        opts.separator "Doctor modes:"
+        opts.separator "    default  lightweight auth, ref, and layout checks without reading every JSON file"
+        opts.separator "    --deep   parse every claim, heartbeat, and batch JSON file"
+        opts.separator "Exit 2 means private coordination state is UNKNOWN until backend access is fixed."
+        opts.separator ""
+      end
+    end
+
+    def deep_option_token?(argv)
+      # Keep this in sync with value-taking opts.on definitions in parse_options.
+      value_options = %w[
+        --backend --ref --state-root --agent-id --repo --target --batch-id --branch
+        --ttl --status --install-dir --profile
+      ]
+      skip_next = false
+      argv.any? do |arg|
+        if skip_next
+          skip_next = false
+          false
+        elsif value_options.include?(arg)
+          skip_next = true
+          false
+        else
+          arg == "--deep"
+        end
+      end
+    end
+
+    def claim(options)
+      require_options(options, :agent_id, :repo, :target)
+      ttl = positive_ttl(options[:ttl] || DEFAULT_CLAIM_TTL)
+      now = now_utc
+      expires_at = now + ttl
+      path = AgentCoord.claim_path(options.fetch(:repo), options.fetch(:target))
+      store = build_store(options)
+      existing = store.read_json(path)
+
+      if existing && active_claim_record?(existing.data) && existing.data["agent_id"] != options[:agent_id]
+        holder_state = claim_holder_state(store, existing.data, now)
+        unless takeover_allowed?(holder_state)
+          raise ClaimRefused, claim_refusal_message(options, existing.data, holder_state)
+        end
+      end
+
+      payload = {
+        "schema_version" => SCHEMA_VERSION,
+        "repo" => options.fetch(:repo),
+        "target" => options.fetch(:target).to_s,
+        "agent_id" => options.fetch(:agent_id),
+        "batch_id" => options[:batch_id],
+        "branch" => options[:branch],
+        "status" => "active",
+        "claimed_at" => existing&.data&.fetch("claimed_at", timestamp(now)),
+        "updated_at" => timestamp(now),
+        "expires_at" => timestamp(expires_at)
+      }.compact
+
+      begin
+        write_with_cas(store, path, payload, existing, "Claim #{options[:repo]}##{options[:target]}")
+      rescue Conflict => e
+        raise OperationalError, "claim write contention for #{options[:repo]}##{options[:target]}; #{e.message}"
+      end
+      @stdout.puts "claimed #{options[:repo]}##{options[:target]} by #{options[:agent_id]} " \
+                   "until #{timestamp(expires_at)}"
+      0
+    end
+
+    def release(options)
+      require_options(options, :agent_id, :repo, :target)
+      now = now_utc
+      path = AgentCoord.claim_path(options.fetch(:repo), options.fetch(:target))
+      store = build_store(options)
+      existing = store.read_json(path)
+      raise Error, "no claim exists for #{options[:repo]}##{options[:target]}" unless existing
+
+      holder = existing.data["agent_id"]
+      if active_claim_record?(existing.data) && holder != options[:agent_id]
+        raise Error, "active claim belongs to #{holder}; #{options[:agent_id]} cannot release it"
+      end
+
+      payload = existing.data.merge(
+        "agent_id" => holder || options[:agent_id],
+        "status" => "released",
+        "released_by" => options[:agent_id],
+        "released_at" => timestamp(now),
+        "updated_at" => timestamp(now),
+        "expires_at" => timestamp(now)
+      )
+
+      store.write_json(path, payload, message: "Release #{options[:repo]}##{options[:target]}", sha: existing.sha)
+      @stdout.puts "released #{options[:repo]}##{options[:target]} by #{options[:agent_id]}"
+      0
+    end
+
+    def render_version(options)
+      payload = {
+        "version" => VERSION,
+        "schema_version" => SCHEMA_VERSION,
+        "default_backend" => DEFAULT_BACKEND,
+        "default_ref" => DEFAULT_REF
+      }
+      emit_payload(payload, options) do
+        @stdout.puts "agent-coord #{VERSION}"
+        @stdout.puts "schema_version: #{SCHEMA_VERSION}"
+        @stdout.puts "default_backend: #{DEFAULT_BACKEND}"
+        @stdout.puts "default_ref: #{DEFAULT_REF}"
+      end
+      0
+    end
+
+    def render_config(options)
+      payload = config_payload
+      emit_payload(payload, options) do
+        @stdout.puts "agent-coord config"
+        @stdout.puts "version: #{payload.fetch('version')}"
+        @stdout.puts "default_backend: #{payload.fetch('default_backend')}"
+        @stdout.puts "default_claim_ttl_seconds: #{payload.fetch('default_claim_ttl_seconds')}"
+        @stdout.puts "default_heartbeat_ttl_seconds: #{payload.fetch('default_heartbeat_ttl_seconds')}"
+        @stdout.puts "heartbeat_dead_after_ttl_multiplier: #{payload.fetch('heartbeat_dead_after_ttl_multiplier')}"
+        @stdout.puts "dependency_terminal_statuses: #{payload.fetch('dependency_terminal_statuses').join(',')}"
+        @stdout.puts "exit_codes: #{payload.fetch('exit_codes').map { |name, code| "#{name}=#{code}" }.join(',')}"
+      end
+      0
+    end
+
+    def doctor(options)
+      doctor_options = options.dup
+      doctor_options[:state_root] ||= default_status_state_root
+      backend_kind = doctor_options[:state_root] ? "local" : "github"
+      begin
+        if doctor_options[:state_root]
+          store = LocalStore.new(doctor_options.fetch(:state_root))
+          store.verify_root!
+        else
+          check_command!("gh", "auth", "status")
+          check_command!("gh", "repo", "view", doctor_options.fetch(:backend))
+          store = build_store(doctor_options)
+          store.verify_readable!
+        end
+        store.verify_layout!(JSON_PREFIXES)
+        check_state_readable!(store) if options[:deep]
+      rescue JSON::ParserError, SystemCallError => e
+        raise OperationalError, "state unreadable: #{e.message}"
+      end
+
+      payload = {
+        "version" => VERSION,
+        "backend" => backend_kind,
+        "backend_repo" => doctor_options.fetch(:backend),
+        "state_root" => doctor_options[:state_root],
+        "deep" => !options[:deep].nil?,
+        "status" => "ok"
+      }
+      emit_payload(payload, options) do
+        @stdout.puts "agent-coord doctor"
+        @stdout.puts "version: #{VERSION}"
+        @stdout.puts "backend: #{backend_kind}"
+        @stdout.puts "backend_repo: #{doctor_options.fetch(:backend)}"
+        @stdout.puts "state_root: #{doctor_options[:state_root] || '-'}"
+        @stdout.puts "mode: #{options[:deep] ? 'deep' : 'lightweight'}"
+        @stdout.puts "status: ok"
+      end
+      0
+    end
+
+    def bootstrap(options)
+      install_dir = File.expand_path(options[:install_dir] || File.join(Dir.home, ".local", "bin"))
+      status_state_root = options[:status_state_root] && File.expand_path(options[:status_state_root])
+      begin
+        FileUtils.mkdir_p(install_dir)
+
+        install_command(
+          File.expand_path("agent-coord", __dir__),
+          File.join(install_dir, "agent-coord"),
+          status_state_root: status_state_root
+        )
+        install_command(
+          File.expand_path("agent_coord", __dir__),
+          File.join(install_dir, "agent_coord"),
+          status_state_root: status_state_root
+        )
+
+        profile = nil
+        unless options[:no_profile]
+          profile = File.expand_path(options[:profile] || default_profile_path)
+          ensure_profile_path(profile, install_dir)
+        end
+      rescue SystemCallError => e
+        raise OperationalError, "bootstrap failed: #{e.message}"
+      end
+
+      @stdout.puts "installed agent-coord -> #{File.join(install_dir, 'agent-coord')}"
+      @stdout.puts "installed agent_coord -> #{File.join(install_dir, 'agent_coord')}"
+      if profile
+        @stdout.puts "profile updated: #{profile}"
+      else
+        @stdout.puts "profile update skipped"
+      end
+      0
+    end
+
+    def heartbeat(options)
+      require_options(options, :agent_id)
+      ttl = positive_ttl(options[:ttl] || DEFAULT_HEARTBEAT_TTL)
+      now = now_utc
+      path = AgentCoord.heartbeat_path(options.fetch(:agent_id))
+      store = build_store(options)
+      payload = {
+        "schema_version" => SCHEMA_VERSION,
+        "agent_id" => options.fetch(:agent_id),
+        "repo" => options[:repo],
+        "target" => options[:target]&.to_s,
+        "batch_id" => options[:batch_id],
+        "branch" => options[:branch],
+        "status" => options.fetch(:status),
+        "updated_at" => timestamp(now),
+        "expires_at" => timestamp(now + ttl)
+      }.compact
+
+      upsert_json(store, path, payload, message: "Heartbeat #{options[:agent_id]}")
+      @stdout.puts "heartbeat #{options[:agent_id]} #{timestamp(now)}"
+      0
+    end
+
+    def render_status(options)
+      status_options = options.dup
+      status_options[:state_root] ||= default_status_state_root
+      store = build_store(status_options)
+      now = now_utc
+      payload =
+        case status_scope(options)
+        when :target
+          target_status_payload(store, options, now)
+        when :batch
+          batch_status_payload(store, options, now)
+        else
+          broad_status_payload(store, now)
+        end
+
+      if options[:json]
+        @stdout.puts JSON.pretty_generate(payload)
+      else
+        render_status_text(payload)
+      end
+      0
+    rescue JSON::ParserError => e
+      raise OperationalError, "state unreadable: #{e.message}"
+    end
+
+    def status_scope(options)
+      target_scoped = options[:repo] || options[:target]
+      batch_scoped = options[:batch_id]
+
+      raise Error, "--batch-id cannot be combined with --repo or --target" if batch_scoped && target_scoped
+
+      if target_scoped
+        require_options(options, :repo, :target)
+        :target
+      elsif batch_scoped
+        :batch
+      else
+        :all
+      end
+    end
+
+    def broad_status_payload(store, now)
+      grouped = JSON_PREFIXES.to_h { |prefix| [prefix, store.list_json(prefix)] }
+      heartbeats_by_id = heartbeats_by_agent(grouped.fetch("heartbeats"))
+      lane_states = build_lane_states(grouped.fetch("batches"), heartbeats_by_id)
+      malformed_names = malformed_batch_lane_names(grouped.fetch("batches"))
+      section_notes = {}
+      section_notes["lanes"] = "malformed lane names: #{malformed_names.join(', ')}" unless malformed_names.empty?
+
+      status_payload(
+        scope: { "kind" => "all" },
+        section_notes: section_notes,
+        claim_entries: grouped.fetch("claims"),
+        heartbeat_entries: grouped.fetch("heartbeats"),
+        batch_entries: grouped.fetch("batches"),
+        heartbeats_by_agent: heartbeats_by_id,
+        lane_states: lane_states,
+        now: now
+      )
+    end
+
+    def target_status_payload(store, options, now)
+      claim = store.read_json(AgentCoord.claim_path(options.fetch(:repo), options.fetch(:target)))
+      heartbeat_entries = []
+      heartbeat = nil
+      holder = nil
+      if claim
+        holder = claim.data["agent_id"].to_s
+        heartbeat = read_status_heartbeat(store, holder)
+        heartbeat_entries << heartbeat if valid_status_heartbeat?(heartbeat)
+      end
+      section_notes = { "batches" => "not checked in target scope" }
+      if claim && heartbeat_entries.empty?
+        section_notes["heartbeats"] = if heartbeat == :invalid
+                                        "holder heartbeat unreadable"
+                                      elsif heartbeat == :mismatched
+                                        "holder heartbeat mismatched"
+                                      elsif holder.to_s.empty?
+                                        "claim holder not set"
+                                      else
+                                        "holder heartbeat not found"
+                                      end
+      end
+
+      status_payload(
+        scope: {
+          "kind" => "target",
+          "repo" => options.fetch(:repo),
+          "target" => options.fetch(:target).to_s
+        },
+        section_notes: section_notes,
+        claim_entries: [claim].compact,
+        heartbeat_entries: heartbeat_entries,
+        batch_entries: [],
+        heartbeats_by_agent: heartbeats_by_agent(heartbeat_entries),
+        lane_states: {},
+        now: now
+      )
+    end
+
+    # rubocop:disable Metrics/AbcSize, Metrics/BlockLength, Metrics/CyclomaticComplexity, Metrics/MethodLength, Metrics/PerceivedComplexity
+    def batch_status_payload(store, options, now)
+      heartbeat_entries_by_agent = {}
+      batch_entry = store.read_json(AgentCoord.batch_path(options.fetch(:batch_id)))
+      batch_entries = [batch_entry].compact
+      lane_states = {}
+      section_notes = { "claims" => "not checked in batch scope" }
+      malformed_dependency_refs = []
+      unresolved_dependency_refs = []
+      malformed_lane_names = []
+
+      if batch_entry
+        batch_id = batch_entry.data.fetch("batch_id", AgentCoord.target_from_path(batch_entry.path))
+        lanes = Array(batch_entry.data["lanes"])
+        lanes.each do |lane|
+          name = lane_name(lane)
+          if malformed_lane_name?(name)
+            malformed_lane_names << name
+            next
+          end
+
+          heartbeat = read_cached_status_heartbeat(store, lane_owner(lane), heartbeat_entries_by_agent)
+          lane_states["#{batch_id}:#{name}"] = lane_status(lane, status_heartbeat_data(heartbeat))
+        end
+
+        dependency_refs = lanes.flat_map { |lane| lane_dependencies(lane) }.uniq
+        dependency_refs.each do |dependency|
+          next if lane_states.key?(dependency)
+
+          candidates = dependency_lane_ref_candidates(dependency)
+          if candidates.empty?
+            malformed_dependency_refs << dependency
+            next
+          end
+
+          malformed_dependency_ref = false
+          candidates.each do |dependency_batch_id, dependency_lane_name|
+            dependency_batch_path = batch_path_for_status(dependency_batch_id)
+            malformed_dependency_ref = true unless dependency_batch_path
+            next unless dependency_batch_path
+
+            dependency_batch = store.read_json(dependency_batch_path)
+            next unless dependency_batch
+
+            dependency_lane = Array(dependency_batch.data["lanes"]).find do |lane|
+              name = lane_name(lane)
+              !malformed_lane_name?(name) && name == dependency_lane_name
+            end
+            unless dependency_lane
+              malformed_dependency_ref = true
+              next
+            end
+
+            heartbeat = read_cached_status_heartbeat(store, lane_owner(dependency_lane), heartbeat_entries_by_agent)
+            lane_states[dependency] = lane_status(dependency_lane, status_heartbeat_data(heartbeat))
+            break
+          end
+          malformed_dependency_refs << dependency if malformed_dependency_ref && !lane_states.key?(dependency)
+          unresolved_dependency_refs << dependency if !malformed_dependency_ref && !lane_states.key?(dependency)
+        end
+
+        heartbeat_notes = []
+        unreadable_heartbeat_owners = heartbeat_entries_by_agent.select { |_, entry| entry == :invalid }.keys
+        mismatched_heartbeat_owners = heartbeat_entries_by_agent.select { |_, entry| entry == :mismatched }.keys
+        missing_heartbeat_owners = heartbeat_entries_by_agent.select { |_, entry| entry.nil? }.keys
+        unless unreadable_heartbeat_owners.empty?
+          heartbeat_notes << "lane-owner heartbeats unreadable: #{unreadable_heartbeat_owners.join(', ')}"
+        end
+        unless mismatched_heartbeat_owners.empty?
+          heartbeat_notes << "lane-owner heartbeats mismatched: #{mismatched_heartbeat_owners.join(', ')}"
+        end
+        unless missing_heartbeat_owners.empty?
+          heartbeat_notes << "lane-owner heartbeats not found: #{missing_heartbeat_owners.join(', ')}"
+        end
+        section_notes["heartbeats"] = heartbeat_notes.join("; ") unless heartbeat_notes.empty?
+        unless malformed_lane_names.empty?
+          section_notes["lanes"] =
+            "malformed lane names: #{malformed_lane_names.join(', ')}"
+        end
+        unless malformed_dependency_refs.empty?
+          section_notes["dependencies"] =
+            "malformed dependency refs: #{malformed_dependency_refs.join(', ')}"
+        end
+        unless unresolved_dependency_refs.empty?
+          section_notes["unresolved_dependencies"] =
+            "unresolved dependency refs: #{unresolved_dependency_refs.join(', ')}"
+        end
+      else
+        section_notes["batches"] = "batch not found"
+      end
+
+      status_payload(
+        scope: { "kind" => "batch", "batch_id" => options.fetch(:batch_id).to_s },
+        section_notes: section_notes,
+        claim_entries: [],
+        heartbeat_entries: heartbeat_entries_by_agent.values.select { |entry| valid_status_heartbeat?(entry) },
+        batch_entries: batch_entries,
+        heartbeats_by_agent: heartbeat_entries_by_agent,
+        lane_states: lane_states,
+        now: now
+      )
+    end
+    # rubocop:enable Metrics/AbcSize, Metrics/BlockLength, Metrics/CyclomaticComplexity, Metrics/MethodLength, Metrics/PerceivedComplexity
+
+    # rubocop:disable Metrics/ParameterLists
+    def status_payload(scope:, section_notes:, claim_entries:, heartbeat_entries:, batch_entries:,
+                       heartbeats_by_agent:, lane_states:, now:)
+      {
+        "version" => VERSION,
+        "scope" => scope,
+        "degraded" => section_notes.values,
+        "section_notes" => section_notes,
+        "claims" => claim_entries.map { |entry| claim_status_hash(entry) },
+        "heartbeats" => heartbeat_entries.map { |entry| heartbeat_status_hash(entry, now) },
+        "batches" => batch_entries.map { |entry| batch_status_hash(entry, heartbeats_by_agent, lane_states, now) }
+      }
+    end
+    # rubocop:enable Metrics/ParameterLists
+
+    def render_status_text(payload)
+      @stdout.puts "claims"
+      if payload.fetch("claims").empty?
+        @stdout.puts "- #{status_section_note(payload, 'claims') || 'none'}"
+      else
+        payload.fetch("claims").each do |claim|
+          @stdout.puts "- #{claim.fetch('repo')}##{claim.fetch('target')} " \
+                       "#{claim.fetch('status')} #{claim.fetch('agent_id')} " \
+                       "expires #{claim.fetch('expires_at')}"
+        end
+      end
+
+      @stdout.puts "heartbeats"
+      if payload.fetch("heartbeats").empty?
+        @stdout.puts "- #{status_section_note(payload, 'heartbeats') || 'none'}"
+      else
+        payload.fetch("heartbeats").each do |heartbeat|
+          @stdout.puts "- #{heartbeat.fetch('agent_id')} " \
+                       "#{heartbeat.fetch('status')} " \
+                       "#{heartbeat.fetch('liveness')} " \
+                       "#{heartbeat.fetch('target')} updated #{heartbeat.fetch('updated_at')}"
+        end
+      end
+
+      @stdout.puts "batches"
+      if payload.fetch("batches").empty?
+        @stdout.puts "- #{status_section_note(payload, 'batches') || 'none'}"
+      else
+        payload.fetch("batches").each do |batch|
+          render_batch_status_hash(batch)
+        end
+      end
+
+      degraded = payload.fetch("degraded", [])
+      return if degraded.empty?
+
+      @stdout.puts "degraded"
+      degraded.each { |note| @stdout.puts "- #{note}" }
+    end
+
+    def status_section_note(payload, section)
+      payload.dig("section_notes", section)
+    end
+
+    def claim_status_hash(entry)
+      data = entry.data
+      {
+        "path" => entry.path,
+        "repo" => data.fetch("repo", AgentCoord.repo_from_claim_path(entry.path)),
+        "target" => data.fetch("target", AgentCoord.target_from_path(entry.path)),
+        "status" => data.fetch("status", "unknown"),
+        "agent_id" => data.fetch("agent_id", "UNKNOWN"),
+        "expires_at" => data.fetch("expires_at", "UNKNOWN")
+      }
+    end
+
+    def heartbeat_status_hash(entry, now)
+      data = entry.data
+      target = [data["repo"], data["target"]].compact.join("#")
+      target = "-" if target.empty?
+      {
+        "path" => entry.path,
+        "agent_id" => data.fetch("agent_id", AgentCoord.target_from_path(entry.path)),
+        "status" => data.fetch("status", "unknown"),
+        "liveness" => heartbeat_liveness(data, now),
+        "target" => target,
+        "updated_at" => data.fetch("updated_at", "UNKNOWN")
+      }
+    end
+
+    def batch_status_hash(entry, heartbeats_by_agent, lane_states, now)
+      batch = entry.data
+      batch_id = batch.fetch("batch_id", AgentCoord.target_from_path(entry.path))
+      lanes = Array(batch["lanes"]).map do |lane|
+        name = lane_name(lane)
+        owner = lane_owner(lane)
+        heartbeat = heartbeats_by_agent[owner]
+        heartbeat_data = status_heartbeat_data(heartbeat)
+        status = lane_status(lane, heartbeat_data)
+        liveness = status_heartbeat_liveness(heartbeat, now)
+        deps = lane_dependencies(lane)
+        blocked_on = deps.reject { |dependency| dependency_met?(dependency, lane_states) }
+
+        {
+          "name" => name,
+          "owner" => owner,
+          "targets" => Array(lane["targets"] || lane["target"]).compact.map(&:to_s),
+          "status" => status,
+          "liveness" => liveness,
+          "deps" => deps,
+          "blocked_on" => blocked_on
+        }
+      end
+
+      {
+        "path" => entry.path,
+        "batch_id" => batch_id,
+        "lanes" => lanes
+      }
+    end
+
+    def render_batch_status_hash(batch)
+      @stdout.puts "- #{batch.fetch('batch_id')}"
+      if batch.fetch("lanes").empty?
+        @stdout.puts "  - lanes -"
+        return
+      end
+
+      batch.fetch("lanes").each do |lane|
+        @stdout.puts "  - lane #{lane.fetch('name')} owner #{lane.fetch('owner')} " \
+                     "targets #{format_list(lane.fetch('targets'))} " \
+                     "status #{lane.fetch('status')} #{lane.fetch('liveness')} " \
+                     "deps #{format_list(lane.fetch('deps'))} blocked_on #{format_list(lane.fetch('blocked_on'))}"
+      end
+    end
+
+    def read_status_heartbeat(store, agent_id)
+      return nil if agent_id.to_s.empty? || agent_id == "UNKNOWN"
+
+      path = AgentCoord.heartbeat_path(agent_id)
+      entry = store.read_json(path)
+      return nil unless entry
+
+      payload_agent_id = entry.data.fetch("agent_id", AgentCoord.target_from_path(entry.path)).to_s
+      return :mismatched unless payload_agent_id == agent_id
+
+      entry
+    rescue JSON::ParserError
+      :invalid
+    rescue PathValidationError
+      nil
+    end
+
+    def read_cached_status_heartbeat(store, agent_id, cache)
+      if agent_id.to_s.empty? || agent_id == "UNKNOWN"
+        cache[agent_id] = nil unless agent_id.to_s.empty?
+        return nil
+      end
+      return cache[agent_id] if cache.key?(agent_id)
+
+      cache[agent_id] = read_status_heartbeat(store, agent_id)
+    end
+
+    def valid_status_heartbeat?(entry)
+      entry && !%i[invalid mismatched].include?(entry)
+    end
+
+    def status_heartbeat_data(entry)
+      return entry if entry.is_a?(Hash)
+
+      valid_status_heartbeat?(entry) ? entry.data : nil
+    end
+
+    def status_heartbeat_liveness(entry, now)
+      case entry
+      when :invalid
+        "unreadable"
+      when :mismatched
+        "mismatched"
+      when Hash
+        heartbeat_liveness(entry, now)
+      else
+        valid_status_heartbeat?(entry) ? heartbeat_liveness(entry.data, now) : "no-heartbeat"
+      end
+    end
+
+    def dependency_lane_ref_candidates(ref)
+      value = ref.to_s
+      separator = value.rindex(":")
+      return [] unless separator
+
+      batch_id = value[0...separator]
+      lane = value[(separator + 1)..]
+      return [] if batch_id.to_s.empty? || lane.to_s.empty?
+
+      [[batch_id, lane]]
+    end
+
+    def batch_path_for_status(batch_id)
+      AgentCoord.batch_path(batch_id)
+    rescue PathValidationError
+      nil
+    end
+
+    def heartbeats_by_agent(entries)
+      entries.to_h do |entry|
+        data = entry.data
+        [data.fetch("agent_id", AgentCoord.target_from_path(entry.path)), data]
+      end
+    end
+
+    def build_lane_states(batches, heartbeats_by_agent)
+      batches.each_with_object({}) do |entry, states|
+        batch = entry.data
+        batch_id = batch.fetch("batch_id", AgentCoord.target_from_path(entry.path))
+        Array(batch["lanes"]).each do |lane|
+          name = lane_name(lane)
+          next if malformed_lane_name?(name)
+
+          owner = lane_owner(lane)
+          heartbeat = heartbeats_by_agent[owner]
+          states["#{batch_id}:#{name}"] = lane_status(lane, heartbeat)
+        end
+      end
+    end
+
+    def malformed_batch_lane_names(batches)
+      batches.flat_map do |entry|
+        Array(entry.data["lanes"]).filter_map do |lane|
+          name = lane_name(lane)
+          name if malformed_lane_name?(name)
+        end
+      end
+    end
+
+    def lane_name(lane)
+      lane["name"] || lane["id"] || "UNKNOWN"
+    end
+
+    def malformed_lane_name?(name)
+      name.to_s.include?(":")
+    end
+
+    def lane_owner(lane)
+      owner = lane["owner"] || lane["agent_id"]
+      owner.to_s.empty? ? "UNKNOWN" : owner
+    end
+
+    def lane_status(lane, heartbeat)
+      heartbeat&.fetch("status", nil) || lane["status"] || "unknown"
+    end
+
+    def lane_dependencies(lane)
+      Array(lane["depends_on"]).compact.map(&:to_s)
+    end
+
+    def dependency_met?(dependency, lane_states)
+      DEPENDENCY_DONE_STATUSES.include?(lane_states.fetch(dependency, nil).to_s)
+    end
+
+    def format_list(values)
+      compact_values = Array(values).compact.map(&:to_s).reject(&:empty?)
+      compact_values.empty? ? "-" : compact_values.join(",")
+    end
+
+    def build_store(options)
+      return LocalStore.new(options.fetch(:state_root)) if options[:state_root]
+
+      GitHubStore.new(backend: options.fetch(:backend), ref: options.fetch(:ref))
+    end
+
+    def default_status_state_root
+      configured_root = ENV.fetch(STATUS_STATE_ROOT_ENV, nil)
+      return configured_root unless configured_root.to_s.empty?
+
+      source_root = AgentCoord.source_root
+      AgentCoord.state_root?(source_root) ? source_root : nil
+    end
+
+    def write_with_cas(store, path, payload, existing, message)
+      if existing
+        store.write_json(path, payload, message: message, sha: existing.sha)
+      else
+        store.write_json(path, payload, message: message, create: true)
+      end
+    end
+
+    def upsert_json(store, path, payload, message:)
+      2.times do
+        existing = store.read_json(path)
+        store.write_json(path, payload, message: message, sha: existing&.sha, create: existing.nil?)
+        return
+      rescue Conflict
+        next
+      end
+      raise Conflict, "state changed while writing #{path}"
+    end
+
+    def active_claim_record?(claim)
+      claim["status"] == "active"
+    end
+
+    def claim_holder_state(store, claim, now)
+      holder = claim["agent_id"].to_s
+      heartbeat = holder.empty? ? nil : read_holder_heartbeat(store, holder)
+      return fallback_holder_state(claim, now, "invalid") if heartbeat == :invalid
+
+      liveness = heartbeat && heartbeat_liveness(heartbeat.data, now)
+
+      return { liveness: liveness } if %w[live stale dead].include?(liveness)
+
+      fallback_holder_state(claim, now, heartbeat ? "unknown" : "missing")
+    end
+
+    def fallback_holder_state(claim, now, liveness)
+      {
+        liveness: liveness,
+        fallback_live: claim_fallback_live?(claim, now),
+        fallback_expires_at: claim["expires_at"]
+      }
+    end
+
+    def read_holder_heartbeat(store, holder)
+      store.read_json(AgentCoord.heartbeat_path(holder))
+    rescue OperationalError
+      raise
+    rescue JSON::ParserError
+      :invalid
+    rescue Error
+      nil
+    end
+
+    def takeover_allowed?(holder_state)
+      return false if %w[live stale].include?(holder_state.fetch(:liveness))
+      return true if holder_state.fetch(:liveness) == "dead"
+
+      !holder_state.fetch(:fallback_live)
+    end
+
+    def claim_refusal_message(options, claim, holder_state)
+      holder = claim.fetch("agent_id", "UNKNOWN")
+      liveness = holder_state.fetch(:liveness)
+      details =
+        if %w[live stale].include?(liveness)
+          "heartbeat #{liveness}"
+        else
+          "heartbeat #{liveness}; fallback claim expires at #{holder_state.fetch(:fallback_expires_at, 'UNKNOWN')}"
+        end
+      "active claim for #{options[:repo]}##{options[:target]} held by #{holder}; #{details}"
+    end
+
+    def claim_fallback_live?(claim, now)
+      parse_time(claim["expires_at"]) > now
+    rescue ArgumentError, TypeError
+      false
+    end
+
+    def heartbeat_liveness(heartbeat, now)
+      updated_at = parse_time(heartbeat.fetch("updated_at"))
+      expires_at = parse_time(heartbeat.fetch("expires_at"))
+      ttl = expires_at - updated_at
+      return "dead" unless ttl.positive?
+      return "live" if now < expires_at
+      return "stale" if now < updated_at + (HEARTBEAT_DEAD_AFTER_TTL_MULTIPLIER * ttl)
+
+      "dead"
+    rescue ArgumentError, KeyError, TypeError
+      "unknown"
+    end
+
+    def require_options(options, *names)
+      names.each do |name|
+        raise Error, "missing required --#{name.to_s.tr('_', '-')}" if options[name].to_s.empty?
+      end
+    end
+
+    def positive_ttl(ttl)
+      raise Error, "--ttl must be positive" unless ttl.to_i.positive?
+
+      ttl.to_i
+    end
+
+    def now_utc
+      @clock.now.utc
+    end
+
+    def timestamp(time)
+      time.utc.iso8601
+    end
+
+    def parse_time(value)
+      Time.iso8601(value).utc
+    end
+
+    def config_payload
+      {
+        "version" => VERSION,
+        "schema_version" => SCHEMA_VERSION,
+        "default_backend" => DEFAULT_BACKEND,
+        "default_ref" => DEFAULT_REF,
+        "default_claim_ttl_seconds" => DEFAULT_CLAIM_TTL,
+        "default_heartbeat_ttl_seconds" => DEFAULT_HEARTBEAT_TTL,
+        "heartbeat_dead_after_ttl_multiplier" => HEARTBEAT_DEAD_AFTER_TTL_MULTIPLIER,
+        "dependency_terminal_statuses" => DEPENDENCY_DONE_STATUSES,
+        "exit_codes" => EXIT_CODES
+      }
+    end
+
+    def emit_payload(payload, options)
+      if options[:json]
+        @stdout.puts JSON.pretty_generate(payload)
+      else
+        yield
+      end
+    end
+
+    def check_command!(*args)
+      stdout, stderr, status = Open3.capture3(*args)
+      return if status.success?
+
+      message = [stderr, stdout].reject(&:empty?).join("\n")
+      raise OperationalError, "#{args.join(' ')} failed: #{message}"
+    rescue SystemCallError => e
+      raise OperationalError, "#{args.join(' ')} failed: #{e.message}"
+    end
+
+    def check_state_readable!(store)
+      JSON_PREFIXES.each { |prefix| store.list_json(prefix) }
+    end
+
+    def install_link(source, destination)
+      raise OperationalError, "bootstrap source missing: #{source}" unless File.exist?(source)
+
+      FileUtils.ln_sf(source, destination)
+    end
+
+    def install_command(source, destination, status_state_root:)
+      return install_link(source, destination) unless status_state_root
+
+      install_wrapper(source, destination, status_state_root)
+    end
+
+    def install_wrapper(source, destination, status_state_root)
+      raise OperationalError, "bootstrap source missing: #{source}" unless File.exist?(source)
+
+      FileUtils.rm_f(destination)
+      File.write(
+        destination,
+        <<~SH
+          #!/bin/sh
+          export #{STATUS_STATE_ROOT_ENV}=#{Shellwords.escape(status_state_root)}
+          exec #{Shellwords.escape(source)} "$@"
+        SH
+      )
+      FileUtils.chmod(0o755, destination)
+    end
+
+    def default_profile_path
+      shell = File.basename(ENV.fetch("SHELL", ""))
+      shell == "zsh" ? File.join(Dir.home, ".zshrc") : File.join(Dir.home, ".bashrc")
+    end
+
+    def ensure_profile_path(profile, install_dir)
+      FileUtils.mkdir_p(File.dirname(profile))
+      line = "export PATH=#{Shellwords.escape(install_dir)}:\"$PATH\""
+      existing = File.exist?(profile) ? File.read(profile) : ""
+      return if existing.lines.any? { |existing_line| existing_line.strip == line }
+
+      File.open(profile, "a") do |file|
+        file.puts
+        file.puts "# agent-coord bootstrap"
+        file.puts line
+      end
+    end
+  end
+
+  class LocalStore
+    def initialize(root)
+      @root = File.expand_path(root)
+    end
+
+    def verify_root!
+      raise OperationalError, "state root does not exist: #{@root}" unless File.exist?(@root)
+      raise OperationalError, "state root is not a directory: #{@root}" unless Dir.exist?(@root)
+      raise OperationalError, "state root is not writable: #{@root}" unless File.writable?(@root)
+    end
+
+    def read_json(path)
+      file = expanded_path(path)
+      return nil unless File.file?(file)
+
+      StoredJson.new(path: path, data: JSON.parse(File.read(file)), sha: file_sha(file))
+    end
+
+    # LocalStore keeps GitHubStore's keyword interface; only GitHubStore uses message.
+    def write_json(path, data, message:, sha: nil, create: false) # rubocop:disable Lint/UnusedMethodArgument
+      file = expanded_path(path)
+      FileUtils.mkdir_p(File.dirname(file))
+      with_file_lock(file) do
+        raise Conflict, "state already exists at #{path}" if create && File.exist?(file)
+        raise Conflict, "state changed at #{path}" if sha && (!File.exist?(file) || file_sha(file) != sha)
+
+        File.write(file, "#{JSON.pretty_generate(data)}\n")
+      end
+    end
+
+    def list_json(prefix)
+      directory = expanded_path(prefix)
+      return [] unless Dir.exist?(directory)
+
+      Dir.glob(File.join(directory, "**", "*.json"), sort: true).map do |file|
+        path = file.delete_prefix("#{@root}/")
+        StoredJson.new(path: path, data: JSON.parse(File.read(file)), sha: file_sha(file))
+      end
+    end
+
+    def verify_layout!(prefixes)
+      prefixes.each do |prefix|
+        directory = expanded_path(prefix)
+        # Empty local roots are valid because writes create prefix directories on demand.
+        next unless File.exist?(directory)
+        next if Dir.exist?(directory)
+
+        raise OperationalError, "state layout invalid: #{prefix} is not a directory"
+      end
+    end
+
+    private
+
+    def expanded_path(path)
+      AgentCoord.safe_path!(path)
+      expanded = File.expand_path(path, @root)
+      raise Error, "state path escapes root: #{path}" unless expanded == @root || expanded.start_with?("#{@root}/")
+
+      expanded
+    end
+
+    def with_file_lock(file)
+      File.open("#{file}.lock", File::RDWR | File::CREAT, 0o600) do |lock|
+        lock.flock(File::LOCK_EX)
+        yield
+      end
+    end
+
+    def file_sha(file)
+      Digest::SHA256.file(file).hexdigest
+    end
+  end
+
+  class GitHubStore
+    def initialize(backend:, ref:)
+      AgentCoord.validate_repo!(backend, "backend")
+      @backend = backend
+      @ref = ref
+      @json_cache = {}
+    end
+
+    def read_json(path)
+      AgentCoord.safe_path!(path)
+      return @json_cache[path] if @json_cache.key?(path)
+
+      result = gh_api("repos/#{@backend}/contents/#{path}?ref=#{@ref}")
+      if result.not_found?
+        verify_ref_readable!
+        @json_cache[path] = nil
+        return nil
+      end
+      raise OperationalError, result.error_message unless result.success?
+
+      response = JSON.parse(result.stdout)
+      content = Base64.decode64(response.fetch("content"))
+      @json_cache[path] = StoredJson.new(path: path, data: JSON.parse(content), sha: response.fetch("sha"))
+    end
+
+    def write_json(path, data, message:, sha: nil, create: false)
+      AgentCoord.safe_path!(path)
+      args = [
+        "-X", "PUT",
+        "repos/#{@backend}/contents/#{path}",
+        "-f", "message=#{message}",
+        "-f", "branch=#{@ref}",
+        "-f", "content=#{Base64.strict_encode64("#{JSON.pretty_generate(data)}\n")}"
+      ]
+      args.push("-f", "sha=#{sha}") if sha
+      result = gh_api(*args)
+      if result.conflict?
+        invalidate_read_cache(path)
+        reason = create ? "state already exists at #{path}" : "state changed at #{path}"
+        raise Conflict, reason
+      end
+      raise OperationalError, result.error_message unless result.success?
+
+      invalidate_read_cache(path)
+    end
+
+    def list_json(prefix)
+      AgentCoord.safe_path!(prefix)
+      tree_nodes.filter_map do |node|
+        path = node["path"]
+        next unless node["type"] == "blob" && path&.start_with?("#{prefix}/") && path.end_with?(".json")
+
+        read_json(path)
+      end
+    end
+
+    def verify_readable!
+      tree_nodes
+    end
+
+    def verify_layout!(prefixes)
+      nodes = tree_nodes
+      prefixes.each do |prefix|
+        next unless nodes.any? { |node| node["path"] == prefix && node["type"] != "tree" }
+
+        raise OperationalError, "state layout invalid: #{prefix} is not a directory"
+      end
+    end
+
+    private
+
+    def verify_ref_readable!
+      return if @ref_readable
+
+      result = gh_api("repos/#{@backend}/git/trees/#{@ref}")
+      unless result.success?
+        raise OperationalError,
+              "backend ref #{@backend}@#{@ref} is not readable: #{result.error_message}"
+      end
+
+      @ref_readable = true
+    end
+
+    def tree_nodes
+      return @tree_nodes if defined?(@tree_nodes)
+
+      result = gh_api("repos/#{@backend}/git/trees/#{@ref}?recursive=1")
+      unless result.success?
+        raise OperationalError,
+              "backend ref #{@backend}@#{@ref} is not readable: #{result.error_message}"
+      end
+
+      @ref_readable = true
+      @tree_nodes = JSON.parse(result.stdout).fetch("tree", [])
+    end
+
+    def invalidate_read_cache(path)
+      @json_cache.delete(path)
+      # Must remove the ivar so tree_nodes re-fetches after a successful write.
+      remove_instance_variable(:@tree_nodes) if defined?(@tree_nodes)
+    end
+
+    def gh_api(*args)
+      stdout, stderr, status = Open3.capture3("gh", "api", *args)
+      GhResult.new(stdout: stdout, stderr: stderr, status: status)
+    rescue SystemCallError => e
+      raise OperationalError, "gh api #{args.join(' ')} failed: #{e.message}"
+    end
+  end
+
+  GhResult = Struct.new(:stdout, :stderr, :status, keyword_init: true) do
+    def success?
+      status.success?
+    end
+
+    def not_found?
+      !success? && error_message.match?(/404|not found/i)
+    end
+
+    def conflict?
+      !success? && error_message.match?(/409|422|sha|already exists|conflict/i)
+    end
+
+    def error_message
+      [stderr, stdout].reject(&:empty?).join("\n")
+    end
+  end
+
+  def self.safe_path!(path)
+    return unless path.to_s.empty? || path.include?("..") || path.start_with?("/") || path.split("/").any?(&:empty?)
+
+    raise PathValidationError, "unsafe state path: #{path}"
+  end
+
+  def self.validate_repo!(repo, field)
+    return if repo.match?(%r{\A[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+\z})
+
+    raise Error, "invalid #{field} repo: #{repo}"
+  end
+
+  def self.validate_segment!(segment, field)
+    return if segment.to_s.match?(/\A[A-Za-z0-9_:-]+(?:\.[A-Za-z0-9_:-]+)*\z/)
+
+    raise PathValidationError, "invalid #{field}: #{segment}"
+  end
+
+  def self.claim_path(repo, target)
+    validate_repo!(repo, "target")
+    validate_segment!(target, "target")
+    "claims/#{repo}/#{target}.json"
+  end
+
+  def self.heartbeat_path(agent_id)
+    validate_segment!(agent_id, "agent-id")
+    "heartbeats/#{agent_id}.json"
+  end
+
+  def self.batch_path(batch_id)
+    validate_segment!(batch_id, "batch-id")
+    "batches/#{batch_id}.json"
+  end
+
+  def self.repo_from_claim_path(path)
+    parts = path.split("/")
+    return "UNKNOWN" unless parts.length >= 4
+
+    "#{parts[1]}/#{parts[2]}"
+  end
+
+  def self.target_from_path(path)
+    File.basename(path, ".json")
+  end
+
+  def self.source_root
+    File.expand_path("..", __dir__)
+  end
+
+  def self.state_root?(root)
+    JSON_PREFIXES.all? { |prefix| Dir.exist?(File.join(root, prefix)) }
+  end
+end
+
+if $PROGRAM_NAME == __FILE__
+  begin
+    exit AgentCoord::Runner.new(ARGV).run
+  rescue AgentCoord::Error => e
+    warn e.message
+    exit e.exit_code
+  end
+end
