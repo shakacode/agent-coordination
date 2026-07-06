@@ -24,7 +24,9 @@ class HttpStoreStub
                      if_none_match: req["if-none-match"] }
       status, body = @responses.shift || [500, { "error" => "unexpected" }]
       res.status = status
-      if body.is_a?(String)
+      if body.nil?
+        res.body = nil
+      elsif body.is_a?(String)
         res.content_type = "text/plain"
         res.body = body
       else
@@ -65,6 +67,14 @@ class HttpStoreReadTest < HttpStoreTestCase
       assert_equal "7", entry.sha
       assert_equal "Bearer tok", stub.requests.first[:auth]
       assert_equal "/v1/state/claims%2Fo%2Fr%2F1.json", stub.requests.first[:path]
+    end
+  end
+
+  def test_read_json_percent_encodes_spaces_in_state_path
+    body = { "path" => "claims/o r/1.json", "data" => { "agent_id" => "a1" }, "version" => 7 }
+    with_stub([[200, body]]) do |store, stub|
+      store.read_json("claims/o r/1.json")
+      assert_equal "/v1/state/claims%2Fo%20r%2F1.json", stub.requests.first[:path]
     end
   end
 
@@ -156,6 +166,15 @@ class HttpStoreReadTest < HttpStoreTestCase
       assert_includes error.message, "http backend unreachable"
       assert_includes error.message, "certificate verify failed"
     end
+  end
+
+  def test_list_json_treats_no_body_error_as_operational
+    store = AgentCoord::HttpStore.new(base_url: "http://127.0.0.1:9", token: "tok")
+    response = Struct.new(:code, :body).new("204", nil)
+    store.define_singleton_method(:request) { |*| response }
+
+    error = assert_raises(AgentCoord::OperationalError) { store.list_json("claims") }
+    assert_includes error.message, "http backend list claims failed: 204"
   end
 end
 
@@ -310,6 +329,26 @@ class HttpBackendSelectionTest < HttpEnvTestCase
         assert_includes out, "claims"
         assert_includes err, "--api-url and --state-root"
       end
+    end
+  end
+
+  def test_state_root_flag_warns_when_api_url_env_set_and_uses_local
+    Dir.mktmpdir do |root|
+      with_env("AGENT_COORD_API_URL" => "http://127.0.0.1:9", "AGENT_COORD_API_TOKEN" => nil) do
+        code, out, err = run_cli(["status", "--state-root", root], {})
+        assert_equal 0, code
+        assert_includes out, "claims"
+        assert_includes err, "AGENT_COORD_API_URL and --state-root"
+      end
+    end
+  end
+
+  def test_empty_state_root_env_is_ignored
+    with_env("AGENT_COORD_STATE_ROOT" => "") do
+      options = AgentCoord::Runner.new([], stdout: StringIO.new, stderr: StringIO.new)
+                                  .send(:parse_options, "status", [])
+      assert_nil options[:state_root]
+      assert_nil options[:api_url]
     end
   end
 

@@ -189,24 +189,30 @@ module AgentCoord
     end
 
     def resolve_backend_env(options)
-      if options[:state_root]
-        @stderr.puts "warning: --api-url and --state-root are both set; using the local backend." if options[:api_url]
-        return
-      end
-
       cli_api = options[:api_url]
       env_api = ENV.fetch("AGENT_COORD_API_URL", nil)
       env_root = ENV.fetch("AGENT_COORD_STATE_ROOT", nil)
+      env_root = nil if env_root == ""
+
+      if options[:state_root]
+        if cli_api
+          @stderr.puts "warning: --api-url and --state-root are both set; using the local backend."
+        elsif env_api && !env_api.empty?
+          @stderr.puts "warning: AGENT_COORD_API_URL and --state-root are both set; using the local backend."
+        end
+        return
+      end
+
       options[:api_url] ||= env_api
       if options[:api_url]
-        if env_root && !env_root.empty?
+        if env_root
           api_source = cli_api ? "--api-url" : "AGENT_COORD_API_URL"
           @stderr.puts "warning: #{api_source} and AGENT_COORD_STATE_ROOT are both set; " \
                        "using the HTTP backend. Pass --state-root to force local."
         end
         return
       end
-      options[:state_root] = env_root
+      options[:state_root] = env_root if env_root
     end
 
     def add_command_help(opts, command)
@@ -1328,6 +1334,7 @@ module AgentCoord
     OPEN_TIMEOUT = 5
     READ_TIMEOUT = 10
     LOOPBACK_HOSTS = %w[localhost 127.0.0.1 ::1].freeze
+    PERCENT_ENCODE_UNSAFE = /[^A-Za-z0-9._~-]/
 
     def initialize(base_url:, token:)
       uri = parse_base_url(base_url)
@@ -1419,7 +1426,7 @@ module AgentCoord
     end
 
     def escape_component(value)
-      URI.encode_www_form_component(value)
+      URI::DEFAULT_PARSER.escape(value.to_s, PERCENT_ENCODE_UNSAFE)
     end
 
     def parsed_json_object(response, action)
@@ -1463,7 +1470,7 @@ module AgentCoord
       detail = begin
         parsed = JSON.parse(response.body)
         parsed.is_a?(Hash) ? parsed.fetch("error", response.body) : response.body.to_s[0, 200]
-      rescue JSON::ParserError
+      rescue JSON::ParserError, TypeError
         response.body.to_s[0, 200]
       end
       "http backend #{action} failed: #{response.code} #{detail}"
