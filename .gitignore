@@ -1,0 +1,9 @@
+# Runtime coordination data belongs in shakacode/agent-coordination-state.
+/claims/
+/heartbeats/
+/batches/
+*.json.lock
+
+# Local generated/runtime artifacts.
+/.wrangler/
+/node_modules/

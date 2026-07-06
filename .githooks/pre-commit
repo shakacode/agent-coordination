@@ -1,0 +1,29 @@
+#!/bin/sh
+set -eu
+
+rubocop_files=$(
+  git -c core.quotepath=false diff --cached --name-only --diff-filter=ACMR -- |
+    awk '
+      $0 == "Gemfile" ||
+      $0 == "bin/agent-coord" ||
+      $0 == "bin/agent_coord" ||
+      $0 ~ /\.rb$/ { print }
+    '
+)
+
+[ -n "$rubocop_files" ] || exit 0
+
+if ! command -v bundle >/dev/null 2>&1; then
+  echo "Bundler is required to run RuboCop. Install Bundler and retry." >&2
+  exit 1
+fi
+
+if ! bundle check >/dev/null 2>&1; then
+  echo "Bundle is missing required gems. Run 'bundle install' and retry." >&2
+  exit 1
+fi
+
+printf '%s\n' "$rubocop_files" | ruby -e '
+files = STDIN.read.lines.map(&:chomp).reject(&:empty?)
+exec("bundle", "exec", "rubocop", "--force-exclusion", "--", *files)
+'
