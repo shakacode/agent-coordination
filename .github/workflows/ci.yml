@@ -48,7 +48,9 @@ jobs:
           bundler-cache: true
 
       - name: Run tests
-        run: bundle exec ruby -Itest test/agent_coord_test.rb
+        run: |
+          bundle exec ruby -Itest test/agent_coord_test.rb
+          bundle exec ruby -Itest test/http_store_test.rb
 
   worker-typecheck:
     runs-on: ubuntu-latest

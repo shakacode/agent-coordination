@@ -501,7 +501,7 @@ git add worker && git commit -m "Add versioned state GET/PUT/LIST with If-Match 
 - Consumes: transport contract from Task 6.
 - Produces: `AgentCoord::HttpStore.new(base_url:, token:)` with `read_json(path) -> StoredJson|nil`, `list_json(prefix) -> [StoredJson]`, `verify_layout!(prefixes)`, `verify_readable!` — the same duck type as `LocalStore`/`GitHubStore`. `StoredJson#sha` carries the version as a String.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 `test/http_store_test.rb`:
 
@@ -582,12 +582,12 @@ class HttpStoreReadTest < Minitest::Test
 end
 ```
 
-- [ ] **Step 2: Run to verify it fails**
+- [x] **Step 2: Run to verify it fails**
 
 Run: `bundle exec ruby test/http_store_test.rb`
 Expected: FAIL with `uninitialized constant AgentCoord::HttpStore`.
 
-- [ ] **Step 3: Implement `HttpStore` reads**
+- [x] **Step 3: Implement `HttpStore` reads**
 
 In `bin/agent-coord`, add `require "net/http"` and `require "uri"` to the requires, then after the `GitHubStore` class:
 
@@ -662,12 +662,12 @@ In `bin/agent-coord`, add `require "net/http"` and `require "uri"` to the requir
   end
 ```
 
-- [ ] **Step 4: Run to verify it passes**
+- [x] **Step 4: Run to verify it passes**
 
 Run: `bundle exec ruby test/http_store_test.rb`
 Expected: `4 runs ... 0 failures, 0 errors`.
 
-- [ ] **Step 5: Lint and commit**
+- [x] **Step 5: Lint and commit**
 
 ```bash
 bundle exec rubocop && git add -A && git commit -m "Add HttpStore reads with stub-server tests"
@@ -684,7 +684,7 @@ bundle exec rubocop && git add -A && git commit -m "Add HttpStore reads with stu
 **Interfaces:**
 - Produces: `write_json(path, data, message:, sha: nil, create: false)` — 201/200 → success; 409 → `Conflict` with the exact strings the other stores use: `"state already exists at #{path}"` (create) / `"state changed at #{path}"` (update). This preserves claim/heartbeat/release behavior in `Runner` unchanged.
 
-- [ ] **Step 1: Write the failing tests** (append to `HttpStoreReadTest`’s file as a new class)
+- [x] **Step 1: Write the failing tests** (append to `HttpStoreReadTest`’s file as a new class)
 
 ```ruby
 class HttpStoreWriteTest < Minitest::Test
@@ -728,12 +728,12 @@ class HttpStoreWriteTest < Minitest::Test
 end
 ```
 
-- [ ] **Step 2: Run to verify failure**
+- [x] **Step 2: Run to verify failure**
 
 Run: `bundle exec ruby test/http_store_test.rb`
 Expected: FAIL with `NoMethodError: undefined method 'write_json'`.
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
 
 Inside `HttpStore` (public section, after `list_json`):
 
@@ -755,12 +755,12 @@ Inside `HttpStore` (public section, after `list_json`):
     end
 ```
 
-- [ ] **Step 4: Run full suite**
+- [x] **Step 4: Run full suite**
 
 Run: `bundle exec ruby test/http_store_test.rb && bundle exec ruby test/agent_coord_test.rb`
 Expected: all green.
 
-- [ ] **Step 5: Lint and commit**
+- [x] **Step 5: Lint and commit**
 
 ```bash
 bundle exec rubocop && git add -A && git commit -m "Add HttpStore CAS writes mapped to Conflict semantics"
@@ -782,7 +782,7 @@ bundle exec rubocop && git add -A && git commit -m "Add HttpStore CAS writes map
   4. otherwise → `GitHubStore`
   - When both `AGENT_COORD_API_URL` and `AGENT_COORD_STATE_ROOT` env vars are set, warn once on stderr: `warning: AGENT_COORD_API_URL and AGENT_COORD_STATE_ROOT are both set; using the HTTP backend. Pass --state-root to force local.`
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 ```ruby
 class HttpBackendSelectionTest < Minitest::Test
@@ -847,12 +847,12 @@ end
 
 Note: `Runner.new` currently accepts `stdout:`/`stderr:` keywords (`stderr` is stored but unused for warnings). The warning in Step 3 writes to `@stderr`.
 
-- [ ] **Step 2: Run to verify failure**
+- [x] **Step 2: Run to verify failure**
 
 Run: `bundle exec ruby test/http_store_test.rb`
 Expected: FAIL — status hits the GitHub/local path instead of the stub (first test), no token error (second), no warning (third).
 
-- [ ] **Step 3: Implement selection**
+- [x] **Step 3: Implement selection**
 
 In `parse_options`, change the initial options hash: `state_root: nil, api_url: nil` (drop the direct env fetch for `state_root`), and add the flag:
 
@@ -912,12 +912,12 @@ In `render_status` and `doctor`, guard the mirror default so HTTP wins:
 
 (and the equivalent line in `doctor` for `doctor_options`).
 
-- [ ] **Step 4: Run the full suite**
+- [x] **Step 4: Run the full suite**
 
 Run: `bundle exec ruby test/http_store_test.rb && bundle exec ruby test/agent_coord_test.rb`
 Expected: all green. If an existing test set `AGENT_COORD_STATE_ROOT` via ENV and relied on the old fetch location, it still passes — the env fallback moved but kept identical effect.
 
-- [ ] **Step 5: Lint and commit**
+- [x] **Step 5: Lint and commit**
 
 ```bash
 bundle exec rubocop && git add -A && git commit -m "Add HTTP backend selection with precedence and both-set warning"
@@ -934,7 +934,7 @@ bundle exec rubocop && git add -A && git commit -m "Add HTTP backend selection w
 **Interfaces:**
 - Produces: `agent-coord doctor` with the HTTP backend reports `backend: http` and `backend_url`, checks `/v1/health` and a claims list; `--deep` lists all three prefixes.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 ```ruby
 class HttpDoctorTest < Minitest::Test
@@ -960,12 +960,12 @@ class HttpDoctorTest < Minitest::Test
 end
 ```
 
-- [ ] **Step 2: Run to verify failure**
+- [x] **Step 2: Run to verify failure**
 
 Run: `bundle exec ruby test/http_store_test.rb`
 Expected: FAIL — doctor reports `backend: github` and tries `gh auth status`.
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
 
 In `doctor`, before the current `backend_kind` logic:
 
@@ -995,7 +995,7 @@ The existing `store.verify_layout!(JSON_PREFIXES)` call after the branch stays w
 
 Extend the payload and text output with `"backend_url" => doctor_options[:api_url]` and a `backend_url:` line when backend is http.
 
-- [ ] **Step 4: Run, lint, commit**
+- [x] **Step 4: Run, lint, commit**
 
 Run: `bundle exec ruby test/http_store_test.rb && bundle exec ruby test/agent_coord_test.rb && bundle exec rubocop`
 Expected: green.
