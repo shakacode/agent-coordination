@@ -4,7 +4,7 @@
 
 **Goal:** Prove the coordination protocol end-to-end with (a) deterministic scripted workers that run in CI with no LLM, and (b) two seeded GitHub test repos where real Codex and Claude sessions process issue batches and a scorecard verifies the outcome.
 
-**Architecture:** Two layers over the same worker protocol. Layer 1 is a *protocol automaton* — a Ruby script that performs the exact worker sequence (claim → worktree → branch → fix → test → heartbeat phases → release) mechanically, so races and parity are CI-testable and deterministic. Layer 2 swaps the automaton for real `codex exec` / `claude -p` sessions against real GitHub repos seeded with known-fixable issues, and a verifier script scores the run (exactly one claim per issue, PR opened, CI state, no cross-lane collisions). The sim template project ships the full `.agents/` seam so the real agent-workflows skills resolve it like any consumer repo.
+**Architecture:** Two layers over the same worker protocol. Layer 1 is a *protocol automaton* — a Ruby script that performs the exact worker sequence (claim → isolated clone/workdir → branch → fix → test → heartbeat phases → release) mechanically, so races and parity are CI-testable and deterministic. Layer 2 swaps the automaton for real `codex exec` / `claude -p` sessions against real GitHub repos seeded with known-fixable issues, and a verifier script scores the run (exactly one claim per issue, PR opened, CI state, no cross-lane collisions). The sim template project ships the full `.agents/` seam so the real agent-workflows skills resolve it like any consumer repo.
 
 **Tech Stack:** Ruby 3.4 stdlib + minitest (automaton, verifier, tests), bash (runners), `gh` CLI (seeding, verification), local bare git repos for CI mode, GitHub Actions minitest CI inside the sim template.
 
@@ -449,7 +449,7 @@ bundle exec rubocop && git add sim/bin/seed && git commit -m "Add sim repo seedi
 
 **Interfaces:**
 - Consumes: the `agent-coord` CLI (any backend via env), a git remote (local bare repo in CI mode), `sim/issues.json` keys.
-- Produces: `sim/bin/scripted-worker --agent-id ID --repo-slug OWNER/REPO --clone-url URL --issue-key task_one --workdir DIR` which performs, in order: `claim` (hard-stops on exit 3 printing `WORKER_REFUSED`), `git worktree add`, branch `sim/<issue-key>-<agent-id>`, applies the canonical fix, runs the acceptance test, commits, pushes, heartbeats at each phase (`claimed`, `implementing`, `validating`, `pushing`, `done`), `release`, prints `WORKER_DONE <branch>`. Exit 0 on done, 3 on refused, 2 otherwise.
+- Produces: `sim/bin/scripted-worker --agent-id ID --repo-slug OWNER/REPO --clone-url URL --issue-key task_one --workdir DIR` which performs, in order: validate the issue key, `claim` (hard-stops on exit 3 printing `WORKER_REFUSED`), isolated `git clone` in `--workdir`, branch `sim/<issue-key>-<agent-id>`, applies the canonical fix, runs the acceptance test, commits, pushes, heartbeats at each phase (`claimed`, `implementing`, `validating`, `pushing`, `done`; `failed` on post-claim failure), `release`, prints `WORKER_DONE <branch>`. Exit 0 on done, 3 on refused, 2 otherwise.
 
 - [x] **Step 1: Write the failing test**
 
@@ -458,13 +458,14 @@ bundle exec rubocop && git add sim/bin/seed && git commit -m "Add sim repo seedi
 ```ruby
 # frozen_string_literal: true
 
+require "fileutils"
 require "json"
 require "minitest/autorun"
 require "open3"
 require "tmpdir"
 
-SIM_ROOT = File.expand_path("..", __dir__)
-WORKER = File.join(SIM_ROOT, "bin", "scripted-worker")
+SIM_ROOT = File.expand_path("..", __dir__) unless defined?(SIM_ROOT)
+WORKER = File.join(SIM_ROOT, "bin", "scripted-worker") unless defined?(WORKER)
 
 class ScriptedWorkerTest < Minitest::Test
   def setup
@@ -476,19 +477,26 @@ class ScriptedWorkerTest < Minitest::Test
     seed = File.join(@dir, "seed")
     FileUtils.cp_r(File.join(SIM_ROOT, "template", "."), seed)
     Dir.chdir(seed) do
-      system("git init -q -b main && git add -A && git commit -qm seed && " \
+      system("git init -q -b main && " \
+             "git config user.name 'agent-coord sim test' && " \
+             "git config user.email 'agent-coord-sim@example.invalid' && " \
+             "git add -A && git commit -qm seed && " \
              "git remote add origin #{@origin} && git push -q origin main", exception: true)
     end
   end
 
-  def teardown = FileUtils.remove_entry(@dir)
+  def teardown
+    FileUtils.remove_entry(@dir)
+  end
 
-  def run_worker(agent_id)
+  def run_worker(agent_id, issue_key: "task_one", clone_url: @origin)
     env = { "AGENT_COORD_STATE_ROOT" => @state }
-    Open3.capture3(env, WORKER,
-                   "--agent-id", agent_id, "--repo-slug", "sim/local",
-                   "--clone-url", @origin, "--issue-key", "task_one",
-                   "--workdir", File.join(@dir, "work-#{agent_id}"))
+    Open3.capture3(
+      env, WORKER,
+      "--agent-id", agent_id, "--repo-slug", "sim/local",
+      "--clone-url", clone_url, "--issue-key", issue_key,
+      "--workdir", File.join(@dir, "work-#{agent_id}")
+    )
   end
 
   def test_worker_completes_and_records_protocol
@@ -506,17 +514,36 @@ class ScriptedWorkerTest < Minitest::Test
   end
 
   def test_second_worker_is_refused_while_first_holds_claim
-    # Hold the claim manually so the automaton meets contention.
     env = { "AGENT_COORD_STATE_ROOT" => @state }
+    system(
+      env, File.expand_path("../../bin/agent-coord", __dir__),
+      "claim", "--agent-id", "holder", "--repo", "sim/local",
+      "--target", "task_one", exception: true, out: File::NULL
+    )
     system(env, File.expand_path("../../bin/agent-coord", __dir__),
-           "claim", "--agent-id", "holder", "--repo-slug".sub("-slug", ""), "sim/local",
-           "--target", "task_one", exception: true)
-    system(env, File.expand_path("../../bin/agent-coord", __dir__),
-           "heartbeat", "--agent-id", "holder", exception: true)
+           "heartbeat", "--agent-id", "holder", exception: true, out: File::NULL)
 
-    stdout, _, status = run_worker("w2")
+    stdout, _stderr, status = run_worker("w2")
     assert_equal 3, status.exitstatus
     assert_includes stdout, "WORKER_REFUSED"
+  end
+
+  def test_unknown_issue_key_fails_before_claim
+    stdout, _stderr, status = run_worker("w3", issue_key: "task_four")
+    assert_equal 2, status.exitstatus
+    assert_includes stdout, "unknown issue key: task_four"
+    refute File.exist?(File.join(@state, "claims", "sim", "local", "task_four.json"))
+  end
+
+  def test_failure_after_claim_releases_claim
+    missing_origin = File.join(@dir, "missing.git")
+    _stdout, _stderr, status = run_worker("w4", clone_url: missing_origin)
+    refute_equal 0, status.exitstatus
+
+    claim = JSON.parse(File.read(File.join(@state, "claims", "sim", "local", "task_one.json")))
+    assert_equal "released", claim.fetch("status")
+    heartbeat = JSON.parse(File.read(File.join(@state, "heartbeats", "w4.json")))
+    assert_equal "failed", heartbeat.fetch("status")
   end
 end
 ```
@@ -541,7 +568,13 @@ Expected: FAIL — `sim/bin/scripted-worker` does not exist.
 ```bash
 #!/usr/bin/env bash
 set -euo pipefail
-AGENT_ID="" REPO_SLUG="" CLONE_URL="" ISSUE_KEY="" WORKDIR=""
+
+AGENT_ID=""
+REPO_SLUG=""
+CLONE_URL=""
+ISSUE_KEY=""
+WORKDIR=""
+
 while [ $# -gt 0 ]; do
   case "$1" in
     --agent-id) AGENT_ID="$2"; shift 2 ;;
@@ -552,13 +585,39 @@ while [ $# -gt 0 ]; do
     *) echo "unknown arg: $1"; exit 1 ;;
   esac
 done
-[ -n "$AGENT_ID" ] && [ -n "$REPO_SLUG" ] && [ -n "$CLONE_URL" ] && \
+
+[ -n "$AGENT_ID" ] && [ -n "$REPO_SLUG" ] && [ -n "$CLONE_URL" ] &&
   [ -n "$ISSUE_KEY" ] && [ -n "$WORKDIR" ] || { echo "missing args"; exit 1; }
+
 CLI="$(cd "$(dirname "$0")/../.." && pwd)/bin/agent-coord"
 BRANCH="sim/${ISSUE_KEY}-${AGENT_ID}"
+CLAIM_ACQUIRED=0
 
-beat() { "$CLI" heartbeat --agent-id "$AGENT_ID" --repo "$REPO_SLUG" \
-          --target "$ISSUE_KEY" --branch "$BRANCH" --status "$1"; }
+case "$ISSUE_KEY" in
+  task_one|task_two|task_three) ;;
+  *) echo "unknown issue key: $ISSUE_KEY"; exit 2 ;;
+esac
+
+beat() {
+  "$CLI" heartbeat --agent-id "$AGENT_ID" --repo "$REPO_SLUG" \
+    --target "$ISSUE_KEY" --branch "$BRANCH" --status "$1"
+}
+
+release_claim() {
+  "$CLI" release --agent-id "$AGENT_ID" --repo "$REPO_SLUG" --target "$ISSUE_KEY"
+  CLAIM_ACQUIRED=0
+}
+
+cleanup_claim() {
+  status=$?
+  trap - EXIT
+  if [ "$status" -ne 0 ] && [ "$CLAIM_ACQUIRED" -eq 1 ]; then
+    beat failed >/dev/null 2>&1 || true
+    release_claim >/dev/null 2>&1 || true
+  fi
+  exit "$status"
+}
+trap cleanup_claim EXIT
 
 set +e
 "$CLI" claim --agent-id "$AGENT_ID" --repo "$REPO_SLUG" --target "$ISSUE_KEY" --branch "$BRANCH"
@@ -566,10 +625,15 @@ CODE=$?
 set -e
 if [ "$CODE" -eq 3 ]; then echo "WORKER_REFUSED ${ISSUE_KEY}"; exit 3; fi
 [ "$CODE" -eq 0 ] || exit 2
+CLAIM_ACQUIRED=1
 beat claimed
 
-mkdir -p "$WORKDIR" && cd "$WORKDIR"
-git clone -q "$CLONE_URL" repo && cd repo
+mkdir -p "$WORKDIR"
+cd "$WORKDIR"
+git clone -q --branch main "$CLONE_URL" repo
+cd repo
+git config user.name "agent-coord sim worker"
+git config user.email "agent-coord-sim@example.invalid"
 git checkout -q -b "$BRANCH"
 beat implementing
 
@@ -614,11 +678,12 @@ beat validating
 ruby "test/${ISSUE_KEY}_test.rb"
 
 beat pushing
-git add lib && git commit -qm "Fix ${ISSUE_KEY} (scripted sim worker ${AGENT_ID})"
+git add lib
+git commit -qm "Fix ${ISSUE_KEY} (scripted sim worker ${AGENT_ID})"
 git push -q origin "$BRANCH"
 
 beat done
-"$CLI" release --agent-id "$AGENT_ID" --repo "$REPO_SLUG" --target "$ISSUE_KEY"
+release_claim
 echo "WORKER_DONE ${BRANCH}"
 ```
 
@@ -629,7 +694,7 @@ chmod +x sim/bin/scripted-worker
 - [x] **Step 4: Run to verify pass**
 
 Run: `bundle exec ruby sim/test/scripted_worker_test.rb`
-Expected: `2 runs ... 0 failures, 0 errors`.
+Expected: `4 runs ... 0 failures, 0 errors`.
 
 - [x] **Step 5: Lint and commit**
 

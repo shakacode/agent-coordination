@@ -23,11 +23,33 @@ done
 
 CLI="$(cd "$(dirname "$0")/../.." && pwd)/bin/agent-coord"
 BRANCH="sim/${ISSUE_KEY}-${AGENT_ID}"
+CLAIM_ACQUIRED=0
+
+case "$ISSUE_KEY" in
+  task_one|task_two|task_three) ;;
+  *) echo "unknown issue key: $ISSUE_KEY"; exit 2 ;;
+esac
 
 beat() {
   "$CLI" heartbeat --agent-id "$AGENT_ID" --repo "$REPO_SLUG" \
     --target "$ISSUE_KEY" --branch "$BRANCH" --status "$1"
 }
+
+release_claim() {
+  "$CLI" release --agent-id "$AGENT_ID" --repo "$REPO_SLUG" --target "$ISSUE_KEY"
+  CLAIM_ACQUIRED=0
+}
+
+cleanup_claim() {
+  status=$?
+  trap - EXIT
+  if [ "$status" -ne 0 ] && [ "$CLAIM_ACQUIRED" -eq 1 ]; then
+    beat failed >/dev/null 2>&1 || true
+    release_claim >/dev/null 2>&1 || true
+  fi
+  exit "$status"
+}
+trap cleanup_claim EXIT
 
 set +e
 "$CLI" claim --agent-id "$AGENT_ID" --repo "$REPO_SLUG" --target "$ISSUE_KEY" --branch "$BRANCH"
@@ -38,6 +60,7 @@ if [ "$CODE" -eq 3 ]; then
   exit 3
 fi
 [ "$CODE" -eq 0 ] || exit 2
+CLAIM_ACQUIRED=1
 beat claimed
 
 mkdir -p "$WORKDIR"
@@ -95,5 +118,5 @@ git commit -qm "Fix ${ISSUE_KEY} (scripted sim worker ${AGENT_ID})"
 git push -q origin "$BRANCH"
 
 beat done
-"$CLI" release --agent-id "$AGENT_ID" --repo "$REPO_SLUG" --target "$ISSUE_KEY"
+release_claim
 echo "WORKER_DONE ${BRANCH}"

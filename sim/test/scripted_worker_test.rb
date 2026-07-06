@@ -6,8 +6,8 @@ require "minitest/autorun"
 require "open3"
 require "tmpdir"
 
-SIM_ROOT = File.expand_path("..", __dir__)
-WORKER = File.join(SIM_ROOT, "bin", "scripted-worker")
+SIM_ROOT = File.expand_path("..", __dir__) unless defined?(SIM_ROOT)
+WORKER = File.join(SIM_ROOT, "bin", "scripted-worker") unless defined?(WORKER)
 
 class ScriptedWorkerTest < Minitest::Test
   def setup
@@ -31,12 +31,12 @@ class ScriptedWorkerTest < Minitest::Test
     FileUtils.remove_entry(@dir)
   end
 
-  def run_worker(agent_id)
+  def run_worker(agent_id, issue_key: "task_one", clone_url: @origin)
     env = { "AGENT_COORD_STATE_ROOT" => @state }
     Open3.capture3(
       env, WORKER,
       "--agent-id", agent_id, "--repo-slug", "sim/local",
-      "--clone-url", @origin, "--issue-key", "task_one",
+      "--clone-url", clone_url, "--issue-key", issue_key,
       "--workdir", File.join(@dir, "work-#{agent_id}")
     )
   end
@@ -68,5 +68,23 @@ class ScriptedWorkerTest < Minitest::Test
     stdout, _stderr, status = run_worker("w2")
     assert_equal 3, status.exitstatus
     assert_includes stdout, "WORKER_REFUSED"
+  end
+
+  def test_unknown_issue_key_fails_before_claim
+    stdout, _stderr, status = run_worker("w3", issue_key: "task_four")
+    assert_equal 2, status.exitstatus
+    assert_includes stdout, "unknown issue key: task_four"
+    refute File.exist?(File.join(@state, "claims", "sim", "local", "task_four.json"))
+  end
+
+  def test_failure_after_claim_releases_claim
+    missing_origin = File.join(@dir, "missing.git")
+    _stdout, _stderr, status = run_worker("w4", clone_url: missing_origin)
+    refute_equal 0, status.exitstatus
+
+    claim = JSON.parse(File.read(File.join(@state, "claims", "sim", "local", "task_one.json")))
+    assert_equal "released", claim.fetch("status")
+    heartbeat = JSON.parse(File.read(File.join(@state, "heartbeats", "w4.json")))
+    assert_equal "failed", heartbeat.fetch("status")
   end
 end
