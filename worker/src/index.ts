@@ -41,10 +41,11 @@ async function getState(env: Env, path: string): Promise<Response> {
 }
 
 async function putState(request: Request, env: Env, path: string): Promise<Response> {
+  // Best-effort pre-parse guard; the serialized-data cap below still handles absent lengths.
   const contentLength = request.headers.get("content-length");
   if (contentLength && /^\d+$/.test(contentLength)) {
     const requestBytes = Number.parseInt(contentLength, 10);
-    if (Number.isSafeInteger(requestBytes) && requestBytes > MAX_REQUEST_BYTES) {
+    if (!Number.isSafeInteger(requestBytes) || requestBytes > MAX_REQUEST_BYTES) {
       return json(413, { error: "payload_too_large" });
     }
   }
@@ -116,7 +117,8 @@ export default {
       return json(200, { status: "ok" });
     }
     const machine = await authenticate(request, env);
-    // Phase 1 authenticates the machine token but keeps path ownership in the existing Ruby Runner.
+    // SECURITY: Phase 1 trusts agent-coord Runner as the sole caller. This API authenticates
+    // machine tokens but does not provide per-path authorization until Phase 2 endpoints land.
     if (!machine) {
       return json(401, { error: "unauthorized" });
     }
