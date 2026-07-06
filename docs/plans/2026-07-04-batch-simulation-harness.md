@@ -352,7 +352,11 @@ REPO="${1:?usage: seed <owner/repo> [--reset]}"
 RESET="${2:-}"
 HERE="$(cd "$(dirname "$0")/.." && pwd)"
 WORK="$(mktemp -d)"
-trap 'rm -R "$WORK"' EXIT
+cleanup() {
+  chmod -R u+w "$WORK" 2>/dev/null || true
+  rm -R "$WORK" 2>/dev/null || true
+}
+trap cleanup EXIT
 
 case "$REPO" in
   shakacode/agent-coord-sim-alpha | shakacode/agent-coord-sim-beta) ;;
