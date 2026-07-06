@@ -397,6 +397,16 @@ gh issue list --repo "$REPO" --label sim-batch --state open --limit 1000 --json 
 count=0
 created=0
 skipped=0
+issue_pairs="$WORK/issues.nul"
+python3 - "$HERE/issues.json" > "$issue_pairs" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as handle:
+    for issue in json.load(handle)["issues"]:
+        sys.stdout.write(issue["title"] + "\0" + issue["body"] + "\0")
+PY
+
 while IFS= read -r -d '' TITLE && IFS= read -r -d '' BODY; do
   count=$((count + 1))
   if grep -Fxq -- "$TITLE" "$existing_titles"; then
@@ -405,15 +415,7 @@ while IFS= read -r -d '' TITLE && IFS= read -r -d '' BODY; do
   fi
   gh issue create --repo "$REPO" --title "$TITLE" --body "$BODY" --label sim-batch
   created=$((created + 1))
-done < <(python3 - "$HERE/issues.json" <<'PY'
-import json
-import sys
-
-with open(sys.argv[1], encoding="utf-8") as handle:
-    for issue in json.load(handle)["issues"]:
-        sys.stdout.write(issue["title"] + "\0" + issue["body"] + "\0")
-PY
-)
+done < "$issue_pairs"
 echo "SEEDED $REPO with $count issues ($created created, $skipped skipped)"
 ```
 
