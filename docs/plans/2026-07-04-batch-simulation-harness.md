@@ -548,6 +548,13 @@ class ScriptedWorkerTest < Minitest::Test
     refute File.exist?(File.join(@state, "claims", "sim", "local", "task_four.json"))
   end
 
+  def test_invalid_branch_agent_id_fails_before_claim
+    stdout, _stderr, status = run_worker("worker.lock")
+    assert_equal 2, status.exitstatus
+    assert_includes stdout, "invalid worker branch: sim/task_one-worker.lock"
+    refute File.exist?(File.join(@state, "claims", "sim", "local", "task_one.json"))
+  end
+
   def test_failure_after_claim_releases_claim
     missing_origin = File.join(@dir, "missing.git")
     _stdout, _stderr, status = run_worker("w4", clone_url: missing_origin)
@@ -651,6 +658,11 @@ if ! apply_issue_fix "$ISSUE_KEY" check; then
   exit 2
 fi
 
+if ! git check-ref-format --branch "$BRANCH" >/dev/null 2>&1; then
+  echo "invalid worker branch: $BRANCH"
+  exit 2
+fi
+
 beat() {
   "$CLI" heartbeat --agent-id="$AGENT_ID" --repo="$REPO_SLUG" \
     --target="$ISSUE_KEY" --branch="$BRANCH" --status="$1"
@@ -669,7 +681,13 @@ cleanup_claim() {
   if [ "$status" -ne 0 ] && [ "$CLAIM_ACQUIRED" -eq 1 ]; then
     if [ "$WORK_PUSHED" -eq 1 ]; then
       if [ "$DONE_RECORDED" -eq 0 ]; then
-        beat done >/dev/null || echo "warning: failed to record done heartbeat for ${ISSUE_KEY}" >&2
+        if beat done >/dev/null; then
+          DONE_RECORDED=1
+        else
+          echo "warning: failed to record done heartbeat for ${ISSUE_KEY}" >&2
+          release_claim >/dev/null || echo "warning: failed to release claim for ${ISSUE_KEY}" >&2
+          exit 2
+        fi
       fi
       if release_claim >/dev/null; then
         echo "WORKER_DONE ${BRANCH}"
