@@ -277,6 +277,16 @@ class HttpBackendSelectionTest < HttpEnvTestCase
       end
     end
   end
+
+  def test_version_does_not_warn_about_backend_env_conflicts
+    with_env("AGENT_COORD_API_URL" => "https://agent-coord.example",
+             "AGENT_COORD_STATE_ROOT" => "/tmp/nonexistent-root") do
+      code, out, err = run_cli(["version"], {})
+      assert_equal 0, code
+      assert_includes out, AgentCoord::VERSION
+      assert_empty err
+    end
+  end
 end
 
 class HttpDoctorTest < HttpEnvTestCase

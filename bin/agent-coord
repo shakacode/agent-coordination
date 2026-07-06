@@ -166,8 +166,16 @@ module AgentCoord
       parser.parse!(argv)
       raise Error, "unexpected arguments: #{argv.join(' ')}" unless argv.empty?
 
-      resolve_backend_env(options)
+      finalize_options(command, options)
+    end
+
+    def finalize_options(command, options)
+      resolve_backend_env(options) if backend_command?(command)
       options
+    end
+
+    def backend_command?(command)
+      %w[claim release heartbeat status doctor].include?(command)
     end
 
     def default_options
