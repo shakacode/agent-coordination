@@ -1440,8 +1440,7 @@ module AgentCoord
       ) do |http|
         http.request(http_request)
       end
-    rescue URI::InvalidURIError, ArgumentError, SocketError, SystemCallError, Timeout::Error, IOError,
-           OpenSSL::SSL::SSLError => e
+    rescue URI::InvalidURIError, SocketError, SystemCallError, Timeout::Error, IOError, OpenSSL::SSL::SSLError => e
       raise OperationalError, "http backend unreachable: #{e.message}"
     end
 
