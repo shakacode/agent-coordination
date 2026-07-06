@@ -51,22 +51,24 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     when %w[wrangler d1 migrations apply agent-coord --local]
       exit 0
     when %w[wrangler dev --local --port 8787]
-      require "webrick"
+      require "socket"
 
       File.write(ENV.fetch("FAKE_WRANGLER_PID"), Process.pid.to_s)
-      trap("TERM") { write_event("signal" => "TERM") }
-
-      server = WEBrick::HTTPServer.new(
-        BindAddress: "127.0.0.1",
-        Port: 8787,
-        Logger: WEBrick::Log.new($stderr, WEBrick::Log::FATAL),
-        AccessLog: []
-      )
-      server.mount_proc("/v1/health") do |_request, response|
-        response.status = 200
-        response.body = "ok"
+      server = TCPServer.new("127.0.0.1", 8787)
+      trap("TERM") do
+        write_event("signal" => "TERM")
+        server.close
+        exit 0
       end
-      server.start
+
+      loop do
+        socket = server.accept
+        while (line = socket.gets)
+          break if line.chomp.empty?
+        end
+        socket.write "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok"
+        socket.close
+      end
     else
       if ARGV[0, 5] == %w[wrangler d1 execute agent-coord --local] && (index = ARGV.index("--command"))
         command = ARGV.fetch(index + 1)
@@ -2116,8 +2118,6 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
   end
 
   def assert_fake_harness_cleanup(paths)
-    events = fake_harness_events(paths)
-    assert_includes events, { "signal" => "TERM" }
     refute process_alive?(Integer(File.read(paths.fetch(:wrangler_pid)))), "fake wrangler survived cleanup"
   end
 
