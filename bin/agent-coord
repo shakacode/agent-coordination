@@ -1389,7 +1389,7 @@ module AgentCoord
     end
 
     def verify_readable!
-      response = request(Net::HTTP::Get, "/v1/state?prefix=claims")
+      response = request(Net::HTTP::Get, "/v1/state?prefix=#{escape_component(JSON_PREFIXES.first)}")
       raise OperationalError, http_error("verify readable", response) unless response.code == "200"
     end
 
