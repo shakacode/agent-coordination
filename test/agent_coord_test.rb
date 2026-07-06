@@ -873,6 +873,7 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     assert_equal "4150", payload.fetch("scope").fetch("target")
     assert_equal ["not checked in target scope"], payload.fetch("degraded")
     assert_equal "not checked in target scope", payload.fetch("section_notes").fetch("batches")
+    assert_equal "jg-codex/4150-worker", payload.fetch("claims").first.fetch("branch")
     assert_equal "worker-4150", payload.fetch("heartbeats").first.fetch("agent_id")
   end
 
@@ -1498,6 +1499,7 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
           "repo" => "shakacode/react_on_rails",
           "target" => "4150",
           "agent_id" => "worker-4150",
+          "branch" => "jg-codex/4150-worker",
           "status" => "active",
           "claimed_at" => (@now - 60).iso8601,
           "updated_at" => (@now - 60).iso8601,

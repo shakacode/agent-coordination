@@ -63,22 +63,29 @@ class BatchVerifier
     pr_col = "SKIPPED"
     ci_col = "SKIPPED"
     return { branch: branch_col, pr: pr_col, ci: ci_col } unless @live
+    return fail_row(issue.fetch("key"), "no branch recorded") if branch_col == "UNKNOWN" || branch_col.empty?
 
-    branch_out, = Open3.capture3(
+    branch_out, branch_err, branch_status = Open3.capture3(
       "gh", "pr", "list", "--repo", @repo_slug, "--state", "all",
-      "--search", "#{issue.fetch('title')} in:title", "--json", "url,headRefName,number"
+      "--head", branch_col, "--json", "url,headRefName,number"
     )
+    return fail_row(issue.fetch("key"), "gh pr list failed: #{branch_err.strip}") unless branch_status.success?
+
     pr = JSON.parse(branch_out).first
     return fail_row(issue.fetch("key"), "no PR found") if pr.nil?
 
     branch_col = pr.fetch("headRefName", branch_col)
     pr_col = pr.fetch("url")
-    checks_out, = Open3.capture3(
+    checks_out, checks_err, = Open3.capture3(
       "gh", "pr", "checks", pr.fetch("number").to_s, "--repo", @repo_slug,
-      "--json", "bucket", "--jq", "[.[].bucket] | unique | join(\",\")"
+      "--json", "bucket"
     )
-    ci_col = checks_out.strip.empty? ? "none" : checks_out.strip
-    return fail_row(issue.fetch("key"), "CI failing (#{ci_col}) #{pr_col}") if ci_col.include?("fail")
+    return fail_row(issue.fetch("key"), "gh pr checks failed: #{checks_err.strip}") if checks_out.strip.empty?
+
+    buckets = JSON.parse(checks_out).map { |check| check.fetch("bucket") }.uniq.sort
+    ci_col = buckets.empty? ? "none" : buckets.join(",")
+    bad_buckets = buckets & %w[fail pending]
+    return fail_row(issue.fetch("key"), "CI not passing (#{ci_col}) #{pr_col}") unless bad_buckets.empty?
 
     { branch: branch_col, pr: pr_col, ci: ci_col }
   end

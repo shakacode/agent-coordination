@@ -905,29 +905,47 @@ manifest.each do |issue|
   pr_col = "SKIPPED"
   ci_col = "SKIPPED"
   if live
-    branch_out, = Open3.capture3(
+    branch_col = claim.fetch("branch", "UNKNOWN")
+    if branch_col == "UNKNOWN" || branch_col.empty?
+      puts "FAIL #{key} no branch recorded"
+      next
+    end
+
+    branch_out, branch_err, branch_status = Open3.capture3(
       "gh", "pr", "list", "--repo", repo_slug, "--state", "all",
-      "--search", "#{issue.fetch('title')} in:title", "--json", "url,headRefName,number"
+      "--head", branch_col, "--json", "url,headRefName,number"
     )
+    unless branch_status.success?
+      puts "FAIL #{key} gh pr list failed: #{branch_err.strip}"
+      next
+    end
+
     pr = JSON.parse(branch_out).first
     if pr.nil?
       puts "FAIL #{key} no PR found"
       next
     end
     pr_col = pr.fetch("url")
-    checks_out, = Open3.capture3(
+    checks_out, checks_err, = Open3.capture3(
       "gh", "pr", "checks", pr.fetch("number").to_s, "--repo", repo_slug,
-      "--json", "bucket", "--jq", "[.[].bucket] | unique | join(\",\")"
+      "--json", "bucket"
     )
-    ci_col = checks_out.strip.empty? ? "none" : checks_out.strip
-    if ci_col.include?("fail")
-      puts "FAIL #{key} CI failing (#{ci_col}) #{pr_col}"
+    if checks_out.strip.empty?
+      puts "FAIL #{key} gh pr checks failed: #{checks_err.strip}"
+      next
+    end
+
+    buckets = JSON.parse(checks_out).map { |check| check.fetch("bucket") }.uniq.sort
+    ci_col = buckets.empty? ? "none" : buckets.join(",")
+    bad_buckets = buckets & %w[fail pending]
+    unless bad_buckets.empty?
+      puts "FAIL #{key} CI not passing (#{ci_col}) #{pr_col}"
       next
     end
   end
 
   passes += 1
-  puts "PASS #{key} claim=released pr=#{pr_col} ci=#{ci_col}"
+  puts "PASS #{key} claim=released branch=#{claim.fetch('branch', 'UNKNOWN')} pr=#{pr_col} ci=#{ci_col}"
 end
 
 puts "SCORE #{passes}/#{manifest.length}"

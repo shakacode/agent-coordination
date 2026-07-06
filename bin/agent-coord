@@ -677,6 +677,7 @@ module AgentCoord
         "target" => data.fetch("target", AgentCoord.target_from_path(entry.path)),
         "status" => data.fetch("status", "unknown"),
         "agent_id" => data.fetch("agent_id", "UNKNOWN"),
+        "branch" => data.fetch("branch", "UNKNOWN"),
         "expires_at" => data.fetch("expires_at", "UNKNOWN")
       }
     end
