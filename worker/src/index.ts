@@ -28,6 +28,7 @@ async function authenticate(request: Request, env: Env): Promise<string | null> 
 const MAX_STATE_BYTES = 256 * 1024;
 const MAX_REQUEST_BYTES = MAX_STATE_BYTES + 4096;
 const MAX_STATE_PATH_BYTES = 512;
+const MAX_LIST_ENTRIES = 1000;
 const STATE_PATH = /^(claims|heartbeats|batches)\/[A-Za-z0-9_.:/-]+\.json$/;
 
 function validPath(path: string): boolean {
@@ -128,9 +129,13 @@ async function listState(env: Env, prefix: string): Promise<Response> {
     return json(400, { error: "invalid_prefix" });
   }
   const rows = await env.DB.prepare(
-    "SELECT path, data, version FROM state WHERE path LIKE ? ORDER BY path",
-  ).bind(`${prefix}/%`).all<{ path: string; data: string; version: number }>();
-  const entries = (rows.results ?? []).map((r) => ({
+    "SELECT path, data, version FROM state WHERE path LIKE ? ORDER BY path LIMIT ?",
+  ).bind(`${prefix}/%`, MAX_LIST_ENTRIES + 1).all<{ path: string; data: string; version: number }>();
+  const results = rows.results ?? [];
+  if (results.length > MAX_LIST_ENTRIES) {
+    return json(413, { error: "prefix_too_large" });
+  }
+  const entries = results.map((r) => ({
     path: r.path,
     data: JSON.parse(r.data),
     version: r.version,
