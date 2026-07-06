@@ -378,7 +378,7 @@ module AgentCoord
         "version" => VERSION,
         "backend" => backend_kind,
         "backend_repo" => doctor_options.fetch(:backend),
-        "backend_url" => doctor_options[:api_url],
+        "backend_url" => active_backend_url(doctor_options, backend_kind),
         "state_root" => doctor_options[:state_root],
         "deep" => !options[:deep].nil?,
         "status" => "ok"
@@ -394,6 +394,10 @@ module AgentCoord
         @stdout.puts "status: ok"
       end
       0
+    end
+
+    def active_backend_url(options, backend_kind)
+      backend_kind == "http" ? options[:api_url] : nil
     end
 
     def bootstrap(options)
@@ -1457,7 +1461,8 @@ module AgentCoord
 
     def http_error(action, response)
       detail = begin
-        JSON.parse(response.body).fetch("error", response.body)
+        parsed = JSON.parse(response.body)
+        parsed.is_a?(Hash) ? parsed.fetch("error", response.body) : response.body.to_s[0, 200]
       rescue JSON::ParserError
         response.body.to_s[0, 200]
       end

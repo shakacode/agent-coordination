@@ -94,6 +94,13 @@ class HttpStoreReadTest < HttpStoreTestCase
     end
   end
 
+  def test_read_json_raises_operational_on_non_object_error_body
+    with_stub([[500, []]]) do |store, _|
+      error = assert_raises(AgentCoord::OperationalError) { store.read_json("claims/o/r/1.json") }
+      assert_includes error.message, "500 []"
+    end
+  end
+
   def test_read_json_raises_operational_on_malformed_success
     with_stub([[200, { "path" => "claims/o/r/1.json", "version" => 7 }]]) do |store, _|
       error = assert_raises(AgentCoord::OperationalError) { store.read_json("claims/o/r/1.json") }
@@ -301,6 +308,19 @@ class HttpBackendSelectionTest < HttpEnvTestCase
         code, out, err = run_cli(["status", "--api-url", "http://127.0.0.1:9", "--state-root", root], {})
         assert_equal 0, code
         assert_includes out, "claims"
+        assert_includes err, "--api-url and --state-root"
+      end
+    end
+  end
+
+  def test_doctor_json_omits_backend_url_when_state_root_wins
+    Dir.mktmpdir do |root|
+      with_env("AGENT_COORD_API_TOKEN" => nil) do
+        code, out, err = run_cli(["doctor", "--api-url", "http://127.0.0.1:9", "--state-root", root, "--json"], {})
+        payload = JSON.parse(out)
+        assert_equal 0, code
+        assert_equal "local", payload.fetch("backend")
+        assert_nil payload["backend_url"]
         assert_includes err, "--api-url and --state-root"
       end
     end
