@@ -43,6 +43,25 @@ session is dead but its lease isn't. It's the worktree insight again, applied
 across machines: make the ownership boundary explicit and the switch becomes
 routine.
 
+### Use case 3b: Plan windows — cap-aware work, cross-host failover
+
+Both vendors meter subscriptions (5-hour windows, weekly caps). When one app
+hits its cap, every lane it hosts stalls at once — and without limit tracking
+that looks identical to several broken workers. The coordination plane records
+cap state per machine+app pair, shows the reset countdown, and offers the move
+that actually helps: **hand the work item to the other vendor** — release with
+a handoff note (branch, PR, phase, next steps), re-claim from the other app,
+keep going on the same branch and PR. Claims, branches, and PRs are
+host-agnostic, so switching a work item from Codex to Claude Code mid-PR (or
+back) is a routine handoff, not a restart.
+
+A boundary worth stating plainly: this plane **respects vendor limits**. It
+surfaces caps and routes work to genuinely separate budget pools — the other
+vendor's plan, or a different person's account on a team. It never rotates or
+pools accounts within a vendor, and the launcher stops at caps rather than
+scheduling around them. Making your paid window count is the feature;
+evading it is permanently out of scope.
+
 ## Use case 4: Work can get lost
 
 Local agent sessions die undramatically: a chat window closed, a context
