@@ -26,6 +26,7 @@ async function authenticate(request: Request, env: Env): Promise<string | null> 
 }
 
 const MAX_STATE_BYTES = 256 * 1024;
+const MAX_REQUEST_BYTES = MAX_STATE_BYTES + 4096;
 const STATE_PATH = /^(claims|heartbeats|batches)\/[A-Za-z0-9_.:/-]+\.json$/;
 
 function validPath(path: string): boolean {
@@ -40,6 +41,14 @@ async function getState(env: Env, path: string): Promise<Response> {
 }
 
 async function putState(request: Request, env: Env, path: string): Promise<Response> {
+  const contentLength = request.headers.get("content-length");
+  if (contentLength && /^\d+$/.test(contentLength)) {
+    const requestBytes = Number.parseInt(contentLength, 10);
+    if (Number.isSafeInteger(requestBytes) && requestBytes > MAX_REQUEST_BYTES) {
+      return json(413, { error: "payload_too_large" });
+    }
+  }
+
   let body: unknown;
   try {
     body = await request.json();
