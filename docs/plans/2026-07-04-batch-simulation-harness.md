@@ -178,7 +178,7 @@ if [ -n "$base_ref" ]; then
   if [ "$changed_count" -gt 0 ]; then
     invalid="$(printf '%s\n' "$changed" |
       sed '/^$/d' |
-      grep -Ev '^lib/task_(one|two|three)\.rb$' || true)"
+      grep -Ev '^lib/task_[[:alnum:]_]+\.rb$' || true)"
     if [ -n "$invalid" ]; then
       printf 'Unexpected changed files for single-task validation:\n%s\n' "$invalid" >&2
       exit 1
@@ -188,6 +188,10 @@ if [ -n "$base_ref" ]; then
       exit 1
     fi
     for test_file in $tests; do
+      if [ ! -f "$test_file" ]; then
+        printf 'Expected matching test file for changed task: %s\n' "$test_file" >&2
+        exit 1
+      fi
       ruby "$test_file"
     done
     exit 0
@@ -353,8 +357,7 @@ RESET="${2:-}"
 HERE="$(cd "$(dirname "$0")/.." && pwd)"
 WORK="$(mktemp -d)"
 cleanup() {
-  chmod -R u+w "$WORK" 2>/dev/null || true
-  rm -R "$WORK" 2>/dev/null || true
+  rm -R -f "$WORK"
 }
 trap cleanup EXIT
 

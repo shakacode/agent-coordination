@@ -6,8 +6,7 @@ RESET="${2:-}"
 HERE="$(cd "$(dirname "$0")/.." && pwd)"
 WORK="$(mktemp -d)"
 cleanup() {
-  chmod -R u+w "$WORK" 2>/dev/null || true
-  rm -R "$WORK" 2>/dev/null || true
+  rm -R -f "$WORK"
 }
 trap cleanup EXIT
 
