@@ -205,12 +205,6 @@ set -euo pipefail
 root="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
 cd "$root"
 
-if [ "${GITHUB_EVENT_NAME:-}" = "pull_request" ] && [ -n "${GITHUB_BASE_REF:-}" ]; then
-  git fetch --quiet origin "$GITHUB_BASE_REF" --depth=1
-  AGENT_SIM_BASE_REF="$(git rev-parse FETCH_HEAD)" "$root/.agents/bin/validate"
-  exit 0
-fi
-
 "$root/.agents/bin/validate"
 ```
 
@@ -253,7 +247,7 @@ generated from `sim/template/`; do not hand-edit outside a simulation run.
 ## Agent Workflow Configuration
 
 Portable shared skills resolve this repo's commands and policy through:
-- **Commands** — run `.agents/bin/<name>` (`setup`, `validate`, `test`, ...); see `.agents/bin/README.md`. A missing script means that capability is n/a here.
+- **Commands** — run `.agents/bin/<name>` (`ci`, `validate`, `test`); see `.agents/bin/README.md`. A missing script means that capability is n/a here.
 - **Policy / config** — `.agents/agent-workflow.yml`.
 ```
 
@@ -360,6 +354,15 @@ HERE="$(cd "$(dirname "$0")/.." && pwd)"
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
 
+case "$REPO" in
+  shakacode/agent-coord-sim-alpha | shakacode/agent-coord-sim-beta) ;;
+  *)
+    echo "refusing to overwrite non-simulation repo: $REPO" >&2
+    echo "allowed repos: shakacode/agent-coord-sim-alpha, shakacode/agent-coord-sim-beta" >&2
+    exit 1
+    ;;
+esac
+
 cp -R "$HERE/template/." "$WORK/"
 cd "$WORK"
 git init -q -b main && git add -A
@@ -380,16 +383,26 @@ fi
 gh label create sim-batch --repo "$REPO" --color 5319e7 \
   --description "Seeded simulation issue" 2>/dev/null || true
 
-count=$(python3 -c 'import json;print(len(json.load(open("'"$HERE"'/issues.json"))["issues"]))')
-for i in $(seq 0 $((count - 1))); do
-  TITLE=$(python3 -c 'import json;print(json.load(open("'"$HERE"'/issues.json"))["issues"]['"$i"']["title"])')
-  BODY=$(python3 -c 'import json;print(json.load(open("'"$HERE"'/issues.json"))["issues"]['"$i"']["body"])')
-  if gh issue list --repo "$REPO" --label sim-batch --state open --json title \
-    --jq '.[].title' | grep -Fxq "$TITLE"; then
+existing_titles="$WORK/existing_titles"
+gh issue list --repo "$REPO" --label sim-batch --state open --limit 1000 --json title \
+  --jq '.[].title' > "$existing_titles"
+
+count=0
+while IFS= read -r -d '' TITLE && IFS= read -r -d '' BODY; do
+  count=$((count + 1))
+  if grep -Fxq -- "$TITLE" "$existing_titles"; then
     continue
   fi
   gh issue create --repo "$REPO" --title "$TITLE" --body "$BODY" --label sim-batch
-done
+done < <(python3 - "$HERE/issues.json" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as handle:
+    for issue in json.load(handle)["issues"]:
+        sys.stdout.write(issue["title"] + "\0" + issue["body"] + "\0")
+PY
+)
 echo "SEEDED $REPO with $count issues"
 ```
 
