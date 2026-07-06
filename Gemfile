@@ -5,3 +5,4 @@ source "https://rubygems.org"
 gem "base64", require: false
 gem "minitest", require: false
 gem "rubocop", require: false
+gem "webrick", require: false

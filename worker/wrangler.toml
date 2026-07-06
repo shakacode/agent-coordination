@@ -1,0 +1,8 @@
+name = "agent-coord-api"
+main = "src/index.ts"
+compatibility_date = "2026-06-01"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "agent-coord"
+database_id = "REPLACE_AT_DEPLOY"   # [OPERATOR] fills after `wrangler d1 create agent-coord`

@@ -5,10 +5,13 @@ require "base64"
 require "digest"
 require "fileutils"
 require "json"
+require "net/http"
+require "openssl"
 require "open3"
 require "optparse"
 require "shellwords"
 require "time"
+require "uri"
 
 module AgentCoord
   VERSION = "0.1.0"
@@ -116,6 +119,7 @@ module AgentCoord
           --backend OWNER/REPO       backend repository (default: #{DEFAULT_BACKEND})
           --ref REF                  backend branch/ref (default: #{DEFAULT_REF})
           --state-root PATH          use local files instead of GitHub API
+          --api-url URL              use the HTTP backend at URL
           --json                     emit JSON for supported commands
           -h, --help                 show command help
       HELP
@@ -127,12 +131,7 @@ module AgentCoord
     end
 
     def parse_options(command, argv)
-      options = {
-        backend: ENV.fetch("AGENT_COORD_BACKEND", DEFAULT_BACKEND),
-        ref: ENV.fetch("AGENT_COORD_REF", DEFAULT_REF),
-        state_root: ENV.fetch("AGENT_COORD_STATE_ROOT", nil),
-        status: "in_progress"
-      }
+      options = default_options
 
       parser = OptionParser.new do |opts|
         opts.banner = "Usage: agent-coord #{command} [options]"
@@ -141,6 +140,7 @@ module AgentCoord
         opts.on("--backend OWNER/REPO", "backend repository") { |value| options[:backend] = value }
         opts.on("--ref REF", "backend branch/ref") { |value| options[:ref] = value }
         opts.on("--state-root PATH", "use local files instead of GitHub API") { |value| options[:state_root] = value }
+        opts.on("--api-url URL", "use the HTTP backend at URL") { |value| options[:api_url] = value }
         opts.on("--json", "emit JSON for supported commands") { options[:json] = true }
         opts.on("--agent-id ID", "stable agent identifier") { |value| options[:agent_id] = value }
         opts.on("--repo OWNER/REPO", "target repository") { |value| options[:repo] = value }
@@ -166,7 +166,53 @@ module AgentCoord
       parser.parse!(argv)
       raise Error, "unexpected arguments: #{argv.join(' ')}" unless argv.empty?
 
+      finalize_options(command, options)
+    end
+
+    def finalize_options(command, options)
+      resolve_backend_env(options) if backend_command?(command)
       options
+    end
+
+    def backend_command?(command)
+      %w[claim release heartbeat status doctor].include?(command)
+    end
+
+    def default_options
+      {
+        backend: ENV.fetch("AGENT_COORD_BACKEND", DEFAULT_BACKEND),
+        ref: ENV.fetch("AGENT_COORD_REF", DEFAULT_REF),
+        state_root: nil,
+        api_url: nil,
+        status: "in_progress"
+      }
+    end
+
+    def resolve_backend_env(options)
+      cli_api = options[:api_url]
+      env_api = ENV.fetch("AGENT_COORD_API_URL", nil)
+      env_root = ENV.fetch("AGENT_COORD_STATE_ROOT", nil)
+      env_root = nil if env_root == ""
+
+      if options[:state_root]
+        if cli_api
+          @stderr.puts "warning: --api-url and --state-root are both set; using the local backend."
+        elsif env_api && !env_api.empty?
+          @stderr.puts "warning: AGENT_COORD_API_URL and --state-root are both set; using the local backend."
+        end
+        return
+      end
+
+      options[:api_url] ||= env_api
+      if options[:api_url]
+        if env_root
+          api_source = cli_api ? "--api-url" : "AGENT_COORD_API_URL"
+          @stderr.puts "warning: #{api_source} and AGENT_COORD_STATE_ROOT are both set; " \
+                       "using the HTTP backend. Pass --state-root to force local."
+        end
+        return
+      end
+      options[:state_root] = env_root if env_root
     end
 
     def add_command_help(opts, command)
@@ -193,7 +239,7 @@ module AgentCoord
     def deep_option_token?(argv)
       # Keep this in sync with value-taking opts.on definitions in parse_options.
       value_options = %w[
-        --backend --ref --state-root --agent-id --repo --target --batch-id --branch
+        --backend --ref --state-root --api-url --agent-id --repo --target --batch-id --branch
         --ttl --status --install-dir --profile
       ]
       skip_next = false
@@ -309,10 +355,17 @@ module AgentCoord
 
     def doctor(options)
       doctor_options = options.dup
-      doctor_options[:state_root] ||= default_status_state_root
-      backend_kind = doctor_options[:state_root] ? "local" : "github"
+      doctor_options[:state_root] ||= default_status_state_root unless doctor_options[:api_url]
+      backend_kind =
+        if doctor_options[:api_url] && !doctor_options[:state_root] then "http"
+        elsif doctor_options[:state_root] then "local"
+        else "github"
+        end
       begin
-        if doctor_options[:state_root]
+        if backend_kind == "http"
+          store = build_store(doctor_options)
+          store.verify_readable!
+        elsif doctor_options[:state_root]
           store = LocalStore.new(doctor_options.fetch(:state_root))
           store.verify_root!
         else
@@ -331,6 +384,7 @@ module AgentCoord
         "version" => VERSION,
         "backend" => backend_kind,
         "backend_repo" => doctor_options.fetch(:backend),
+        "backend_url" => active_backend_url(doctor_options, backend_kind),
         "state_root" => doctor_options[:state_root],
         "deep" => !options[:deep].nil?,
         "status" => "ok"
@@ -340,11 +394,16 @@ module AgentCoord
         @stdout.puts "version: #{VERSION}"
         @stdout.puts "backend: #{backend_kind}"
         @stdout.puts "backend_repo: #{doctor_options.fetch(:backend)}"
+        @stdout.puts "backend_url: #{doctor_options[:api_url]}" if backend_kind == "http"
         @stdout.puts "state_root: #{doctor_options[:state_root] || '-'}"
         @stdout.puts "mode: #{options[:deep] ? 'deep' : 'lightweight'}"
         @stdout.puts "status: ok"
       end
       0
+    end
+
+    def active_backend_url(options, backend_kind)
+      backend_kind == "http" ? options[:api_url] : nil
     end
 
     def bootstrap(options)
@@ -408,7 +467,7 @@ module AgentCoord
 
     def render_status(options)
       status_options = options.dup
-      status_options[:state_root] ||= default_status_state_root
+      status_options[:state_root] ||= default_status_state_root unless status_options[:api_url]
       store = build_store(status_options)
       now = now_utc
       payload =
@@ -874,6 +933,13 @@ module AgentCoord
     def build_store(options)
       return LocalStore.new(options.fetch(:state_root)) if options[:state_root]
 
+      if options[:api_url]
+        token = ENV.fetch("AGENT_COORD_API_TOKEN", nil)
+        raise OperationalError, "AGENT_COORD_API_TOKEN is required when using the HTTP backend" if token.to_s.empty?
+
+        return HttpStore.new(base_url: options[:api_url], token: token)
+      end
+
       GitHubStore.new(backend: options.fetch(:backend), ref: options.fetch(:ref))
     end
 
@@ -1262,6 +1328,153 @@ module AgentCoord
       GhResult.new(stdout: stdout, stderr: stderr, status: status)
     rescue SystemCallError => e
       raise OperationalError, "gh api #{args.join(' ')} failed: #{e.message}"
+    end
+  end
+
+  class HttpStore
+    OPEN_TIMEOUT = 5
+    READ_TIMEOUT = 10
+    LOOPBACK_HOSTS = %w[localhost 127.0.0.1 ::1].freeze
+    PERCENT_ENCODE_UNSAFE = /[^A-Za-z0-9._~-]/
+
+    def initialize(base_url:, token:)
+      uri = parse_base_url(base_url)
+      @base = uri.to_s.chomp("/")
+      @token = token
+    end
+
+    def read_json(path)
+      AgentCoord.safe_path!(path)
+      response = request(Net::HTTP::Get, state_path(path))
+      if response.code == "404"
+        body = parsed_json_object(response, "read #{path}")
+        return nil if body["error"] == "not_found"
+
+        raise OperationalError, http_error("read #{path}", response)
+      end
+      raise OperationalError, http_error("read #{path}", response) unless response.code == "200"
+
+      body = parsed_json_object(response, "read #{path}")
+      StoredJson.new(path: path, data: fetch_field(body, "data", "read #{path}"),
+                     sha: fetch_field(body, "version", "read #{path}").to_s)
+    end
+
+    def list_json(prefix)
+      AgentCoord.safe_path!(prefix)
+      response = request(Net::HTTP::Get, "/v1/state?prefix=#{escape_component(prefix)}")
+      raise OperationalError, http_error("list #{prefix}", response) unless response.code == "200"
+
+      entries = fetch_field(parsed_json_object(response, "list #{prefix}"), "entries", "list #{prefix}")
+      unless entries.is_a?(Array)
+        raise OperationalError, "http backend list #{prefix} returned malformed response: entries is not an array"
+      end
+
+      entries.map do |entry|
+        unless entry.is_a?(Hash)
+          raise OperationalError, "http backend list #{prefix} returned malformed response: entry is not an object"
+        end
+
+        StoredJson.new(path: fetch_field(entry, "path", "list #{prefix}"),
+                       data: fetch_field(entry, "data", "list #{prefix}"),
+                       sha: fetch_field(entry, "version", "list #{prefix}").to_s)
+      end
+    end
+
+    # message is accepted for interface parity; the HTTP backend has no commit messages.
+    def write_json(path, data, message:, sha: nil, create: false) # rubocop:disable Lint/UnusedMethodArgument
+      AgentCoord.safe_path!(path)
+      raise Error, "write_json requires sha or create" if sha.nil? && !create
+
+      headers = sha ? { "If-Match" => sha } : { "If-None-Match" => "*" }
+      response = request(Net::HTTP::Put, state_path(path), body: { "data" => data }, headers: headers)
+      case response.code
+      when "200", "201" then nil
+      when "409"
+        raise Conflict, (create ? "state already exists at #{path}" : "state changed at #{path}")
+      else
+        raise OperationalError, http_error("write #{path}", response)
+      end
+    end
+
+    def verify_readable!
+      response = request(Net::HTTP::Get, "/v1/state?prefix=#{escape_component(JSON_PREFIXES.first)}")
+      raise OperationalError, http_error("verify readable", response) unless response.code == "200"
+    end
+
+    def verify_layout!(_prefixes)
+      response = request(Net::HTTP::Get, "/v1/health")
+      raise OperationalError, http_error("health", response) unless response.code == "200"
+    end
+
+    private
+
+    def parse_base_url(base_url)
+      uri = URI.parse(base_url.to_s)
+      unless %w[http https].include?(uri.scheme) && !uri.host.to_s.empty?
+        raise OperationalError, "invalid HTTP backend URL: expected http(s) URL with host"
+      end
+      if uri.scheme == "http" && !LOOPBACK_HOSTS.include?(uri.host)
+        raise OperationalError, "HTTP backend URL must use https unless it points at localhost"
+      end
+
+      uri
+    rescue URI::InvalidURIError => e
+      raise OperationalError, "invalid HTTP backend URL: #{e.message}"
+    end
+
+    def state_path(path)
+      "/v1/state/#{escape_component(path)}"
+    end
+
+    def escape_component(value)
+      URI::DEFAULT_PARSER.escape(value.to_s, PERCENT_ENCODE_UNSAFE)
+    end
+
+    def parsed_json_object(response, action)
+      body = JSON.parse(response.body)
+      return body if body.is_a?(Hash)
+
+      raise OperationalError, "http backend #{action} returned malformed response: expected object"
+    rescue JSON::ParserError, TypeError => e
+      raise OperationalError, "http backend #{action} returned malformed JSON: #{e.message}"
+    end
+
+    def fetch_field(body, field, action)
+      body.fetch(field)
+    rescue KeyError, NoMethodError
+      raise OperationalError, "http backend #{action} returned malformed response: missing #{field}"
+    end
+
+    def request(klass, request_path, body: nil, headers: {})
+      uri = URI.parse("#{@base}#{request_path}")
+      http_request = klass.new(uri)
+      http_request["Authorization"] = "Bearer #{@token}"
+      headers.each { |name, value| http_request[name] = value }
+      if body
+        http_request["Content-Type"] = "application/json"
+        http_request.body = JSON.generate(body)
+      end
+      Net::HTTP.start(
+        uri.host,
+        uri.port,
+        use_ssl: uri.scheme == "https",
+        open_timeout: OPEN_TIMEOUT,
+        read_timeout: READ_TIMEOUT
+      ) do |http|
+        http.request(http_request)
+      end
+    rescue URI::InvalidURIError, SocketError, SystemCallError, Timeout::Error, IOError, OpenSSL::SSL::SSLError => e
+      raise OperationalError, "http backend unreachable: #{e.message}"
+    end
+
+    def http_error(action, response)
+      detail = begin
+        parsed = JSON.parse(response.body)
+        parsed.is_a?(Hash) ? parsed.fetch("error", response.body) : response.body.to_s[0, 200]
+      rescue JSON::ParserError, TypeError
+        response.body.to_s[0, 200]
+      end
+      "http backend #{action} failed: #{response.code} #{detail}"
     end
   end
 

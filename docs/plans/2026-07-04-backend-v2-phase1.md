@@ -2,9 +2,9 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Split coordination state into its own private repo and add an HTTP backend (Cloudflare Worker + D1 versioned-JSON store) behind the unchanged `agent-coord` CLI contract, implementing shakacode/agent-coordination#7 and the reorg decision.
+**Goal:** Split coordination state into its own private repo and add an HTTP backend (Cloudflare Worker + D1 versioned-JSON store) behind the unchanged `agent-coord` CLI contract, implementing shakacode/agent-coordination#3 and the reorg decision.
 
-**Architecture:** The Worker is a small versioned JSON key-value API (`/v1/state/<path>` with `If-Match` optimistic concurrency) — deliberately NOT the relational schema from docs/backend-design.md, which is the Phase 2 (#8) target when claim logic moves server-side. In Phase 1 all claim/heartbeat/status logic stays in the proven Ruby `Runner`; only the storage transport changes. A new `HttpStore` class sits beside `GitHubStore`/`LocalStore` and maps `read_json`/`write_json`/`list_json` 1:1 onto HTTP calls, so CAS semantics, exit codes, and JSON output are byte-identical to today.
+**Architecture:** The Worker is a small versioned JSON key-value API (`/v1/state/<path>` with `If-Match` optimistic concurrency) — deliberately NOT the relational schema from docs/backend-design.md, which is the Phase 2 (#4) target when claim logic moves server-side. In Phase 1 all claim/heartbeat/status logic stays in the proven Ruby `Runner`; only the storage transport changes. A new `HttpStore` class sits beside `GitHubStore`/`LocalStore` and maps `read_json`/`write_json`/`list_json` 1:1 onto HTTP calls, so CAS semantics, exit codes, and JSON output are byte-identical to today.
 
 **Tech Stack:** Ruby 3.4 stdlib (CLI, tests via minitest + WEBrick stub), TypeScript Cloudflare Worker (no framework), D1 (SQLite), wrangler v4, bash integration harness.
 
@@ -176,7 +176,7 @@ git commit -m "Move live state to agent-coordination-state; this repo is code-on
 **Interfaces:**
 - Produces: `GET /v1/health` → `200 {"status":"ok"}`; D1 tables `state` and `machines`; the `Env` type `{ DB: D1Database }` used by Tasks 5–6.
 
-- [ ] **Step 1: Write the config and migration**
+- [x] **Step 1: Write the config and migration**
 
 `worker/wrangler.toml`:
 
@@ -234,7 +234,7 @@ node_modules/
 .wrangler/
 ```
 
-- [ ] **Step 2: Write the skeleton with only the health route**
+- [x] **Step 2: Write the skeleton with only the health route**
 
 `worker/src/index.ts`:
 
@@ -261,7 +261,7 @@ export default {
 };
 ```
 
-- [ ] **Step 3: Verify locally**
+- [x] **Step 3: Verify locally**
 
 ```bash
 cd worker && npm install
@@ -274,7 +274,7 @@ kill %1
 
 Expected: `{"status":"ok"}`
 
-- [ ] **Step 4: Commit**
+- [x] **Step 4: Commit**
 
 ```bash
 cd .. && git add worker && git commit -m "Add Worker scaffold: wrangler config, D1 migration, health route"
@@ -290,7 +290,7 @@ cd .. && git add worker && git commit -m "Add Worker scaffold: wrangler config, 
 **Interfaces:**
 - Produces: `authenticate(request, env)` returning `machine: string | null`; every non-health route returns `401 {"error":"unauthorized"}` without a valid token. Tokens verified as SHA-256 hex against `machines.token_hash` where `revoked_at IS NULL`.
 
-- [ ] **Step 1: Add the auth function and wire it in**
+- [x] **Step 1: Add the auth function and wire it in**
 
 Add to `worker/src/index.ts` above `export default`:
 
@@ -326,7 +326,7 @@ Replace the `fetch` body with:
     return json(404, { error: "not_found" });
 ```
 
-- [ ] **Step 2: Verify 401 and 200 paths**
+- [x] **Step 2: Verify 401 and 200 paths**
 
 ```bash
 cd worker
@@ -341,7 +341,7 @@ kill %1
 
 Expected: `401` then `404`.
 
-- [ ] **Step 3: Commit**
+- [x] **Step 3: Commit**
 
 ```bash
 cd .. && git add worker/src/index.ts && git commit -m "Add per-machine bearer-token auth to Worker"
@@ -362,7 +362,7 @@ cd .. && git add worker/src/index.ts && git commit -m "Add per-machine bearer-to
   - `GET /v1/state?prefix=<claims|heartbeats|batches>` → `200 {"entries":[{"path","data","version"},...]}`
   - Path rule: `^(claims|heartbeats|batches)/[A-Za-z0-9_.:/-]+\.json$`, no `..`, no empty segment → else `400 {"error":"invalid_path"}`.
 
-- [ ] **Step 1: Add path validation and the three handlers**
+- [x] **Step 1: Add path validation and the three handlers**
 
 Add above `export default`:
 
@@ -444,7 +444,7 @@ Replace the trailing `return json(404, ...)` in `fetch` with:
     return json(404, { error: "not_found" });
 ```
 
-- [ ] **Step 2: Write the smoke test**
+- [x] **Step 2: Write the smoke test**
 
 `worker/bin/smoke`:
 
@@ -473,7 +473,7 @@ echo SMOKE_OK
 chmod +x worker/bin/smoke
 ```
 
-- [ ] **Step 3: Run it**
+- [x] **Step 3: Run it**
 
 ```bash
 cd worker && npx wrangler dev --local --port 8787 & sleep 3
@@ -483,7 +483,7 @@ kill %1
 
 Expected: `SMOKE_OK`
 
-- [ ] **Step 4: Commit**
+- [x] **Step 4: Commit**
 
 ```bash
 git add worker && git commit -m "Add versioned state GET/PUT/LIST with If-Match CAS"
@@ -501,7 +501,7 @@ git add worker && git commit -m "Add versioned state GET/PUT/LIST with If-Match 
 - Consumes: transport contract from Task 6.
 - Produces: `AgentCoord::HttpStore.new(base_url:, token:)` with `read_json(path) -> StoredJson|nil`, `list_json(prefix) -> [StoredJson]`, `verify_layout!(prefixes)`, `verify_readable!` — the same duck type as `LocalStore`/`GitHubStore`. `StoredJson#sha` carries the version as a String.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 `test/http_store_test.rb`:
 
@@ -582,12 +582,12 @@ class HttpStoreReadTest < Minitest::Test
 end
 ```
 
-- [ ] **Step 2: Run to verify it fails**
+- [x] **Step 2: Run to verify it fails**
 
 Run: `bundle exec ruby test/http_store_test.rb`
 Expected: FAIL with `uninitialized constant AgentCoord::HttpStore`.
 
-- [ ] **Step 3: Implement `HttpStore` reads**
+- [x] **Step 3: Implement `HttpStore` reads**
 
 In `bin/agent-coord`, add `require "net/http"` and `require "uri"` to the requires, then after the `GitHubStore` class:
 
@@ -662,12 +662,12 @@ In `bin/agent-coord`, add `require "net/http"` and `require "uri"` to the requir
   end
 ```
 
-- [ ] **Step 4: Run to verify it passes**
+- [x] **Step 4: Run to verify it passes**
 
 Run: `bundle exec ruby test/http_store_test.rb`
 Expected: `4 runs ... 0 failures, 0 errors`.
 
-- [ ] **Step 5: Lint and commit**
+- [x] **Step 5: Lint and commit**
 
 ```bash
 bundle exec rubocop && git add -A && git commit -m "Add HttpStore reads with stub-server tests"
@@ -684,7 +684,7 @@ bundle exec rubocop && git add -A && git commit -m "Add HttpStore reads with stu
 **Interfaces:**
 - Produces: `write_json(path, data, message:, sha: nil, create: false)` — 201/200 → success; 409 → `Conflict` with the exact strings the other stores use: `"state already exists at #{path}"` (create) / `"state changed at #{path}"` (update). This preserves claim/heartbeat/release behavior in `Runner` unchanged.
 
-- [ ] **Step 1: Write the failing tests** (append to `HttpStoreReadTest`’s file as a new class)
+- [x] **Step 1: Write the failing tests** (append to `HttpStoreReadTest`’s file as a new class)
 
 ```ruby
 class HttpStoreWriteTest < Minitest::Test
@@ -728,12 +728,12 @@ class HttpStoreWriteTest < Minitest::Test
 end
 ```
 
-- [ ] **Step 2: Run to verify failure**
+- [x] **Step 2: Run to verify failure**
 
 Run: `bundle exec ruby test/http_store_test.rb`
 Expected: FAIL with `NoMethodError: undefined method 'write_json'`.
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
 
 Inside `HttpStore` (public section, after `list_json`):
 
@@ -755,12 +755,12 @@ Inside `HttpStore` (public section, after `list_json`):
     end
 ```
 
-- [ ] **Step 4: Run full suite**
+- [x] **Step 4: Run full suite**
 
 Run: `bundle exec ruby test/http_store_test.rb && bundle exec ruby test/agent_coord_test.rb`
 Expected: all green.
 
-- [ ] **Step 5: Lint and commit**
+- [x] **Step 5: Lint and commit**
 
 ```bash
 bundle exec rubocop && git add -A && git commit -m "Add HttpStore CAS writes mapped to Conflict semantics"
@@ -782,7 +782,7 @@ bundle exec rubocop && git add -A && git commit -m "Add HttpStore CAS writes map
   4. otherwise → `GitHubStore`
   - When both `AGENT_COORD_API_URL` and `AGENT_COORD_STATE_ROOT` env vars are set, warn once on stderr: `warning: AGENT_COORD_API_URL and AGENT_COORD_STATE_ROOT are both set; using the HTTP backend. Pass --state-root to force local.`
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 ```ruby
 class HttpBackendSelectionTest < Minitest::Test
@@ -847,12 +847,12 @@ end
 
 Note: `Runner.new` currently accepts `stdout:`/`stderr:` keywords (`stderr` is stored but unused for warnings). The warning in Step 3 writes to `@stderr`.
 
-- [ ] **Step 2: Run to verify failure**
+- [x] **Step 2: Run to verify failure**
 
 Run: `bundle exec ruby test/http_store_test.rb`
 Expected: FAIL — status hits the GitHub/local path instead of the stub (first test), no token error (second), no warning (third).
 
-- [ ] **Step 3: Implement selection**
+- [x] **Step 3: Implement selection**
 
 In `parse_options`, change the initial options hash: `state_root: nil, api_url: nil` (drop the direct env fetch for `state_root`), and add the flag:
 
@@ -912,12 +912,12 @@ In `render_status` and `doctor`, guard the mirror default so HTTP wins:
 
 (and the equivalent line in `doctor` for `doctor_options`).
 
-- [ ] **Step 4: Run the full suite**
+- [x] **Step 4: Run the full suite**
 
 Run: `bundle exec ruby test/http_store_test.rb && bundle exec ruby test/agent_coord_test.rb`
 Expected: all green. If an existing test set `AGENT_COORD_STATE_ROOT` via ENV and relied on the old fetch location, it still passes — the env fallback moved but kept identical effect.
 
-- [ ] **Step 5: Lint and commit**
+- [x] **Step 5: Lint and commit**
 
 ```bash
 bundle exec rubocop && git add -A && git commit -m "Add HTTP backend selection with precedence and both-set warning"
@@ -934,7 +934,7 @@ bundle exec rubocop && git add -A && git commit -m "Add HTTP backend selection w
 **Interfaces:**
 - Produces: `agent-coord doctor` with the HTTP backend reports `backend: http` and `backend_url`, checks `/v1/health` and a claims list; `--deep` lists all three prefixes.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 ```ruby
 class HttpDoctorTest < Minitest::Test
@@ -960,12 +960,12 @@ class HttpDoctorTest < Minitest::Test
 end
 ```
 
-- [ ] **Step 2: Run to verify failure**
+- [x] **Step 2: Run to verify failure**
 
 Run: `bundle exec ruby test/http_store_test.rb`
 Expected: FAIL — doctor reports `backend: github` and tries `gh auth status`.
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
 
 In `doctor`, before the current `backend_kind` logic:
 
@@ -995,7 +995,7 @@ The existing `store.verify_layout!(JSON_PREFIXES)` call after the branch stays w
 
 Extend the payload and text output with `"backend_url" => doctor_options[:api_url]` and a `backend_url:` line when backend is http.
 
-- [ ] **Step 4: Run, lint, commit**
+- [x] **Step 4: Run, lint, commit**
 
 Run: `bundle exec ruby test/http_store_test.rb && bundle exec ruby test/agent_coord_test.rb && bundle exec rubocop`
 Expected: green.
@@ -1014,7 +1014,7 @@ git add -A && git commit -m "Teach doctor the HTTP backend"
 
 **Interfaces:**
 - Consumes: everything above.
-- Produces: one command that proves the #7 acceptance criteria: contention refusal (exit 3), dead-holder takeover, two-concurrent-claims single winner, heartbeat/status/release parity.
+- Produces: one command that proves the #3 acceptance criteria: contention refusal (exit 3), dead-holder takeover, two-concurrent-claims single winner, heartbeat/status/release parity.
 
 - [ ] **Step 1: Write the harness**
 
@@ -1259,7 +1259,7 @@ No file changes. Execute the grill-decided cutover:
 ## Roadmap: subsequent plans (separate documents, in order)
 
 0. **Parallel track — [`2026-07-04-batch-simulation-harness.md`](2026-07-04-batch-simulation-harness.md):** deterministic scripted-worker protocol tests (CI, no LLM, LocalStore today / HTTP backend once this plan lands) plus two seeded GitHub sim repos where real Codex and Claude sessions process issue batches and a scorecard verifies claims/PRs/CI. Layer 1 can start immediately; Layer 2's live scenarios become the acceptance demo for this phase's cutover.
-1. **Phase 2 — `2026-XX-XX-backend-v2-phase2.md` (#8):** relational schema migration (claims/agent_status/machine_liveness/lanes/events tables per docs/backend-design.md), server-side claim ops with single-statement CAS (generation fencing, instance ids, `--supersede`), sticky terminal status, `cancel` verb, `register-batch`, thread handles + phases, **`host` attribution (codex | claude-code) and a `handoff` release mode with resume notes** (single-PR machine/editor switching), lifecycle-hook heartbeat transport, sidecar split, bot-authored nightly export to agent-coordination-state. Supersedes the Phase 1 KV routes for claims/heartbeats (the `/v1/state` KV remains for batches passthrough until `register-batch` lands).
+1. **Phase 2 — `2026-XX-XX-backend-v2-phase2.md` (#4):** relational schema migration (claims/agent_status/machine_liveness/lanes/events tables per docs/backend-design.md), server-side claim ops with single-statement CAS (generation fencing, instance ids, `--supersede`), sticky terminal status, `cancel` verb, `register-batch`, thread handles + phases, **`host` attribution (codex | claude-code) and a `handoff` release mode with resume notes** (single-PR machine/editor switching), lifecycle-hook heartbeat transport, sidecar split, bot-authored nightly export to agent-coordination-state. Supersedes the Phase 1 KV routes for claims/heartbeats (the `/v1/state` KV remains for batches passthrough until `register-batch` lands).
 2. **Phase 3 — dashboard merge + API mode (dashboard#9):** subtree-merge `agent-coordination-dashboard` into `dashboard/`, transfer its issue, archive the old repo; reader swap to the Worker API; polling; thread handles + host/machine columns; wedged detection; registration-first start flow; Worker-served read view behind Cloudflare Access.
 3. **Phase 4 — agent-workflows text (#63, #64, #76, pr-lane):** coordination contract doc additions, push-phase ownership verification, thread-handle goal-prompt line, Lane Card, address-review exclusion, and the **pr-lane skill** (coordinated single-PR flow for direct-prompt work: claim → CI/review process → PR↔dashboard mapping → explicit handoff/release for machine or editor switches). Blocked by Phase 2 fields.
-4. **Phase 5 — launcher + reservations (#9, #10):** `launch_requested` polling daemon spawning `codex exec`/`claude -p` in worktrees; capacity reservations closing the triage race.
+4. **Phase 5 — launcher + reservations (#5, #6):** `launch_requested` polling daemon spawning `codex exec`/`claude -p` in worktrees; capacity reservations closing the triage race.
