@@ -279,6 +279,14 @@ class HttpBackendSelectionTest < HttpEnvTestCase
     end
   end
 
+  def test_api_url_with_empty_host_is_operational_error
+    with_env("AGENT_COORD_API_URL" => "https://", "AGENT_COORD_API_TOKEN" => "tok") do
+      code, _, err = run_cli(["status"], {})
+      assert_equal 2, code
+      assert_includes err, "expected http(s) URL with host"
+    end
+  end
+
   def test_non_loopback_http_api_url_is_operational_error
     with_env("AGENT_COORD_API_URL" => "http://agent-coord.example", "AGENT_COORD_API_TOKEN" => "tok") do
       code, _, err = run_cli(["status"], {})

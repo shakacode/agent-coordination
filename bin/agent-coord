@@ -1409,7 +1409,7 @@ module AgentCoord
 
     def parse_base_url(base_url)
       uri = URI.parse(base_url.to_s)
-      unless %w[http https].include?(uri.scheme) && uri.host
+      unless %w[http https].include?(uri.scheme) && !uri.host.to_s.empty?
         raise OperationalError, "invalid HTTP backend URL: expected http(s) URL with host"
       end
       if uri.scheme == "http" && !LOOPBACK_HOSTS.include?(uri.host)
