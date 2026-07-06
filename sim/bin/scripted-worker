@@ -25,18 +25,63 @@ CLI="$(cd "$(dirname "$0")/../.." && pwd)/bin/agent-coord"
 BRANCH="sim/${ISSUE_KEY}-${AGENT_ID}"
 CLAIM_ACQUIRED=0
 
-case "$ISSUE_KEY" in
-  task_one|task_two|task_three) ;;
-  *) echo "unknown issue key: $ISSUE_KEY"; exit 2 ;;
-esac
+apply_issue_fix() {
+  issue_key="$1"
+  mode="${2:-apply}"
+
+  case "$issue_key" in
+    task_one)
+      [ "$mode" = "check" ] && return 0
+      cat > lib/task_one.rb <<'RB'
+# frozen_string_literal: true
+
+module TaskOne
+  def self.positive_sum(numbers)
+    numbers.select(&:positive?).sum
+  end
+end
+RB
+      ;;
+    task_two)
+      [ "$mode" = "check" ] && return 0
+      cat > lib/task_two.rb <<'RB'
+# frozen_string_literal: true
+
+module TaskTwo
+  def self.title_case(text)
+    text.split.map(&:capitalize).join(" ")
+  end
+end
+RB
+      ;;
+    task_three)
+      [ "$mode" = "check" ] && return 0
+      cat > lib/task_three.rb <<'RB'
+# frozen_string_literal: true
+
+module TaskThree
+  def self.inclusive_count(first, last)
+    last - first + 1
+  end
+end
+RB
+      ;;
+    *) return 1 ;;
+  esac
+}
+
+if ! apply_issue_fix "$ISSUE_KEY" check; then
+  echo "unknown issue key: $ISSUE_KEY"
+  exit 2
+fi
 
 beat() {
-  "$CLI" heartbeat --agent-id "$AGENT_ID" --repo "$REPO_SLUG" \
-    --target "$ISSUE_KEY" --branch "$BRANCH" --status "$1"
+  "$CLI" heartbeat --agent-id="$AGENT_ID" --repo="$REPO_SLUG" \
+    --target="$ISSUE_KEY" --branch="$BRANCH" --status="$1"
 }
 
 release_claim() {
-  "$CLI" release --agent-id "$AGENT_ID" --repo "$REPO_SLUG" --target "$ISSUE_KEY"
+  "$CLI" release --agent-id="$AGENT_ID" --repo="$REPO_SLUG" --target="$ISSUE_KEY"
   CLAIM_ACQUIRED=0
 }
 
@@ -52,7 +97,7 @@ cleanup_claim() {
 trap cleanup_claim EXIT
 
 set +e
-"$CLI" claim --agent-id "$AGENT_ID" --repo "$REPO_SLUG" --target "$ISSUE_KEY" --branch "$BRANCH"
+"$CLI" claim --agent-id="$AGENT_ID" --repo="$REPO_SLUG" --target="$ISSUE_KEY" --branch="$BRANCH"
 CODE=$?
 set -e
 if [ "$CODE" -eq 3 ]; then
@@ -65,49 +110,14 @@ beat claimed
 
 mkdir -p "$WORKDIR"
 cd "$WORKDIR"
-git clone -q --branch main "$CLONE_URL" repo
+git clone -q --branch main -- "$CLONE_URL" repo
 cd repo
 git config user.name "agent-coord sim worker"
 git config user.email "agent-coord-sim@example.invalid"
 git checkout -q -b "$BRANCH"
 beat implementing
 
-case "$ISSUE_KEY" in
-  task_one)
-    cat > lib/task_one.rb <<'RB'
-# frozen_string_literal: true
-
-module TaskOne
-  def self.positive_sum(numbers)
-    numbers.select(&:positive?).sum
-  end
-end
-RB
-    ;;
-  task_two)
-    cat > lib/task_two.rb <<'RB'
-# frozen_string_literal: true
-
-module TaskTwo
-  def self.title_case(text)
-    text.split.map(&:capitalize).join(" ")
-  end
-end
-RB
-    ;;
-  task_three)
-    cat > lib/task_three.rb <<'RB'
-# frozen_string_literal: true
-
-module TaskThree
-  def self.inclusive_count(first, last)
-    last - first + 1
-  end
-end
-RB
-    ;;
-  *) echo "unknown issue key: $ISSUE_KEY"; exit 2 ;;
-esac
+apply_issue_fix "$ISSUE_KEY"
 
 beat validating
 ruby "test/${ISSUE_KEY}_test.rb"
