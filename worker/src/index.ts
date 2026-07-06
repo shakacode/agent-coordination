@@ -33,6 +33,37 @@ function validPath(path: string): boolean {
   return STATE_PATH.test(path) && !path.includes("..") && !path.includes("//");
 }
 
+async function readJsonBody(request: Request): Promise<{ body: unknown } | { response: Response }> {
+  if (!request.body) return { response: json(400, { error: "invalid_json" }) };
+
+  const reader = request.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let received = 0;
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    received += value.byteLength;
+    if (received > MAX_REQUEST_BYTES) {
+      await reader.cancel();
+      return { response: json(413, { error: "payload_too_large" }) };
+    }
+    chunks.push(value);
+  }
+
+  const bytes = new Uint8Array(received);
+  let offset = 0;
+  for (const chunk of chunks) {
+    bytes.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+
+  try {
+    return { body: JSON.parse(new TextDecoder().decode(bytes)) };
+  } catch {
+    return { response: json(400, { error: "invalid_json" }) };
+  }
+}
+
 async function getState(env: Env, path: string): Promise<Response> {
   const row = await env.DB.prepare("SELECT data, version FROM state WHERE path = ?")
     .bind(path).first<{ data: string; version: number }>();
@@ -50,12 +81,9 @@ async function putState(request: Request, env: Env, path: string): Promise<Respo
     }
   }
 
-  let body: unknown;
-  try {
-    body = await request.json();
-  } catch {
-    return json(400, { error: "invalid_json" });
-  }
+  const bodyResult = await readJsonBody(request);
+  if ("response" in bodyResult) return bodyResult.response;
+  const body = bodyResult.body;
   if (body === null || typeof body !== "object" || Array.isArray(body)) {
     return json(400, { error: "missing_data" });
   }
