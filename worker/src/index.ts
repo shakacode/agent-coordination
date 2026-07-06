@@ -83,11 +83,7 @@ async function putState(request: Request, env: Env, path: string): Promise<Respo
     const result = await env.DB.prepare(
       "UPDATE state SET data = ?, version = version + 1, updated_at = ? WHERE path = ? AND version = ?",
     ).bind(data, now, path, version).run();
-    if (result.meta.changes === 0) {
-      const existing = await env.DB.prepare("SELECT 1 AS found FROM state WHERE path = ?").bind(path).first();
-      if (!existing) return json(404, { error: "not_found" });
-      return json(409, { error: "version_conflict" });
-    }
+    if (result.meta.changes === 0) return json(409, { error: "version_conflict" });
     return json(200, { path, version: version + 1 });
   }
   return json(400, { error: "precondition_required" });
