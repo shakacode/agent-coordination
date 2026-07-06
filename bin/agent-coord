@@ -6,6 +6,7 @@ require "digest"
 require "fileutils"
 require "json"
 require "net/http"
+require "openssl"
 require "open3"
 require "optparse"
 require "shellwords"
@@ -182,12 +183,14 @@ module AgentCoord
     def resolve_backend_env(options)
       return if options[:state_root]
 
+      cli_api = options[:api_url]
       env_api = ENV.fetch("AGENT_COORD_API_URL", nil)
       env_root = ENV.fetch("AGENT_COORD_STATE_ROOT", nil)
       options[:api_url] ||= env_api
       if options[:api_url]
         if env_root && !env_root.empty?
-          @stderr.puts "warning: AGENT_COORD_API_URL and AGENT_COORD_STATE_ROOT are both set; " \
+          api_source = cli_api ? "--api-url" : "AGENT_COORD_API_URL"
+          @stderr.puts "warning: #{api_source} and AGENT_COORD_STATE_ROOT are both set; " \
                        "using the HTTP backend. Pass --state-root to force local."
         end
         return
@@ -1382,7 +1385,8 @@ module AgentCoord
       ) do |http|
         http.request(http_request)
       end
-    rescue URI::InvalidURIError, ArgumentError, SocketError, SystemCallError, Timeout::Error, IOError => e
+    rescue URI::InvalidURIError, ArgumentError, SocketError, SystemCallError, Timeout::Error, IOError,
+           OpenSSL::SSL::SSLError => e
       raise OperationalError, "http backend unreachable: #{e.message}"
     end
 

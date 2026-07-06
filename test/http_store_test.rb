@@ -80,6 +80,18 @@ class HttpStoreReadTest < HttpStoreTestCase
     error = assert_raises(AgentCoord::OperationalError) { store.list_json("claims") }
     assert_includes error.message, "http backend unreachable"
   end
+
+  def test_list_json_wraps_tls_failures_as_operational
+    store = AgentCoord::HttpStore.new(base_url: "https://agent-coord.example", token: "tok")
+    original_start = Net::HTTP.method(:start)
+    Net::HTTP.define_singleton_method(:start) { |*| raise OpenSSL::SSL::SSLError, "certificate verify failed" }
+
+    error = assert_raises(AgentCoord::OperationalError) { store.list_json("claims") }
+    assert_includes error.message, "http backend unreachable"
+    assert_includes error.message, "certificate verify failed"
+  ensure
+    Net::HTTP.define_singleton_method(:start, original_start) if original_start
+  end
 end
 
 class HttpStoreWriteTest < HttpStoreTestCase
@@ -195,6 +207,23 @@ class HttpBackendSelectionTest < HttpEnvTestCase
       code, _, err = run_cli(["status"], {})
       assert_equal 0, code
       assert_includes err, "both set"
+    end
+  ensure
+    stub.shutdown
+  end
+
+  def test_api_url_flag_warning_names_flag_when_state_root_env_set
+    responses = [
+      [200, { "entries" => [] }],
+      [200, { "entries" => [] }],
+      [200, { "entries" => [] }]
+    ]
+    stub = HttpStoreStub.new(responses)
+    with_env("AGENT_COORD_API_TOKEN" => "tok", "AGENT_COORD_STATE_ROOT" => "/tmp/nonexistent-root") do
+      code, _, err = run_cli(["status", "--api-url", stub.base_url], {})
+      assert_equal 0, code
+      assert_includes err, "--api-url and AGENT_COORD_STATE_ROOT"
+      refute_includes err, "AGENT_COORD_API_URL and AGENT_COORD_STATE_ROOT"
     end
   ensure
     stub.shutdown
