@@ -43,11 +43,11 @@ session is dead but its lease isn't. It's the worktree insight again, applied
 across machines: make the ownership boundary explicit and the switch becomes
 routine.
 
-## Use case 3b: Plan windows — cap-aware work, cross-host failover
+### Use case 3b: Plan windows — cap-aware work, cross-host failover
 
 Both vendors meter subscriptions (5-hour windows, weekly caps). When one app
 hits its cap, every lane it hosts stalls at once — and without limit tracking
-that looks identical to five broken workers. The coordination plane records
+that looks identical to several broken workers. The coordination plane records
 cap state per machine+app pair, shows the reset countdown, and offers the move
 that actually helps: **hand the work item to the other vendor** — release with
 a handoff note (branch, PR, phase, next steps), re-claim from the other app,
