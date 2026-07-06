@@ -16,7 +16,7 @@ async function sha256Hex(value: string): Promise<string> {
 
 async function authenticate(request: Request, env: Env): Promise<string | null> {
   const header = request.headers.get("authorization") ?? "";
-  const match = header.match(/^Bearer (.+)$/);
+  const match = header.match(/^Bearer (.+)$/i);
   if (!match) return null;
   const hash = await sha256Hex(match[1]);
   const row = await env.DB.prepare(

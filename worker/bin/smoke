@@ -3,6 +3,7 @@
 set -euo pipefail
 BASE=http://127.0.0.1:8787
 AUTH="Authorization: Bearer devtoken"
+LOWER_AUTH="Authorization: bearer devtoken"
 P="claims/shakacode/demo/smoke-$(date +%s)-$$.json"
 LONG_PATH="claims/$(python3 -c 'print("x"*600)').json"
 fail() { echo "SMOKE FAIL: $1"; exit 1; }
@@ -11,6 +12,7 @@ expect() { [ "$2" = "$3" ] || fail "$1: expected $3 got $2"; }
 expect create   "$(curl -s -o /dev/null -w %{http_code} -X PUT "$BASE/v1/state/$P" -H "$AUTH" -H 'If-None-Match: *' -d '{"data":{"schema_version":1,"agent_id":"a1"}}')" 201
 expect recreate "$(curl -s -o /dev/null -w %{http_code} -X PUT "$BASE/v1/state/$P" -H "$AUTH" -H 'If-None-Match: *' -d '{"data":{}}')" 409
 expect get      "$(curl -s "$BASE/v1/state/$P" -H "$AUTH" | python3 -c 'import json,sys; print(json.load(sys.stdin)["version"])')" 1
+expect lowerauth "$(curl -s -o /dev/null -w %{http_code} "$BASE/v1/state/$P" -H "$LOWER_AUTH")" 200
 expect casok    "$(curl -s -o /dev/null -w %{http_code} -X PUT "$BASE/v1/state/$P" -H "$AUTH" -H 'If-Match: 1' -d '{"data":{"agent_id":"a2"}}')" 200
 expect casstale "$(curl -s -o /dev/null -w %{http_code} -X PUT "$BASE/v1/state/$P" -H "$AUTH" -H 'If-Match: 1' -d '{"data":{"agent_id":"a3"}}')" 409
 expect missing  "$(curl -s -o /dev/null -w %{http_code} -X PUT "$BASE/v1/state/${P}.missing.json" -H "$AUTH" -H 'If-Match: 1' -d '{"data":{"agent_id":"a3"}}')" 409
