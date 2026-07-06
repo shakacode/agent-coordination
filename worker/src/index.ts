@@ -150,8 +150,9 @@ export default {
     if (!machine) {
       return json(401, { error: "unauthorized" });
     }
-    if (url.pathname === "/v1/state" && request.method === "GET") {
-      return listState(env, url.searchParams.get("prefix") ?? "");
+    if (url.pathname === "/v1/state") {
+      if (request.method === "GET") return listState(env, url.searchParams.get("prefix") ?? "");
+      return json(405, { error: "method_not_allowed" });
     }
     if (url.pathname.startsWith("/v1/state/")) {
       let path: string;

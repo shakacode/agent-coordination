@@ -23,6 +23,7 @@ expect hugever  "$(curl -s -o /dev/null -w %{http_code} -X PUT "$BASE/v1/state/$
 expect badpath  "$(curl -s -o /dev/null -w %{http_code} "$BASE/v1/state/etc/passwd" -H "$AUTH")" 400
 expect badenc   "$(curl -s -o /dev/null -w %{http_code} "$BASE/v1/state/claims/%E0%A4%A.json" -H "$AUTH")" 400
 expect longpath "$(curl -s -o /dev/null -w %{http_code} "$BASE/v1/state/$LONG_PATH" -H "$AUTH")" 400
+expect listpost "$(curl -s -o /dev/null -w %{http_code} -X POST "$BASE/v1/state" -H "$AUTH" -d '{}')" 405
 expect list     "$(curl -s "$BASE/v1/state?prefix=claims" -H "$AUTH" | python3 -c 'import json,sys; print(len(json.load(sys.stdin)["entries"]) >= 1)')" True
 expect large    "$(python3 -c 'import json; print(json.dumps({"data":"x"*(256*1024+1)}))' | curl -s -o /dev/null -w %{http_code} -X PUT "$BASE/v1/state/$P" -H "$AUTH" -H 'If-Match: 2' --data-binary @-)" 413
 echo SMOKE_OK
