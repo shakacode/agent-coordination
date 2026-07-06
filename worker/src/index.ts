@@ -101,6 +101,7 @@ async function putState(request: Request, env: Env, path: string): Promise<Respo
   const ifMatch = request.headers.get("if-match");
   const ifNoneMatch = request.headers.get("if-none-match");
 
+  if (ifNoneMatch && ifNoneMatch !== "*") return json(400, { error: "invalid_if_none_match" });
   if (ifNoneMatch === "*") {
     const result = await env.DB.prepare(
       "INSERT INTO state (path, data, version, updated_at) VALUES (?, ?, 1, ?) ON CONFLICT (path) DO NOTHING",
