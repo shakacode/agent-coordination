@@ -658,6 +658,31 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     assert_equal "active", claim.fetch("status")
   end
 
+  def test_release_persists_branch_supplied_after_claim
+    claim = run_agent_coord(
+      "claim",
+      "--agent-id", "worker-a",
+      "--repo", "shakacode/react_on_rails",
+      "--target", "3970",
+      "--ttl", "3600"
+    )
+    assert_equal 0, claim.status.exitstatus, claim.stderr
+
+    release = run_agent_coord(
+      "release",
+      "--agent-id", "worker-a",
+      "--repo", "shakacode/react_on_rails",
+      "--target", "3970",
+      "--branch", "jg-codex/released-branch"
+    )
+    assert_equal 0, release.status.exitstatus, release.stderr
+
+    claim_path = File.join(@state_root, "claims", "shakacode", "react_on_rails", "3970.json")
+    payload = JSON.parse(File.read(claim_path))
+    assert_equal "released", payload.fetch("status")
+    assert_equal "jg-codex/released-branch", payload.fetch("branch")
+  end
+
   def test_concurrent_claims_for_same_item_have_exactly_one_winner
     results = %w[worker-a worker-b].map do |agent_id|
       Thread.new do
@@ -820,6 +845,7 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     assert_equal 0, status.status.exitstatus, status.stderr
     assert_includes status.stdout, "claims"
     assert_includes status.stdout, "shakacode/react_on_rails#3969"
+    assert_includes status.stdout, "branch jg-codex/3969-agent-coord-backend"
     assert_includes status.stdout, "batches"
     assert_includes status.stdout, "batch-1"
   end

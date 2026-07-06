@@ -316,6 +316,7 @@ module AgentCoord
         "updated_at" => timestamp(now),
         "expires_at" => timestamp(now)
       )
+      payload["branch"] = options[:branch] if options[:branch]
 
       store.write_json(path, payload, message: "Release #{options[:repo]}##{options[:target]}", sha: existing.sha)
       @stdout.puts "released #{options[:repo]}##{options[:target]} by #{options[:agent_id]}"
@@ -690,9 +691,13 @@ module AgentCoord
         @stdout.puts "- #{status_section_note(payload, 'claims') || 'none'}"
       else
         payload.fetch("claims").each do |claim|
-          @stdout.puts "- #{claim.fetch('repo')}##{claim.fetch('target')} " \
-                       "#{claim.fetch('status')} #{claim.fetch('agent_id')} " \
-                       "expires #{claim.fetch('expires_at')}"
+          @stdout.puts [
+            "- #{claim.fetch('repo')}##{claim.fetch('target')}",
+            claim.fetch("status"),
+            claim.fetch("agent_id"),
+            "branch #{claim.fetch('branch')}",
+            "expires #{claim.fetch('expires_at')}"
+          ].join(" ")
         end
       end
 

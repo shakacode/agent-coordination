@@ -6,26 +6,68 @@ HOST="${1:?usage: llm-worker (codex|claude) <owner/repo> <issue> <batch-id>}"
 REPO="${2:?}"
 ISSUE="${3:?}"
 BATCH="${4:?}"
-AGENT_ID="sim-${HOST}-${ISSUE}"
 HERE="$(cd "$(dirname "$0")/.." && pwd)"
-PROMPT=$(sed -e "s|{{REPO}}|$REPO|g" -e "s|{{ISSUE_NUMBER}}|$ISSUE|g" \
-  -e "s|{{AGENT_ID}}|$AGENT_ID|g" -e "s|{{BATCH_ID}}|$BATCH|g" \
-  "$HERE/prompts/worker-prompt.md")
-WORK="$(mktemp -d)"
-cd "$WORK"
+GH_BIN="${GH_BIN:-gh}"
+CODEX_BIN="${CODEX_BIN:-codex}"
+CLAUDE_BIN="${CLAUDE_BIN:-claude}"
 
 case "$HOST" in
-  codex)
-    codex exec --full-auto "$PROMPT"
-    ;;
-  claude)
-    claude -p "$PROMPT" --permission-mode acceptEdits \
-      --allowedTools "Bash,Read,Edit,Write,Glob,Grep"
-    ;;
+  codex | claude) ;;
   *)
     echo "host must be codex or claude"
     exit 1
     ;;
 esac
 
-echo "LLM_WORKER_EXIT host=$HOST issue=$ISSUE workdir=$WORK"
+ISSUE_TITLE="$("$GH_BIN" issue view "$ISSUE" --repo "$REPO" --json title --jq .title)"
+ISSUE_KEY="$(
+  ruby -rjson -e '
+    manifest = JSON.parse(File.read(ARGV.fetch(0))).fetch("issues")
+    title = ARGV.fetch(1)
+    issue = manifest.find { |candidate| candidate.fetch("title") == title }
+    abort "no sim issue key for issue title: #{title}" unless issue
+    puts issue.fetch("key")
+  ' "$HERE/issues.json" "$ISSUE_TITLE"
+)"
+BATCH_REF="$(printf "%s" "$BATCH" | LC_ALL=C tr -c "A-Za-z0-9._-" "-")"
+AGENT_ID="sim-${HOST}-${BATCH_REF}-${ISSUE_KEY}"
+BRANCH="sim/${ISSUE_KEY}-${AGENT_ID}"
+git check-ref-format --branch "$BRANCH" >/dev/null
+PROMPT="$(
+  REPO="$REPO" ISSUE_NUMBER="$ISSUE" ISSUE_KEY="$ISSUE_KEY" \
+    AGENT_ID="$AGENT_ID" BATCH_ID="$BATCH" BRANCH="$BRANCH" \
+    ruby - "$HERE/prompts/worker-prompt.md" <<'RUBY'
+template = File.read(ARGV.fetch(0))
+{
+  "{{REPO}}" => ENV.fetch("REPO"),
+  "{{ISSUE_NUMBER}}" => ENV.fetch("ISSUE_NUMBER"),
+  "{{ISSUE_KEY}}" => ENV.fetch("ISSUE_KEY"),
+  "{{AGENT_ID}}" => ENV.fetch("AGENT_ID"),
+  "{{BATCH_ID}}" => ENV.fetch("BATCH_ID"),
+  "{{BRANCH}}" => ENV.fetch("BRANCH")
+}.each { |placeholder, value| template = template.gsub(placeholder, value) }
+puts template
+RUBY
+)"
+WORK="$(mktemp -d)"
+cd "$WORK"
+
+rc=0
+case "$HOST" in
+  codex)
+    set +e
+    "$CODEX_BIN" exec --full-auto "$PROMPT"
+    rc=$?
+    set -e
+    ;;
+  claude)
+    set +e
+    "$CLAUDE_BIN" -p "$PROMPT" --permission-mode acceptEdits \
+      --allowedTools "Bash,Read,Edit,Write,Glob,Grep"
+    rc=$?
+    set -e
+    ;;
+esac
+
+echo "LLM_WORKER_EXIT host=$HOST issue=$ISSUE issue_key=$ISSUE_KEY workdir=$WORK exit=$rc"
+exit "$rc"

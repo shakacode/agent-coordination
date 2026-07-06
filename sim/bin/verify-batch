@@ -65,29 +65,60 @@ class BatchVerifier
     return { branch: branch_col, pr: pr_col, ci: ci_col } unless @live
     return fail_row(issue.fetch("key"), "no branch recorded") if branch_col == "UNKNOWN" || branch_col.empty?
 
-    branch_out, branch_err, branch_status = Open3.capture3(
-      "gh", "pr", "list", "--repo", @repo_slug, "--state", "all",
-      "--head", branch_col, "--json", "url,headRefName,number"
-    )
-    return fail_row(issue.fetch("key"), "gh pr list failed: #{branch_err.strip}") unless branch_status.success?
-
-    pr = JSON.parse(branch_out).first
-    return fail_row(issue.fetch("key"), "no PR found") if pr.nil?
+    pr = find_pr(issue.fetch("key"), branch_col)
+    return false unless pr
 
     branch_col = pr.fetch("headRefName", branch_col)
     pr_col = pr.fetch("url")
-    checks_out, checks_err, = Open3.capture3(
+    checks_out, checks_err, checks_status = Open3.capture3(
       "gh", "pr", "checks", pr.fetch("number").to_s, "--repo", @repo_slug,
       "--json", "bucket"
     )
     return fail_row(issue.fetch("key"), "gh pr checks failed: #{checks_err.strip}") if checks_out.strip.empty?
 
-    buckets = JSON.parse(checks_out).map { |check| check.fetch("bucket") }.uniq.sort
+    buckets = parse_check_buckets(issue.fetch("key"), checks_out, checks_err)
+    return false unless buckets
+
     ci_col = buckets.empty? ? "none" : buckets.join(",")
-    bad_buckets = buckets & %w[fail pending]
+    return fail_row(issue.fetch("key"), "CI not passing (#{ci_col}) #{pr_col}") if buckets.empty?
+
+    bad_buckets = buckets - %w[pass]
     return fail_row(issue.fetch("key"), "CI not passing (#{ci_col}) #{pr_col}") unless bad_buckets.empty?
+    return fail_row(issue.fetch("key"), "gh pr checks failed: #{checks_err.strip}") unless checks_status.success?
 
     { branch: branch_col, pr: pr_col, ci: ci_col }
+  end
+
+  def find_pr(key, branch)
+    pr_list = fetch_prs(key, branch, "open")
+    return false unless pr_list
+
+    pr_list = fetch_prs(key, branch, "all") if pr_list.empty?
+    return false unless pr_list
+
+    pr = pr_list.max_by { |candidate| candidate.fetch("number").to_i }
+    return fail_row(key, "no PR found") if pr.nil?
+
+    pr
+  end
+
+  def fetch_prs(key, branch, state)
+    branch_out, branch_err, branch_status = Open3.capture3(
+      "gh", "pr", "list", "--repo", @repo_slug, "--state", state,
+      "--head", branch, "--json", "url,headRefName,number,state"
+    )
+    return fail_row(key, "gh pr list failed: #{branch_err.strip}") unless branch_status.success?
+
+    JSON.parse(branch_out)
+  rescue JSON::ParserError
+    fail_row(key, "gh pr list returned invalid JSON")
+  end
+
+  def parse_check_buckets(key, checks_out, checks_err)
+    JSON.parse(checks_out).map { |check| check.fetch("bucket") }.uniq.sort
+  rescue JSON::ParserError
+    detail = checks_err.strip.empty? ? "invalid JSON" : checks_err.strip
+    fail_row(key, "gh pr checks failed: #{detail}")
   end
 
   def fail_row(key, reason)
