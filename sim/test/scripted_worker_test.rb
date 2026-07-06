@@ -42,17 +42,17 @@ class ScriptedWorkerTest < Minitest::Test
   end
 
   def test_worker_completes_and_records_protocol
-    stdout, stderr, status = run_worker("w1")
+    stdout, stderr, status = run_worker("host:worker")
     assert_equal 0, status.exitstatus, "worker failed: #{stderr}"
     assert_includes stdout, "WORKER_DONE"
 
     claim = JSON.parse(File.read(File.join(@state, "claims", "sim", "local", "task_one.json")))
     assert_equal "released", claim.fetch("status")
-    heartbeat = JSON.parse(File.read(File.join(@state, "heartbeats", "w1.json")))
+    heartbeat = JSON.parse(File.read(File.join(@state, "heartbeats", "host:worker.json")))
     assert_equal "done", heartbeat.fetch("status")
 
     branches = `git --git-dir=#{@origin} branch --list`.lines.map(&:strip)
-    assert_includes branches, "sim/task_one-w1"
+    assert_includes branches, "sim/task_one-host-worker"
   end
 
   def test_second_worker_is_refused_while_first_holds_claim

@@ -513,17 +513,17 @@ class ScriptedWorkerTest < Minitest::Test
   end
 
   def test_worker_completes_and_records_protocol
-    stdout, stderr, status = run_worker("w1")
+    stdout, stderr, status = run_worker("host:worker")
     assert_equal 0, status.exitstatus, "worker failed: #{stderr}"
     assert_includes stdout, "WORKER_DONE"
 
     claim = JSON.parse(File.read(File.join(@state, "claims", "sim", "local", "task_one.json")))
     assert_equal "released", claim.fetch("status")
-    heartbeat = JSON.parse(File.read(File.join(@state, "heartbeats", "w1.json")))
+    heartbeat = JSON.parse(File.read(File.join(@state, "heartbeats", "host:worker.json")))
     assert_equal "done", heartbeat.fetch("status")
 
     branches = `git --git-dir=#{@origin} branch --list`.lines.map(&:strip)
-    assert_includes branches, "sim/task_one-w1"
+    assert_includes branches, "sim/task_one-host-worker"
   end
 
   def test_second_worker_is_refused_while_first_holds_claim
@@ -595,7 +595,8 @@ done
   [ -n "$ISSUE_KEY" ] && [ -n "$WORKDIR" ] || { echo "missing args"; exit 2; }
 
 CLI="$(cd "$(dirname "$0")/../.." && pwd)/bin/agent-coord"
-BRANCH="sim/${ISSUE_KEY}-${AGENT_ID}"
+BRANCH_AGENT_ID="$(printf "%s" "$AGENT_ID" | LC_ALL=C tr -c "A-Za-z0-9._-" "-")"
+BRANCH="sim/${ISSUE_KEY}-${BRANCH_AGENT_ID}"
 CLAIM_ACQUIRED=0
 WORK_PUSHED=0
 DONE_RECORDED=0
@@ -657,7 +658,9 @@ beat() {
 
 release_claim() {
   "$CLI" release --agent-id="$AGENT_ID" --repo="$REPO_SLUG" --target="$ISSUE_KEY"
-  CLAIM_ACQUIRED=0
+  local rc=$?
+  [ "$rc" -eq 0 ] && CLAIM_ACQUIRED=0
+  return "$rc"
 }
 
 cleanup_claim() {
