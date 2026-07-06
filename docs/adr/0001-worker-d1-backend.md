@@ -5,7 +5,7 @@ Status: accepted
 
 ## Context
 
-The v2 coordination backend (#7) needs an always-on HTTP store for claims,
+The v2 coordination backend (#3) needs an always-on HTTP store for claims,
 heartbeats, batches, events, and reservations, replacing JSON files committed to
 this repo via the GitHub Contents API. The load is tiny (~14k writes/day), the
 schema is five small tables, and the operator is one person. ShakaCode is a Rails

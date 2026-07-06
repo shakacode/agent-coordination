@@ -48,7 +48,69 @@ jobs:
           bundler-cache: true
 
       - name: Run tests
-        run: bundle exec ruby -Itest test/agent_coord_test.rb
+        run: |
+          bundle exec ruby -Itest test/agent_coord_test.rb
+          bundle exec ruby -Itest test/http_store_test.rb
+          bundle exec ruby sim/test/scripted_worker_test.rb
+          bundle exec ruby sim/test/race_test.rb
 
-      - run: bundle exec ruby sim/test/scripted_worker_test.rb
-      - run: bundle exec ruby sim/test/race_test.rb
+  worker-typecheck:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+
+      - name: Set up Node
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: worker/package-lock.json
+
+      - name: Install worker dependencies
+        run: npm ci
+        working-directory: worker
+
+      - name: Typecheck Worker
+        run: npm run typecheck
+        working-directory: worker
+
+  worker-smoke:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+
+      - name: Set up Node
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: worker/package-lock.json
+
+      - name: Install worker dependencies
+        run: npm ci
+        working-directory: worker
+
+      - name: Run Worker smoke
+        working-directory: worker
+        run: |
+          npx wrangler d1 migrations apply agent-coord --local
+          npx wrangler d1 execute agent-coord --local --command "INSERT OR REPLACE INTO machines (machine, token_hash, created_at, revoked_at) VALUES ('dev', '9428e07c68054de014032f21e0716501aa937714fd31033caf589e66b276e53b', datetime('now'), NULL)"
+          npm run dev > /tmp/wrangler.log 2>&1 &
+          worker_pid=$!
+          trap 'kill "$worker_pid" 2>/dev/null || true' EXIT
+          for _ in {1..30}; do
+            if curl -fsS http://127.0.0.1:8787/v1/health >/dev/null; then
+              break
+            fi
+            sleep 1
+          done
+          curl -fsS http://127.0.0.1:8787/v1/health >/dev/null || { cat /tmp/wrangler.log; exit 1; }
+          ./bin/smoke || { cat /tmp/wrangler.log; exit 1; }
