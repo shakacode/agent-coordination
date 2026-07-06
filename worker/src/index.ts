@@ -27,10 +27,14 @@ async function authenticate(request: Request, env: Env): Promise<string | null> 
 
 const MAX_STATE_BYTES = 256 * 1024;
 const MAX_REQUEST_BYTES = MAX_STATE_BYTES + 4096;
+const MAX_STATE_PATH_BYTES = 512;
 const STATE_PATH = /^(claims|heartbeats|batches)\/[A-Za-z0-9_.:/-]+\.json$/;
 
 function validPath(path: string): boolean {
-  return STATE_PATH.test(path) && !path.includes("..") && !path.includes("//");
+  return new TextEncoder().encode(path).byteLength <= MAX_STATE_PATH_BYTES
+    && STATE_PATH.test(path)
+    && !path.includes("..")
+    && !path.includes("//");
 }
 
 async function readJsonBody(request: Request): Promise<{ body: unknown } | { response: Response }> {
