@@ -551,7 +551,7 @@ class ScriptedWorkerTest < Minitest::Test
   def test_failure_after_claim_releases_claim
     missing_origin = File.join(@dir, "missing.git")
     _stdout, _stderr, status = run_worker("w4", clone_url: missing_origin)
-    refute_equal 0, status.exitstatus
+    assert_equal 2, status.exitstatus
 
     claim = JSON.parse(File.read(File.join(@state, "claims", "sim", "local", "task_one.json")))
     assert_equal "released", claim.fetch("status")
@@ -559,14 +559,6 @@ class ScriptedWorkerTest < Minitest::Test
     assert_equal "failed", heartbeat.fetch("status")
   end
 end
-```
-
-Note: the second test's `claim` invocation uses `--repo sim/local --target task_one` — write it exactly as:
-
-```ruby
-    system(env, File.expand_path("../../bin/agent-coord", __dir__),
-           "claim", "--agent-id", "holder", "--repo", "sim/local",
-           "--target", "task_one", exception: true)
 ```
 
 - [x] **Step 2: Run to verify failure**
@@ -595,12 +587,12 @@ while [ $# -gt 0 ]; do
     --clone-url) CLONE_URL="$2"; shift 2 ;;
     --issue-key) ISSUE_KEY="$2"; shift 2 ;;
     --workdir) WORKDIR="$2"; shift 2 ;;
-    *) echo "unknown arg: $1"; exit 1 ;;
+    *) echo "unknown arg: $1"; exit 2 ;;
   esac
 done
 
 [ -n "$AGENT_ID" ] && [ -n "$REPO_SLUG" ] && [ -n "$CLONE_URL" ] &&
-  [ -n "$ISSUE_KEY" ] && [ -n "$WORKDIR" ] || { echo "missing args"; exit 1; }
+  [ -n "$ISSUE_KEY" ] && [ -n "$WORKDIR" ] || { echo "missing args"; exit 2; }
 
 CLI="$(cd "$(dirname "$0")/../.." && pwd)/bin/agent-coord"
 BRANCH="sim/${ISSUE_KEY}-${AGENT_ID}"
@@ -675,6 +667,7 @@ cleanup_claim() {
       beat failed >/dev/null || echo "warning: failed to record failed heartbeat for ${ISSUE_KEY}" >&2
     fi
     release_claim >/dev/null || echo "warning: failed to release claim for ${ISSUE_KEY}" >&2
+    status=2
   fi
   exit "$status"
 }
@@ -691,7 +684,7 @@ beat claimed
 
 mkdir -p "$WORKDIR"
 cd "$WORKDIR"
-git clone -q --branch main -- "$CLONE_URL" repo
+git clone -q --branch main --depth 1 --no-tags -- "$CLONE_URL" repo
 cd repo
 git config user.name "agent-coord sim worker"
 git config user.email "agent-coord-sim@example.invalid"

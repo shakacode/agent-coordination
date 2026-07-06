@@ -80,7 +80,7 @@ class ScriptedWorkerTest < Minitest::Test
   def test_failure_after_claim_releases_claim
     missing_origin = File.join(@dir, "missing.git")
     _stdout, _stderr, status = run_worker("w4", clone_url: missing_origin)
-    refute_equal 0, status.exitstatus
+    assert_equal 2, status.exitstatus
 
     claim = JSON.parse(File.read(File.join(@state, "claims", "sim", "local", "task_one.json")))
     assert_equal "released", claim.fetch("status")
