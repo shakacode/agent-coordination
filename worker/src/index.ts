@@ -25,6 +25,7 @@ async function authenticate(request: Request, env: Env): Promise<string | null> 
   return row?.machine ?? null;
 }
 
+const MAX_STATE_BYTES = 256 * 1024;
 const STATE_PATH = /^(claims|heartbeats|batches)\/[A-Za-z0-9_.:/-]+\.json$/;
 
 function validPath(path: string): boolean {
@@ -51,6 +52,9 @@ async function putState(request: Request, env: Env, path: string): Promise<Respo
   const payload = body as { data?: unknown };
   if (payload.data === undefined) return json(400, { error: "missing_data" });
   const data = JSON.stringify(payload.data);
+  if (new TextEncoder().encode(data).byteLength > MAX_STATE_BYTES) {
+    return json(413, { error: "payload_too_large" });
+  }
   const now = new Date().toISOString();
   const ifMatch = request.headers.get("if-match");
   const ifNoneMatch = request.headers.get("if-none-match");
@@ -65,15 +69,22 @@ async function putState(request: Request, env: Env, path: string): Promise<Respo
   if (ifMatch) {
     if (!/^\d+$/.test(ifMatch)) return json(400, { error: "invalid_if_match" });
     const version = Number.parseInt(ifMatch, 10);
+    if (!Number.isSafeInteger(version)) return json(400, { error: "invalid_if_match" });
     const result = await env.DB.prepare(
       "UPDATE state SET data = ?, version = version + 1, updated_at = ? WHERE path = ? AND version = ?",
     ).bind(data, now, path, version).run();
-    if (result.meta.changes === 0) return json(409, { error: "version_conflict" });
+    if (result.meta.changes === 0) {
+      const existing = await env.DB.prepare("SELECT 1 AS found FROM state WHERE path = ?").bind(path).first();
+      if (!existing) return json(404, { error: "not_found" });
+      return json(409, { error: "version_conflict" });
+    }
     return json(200, { path, version: version + 1 });
   }
   return json(400, { error: "precondition_required" });
 }
 
+// Phase 1 preserves the existing shared JSON store contract: callers expect full prefix snapshots.
+// Pagination needs matching HttpStore client support before this API sees production traffic.
 async function listState(env: Env, prefix: string): Promise<Response> {
   if (!["claims", "heartbeats", "batches"].includes(prefix)) {
     return json(400, { error: "invalid_prefix" });
@@ -96,6 +107,7 @@ export default {
       return json(200, { status: "ok" });
     }
     const machine = await authenticate(request, env);
+    // Phase 1 authenticates the machine token but keeps path ownership in the existing Ruby Runner.
     if (!machine) {
       return json(401, { error: "unauthorized" });
     }
