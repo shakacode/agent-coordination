@@ -607,8 +607,8 @@ BRANCH="sim/${ISSUE_KEY}-${AGENT_ID}"
 CLAIM_ACQUIRED=0
 
 apply_issue_fix() {
-  issue_key="$1"
-  mode="${2:-apply}"
+  local issue_key="$1"
+  local mode="${2:-apply}"
 
   case "$issue_key" in
     task_one)
@@ -667,11 +667,11 @@ release_claim() {
 }
 
 cleanup_claim() {
-  status=$?
+  local status=$?
   trap - EXIT
   if [ "$status" -ne 0 ] && [ "$CLAIM_ACQUIRED" -eq 1 ]; then
-    beat failed >/dev/null 2>&1 || true
-    release_claim >/dev/null 2>&1 || true
+    beat failed >/dev/null || echo "warning: failed to record failed heartbeat for ${ISSUE_KEY}" >&2
+    release_claim >/dev/null || echo "warning: failed to release claim for ${ISSUE_KEY}" >&2
   fi
   exit "$status"
 }
