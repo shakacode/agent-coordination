@@ -77,6 +77,13 @@ class ScriptedWorkerTest < Minitest::Test
     refute File.exist?(File.join(@state, "claims", "sim", "local", "task_four.json"))
   end
 
+  def test_invalid_branch_agent_id_fails_before_claim
+    stdout, _stderr, status = run_worker("worker.lock")
+    assert_equal 2, status.exitstatus
+    assert_includes stdout, "invalid worker branch: sim/task_one-worker.lock"
+    refute File.exist?(File.join(@state, "claims", "sim", "local", "task_one.json"))
+  end
+
   def test_failure_after_claim_releases_claim
     missing_origin = File.join(@dir, "missing.git")
     _stdout, _stderr, status = run_worker("w4", clone_url: missing_origin)
