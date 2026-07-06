@@ -53,6 +53,8 @@ jobs:
           bundle exec ruby -Itest test/http_store_test.rb
           bundle exec ruby sim/test/scripted_worker_test.rb
           bundle exec ruby sim/test/race_test.rb
+          bundle exec ruby sim/test/verify_batch_test.rb
+          bundle exec ruby sim/test/llm_worker_test.rb
 
   worker-typecheck:
     runs-on: ubuntu-latest

@@ -861,9 +861,9 @@ bundle exec rubocop && git add -A && git commit -m "Add scripted-worker race tes
 
 **Interfaces:**
 - Consumes: coordination state (any backend via env) + `gh` for live-repo mode.
-- Produces: `sim/bin/verify-batch --repo-slug OWNER/REPO [--live]` printing one line per manifest issue — `PASS <key> claim=released branch=<b> pr=<url|SKIPPED> ci=<state|SKIPPED>` or `FAIL <key> <reason>` — and a final `SCORE n/m`. Exit 0 only when n == m. Without `--live`, PR/CI columns are `SKIPPED` (CI mode); with `--live`, it queries `gh pr list --head <branch>` and the PR's checks.
+- Produces: `sim/bin/verify-batch --repo-slug OWNER/REPO [--live]` printing one line per manifest issue — `PASS <key> claim=released branch=<b> pr=<url|SKIPPED> ci=<state|SKIPPED>` or `FAIL <key> <reason>` — and a final `SCORE n/m`. Exit 0 only when n == m. Without `--live`, PR/CI columns are `SKIPPED` (CI mode); with `--live`, it prefers an open PR for the claim branch, falls back to the newest same-branch PR, and fails closed unless every reported check bucket is `pass`.
 
-- [ ] **Step 1: Write the failing test** (CI mode against LocalStore fixtures)
+- [x] **Step 1: Write the failing test** (CI mode against LocalStore fixtures)
 
 `sim/test/verify_batch_test.rb`:
 
@@ -919,92 +919,20 @@ class VerifyBatchTest < Minitest::Test
 end
 ```
 
-- [ ] **Step 2: Run to verify failure**
+- [x] **Step 2: Run to verify failure**
 
 Run: `bundle exec ruby sim/test/verify_batch_test.rb`
 Expected: FAIL — verify-batch missing.
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
 
-`sim/bin/verify-batch` (Ruby for JSON handling):
-
-```ruby
-#!/usr/bin/env ruby
-# frozen_string_literal: true
-
-require "json"
-require "open3"
-
-args = ARGV.dup
-repo_slug = nil
-live = false
-while (arg = args.shift)
-  case arg
-  when "--repo-slug" then repo_slug = args.shift
-  when "--live" then live = true
-  else abort "unknown arg: #{arg}"
-  end
-end
-abort "usage: verify-batch --repo-slug OWNER/REPO [--live]" unless repo_slug
-
-sim_root = File.expand_path("..", __dir__)
-cli = File.join(sim_root, "..", "bin", "agent-coord")
-manifest = JSON.parse(File.read(File.join(sim_root, "issues.json"))).fetch("issues")
-
-stdout, stderr, status = Open3.capture3("ruby", cli, "status", "--json")
-abort "agent-coord status failed: #{stderr}" unless status.success?
-claims = JSON.parse(stdout).fetch("claims")
-
-passes = 0
-manifest.each do |issue|
-  key = issue.fetch("key")
-  claim = claims.find { |c| c["repo"] == repo_slug && c["target"] == key }
-  unless claim
-    puts "FAIL #{key} no claim recorded"
-    next
-  end
-  unless claim["status"] == "released"
-    puts "FAIL #{key} claim status=#{claim['status']} (expected released)"
-    next
-  end
-
-  pr_col = "SKIPPED"
-  ci_col = "SKIPPED"
-  if live
-    branch_out, = Open3.capture3(
-      "gh", "pr", "list", "--repo", repo_slug, "--state", "all",
-      "--search", "#{issue.fetch('title')} in:title", "--json", "url,headRefName,number"
-    )
-    pr = JSON.parse(branch_out).first
-    if pr.nil?
-      puts "FAIL #{key} no PR found"
-      next
-    end
-    pr_col = pr.fetch("url")
-    checks_out, = Open3.capture3(
-      "gh", "pr", "checks", pr.fetch("number").to_s, "--repo", repo_slug,
-      "--json", "bucket", "--jq", "[.[].bucket] | unique | join(\",\")"
-    )
-    ci_col = checks_out.strip.empty? ? "none" : checks_out.strip
-    if ci_col.include?("fail")
-      puts "FAIL #{key} CI failing (#{ci_col}) #{pr_col}"
-      next
-    end
-  end
-
-  passes += 1
-  puts "PASS #{key} claim=released pr=#{pr_col} ci=#{ci_col}"
-end
-
-puts "SCORE #{passes}/#{manifest.length}"
-exit(passes == manifest.length ? 0 : 1)
-```
+`sim/bin/verify-batch` is intentionally implemented as a Ruby `BatchVerifier` rather than inline shell: it reads `agent-coord status --json`, matches manifest issue keys to released claims for the requested repo, and in `--live` mode looks up PR/check state by the branch recorded on the claim. Live scoring is fail-closed: missing/non-JSON `gh` output, no checks, canceled checks, pending checks, or any bucket other than `pass` fail that manifest row instead of crashing or passing by omission.
 
 ```bash
 chmod +x sim/bin/verify-batch
 ```
 
-- [ ] **Step 4: Run tests, lint, commit**
+- [x] **Step 4: Run tests, lint, commit**
 
 Run: `bundle exec ruby sim/test/verify_batch_test.rb`
 Expected: PASS.
@@ -1021,12 +949,13 @@ bundle exec rubocop && git add sim && git commit -m "Add batch verifier scorecar
 - Create: `sim/bin/llm-worker`
 - Create: `sim/prompts/worker-prompt.md`
 - Create: `sim/PLAYBOOK.md`
+- Test: `sim/test/llm_worker_test.rb`
 
 **Interfaces:**
 - Consumes: real sim repos (Task 2), real `codex` / `claude` CLIs on the operator machine, coordination backend via env.
 - Produces: one command per lane that launches a real headless agent session on a seeded issue, and a written playbook for the three canonical scenarios.
 
-- [ ] **Step 1: Write the worker prompt template**
+- [x] **Step 1: Write the worker prompt template**
 
 `sim/prompts/worker-prompt.md`:
 
@@ -1035,53 +964,31 @@ You are a batch worker processing one issue in a simulation repo. Follow this
 exact protocol; if any coordination command exits 3 (CLAIM_REFUSED), stop
 immediately and report the holder — do not work the issue.
 
-Repo: {{REPO}}   Issue: #{{ISSUE_NUMBER}}   Agent id: {{AGENT_ID}}   Batch: {{BATCH_ID}}
+Repo: {{REPO}}   Issue: #{{ISSUE_NUMBER}}   Issue key: {{ISSUE_KEY}}   Agent id: {{AGENT_ID}}   Batch: {{BATCH_ID}}
 
 1. Claim before any code: run
-   `agent-coord claim --agent-id {{AGENT_ID}} --repo {{REPO}} --target {{ISSUE_NUMBER}} --batch-id {{BATCH_ID}}`
+   `agent-coord claim --agent-id {{AGENT_ID}} --repo {{REPO}} --target {{ISSUE_KEY}} --batch-id {{BATCH_ID}} --branch {{BRANCH}}`
    Exit 3 → stop and report. Then heartbeat status claimed.
-2. Clone {{REPO}}, create branch `sim/issue-{{ISSUE_NUMBER}}-{{AGENT_ID}}`.
+2. Clone {{REPO}}, create branch `{{BRANCH}}`.
 3. Read issue #{{ISSUE_NUMBER}}. Fix ONLY the file it names. Heartbeat status
    implementing.
 4. Run `.agents/bin/validate`. It must pass. Heartbeat status validating.
 5. Commit, push the branch, open a PR titled after the issue with
-   "Fixes #{{ISSUE_NUMBER}}" in the body. Heartbeat status pushing --branch <branch>.
+   "Fixes #{{ISSUE_NUMBER}}" in the body. Heartbeat status pushing --branch {{BRANCH}}.
 6. Heartbeat status done, then
-   `agent-coord release --agent-id {{AGENT_ID}} --repo {{REPO}} --target {{ISSUE_NUMBER}}`.
+   `agent-coord release --agent-id {{AGENT_ID}} --repo {{REPO}} --target {{ISSUE_KEY}} --branch {{BRANCH}}`.
 7. Final message: issue number, branch, PR URL, one-line result.
 ```
 
-- [ ] **Step 2: Write the launcher**
+- [x] **Step 2: Write the launcher**
 
-`sim/bin/llm-worker`:
-
-```bash
-#!/usr/bin/env bash
-# Usage: sim/bin/llm-worker (codex|claude) <owner/repo> <issue-number> <batch-id>
-set -euo pipefail
-HOST="${1:?usage: llm-worker (codex|claude) <owner/repo> <issue> <batch-id>}"
-REPO="${2:?}"; ISSUE="${3:?}"; BATCH="${4:?}"
-AGENT_ID="sim-${HOST}-${ISSUE}"
-HERE="$(cd "$(dirname "$0")/.." && pwd)"
-PROMPT=$(sed -e "s|{{REPO}}|$REPO|g" -e "s|{{ISSUE_NUMBER}}|$ISSUE|g" \
-             -e "s|{{AGENT_ID}}|$AGENT_ID|g" -e "s|{{BATCH_ID}}|$BATCH|g" \
-             "$HERE/prompts/worker-prompt.md")
-WORK="$(mktemp -d)"
-cd "$WORK"
-case "$HOST" in
-  codex)  codex exec --full-auto "$PROMPT" ;;
-  claude) claude -p "$PROMPT" --permission-mode acceptEdits \
-            --allowedTools "Bash,Read,Edit,Write,Glob,Grep" ;;
-  *) echo "host must be codex or claude"; exit 1 ;;
-esac
-echo "LLM_WORKER_EXIT host=$HOST issue=$ISSUE workdir=$WORK"
-```
+`sim/bin/llm-worker` resolves the live GitHub issue title back to the manifest key, derives a batch-scoped agent id and deterministic branch, renders the prompt without `sed` replacement hazards, and always prints `LLM_WORKER_EXIT ... workdir=<dir> exit=<rc>` after the headless agent exits. It defaults to `gh`, `codex`, and `claude`, with `GH_BIN`, `CODEX_BIN`, and `CLAUDE_BIN` overrides for tests and unusual operator installs.
 
 ```bash
 chmod +x sim/bin/llm-worker
 ```
 
-- [ ] **Step 3: Write the playbook**
+- [x] **Step 3: Write the playbook**
 
 `sim/PLAYBOOK.md`:
 
@@ -1122,7 +1029,7 @@ hold real work.
 
 Expected: PR opened referencing the issue, `verify-batch --live` shows `PASS` for that key.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 bundle exec rubocop && git add sim && git commit -m "Add LLM batch runner, worker prompt, and simulation playbook"
