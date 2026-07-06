@@ -2,9 +2,9 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Split coordination state into its own private repo and add an HTTP backend (Cloudflare Worker + D1 versioned-JSON store) behind the unchanged `agent-coord` CLI contract, implementing shakacode/agent-coordination#7 and the reorg decision.
+**Goal:** Split coordination state into its own private repo and add an HTTP backend (Cloudflare Worker + D1 versioned-JSON store) behind the unchanged `agent-coord` CLI contract, implementing shakacode/agent-coordination#3 and the reorg decision.
 
-**Architecture:** The Worker is a small versioned JSON key-value API (`/v1/state/<path>` with `If-Match` optimistic concurrency) — deliberately NOT the relational schema from docs/backend-design.md, which is the Phase 2 (#8) target when claim logic moves server-side. In Phase 1 all claim/heartbeat/status logic stays in the proven Ruby `Runner`; only the storage transport changes. A new `HttpStore` class sits beside `GitHubStore`/`LocalStore` and maps `read_json`/`write_json`/`list_json` 1:1 onto HTTP calls, so CAS semantics, exit codes, and JSON output are byte-identical to today.
+**Architecture:** The Worker is a small versioned JSON key-value API (`/v1/state/<path>` with `If-Match` optimistic concurrency) — deliberately NOT the relational schema from docs/backend-design.md, which is the Phase 2 (#4) target when claim logic moves server-side. In Phase 1 all claim/heartbeat/status logic stays in the proven Ruby `Runner`; only the storage transport changes. A new `HttpStore` class sits beside `GitHubStore`/`LocalStore` and maps `read_json`/`write_json`/`list_json` 1:1 onto HTTP calls, so CAS semantics, exit codes, and JSON output are byte-identical to today.
 
 **Tech Stack:** Ruby 3.4 stdlib (CLI, tests via minitest + WEBrick stub), TypeScript Cloudflare Worker (no framework), D1 (SQLite), wrangler v4, bash integration harness.
 
@@ -1014,7 +1014,7 @@ git add -A && git commit -m "Teach doctor the HTTP backend"
 
 **Interfaces:**
 - Consumes: everything above.
-- Produces: one command that proves the #7 acceptance criteria: contention refusal (exit 3), dead-holder takeover, two-concurrent-claims single winner, heartbeat/status/release parity.
+- Produces: one command that proves the #3 acceptance criteria: contention refusal (exit 3), dead-holder takeover, two-concurrent-claims single winner, heartbeat/status/release parity.
 
 - [ ] **Step 1: Write the harness**
 
@@ -1259,7 +1259,7 @@ No file changes. Execute the grill-decided cutover:
 ## Roadmap: subsequent plans (separate documents, in order)
 
 0. **Parallel track — [`2026-07-04-batch-simulation-harness.md`](2026-07-04-batch-simulation-harness.md):** deterministic scripted-worker protocol tests (CI, no LLM, LocalStore today / HTTP backend once this plan lands) plus two seeded GitHub sim repos where real Codex and Claude sessions process issue batches and a scorecard verifies claims/PRs/CI. Layer 1 can start immediately; Layer 2's live scenarios become the acceptance demo for this phase's cutover.
-1. **Phase 2 — `2026-XX-XX-backend-v2-phase2.md` (#8):** relational schema migration (claims/agent_status/machine_liveness/lanes/events tables per docs/backend-design.md), server-side claim ops with single-statement CAS (generation fencing, instance ids, `--supersede`), sticky terminal status, `cancel` verb, `register-batch`, thread handles + phases, **`host` attribution (codex | claude-code) and a `handoff` release mode with resume notes** (single-PR machine/editor switching), lifecycle-hook heartbeat transport, sidecar split, bot-authored nightly export to agent-coordination-state. Supersedes the Phase 1 KV routes for claims/heartbeats (the `/v1/state` KV remains for batches passthrough until `register-batch` lands).
+1. **Phase 2 — `2026-XX-XX-backend-v2-phase2.md` (#4):** relational schema migration (claims/agent_status/machine_liveness/lanes/events tables per docs/backend-design.md), server-side claim ops with single-statement CAS (generation fencing, instance ids, `--supersede`), sticky terminal status, `cancel` verb, `register-batch`, thread handles + phases, **`host` attribution (codex | claude-code) and a `handoff` release mode with resume notes** (single-PR machine/editor switching), lifecycle-hook heartbeat transport, sidecar split, bot-authored nightly export to agent-coordination-state. Supersedes the Phase 1 KV routes for claims/heartbeats (the `/v1/state` KV remains for batches passthrough until `register-batch` lands).
 2. **Phase 3 — dashboard merge + API mode (dashboard#9):** subtree-merge `agent-coordination-dashboard` into `dashboard/`, transfer its issue, archive the old repo; reader swap to the Worker API; polling; thread handles + host/machine columns; wedged detection; registration-first start flow; Worker-served read view behind Cloudflare Access.
 3. **Phase 4 — agent-workflows text (#63, #64, #76, pr-lane):** coordination contract doc additions, push-phase ownership verification, thread-handle goal-prompt line, Lane Card, address-review exclusion, and the **pr-lane skill** (coordinated single-PR flow for direct-prompt work: claim → CI/review process → PR↔dashboard mapping → explicit handoff/release for machine or editor switches). Blocked by Phase 2 fields.
-4. **Phase 5 — launcher + reservations (#9, #10):** `launch_requested` polling daemon spawning `codex exec`/`claude -p` in worktrees; capacity reservations closing the triage race.
+4. **Phase 5 — launcher + reservations (#5, #6):** `launch_requested` polling daemon spawning `codex exec`/`claude -p` in worktrees; capacity reservations closing the triage race.

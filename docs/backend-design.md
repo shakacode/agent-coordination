@@ -1,7 +1,7 @@
 # Coordination Backend v2 Design
 
 Date: 2026-07-04
-Status: proposed (implements #7, #8, #10; decisions from the 2026-07-03 planning grill)
+Status: proposed (implements #3, #4, #6; decisions from the 2026-07-03 planning grill)
 
 ## Problem
 
@@ -13,18 +13,18 @@ already-stale data, and mints every heartbeat as a commit authored by the
 operator's account — inflating their GitHub contribution graph by hundreds of
 commits per active day. A 2026-07-02 concurrency review additionally proved four
 protocol failure modes (unfenced takeover, same-agent-id double starts, sidecar
-status overwrites, unobservable cancellation) tracked in #8.
+status overwrites, unobservable cancellation) tracked in #4.
 
 ## Requirements
 
 Functional:
 
 - Claims with compare-and-swap acquire/renew/release, generation fencing,
-  per-session instance identity, and explicit supersede (#8).
-- Agent status (with phase and thread handle) split from machine liveness (#8).
+  per-session instance identity, and explicit supersede (#4).
+- Agent status (with phase and thread handle) split from machine liveness (#4).
 - Batch registration before launch; first-class cancellation observable in status.
 - Append-only events (phase transitions, stop requests).
-- Capacity reservations (#10).
+- Capacity reservations (#6).
 - Status reads in the existing three scopes (all / target / batch) with unchanged
   CLI exit codes and JSON shapes.
 
@@ -55,16 +55,16 @@ Non-functional (measured against current fleet):
 | Team familiarity | Low (small TS surface, ~300 lines) | High (ShakaCode is a Rails shop) | Medium (gbrain already targets Supabase) |
 | Time to first value | Hours | Days (app + pipeline + hosting) | Hours for DB; more for RPC functions + dashboard + tokens |
 | Exit cost | Re-implement ~10 endpoints behind the same CLI contract; schema is plain SQLite | Same contract seam applies | Same |
-| Launcher-queue fit (#9) | Poll `launch_requested` rows; Worker cron for sweeps | Background jobs built in | Poll or realtime |
+| Launcher-queue fit (#5) | Poll `launch_requested` rows; Worker cron for sweeps | Background jobs built in | Poll or realtime |
 
 Also considered briefly: **Turso** (libSQL — equivalent to D1 without the
 integrated compute/hosting), **Neon** (serverless Postgres — still needs an API
 layer in front, which reintroduces the Worker or an app), and **keeping GitHub
-with tuning** (rejected in #7: commit-per-heartbeat is structural).
+with tuning** (rejected in #3: commit-per-heartbeat is structural).
 
 ## Decision
 
-**Cloudflare Worker + D1**, as already scoped in #7. See
+**Cloudflare Worker + D1**, as already scoped in #3. See
 [ADR 0001](adr/0001-worker-d1-backend.md) for the full rationale. The short form:
 
 - The coordination plane must be *more* reliable and *lower-maintenance* than the
@@ -115,7 +115,7 @@ Codex / Claude Code sessions                     launchd/systemd sidecar
         this repo (git archive: batched daily export, bot identity)
 ```
 
-Writers, one per record type (per the #8 split-records decision):
+Writers, one per record type (per the #4 split-records decision):
 
 - **Agent status**: written only by the agent — via `agent-coord heartbeat` from
   prompt-driven phase transitions, and (proposed) via host lifecycle hooks
@@ -126,7 +126,7 @@ Writers, one per record type (per the #8 split-records decision):
   → hook no-ops. Hook calls are fire-and-forget (1–2s timeout, always exit 0).
 - **Machine liveness**: written only by the sidecar. The sidecar never writes
   agent status, which structurally prevents the terminal-status-overwrite
-  deadlock (#8 F3).
+  deadlock (#4 F3).
 - **Batches/lanes/cancellation/reservations**: written by coordinators via the
   CLI or dashboard write actions.
 
@@ -148,7 +148,7 @@ CREATE TABLE batches (
   launch_prompt TEXT,
   status        TEXT NOT NULL DEFAULT 'registered',
     -- registered | launch_requested | running | stop_requested | stopped | complete
-  machine       TEXT,           -- launch target for #9
+  machine       TEXT,           -- launch target for #5
   cancelled_at  TEXT,
   created_at    TEXT NOT NULL,
   updated_at    TEXT NOT NULL
@@ -170,8 +170,8 @@ CREATE TABLE claims (
   repo            TEXT NOT NULL,
   target          TEXT NOT NULL,
   agent_id        TEXT NOT NULL,
-  instance_id     TEXT NOT NULL, -- per-session nonce (#8 F2)
-  generation      INTEGER NOT NULL DEFAULT 1, -- fencing counter (#8 F1)
+  instance_id     TEXT NOT NULL, -- per-session nonce (#4 F2)
+  generation      INTEGER NOT NULL DEFAULT 1, -- fencing counter (#4 F1)
   batch_id        TEXT,
   branch          TEXT,
   status          TEXT NOT NULL DEFAULT 'active', -- active | released
@@ -218,7 +218,7 @@ CREATE TABLE events (
   at          TEXT NOT NULL
 );
 
-CREATE TABLE reservations (       -- #10
+CREATE TABLE reservations (       -- #6
   id         INTEGER PRIMARY KEY AUTOINCREMENT,
   machine    TEXT NOT NULL,
   lanes      INTEGER NOT NULL,
@@ -242,9 +242,9 @@ All endpoints require `Authorization: Bearer <machine token>`; the Worker derive
 | `POST /v1/machine-liveness` | Sidecar ping. |
 | `GET /v1/status` | `?scope=all` / `?repo=&target=` / `?batch_id=` — same three scopes and degraded-notes contract as today; includes cancellation and reservations. |
 | `PUT /v1/batches/:id` | Register/update batch (registration-first flow). |
-| `POST /v1/batches/:id/cancel` | First-class cancellation (batch or `?lane=`); also settable to `launch_requested` for #9. |
+| `POST /v1/batches/:id/cancel` | First-class cancellation (batch or `?lane=`); also settable to `launch_requested` for #5. |
 | `POST /v1/events` / `GET /v1/events?batch_id=` | Append / list ordered events. |
-| `POST /v1/reservations` / `DELETE /v1/reservations/:id` | Capacity reservation (#10), atomic against free capacity. |
+| `POST /v1/reservations` / `DELETE /v1/reservations/:id` | Capacity reservation (#6), atomic against free capacity. |
 | `GET /v1/health` | Doctor target. |
 | `GET /dashboard` | Read-only view, behind Cloudflare Access (not bearer tokens). |
 
@@ -256,7 +256,7 @@ expressed as **one conditional statement**, which is strictly stronger than the
 current two-file check-then-act because the liveness check moves *into the
 write's WHERE clause*:
 
-- **Acquire with takeover** (closes #8 F1 at the store level):
+- **Acquire with takeover** (closes #4 F1 at the store level):
 
   ```sql
   INSERT INTO claims (...) VALUES (...)
@@ -318,7 +318,7 @@ Per the grill decisions:
 
 - **D1 transaction model**: no interactive transactions. Mitigated by designing
   every exclusion decision as a single conditional statement (above); the parity
-  test suite (#7) includes two-writer contention tests.
+  test suite (#3) includes two-writer contention tests.
 - **TS/Worker unfamiliarity**: surface kept small (~300 lines, no framework);
   the contract lives in the Ruby CLI tests, not the Worker.
 - **Cloudflare outage**: CLI reports operational error (exit 2) and workflows
