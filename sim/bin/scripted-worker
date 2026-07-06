@@ -22,7 +22,8 @@ done
   [ -n "$ISSUE_KEY" ] && [ -n "$WORKDIR" ] || { echo "missing args"; exit 2; }
 
 CLI="$(cd "$(dirname "$0")/../.." && pwd)/bin/agent-coord"
-BRANCH="sim/${ISSUE_KEY}-${AGENT_ID}"
+BRANCH_AGENT_ID="$(printf "%s" "$AGENT_ID" | LC_ALL=C tr -c "A-Za-z0-9._-" "-")"
+BRANCH="sim/${ISSUE_KEY}-${BRANCH_AGENT_ID}"
 CLAIM_ACQUIRED=0
 WORK_PUSHED=0
 DONE_RECORDED=0
@@ -84,7 +85,9 @@ beat() {
 
 release_claim() {
   "$CLI" release --agent-id="$AGENT_ID" --repo="$REPO_SLUG" --target="$ISSUE_KEY"
-  CLAIM_ACQUIRED=0
+  local rc=$?
+  [ "$rc" -eq 0 ] && CLAIM_ACQUIRED=0
+  return "$rc"
 }
 
 cleanup_claim() {
