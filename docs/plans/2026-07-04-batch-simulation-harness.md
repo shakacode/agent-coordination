@@ -373,7 +373,7 @@ git push -q --force origin main
 if [ "$RESET" = "--reset" ]; then
   gh issue list --repo "$REPO" --label sim-batch --state open --limit 1000 --json number \
     --jq '.[].number' | while read -r n; do
-    gh issue close "$n" --repo "$REPO" --comment "Reseeded."
+    gh issue close "$n" --repo "$REPO" --comment "Reseeded." || true
   done
   gh api --paginate "repos/$REPO/branches" --jq '.[].name' | { grep -v '^main$' || true; } | while read -r b; do
     gh api -X DELETE "repos/$REPO/git/refs/heads/$b" || true
@@ -388,12 +388,16 @@ gh issue list --repo "$REPO" --label sim-batch --state open --limit 1000 --json 
   --jq '.[].title' > "$existing_titles"
 
 count=0
+created=0
+skipped=0
 while IFS= read -r -d '' TITLE && IFS= read -r -d '' BODY; do
   count=$((count + 1))
   if grep -Fxq -- "$TITLE" "$existing_titles"; then
+    skipped=$((skipped + 1))
     continue
   fi
   gh issue create --repo "$REPO" --title "$TITLE" --body "$BODY" --label sim-batch
+  created=$((created + 1))
 done < <(python3 - "$HERE/issues.json" <<'PY'
 import json
 import sys
@@ -403,7 +407,7 @@ with open(sys.argv[1], encoding="utf-8") as handle:
         sys.stdout.write(issue["title"] + "\0" + issue["body"] + "\0")
 PY
 )
-echo "SEEDED $REPO with $count issues"
+echo "SEEDED $REPO with $count issues ($created created, $skipped skipped)"
 ```
 
 ```bash
@@ -418,7 +422,7 @@ gh repo create shakacode/agent-coord-sim-beta  --private --description "Batch si
 sim/bin/seed shakacode/agent-coord-sim-alpha
 ```
 
-Expected: `SEEDED shakacode/agent-coord-sim-alpha with 3 issues`, and the repo shows red CI on main (the seeded bugs) with 3 open `sim-batch` issues.
+Expected: `SEEDED shakacode/agent-coord-sim-alpha with 3 issues (3 created, 0 skipped)`, and the repo shows red CI on main (the seeded bugs) with 3 open `sim-batch` issues.
 
 - [x] **Step 3: Commit**
 
