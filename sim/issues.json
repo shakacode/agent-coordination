@@ -1,0 +1,25 @@
+{
+  "issues": [
+    {
+      "key": "task_one",
+      "title": "positive_sum must exclude negative numbers",
+      "file": "lib/task_one.rb",
+      "test": "test/task_one_test.rb",
+      "body": "TaskOne.positive_sum currently includes negatives in the total.\n\nSpec: negatives are excluded. positive_sum([1, 2, 3, -5]) must return 6; positive_sum([-1, -2]) must return 0.\n\nAcceptance: `ruby test/task_one_test.rb` passes. Change only lib/task_one.rb.\nDone when: PR opened referencing this issue and CI is green."
+    },
+    {
+      "key": "task_two",
+      "title": "title_case must capitalize each word",
+      "file": "lib/task_two.rb",
+      "test": "test/task_two_test.rb",
+      "body": "TaskTwo.title_case currently downcases everything.\n\nSpec: title-case each whitespace-separated word. title_case(\"hello WIDE world\") must return \"Hello Wide World\".\n\nAcceptance: `ruby test/task_two_test.rb` passes. Change only lib/task_two.rb.\nDone when: PR opened referencing this issue and CI is green."
+    },
+    {
+      "key": "task_three",
+      "title": "inclusive_count is off by one",
+      "file": "lib/task_three.rb",
+      "test": "test/task_three_test.rb",
+      "body": "TaskThree.inclusive_count(3, 7) returns 4; the range is inclusive so it must return 5.\n\nAcceptance: `ruby test/task_three_test.rb` passes. Change only lib/task_three.rb.\nDone when: PR opened referencing this issue and CI is green."
+    }
+  ]
+}

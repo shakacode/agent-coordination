@@ -1,0 +1,49 @@
+#!/usr/bin/env bash
+set -euo pipefail
+root="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
+cd "$root"
+
+base_ref="${AGENT_SIM_BASE_REF:-}"
+if [ -z "$base_ref" ] && [ -n "${GITHUB_BASE_REF:-}" ]; then
+  git fetch --quiet origin "$GITHUB_BASE_REF" --depth=1
+  base_ref="$(git rev-parse FETCH_HEAD)"
+elif [ -z "$base_ref" ] && [ "$(git branch --show-current)" != "main" ]; then
+  if git rev-parse --verify -q main >/dev/null; then
+    base_ref="main"
+  elif git rev-parse --verify -q origin/main >/dev/null; then
+    base_ref="origin/main"
+  fi
+fi
+
+if [ -n "$base_ref" ]; then
+  changed="$(git diff --name-only "$base_ref")"
+  changed_count="$(printf '%s\n' "$changed" | sed '/^$/d' | wc -l | tr -d ' ')"
+  tests="$(printf '%s\n' "$changed" |
+    sed -n 's#^lib/\(task_.*\)\.rb$#test/\1_test.rb#p' |
+    sort -u)"
+  test_count="$(printf '%s\n' "$tests" | sed '/^$/d' | wc -l | tr -d ' ')"
+
+  if [ "$changed_count" -gt 0 ]; then
+    invalid="$(printf '%s\n' "$changed" |
+      sed '/^$/d' |
+      grep -Ev '^lib/task_[[:alnum:]_]+\.rb$' || true)"
+    if [ -n "$invalid" ]; then
+      printf 'Unexpected changed files for single-task validation:\n%s\n' "$invalid" >&2
+      exit 1
+    fi
+    if [ "$test_count" -ne 1 ]; then
+      printf 'Expected exactly one changed task file, found %s.\n' "$test_count" >&2
+      exit 1
+    fi
+    for test_file in $tests; do
+      if [ ! -f "$test_file" ]; then
+        printf 'Expected matching test file for changed task: %s\n' "$test_file" >&2
+        exit 1
+      fi
+      ruby "$test_file"
+    done
+    exit 0
+  fi
+fi
+
+"$root/.agents/bin/test"

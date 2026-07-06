@@ -25,7 +25,7 @@
 **Files:**
 - Create: `sim/template/lib/task_one.rb`, `sim/template/lib/task_two.rb`, `sim/template/lib/task_three.rb`
 - Create: `sim/template/test/task_one_test.rb`, `sim/template/test/task_two_test.rb`, `sim/template/test/task_three_test.rb`
-- Create: `sim/template/.agents/agent-workflow.yml`, `sim/template/.agents/bin/validate`, `sim/template/.agents/bin/test`, `sim/template/.agents/bin/README.md`
+- Create: `sim/template/.agents/agent-workflow.yml`, `sim/template/.agents/bin/validate`, `sim/template/.agents/bin/test`, `sim/template/.agents/bin/ci`, `sim/template/.agents/bin/README.md`
 - Create: `sim/template/AGENTS.md`, `sim/template/README.md`, `sim/template/Rakefile`
 - Create: `sim/template/.github/workflows/ci.yml`
 - Create: `sim/issues.json`
@@ -33,7 +33,7 @@
 **Interfaces:**
 - Produces: a complete consumer-repo tree with three deliberately buggy functions, three tests that FAIL until fixed, and the seam files real skills resolve. `sim/issues.json` is the single source of truth for issue seeding and verification.
 
-- [ ] **Step 1: Write the buggy libs and their tests**
+- [x] **Step 1: Write the buggy libs and their tests**
 
 Each task file has one bug; each test currently fails. `sim/template/lib/task_one.rb`:
 
@@ -125,7 +125,7 @@ class TaskThreeTest < Minitest::Test
 end
 ```
 
-- [ ] **Step 2: Write the seam and CI files**
+- [x] **Step 2: Write the seam and CI files**
 
 `sim/template/Rakefile`:
 
@@ -154,17 +154,73 @@ exec rake test "$@"
 set -euo pipefail
 root="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
 cd "$root"
+
+base_ref="${AGENT_SIM_BASE_REF:-}"
+if [ -z "$base_ref" ] && [ -n "${GITHUB_BASE_REF:-}" ]; then
+  git fetch --quiet origin "$GITHUB_BASE_REF" --depth=1
+  base_ref="$(git rev-parse FETCH_HEAD)"
+elif [ -z "$base_ref" ] && [ "$(git branch --show-current)" != "main" ]; then
+  if git rev-parse --verify -q main >/dev/null; then
+    base_ref="main"
+  elif git rev-parse --verify -q origin/main >/dev/null; then
+    base_ref="origin/main"
+  fi
+fi
+
+if [ -n "$base_ref" ]; then
+  changed="$(git diff --name-only "$base_ref")"
+  changed_count="$(printf '%s\n' "$changed" | sed '/^$/d' | wc -l | tr -d ' ')"
+  tests="$(printf '%s\n' "$changed" |
+    sed -n 's#^lib/\(task_.*\)\.rb$#test/\1_test.rb#p' |
+    sort -u)"
+  test_count="$(printf '%s\n' "$tests" | sed '/^$/d' | wc -l | tr -d ' ')"
+
+  if [ "$changed_count" -gt 0 ]; then
+    invalid="$(printf '%s\n' "$changed" |
+      sed '/^$/d' |
+      grep -Ev '^lib/task_[[:alnum:]_]+\.rb$' || true)"
+    if [ -n "$invalid" ]; then
+      printf 'Unexpected changed files for single-task validation:\n%s\n' "$invalid" >&2
+      exit 1
+    fi
+    if [ "$test_count" -ne 1 ]; then
+      printf 'Expected exactly one changed task file, found %s.\n' "$test_count" >&2
+      exit 1
+    fi
+    for test_file in $tests; do
+      if [ ! -f "$test_file" ]; then
+        printf 'Expected matching test file for changed task: %s\n' "$test_file" >&2
+        exit 1
+      fi
+      ruby "$test_file"
+    done
+    exit 0
+  fi
+fi
+
 "$root/.agents/bin/test"
 ```
 
-(`chmod +x` both.) `sim/template/.agents/bin/README.md`:
+`sim/template/.agents/bin/ci`:
+
+```bash
+#!/usr/bin/env bash
+set -euo pipefail
+root="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
+cd "$root"
+
+"$root/.agents/bin/validate"
+```
+
+(`chmod +x` all three scripts.) `sim/template/.agents/bin/README.md`:
 
 ```markdown
 # Commands
 
 | Script | Purpose |
 | --- | --- |
-| `validate` | Full pre-push gate (runs test). |
+| `ci` | GitHub Actions entrypoint. |
+| `validate` | Sim-aware gate: exactly one changed task file runs its matching test; non-task diffs are rejected. |
 | `test` | Run minitest suite. |
 ```
 
@@ -195,7 +251,7 @@ generated from `sim/template/`; do not hand-edit outside a simulation run.
 ## Agent Workflow Configuration
 
 Portable shared skills resolve this repo's commands and policy through:
-- **Commands** — run `.agents/bin/<name>` (`validate`, `test`); see `.agents/bin/README.md`. A missing script means that capability is n/a here.
+- **Commands** — run `.agents/bin/<name>` (`ci`, `validate`, `test`); see `.agents/bin/README.md`. A missing script means that capability is n/a here.
 - **Policy / config** — `.agents/agent-workflow.yml`.
 ```
 
@@ -223,15 +279,15 @@ jobs:
   test:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: ruby/setup-ruby@v1
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: ruby/setup-ruby@3fee6763234110473bd57dd4595c5199fce2c510 # v1.258.0
         with:
           ruby-version: "3.4"
       - run: gem install minitest rake
-      - run: .agents/bin/validate
+      - run: .agents/bin/ci
 ```
 
-- [ ] **Step 3: Write the issue manifest**
+- [x] **Step 3: Write the issue manifest**
 
 `sim/issues.json`:
 
@@ -263,15 +319,15 @@ jobs:
 }
 ```
 
-- [ ] **Step 4: Verify the template is self-consistently broken**
+- [x] **Step 4: Verify the template is self-consistently broken**
 
 ```bash
 cd sim/template && rake test; echo "exit=$?"
 ```
 
-Expected: 3 failures (one per task test), non-zero exit — the bugs are real and the tests catch them.
+Expected: 4 failures (Task One has two assertions; Tasks Two and Three have one each), non-zero exit — the bugs are real and the tests catch them.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 cd ../.. && bundle exec rubocop && git add sim && git commit -m "Add sim template project with three seeded bugs and seam files"
@@ -288,7 +344,7 @@ cd ../.. && bundle exec rubocop && git add sim && git commit -m "Add sim templat
 - Consumes: `sim/template/`, `sim/issues.json`.
 - Produces: `sim/bin/seed <owner/repo> [--reset]` — force-pushes template content to `main` and (re)creates one labeled issue per manifest entry. Idempotent; `--reset` also closes old sim issues and deletes non-main branches.
 
-- [ ] **Step 1: Write it**
+- [x] **Step 1: Write it**
 
 `sim/bin/seed`:
 
@@ -300,7 +356,41 @@ REPO="${1:?usage: seed <owner/repo> [--reset]}"
 RESET="${2:-}"
 HERE="$(cd "$(dirname "$0")/.." && pwd)"
 WORK="$(mktemp -d)"
-trap 'rm -rf "$WORK"' EXIT
+ISSUE_PAIRS="$(mktemp)"
+cleanup() {
+  rm -R -f "$WORK"
+  rm -f "$ISSUE_PAIRS"
+}
+trap cleanup EXIT
+
+case "$REPO" in
+  shakacode/agent-coord-sim-alpha | shakacode/agent-coord-sim-beta) ;;
+  *)
+    echo "refusing to overwrite non-simulation repo: $REPO" >&2
+    echo "allowed repos: shakacode/agent-coord-sim-alpha, shakacode/agent-coord-sim-beta" >&2
+    exit 1
+    ;;
+esac
+
+python3 - "$HERE/issues.json" > "$ISSUE_PAIRS" <<'PY'
+import json
+import sys
+from collections import Counter
+
+with open(sys.argv[1], encoding="utf-8") as handle:
+    issues = json.load(handle)["issues"]
+
+titles = [issue["title"] for issue in issues]
+duplicates = [title for title, count in Counter(titles).items() if count > 1]
+if duplicates:
+    sys.stderr.write(
+        "duplicate issue title(s) in sim/issues.json: " + ", ".join(duplicates) + "\n"
+    )
+    raise SystemExit(1)
+
+for issue in issues:
+    sys.stdout.write(issue["title"] + "\0" + issue["body"] + "\0")
+PY
 
 cp -R "$HERE/template/." "$WORK/"
 cd "$WORK"
@@ -310,11 +400,11 @@ git remote add origin "https://github.com/$REPO"
 git push -q --force origin main
 
 if [ "$RESET" = "--reset" ]; then
-  gh issue list --repo "$REPO" --label sim-batch --state open --json number \
+  gh issue list --repo "$REPO" --label sim-batch --state open --limit 1000 --json number \
     --jq '.[].number' | while read -r n; do
-    gh issue close "$n" --repo "$REPO" --comment "Reseeded."
+    gh issue close "$n" --repo "$REPO" --comment "Reseeded." || true
   done
-  gh api "repos/$REPO/branches" --jq '.[].name' | grep -v '^main$' | while read -r b; do
+  gh api --paginate "repos/$REPO/branches" --jq '.[].name' | { grep -v '^main$' || true; } | while read -r b; do
     gh api -X DELETE "repos/$REPO/git/refs/heads/$b" || true
   done
 fi
@@ -322,13 +412,24 @@ fi
 gh label create sim-batch --repo "$REPO" --color 5319e7 \
   --description "Seeded simulation issue" 2>/dev/null || true
 
-count=$(python3 -c 'import json;print(len(json.load(open("'"$HERE"'/issues.json"))["issues"]))')
-for i in $(seq 0 $((count - 1))); do
-  TITLE=$(python3 -c 'import json;print(json.load(open("'"$HERE"'/issues.json"))["issues"]['"$i"']["title"])')
-  BODY=$(python3 -c 'import json;print(json.load(open("'"$HERE"'/issues.json"))["issues"]['"$i"']["body"])')
+existing_titles="$WORK/existing_titles"
+gh issue list --repo "$REPO" --label sim-batch --state open --limit 1000 --json title \
+  --jq '.[].title' > "$existing_titles"
+
+count=0
+created=0
+skipped=0
+
+while IFS= read -r -d '' TITLE && IFS= read -r -d '' BODY; do
+  count=$((count + 1))
+  if grep -Fxq -- "$TITLE" "$existing_titles"; then
+    skipped=$((skipped + 1))
+    continue
+  fi
   gh issue create --repo "$REPO" --title "$TITLE" --body "$BODY" --label sim-batch
-done
-echo "SEEDED $REPO with $count issues"
+  created=$((created + 1))
+done < "$ISSUE_PAIRS"
+echo "SEEDED $REPO with $count issues ($created created, $skipped skipped)"
 ```
 
 ```bash
@@ -343,9 +444,9 @@ gh repo create shakacode/agent-coord-sim-beta  --private --description "Batch si
 sim/bin/seed shakacode/agent-coord-sim-alpha
 ```
 
-Expected: `SEEDED shakacode/agent-coord-sim-alpha with 3 issues`, and the repo shows red CI on main (the seeded bugs) with 3 open `sim-batch` issues.
+Expected: `SEEDED shakacode/agent-coord-sim-alpha with 3 issues (3 created, 0 skipped)`, and the repo shows red CI on main (the seeded bugs) with 3 open `sim-batch` issues.
 
-- [ ] **Step 3: Commit**
+- [x] **Step 3: Commit**
 
 ```bash
 bundle exec rubocop && git add sim/bin/seed && git commit -m "Add sim repo seeding script"

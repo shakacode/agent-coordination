@@ -1,0 +1,81 @@
+#!/usr/bin/env bash
+# Usage: sim/bin/seed <owner/repo> [--reset]
+set -euo pipefail
+REPO="${1:?usage: seed <owner/repo> [--reset]}"
+RESET="${2:-}"
+HERE="$(cd "$(dirname "$0")/.." && pwd)"
+WORK="$(mktemp -d)"
+ISSUE_PAIRS="$(mktemp)"
+cleanup() {
+  rm -R -f "$WORK"
+  rm -f "$ISSUE_PAIRS"
+}
+trap cleanup EXIT
+
+case "$REPO" in
+  shakacode/agent-coord-sim-alpha | shakacode/agent-coord-sim-beta) ;;
+  *)
+    echo "refusing to overwrite non-simulation repo: $REPO" >&2
+    echo "allowed repos: shakacode/agent-coord-sim-alpha, shakacode/agent-coord-sim-beta" >&2
+    exit 1
+    ;;
+esac
+
+python3 - "$HERE/issues.json" > "$ISSUE_PAIRS" <<'PY'
+import json
+import sys
+from collections import Counter
+
+with open(sys.argv[1], encoding="utf-8") as handle:
+    issues = json.load(handle)["issues"]
+
+titles = [issue["title"] for issue in issues]
+duplicates = [title for title, count in Counter(titles).items() if count > 1]
+if duplicates:
+    sys.stderr.write(
+        "duplicate issue title(s) in sim/issues.json: " + ", ".join(duplicates) + "\n"
+    )
+    raise SystemExit(1)
+
+for issue in issues:
+    sys.stdout.write(issue["title"] + "\0" + issue["body"] + "\0")
+PY
+
+cp -R "$HERE/template/." "$WORK/"
+cd "$WORK"
+git init -q -b main && git add -A
+git commit -qm "Seed sim content $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+git remote add origin "https://github.com/$REPO"
+git push -q --force origin main
+
+if [ "$RESET" = "--reset" ]; then
+  gh issue list --repo "$REPO" --label sim-batch --state open --limit 1000 --json number \
+    --jq '.[].number' | while read -r n; do
+    gh issue close "$n" --repo "$REPO" --comment "Reseeded." || true
+  done
+  gh api --paginate "repos/$REPO/branches" --jq '.[].name' | { grep -v '^main$' || true; } | while read -r b; do
+    gh api -X DELETE "repos/$REPO/git/refs/heads/$b" || true
+  done
+fi
+
+gh label create sim-batch --repo "$REPO" --color 5319e7 \
+  --description "Seeded simulation issue" 2>/dev/null || true
+
+existing_titles="$WORK/existing_titles"
+gh issue list --repo "$REPO" --label sim-batch --state open --limit 1000 --json title \
+  --jq '.[].title' > "$existing_titles"
+
+count=0
+created=0
+skipped=0
+
+while IFS= read -r -d '' TITLE && IFS= read -r -d '' BODY; do
+  count=$((count + 1))
+  if grep -Fxq -- "$TITLE" "$existing_titles"; then
+    skipped=$((skipped + 1))
+    continue
+  fi
+  gh issue create --repo "$REPO" --title "$TITLE" --body "$BODY" --label sim-batch
+  created=$((created + 1))
+done < "$ISSUE_PAIRS"
+echo "SEEDED $REPO with $count issues ($created created, $skipped skipped)"
