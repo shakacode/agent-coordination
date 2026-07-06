@@ -9,11 +9,17 @@ WORKDIR=""
 
 while [ $# -gt 0 ]; do
   case "$1" in
-    --agent-id) AGENT_ID="$2"; shift 2 ;;
-    --repo-slug) REPO_SLUG="$2"; shift 2 ;;
-    --clone-url) CLONE_URL="$2"; shift 2 ;;
-    --issue-key) ISSUE_KEY="$2"; shift 2 ;;
-    --workdir) WORKDIR="$2"; shift 2 ;;
+    --agent-id|--repo-slug|--clone-url|--issue-key|--workdir)
+      option="$1"
+      [ $# -ge 2 ] || { echo "missing value for $option"; exit 2; }
+      case "$option" in
+        --agent-id) AGENT_ID="$2" ;;
+        --repo-slug) REPO_SLUG="$2" ;;
+        --clone-url) CLONE_URL="$2" ;;
+        --issue-key) ISSUE_KEY="$2" ;;
+        --workdir) WORKDIR="$2" ;;
+      esac
+      shift 2 ;;
     *) echo "unknown arg: $1"; exit 2 ;;
   esac
 done
@@ -125,7 +131,7 @@ cleanup_claim() {
 trap cleanup_claim EXIT
 
 set +e
-"$CLI" claim --agent-id="$AGENT_ID" --repo="$REPO_SLUG" --target="$ISSUE_KEY" --branch="$BRANCH"
+"$CLI" claim --agent-id="$AGENT_ID" --repo="$REPO_SLUG" --target="$ISSUE_KEY" --branch="$BRANCH" >/dev/null
 CODE=$?
 set -e
 if [ "$CODE" -eq 3 ]; then
@@ -134,7 +140,7 @@ if [ "$CODE" -eq 3 ]; then
 fi
 [ "$CODE" -eq 0 ] || exit 2
 CLAIM_ACQUIRED=1
-beat claimed
+beat claimed >/dev/null
 
 mkdir -p "$WORKDIR"
 cd "$WORKDIR"
@@ -143,20 +149,20 @@ cd repo
 git config user.name "agent-coord sim worker"
 git config user.email "agent-coord-sim@example.invalid"
 git checkout -q -b "$BRANCH"
-beat implementing
+beat implementing >/dev/null
 
 apply_issue_fix "$ISSUE_KEY"
 
-beat validating
-ruby "test/${ISSUE_KEY}_test.rb"
+beat validating >/dev/null
+ruby "test/${ISSUE_KEY}_test.rb" >&2
 
-beat pushing
+beat pushing >/dev/null
 git add lib
 git commit -qm "Fix ${ISSUE_KEY} (scripted sim worker ${AGENT_ID})"
 git push -q origin "$BRANCH"
 WORK_PUSHED=1
 
-beat done
+beat done >/dev/null
 DONE_RECORDED=1
-release_claim
+release_claim >/dev/null
 echo "WORKER_DONE ${BRANCH}"

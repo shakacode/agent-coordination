@@ -512,10 +512,18 @@ class ScriptedWorkerTest < Minitest::Test
     )
   end
 
+  def test_missing_flag_value_exits_with_contract_code
+    env = { "AGENT_COORD_STATE_ROOT" => @state }
+    stdout, _stderr, status = Open3.capture3(env, WORKER, "--workdir")
+
+    assert_equal 2, status.exitstatus
+    assert_includes stdout, "missing value for --workdir"
+  end
+
   def test_worker_completes_and_records_protocol
     stdout, stderr, status = run_worker("host:worker")
     assert_equal 0, status.exitstatus, "worker failed: #{stderr}"
-    assert_includes stdout, "WORKER_DONE"
+    assert_equal "WORKER_DONE sim/task_one-host-worker\n", stdout
 
     claim = JSON.parse(File.read(File.join(@state, "claims", "sim", "local", "task_one.json")))
     assert_equal "released", claim.fetch("status")
@@ -538,7 +546,7 @@ class ScriptedWorkerTest < Minitest::Test
 
     stdout, _stderr, status = run_worker("w2")
     assert_equal 3, status.exitstatus
-    assert_includes stdout, "WORKER_REFUSED"
+    assert_equal "WORKER_REFUSED task_one\n", stdout
   end
 
   def test_unknown_issue_key_fails_before_claim
@@ -589,11 +597,17 @@ WORKDIR=""
 
 while [ $# -gt 0 ]; do
   case "$1" in
-    --agent-id) AGENT_ID="$2"; shift 2 ;;
-    --repo-slug) REPO_SLUG="$2"; shift 2 ;;
-    --clone-url) CLONE_URL="$2"; shift 2 ;;
-    --issue-key) ISSUE_KEY="$2"; shift 2 ;;
-    --workdir) WORKDIR="$2"; shift 2 ;;
+    --agent-id|--repo-slug|--clone-url|--issue-key|--workdir)
+      option="$1"
+      [ $# -ge 2 ] || { echo "missing value for $option"; exit 2; }
+      case "$option" in
+        --agent-id) AGENT_ID="$2" ;;
+        --repo-slug) REPO_SLUG="$2" ;;
+        --clone-url) CLONE_URL="$2" ;;
+        --issue-key) ISSUE_KEY="$2" ;;
+        --workdir) WORKDIR="$2" ;;
+      esac
+      shift 2 ;;
     *) echo "unknown arg: $1"; exit 2 ;;
   esac
 done
@@ -705,13 +719,13 @@ cleanup_claim() {
 trap cleanup_claim EXIT
 
 set +e
-"$CLI" claim --agent-id="$AGENT_ID" --repo="$REPO_SLUG" --target="$ISSUE_KEY" --branch="$BRANCH"
+"$CLI" claim --agent-id="$AGENT_ID" --repo="$REPO_SLUG" --target="$ISSUE_KEY" --branch="$BRANCH" >/dev/null
 CODE=$?
 set -e
 if [ "$CODE" -eq 3 ]; then echo "WORKER_REFUSED ${ISSUE_KEY}"; exit 3; fi
 [ "$CODE" -eq 0 ] || exit 2
 CLAIM_ACQUIRED=1
-beat claimed
+beat claimed >/dev/null
 
 mkdir -p "$WORKDIR"
 cd "$WORKDIR"
@@ -720,22 +734,22 @@ cd repo
 git config user.name "agent-coord sim worker"
 git config user.email "agent-coord-sim@example.invalid"
 git checkout -q -b "$BRANCH"
-beat implementing
+beat implementing >/dev/null
 
 apply_issue_fix "$ISSUE_KEY"
 
-beat validating
-ruby "test/${ISSUE_KEY}_test.rb"
+beat validating >/dev/null
+ruby "test/${ISSUE_KEY}_test.rb" >&2
 
-beat pushing
+beat pushing >/dev/null
 git add lib
 git commit -qm "Fix ${ISSUE_KEY} (scripted sim worker ${AGENT_ID})"
 git push -q origin "$BRANCH"
 WORK_PUSHED=1
 
-beat done
+beat done >/dev/null
 DONE_RECORDED=1
-release_claim
+release_claim >/dev/null
 echo "WORKER_DONE ${BRANCH}"
 ```
 
@@ -746,7 +760,7 @@ chmod +x sim/bin/scripted-worker
 - [x] **Step 4: Run to verify pass**
 
 Run: `bundle exec ruby sim/test/scripted_worker_test.rb`
-Expected: `4 runs ... 0 failures, 0 errors`.
+Expected: `6 runs ... 0 failures, 0 errors`.
 
 - [x] **Step 5: Lint and commit**
 

@@ -41,10 +41,18 @@ class ScriptedWorkerTest < Minitest::Test
     )
   end
 
+  def test_missing_flag_value_exits_with_contract_code
+    env = { "AGENT_COORD_STATE_ROOT" => @state }
+    stdout, _stderr, status = Open3.capture3(env, WORKER, "--workdir")
+
+    assert_equal 2, status.exitstatus
+    assert_includes stdout, "missing value for --workdir"
+  end
+
   def test_worker_completes_and_records_protocol
     stdout, stderr, status = run_worker("host:worker")
     assert_equal 0, status.exitstatus, "worker failed: #{stderr}"
-    assert_includes stdout, "WORKER_DONE"
+    assert_equal "WORKER_DONE sim/task_one-host-worker\n", stdout
 
     claim = JSON.parse(File.read(File.join(@state, "claims", "sim", "local", "task_one.json")))
     assert_equal "released", claim.fetch("status")
@@ -67,7 +75,7 @@ class ScriptedWorkerTest < Minitest::Test
 
     stdout, _stderr, status = run_worker("w2")
     assert_equal 3, status.exitstatus
-    assert_includes stdout, "WORKER_REFUSED"
+    assert_equal "WORKER_REFUSED task_one\n", stdout
   end
 
   def test_unknown_issue_key_fails_before_claim
