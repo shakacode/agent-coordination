@@ -176,7 +176,7 @@ git commit -m "Move live state to agent-coordination-state; this repo is code-on
 **Interfaces:**
 - Produces: `GET /v1/health` → `200 {"status":"ok"}`; D1 tables `state` and `machines`; the `Env` type `{ DB: D1Database }` used by Tasks 5–6.
 
-- [ ] **Step 1: Write the config and migration**
+- [x] **Step 1: Write the config and migration**
 
 `worker/wrangler.toml`:
 
@@ -234,7 +234,7 @@ node_modules/
 .wrangler/
 ```
 
-- [ ] **Step 2: Write the skeleton with only the health route**
+- [x] **Step 2: Write the skeleton with only the health route**
 
 `worker/src/index.ts`:
 
@@ -261,7 +261,7 @@ export default {
 };
 ```
 
-- [ ] **Step 3: Verify locally**
+- [x] **Step 3: Verify locally**
 
 ```bash
 cd worker && npm install
@@ -274,7 +274,7 @@ kill %1
 
 Expected: `{"status":"ok"}`
 
-- [ ] **Step 4: Commit**
+- [x] **Step 4: Commit**
 
 ```bash
 cd .. && git add worker && git commit -m "Add Worker scaffold: wrangler config, D1 migration, health route"
@@ -290,7 +290,7 @@ cd .. && git add worker && git commit -m "Add Worker scaffold: wrangler config, 
 **Interfaces:**
 - Produces: `authenticate(request, env)` returning `machine: string | null`; every non-health route returns `401 {"error":"unauthorized"}` without a valid token. Tokens verified as SHA-256 hex against `machines.token_hash` where `revoked_at IS NULL`.
 
-- [ ] **Step 1: Add the auth function and wire it in**
+- [x] **Step 1: Add the auth function and wire it in**
 
 Add to `worker/src/index.ts` above `export default`:
 
@@ -326,7 +326,7 @@ Replace the `fetch` body with:
     return json(404, { error: "not_found" });
 ```
 
-- [ ] **Step 2: Verify 401 and 200 paths**
+- [x] **Step 2: Verify 401 and 200 paths**
 
 ```bash
 cd worker
@@ -341,7 +341,7 @@ kill %1
 
 Expected: `401` then `404`.
 
-- [ ] **Step 3: Commit**
+- [x] **Step 3: Commit**
 
 ```bash
 cd .. && git add worker/src/index.ts && git commit -m "Add per-machine bearer-token auth to Worker"
@@ -362,7 +362,7 @@ cd .. && git add worker/src/index.ts && git commit -m "Add per-machine bearer-to
   - `GET /v1/state?prefix=<claims|heartbeats|batches>` → `200 {"entries":[{"path","data","version"},...]}`
   - Path rule: `^(claims|heartbeats|batches)/[A-Za-z0-9_.:/-]+\.json$`, no `..`, no empty segment → else `400 {"error":"invalid_path"}`.
 
-- [ ] **Step 1: Add path validation and the three handlers**
+- [x] **Step 1: Add path validation and the three handlers**
 
 Add above `export default`:
 
@@ -444,7 +444,7 @@ Replace the trailing `return json(404, ...)` in `fetch` with:
     return json(404, { error: "not_found" });
 ```
 
-- [ ] **Step 2: Write the smoke test**
+- [x] **Step 2: Write the smoke test**
 
 `worker/bin/smoke`:
 
@@ -473,7 +473,7 @@ echo SMOKE_OK
 chmod +x worker/bin/smoke
 ```
 
-- [ ] **Step 3: Run it**
+- [x] **Step 3: Run it**
 
 ```bash
 cd worker && npx wrangler dev --local --port 8787 & sleep 3
@@ -483,7 +483,7 @@ kill %1
 
 Expected: `SMOKE_OK`
 
-- [ ] **Step 4: Commit**
+- [x] **Step 4: Commit**
 
 ```bash
 git add worker && git commit -m "Add versioned state GET/PUT/LIST with If-Match CAS"
