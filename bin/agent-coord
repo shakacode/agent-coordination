@@ -181,7 +181,10 @@ module AgentCoord
     end
 
     def resolve_backend_env(options)
-      return if options[:state_root]
+      if options[:state_root]
+        @stderr.puts "warning: --api-url and --state-root are both set; using the local backend." if options[:api_url]
+        return
+      end
 
       cli_api = options[:api_url]
       env_api = ENV.fetch("AGENT_COORD_API_URL", nil)
@@ -1312,30 +1315,40 @@ module AgentCoord
   class HttpStore
     OPEN_TIMEOUT = 5
     READ_TIMEOUT = 10
+    LOOPBACK_HOSTS = %w[localhost 127.0.0.1 ::1].freeze
 
     def initialize(base_url:, token:)
-      @base = base_url.to_s.chomp("/")
+      uri = parse_base_url(base_url)
+      @base = uri.to_s.chomp("/")
       @token = token
     end
 
     def read_json(path)
       AgentCoord.safe_path!(path)
-      response = request(Net::HTTP::Get, "/v1/state/#{path}")
-      return nil if response.code == "404"
+      response = request(Net::HTTP::Get, state_path(path))
+      if response.code == "404"
+        body = parsed_json(response, "read #{path}")
+        return nil if body["error"] == "not_found"
+
+        raise OperationalError, http_error("read #{path}", response)
+      end
       raise OperationalError, http_error("read #{path}", response) unless response.code == "200"
 
-      body = JSON.parse(response.body)
-      StoredJson.new(path: path, data: body.fetch("data"), sha: body.fetch("version").to_s)
+      body = parsed_json(response, "read #{path}")
+      StoredJson.new(path: path, data: fetch_field(body, "data", "read #{path}"),
+                     sha: fetch_field(body, "version", "read #{path}").to_s)
     end
 
     def list_json(prefix)
       AgentCoord.safe_path!(prefix)
-      response = request(Net::HTTP::Get, "/v1/state?prefix=#{prefix}")
+      response = request(Net::HTTP::Get, "/v1/state?prefix=#{escape_component(prefix)}")
       raise OperationalError, http_error("list #{prefix}", response) unless response.code == "200"
 
-      JSON.parse(response.body).fetch("entries").map do |entry|
-        StoredJson.new(path: entry.fetch("path"), data: entry.fetch("data"),
-                       sha: entry.fetch("version").to_s)
+      entries = fetch_field(parsed_json(response, "list #{prefix}"), "entries", "list #{prefix}")
+      entries.map do |entry|
+        StoredJson.new(path: fetch_field(entry, "path", "list #{prefix}"),
+                       data: fetch_field(entry, "data", "list #{prefix}"),
+                       sha: fetch_field(entry, "version", "list #{prefix}").to_s)
       end
     end
 
@@ -1345,7 +1358,7 @@ module AgentCoord
       raise Error, "write_json requires sha or create" if sha.nil? && !create
 
       headers = sha ? { "If-Match" => sha } : { "If-None-Match" => "*" }
-      response = request(Net::HTTP::Put, "/v1/state/#{path}", body: { "data" => data }, headers: headers)
+      response = request(Net::HTTP::Put, state_path(path), body: { "data" => data }, headers: headers)
       case response.code
       when "200", "201" then nil
       when "409"
@@ -1366,6 +1379,40 @@ module AgentCoord
     end
 
     private
+
+    def parse_base_url(base_url)
+      uri = URI.parse(base_url.to_s)
+      unless %w[http https].include?(uri.scheme) && uri.host
+        raise OperationalError, "invalid HTTP backend URL: expected http(s) URL with host"
+      end
+      if uri.scheme == "http" && !LOOPBACK_HOSTS.include?(uri.host)
+        raise OperationalError, "HTTP backend URL must use https unless it points at localhost"
+      end
+
+      uri
+    rescue URI::InvalidURIError => e
+      raise OperationalError, "invalid HTTP backend URL: #{e.message}"
+    end
+
+    def state_path(path)
+      "/v1/state/#{escape_component(path)}"
+    end
+
+    def escape_component(value)
+      URI.encode_www_form_component(value)
+    end
+
+    def parsed_json(response, action)
+      JSON.parse(response.body)
+    rescue JSON::ParserError, TypeError => e
+      raise OperationalError, "http backend #{action} returned malformed JSON: #{e.message}"
+    end
+
+    def fetch_field(body, field, action)
+      body.fetch(field)
+    rescue KeyError, NoMethodError
+      raise OperationalError, "http backend #{action} returned malformed response: missing #{field}"
+    end
 
     def request(klass, request_path, body: nil, headers: {})
       uri = URI.parse("#{@base}#{request_path}")

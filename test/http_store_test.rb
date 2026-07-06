@@ -4,6 +4,7 @@ require "json"
 require "minitest/autorun"
 require "net/http"
 require "stringio"
+require "tmpdir"
 require "webrick"
 
 load File.expand_path("../bin/agent-coord", __dir__)
@@ -23,8 +24,13 @@ class HttpStoreStub
                      if_none_match: req["if-none-match"] }
       status, body = @responses.shift || [500, { "error" => "unexpected" }]
       res.status = status
-      res.content_type = "application/json"
-      res.body = JSON.generate(body)
+      if body.is_a?(String)
+        res.content_type = "text/plain"
+        res.body = body
+      else
+        res.content_type = "application/json"
+        res.body = JSON.generate(body)
+      end
     end
     @thread = Thread.new { @server.start }
   end
@@ -40,6 +46,14 @@ class HttpStoreTestCase < Minitest::Test
   ensure
     stub.shutdown
   end
+
+  def with_net_http_start_error(error)
+    original_start = Net::HTTP.method(:start)
+    Net::HTTP.define_singleton_method(:start) { |*| raise error }
+    yield
+  ensure
+    Net::HTTP.define_singleton_method(:start, original_start) if original_start
+  end
 end
 
 class HttpStoreReadTest < HttpStoreTestCase
@@ -50,6 +64,7 @@ class HttpStoreReadTest < HttpStoreTestCase
       assert_equal({ "agent_id" => "a1" }, entry.data)
       assert_equal "7", entry.sha
       assert_equal "Bearer tok", stub.requests.first[:auth]
+      assert_equal "/v1/state/claims%2Fo%2Fr%2F1.json", stub.requests.first[:path]
     end
   end
 
@@ -59,38 +74,53 @@ class HttpStoreReadTest < HttpStoreTestCase
     end
   end
 
+  def test_read_json_raises_operational_on_malformed_not_found
+    with_stub([[404, "<html>wrong origin</html>"]]) do |store, _|
+      error = assert_raises(AgentCoord::OperationalError) { store.read_json("claims/o/r/1.json") }
+      assert_includes error.message, "malformed JSON"
+    end
+  end
+
   def test_read_json_raises_operational_on_server_error
     with_stub([[500, { "error" => "boom" }]]) do |store, _|
       assert_raises(AgentCoord::OperationalError) { store.read_json("claims/o/r/1.json") }
     end
   end
 
+  def test_read_json_raises_operational_on_malformed_success
+    with_stub([[200, { "path" => "claims/o/r/1.json", "version" => 7 }]]) do |store, _|
+      error = assert_raises(AgentCoord::OperationalError) { store.read_json("claims/o/r/1.json") }
+      assert_includes error.message, "malformed response"
+    end
+  end
+
   def test_list_json_maps_entries
     body = { "entries" => [{ "path" => "heartbeats/a1.json", "data" => { "agent_id" => "a1" }, "version" => 2 }] }
-    with_stub([[200, body]]) do |store, _|
+    with_stub([[200, body]]) do |store, stub|
       entries = store.list_json("heartbeats")
       assert_equal 1, entries.length
       assert_equal "heartbeats/a1.json", entries.first.path
       assert_equal "2", entries.first.sha
+      assert_equal "/v1/state?prefix=heartbeats", stub.requests.first[:path]
     end
   end
 
-  def test_list_json_wraps_dns_failures_as_operational
-    store = AgentCoord::HttpStore.new(base_url: "http://nonexistent.invalid", token: "tok")
-    error = assert_raises(AgentCoord::OperationalError) { store.list_json("claims") }
-    assert_includes error.message, "http backend unreachable"
+  def test_list_json_wraps_socket_failures_as_operational
+    store = AgentCoord::HttpStore.new(base_url: "https://agent-coord.example", token: "tok")
+    with_net_http_start_error(SocketError.new("getaddrinfo failed")) do
+      error = assert_raises(AgentCoord::OperationalError) { store.list_json("claims") }
+      assert_includes error.message, "http backend unreachable"
+      assert_includes error.message, "getaddrinfo failed"
+    end
   end
 
   def test_list_json_wraps_tls_failures_as_operational
     store = AgentCoord::HttpStore.new(base_url: "https://agent-coord.example", token: "tok")
-    original_start = Net::HTTP.method(:start)
-    Net::HTTP.define_singleton_method(:start) { |*| raise OpenSSL::SSL::SSLError, "certificate verify failed" }
-
-    error = assert_raises(AgentCoord::OperationalError) { store.list_json("claims") }
-    assert_includes error.message, "http backend unreachable"
-    assert_includes error.message, "certificate verify failed"
-  ensure
-    Net::HTTP.define_singleton_method(:start, original_start) if original_start
+    with_net_http_start_error(OpenSSL::SSL::SSLError.new("certificate verify failed")) do
+      error = assert_raises(AgentCoord::OperationalError) { store.list_json("claims") }
+      assert_includes error.message, "http backend unreachable"
+      assert_includes error.message, "certificate verify failed"
+    end
   end
 end
 
@@ -183,7 +213,7 @@ class HttpBackendSelectionTest < HttpEnvTestCase
     with_env("AGENT_COORD_API_URL" => "http://[bad", "AGENT_COORD_API_TOKEN" => "tok") do
       code, _, err = run_cli(["status"], {})
       assert_equal 2, code
-      assert_includes err, "http backend unreachable"
+      assert_includes err, "invalid HTTP backend URL"
     end
   end
 
@@ -191,7 +221,15 @@ class HttpBackendSelectionTest < HttpEnvTestCase
     with_env("AGENT_COORD_API_URL" => "", "AGENT_COORD_API_TOKEN" => "tok") do
       code, _, err = run_cli(["status"], {})
       assert_equal 2, code
-      assert_includes err, "http backend unreachable"
+      assert_includes err, "invalid HTTP backend URL"
+    end
+  end
+
+  def test_non_loopback_http_api_url_is_operational_error
+    with_env("AGENT_COORD_API_URL" => "http://agent-coord.example", "AGENT_COORD_API_TOKEN" => "tok") do
+      code, _, err = run_cli(["status"], {})
+      assert_equal 2, code
+      assert_includes err, "must use https"
     end
   end
 
@@ -227,6 +265,17 @@ class HttpBackendSelectionTest < HttpEnvTestCase
     end
   ensure
     stub.shutdown
+  end
+
+  def test_api_url_and_state_root_flags_warn_and_use_local
+    Dir.mktmpdir do |root|
+      with_env("AGENT_COORD_API_TOKEN" => nil) do
+        code, out, err = run_cli(["status", "--api-url", "http://127.0.0.1:9", "--state-root", root], {})
+        assert_equal 0, code
+        assert_includes out, "claims"
+        assert_includes err, "--api-url and --state-root"
+      end
+    end
   end
 end
 
