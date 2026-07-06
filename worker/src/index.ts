@@ -167,6 +167,6 @@ export default {
       if (request.method === "PUT") return putState(request, env, path);
       return json(405, { error: "method_not_allowed" });
     }
-    return json(404, { error: "not_found" });
+    return json(404, { error: "route_not_found" });
   },
 };

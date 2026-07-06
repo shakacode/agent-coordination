@@ -1335,14 +1335,14 @@ module AgentCoord
       AgentCoord.safe_path!(path)
       response = request(Net::HTTP::Get, state_path(path))
       if response.code == "404"
-        body = parsed_json(response, "read #{path}")
+        body = parsed_json_object(response, "read #{path}")
         return nil if body["error"] == "not_found"
 
         raise OperationalError, http_error("read #{path}", response)
       end
       raise OperationalError, http_error("read #{path}", response) unless response.code == "200"
 
-      body = parsed_json(response, "read #{path}")
+      body = parsed_json_object(response, "read #{path}")
       StoredJson.new(path: path, data: fetch_field(body, "data", "read #{path}"),
                      sha: fetch_field(body, "version", "read #{path}").to_s)
     end
@@ -1352,8 +1352,16 @@ module AgentCoord
       response = request(Net::HTTP::Get, "/v1/state?prefix=#{escape_component(prefix)}")
       raise OperationalError, http_error("list #{prefix}", response) unless response.code == "200"
 
-      entries = fetch_field(parsed_json(response, "list #{prefix}"), "entries", "list #{prefix}")
+      entries = fetch_field(parsed_json_object(response, "list #{prefix}"), "entries", "list #{prefix}")
+      unless entries.is_a?(Array)
+        raise OperationalError, "http backend list #{prefix} returned malformed response: entries is not an array"
+      end
+
       entries.map do |entry|
+        unless entry.is_a?(Hash)
+          raise OperationalError, "http backend list #{prefix} returned malformed response: entry is not an object"
+        end
+
         StoredJson.new(path: fetch_field(entry, "path", "list #{prefix}"),
                        data: fetch_field(entry, "data", "list #{prefix}"),
                        sha: fetch_field(entry, "version", "list #{prefix}").to_s)
@@ -1410,8 +1418,11 @@ module AgentCoord
       URI.encode_www_form_component(value)
     end
 
-    def parsed_json(response, action)
-      JSON.parse(response.body)
+    def parsed_json_object(response, action)
+      body = JSON.parse(response.body)
+      return body if body.is_a?(Hash)
+
+      raise OperationalError, "http backend #{action} returned malformed response: expected object"
     rescue JSON::ParserError, TypeError => e
       raise OperationalError, "http backend #{action} returned malformed JSON: #{e.message}"
     end

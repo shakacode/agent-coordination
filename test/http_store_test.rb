@@ -81,6 +81,13 @@ class HttpStoreReadTest < HttpStoreTestCase
     end
   end
 
+  def test_read_json_raises_operational_on_route_not_found
+    with_stub([[404, { "error" => "route_not_found" }]]) do |store, _|
+      error = assert_raises(AgentCoord::OperationalError) { store.read_json("claims/o/r/1.json") }
+      assert_includes error.message, "route_not_found"
+    end
+  end
+
   def test_read_json_raises_operational_on_server_error
     with_stub([[500, { "error" => "boom" }]]) do |store, _|
       assert_raises(AgentCoord::OperationalError) { store.read_json("claims/o/r/1.json") }
@@ -94,6 +101,13 @@ class HttpStoreReadTest < HttpStoreTestCase
     end
   end
 
+  def test_read_json_raises_operational_on_non_object_success
+    with_stub([[200, []]]) do |store, _|
+      error = assert_raises(AgentCoord::OperationalError) { store.read_json("claims/o/r/1.json") }
+      assert_includes error.message, "expected object"
+    end
+  end
+
   def test_list_json_maps_entries
     body = { "entries" => [{ "path" => "heartbeats/a1.json", "data" => { "agent_id" => "a1" }, "version" => 2 }] }
     with_stub([[200, body]]) do |store, stub|
@@ -102,6 +116,20 @@ class HttpStoreReadTest < HttpStoreTestCase
       assert_equal "heartbeats/a1.json", entries.first.path
       assert_equal "2", entries.first.sha
       assert_equal "/v1/state?prefix=heartbeats", stub.requests.first[:path]
+    end
+  end
+
+  def test_list_json_raises_operational_when_entries_is_not_array
+    with_stub([[200, { "entries" => "oops" }]]) do |store, _|
+      error = assert_raises(AgentCoord::OperationalError) { store.list_json("heartbeats") }
+      assert_includes error.message, "entries is not an array"
+    end
+  end
+
+  def test_list_json_raises_operational_when_entry_is_not_object
+    with_stub([[200, { "entries" => ["oops"] }]]) do |store, _|
+      error = assert_raises(AgentCoord::OperationalError) { store.list_json("heartbeats") }
+      assert_includes error.message, "entry is not an object"
     end
   end
 
