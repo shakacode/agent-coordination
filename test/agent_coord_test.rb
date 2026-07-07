@@ -47,16 +47,27 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
       "wrangler_log_path" => ENV["WRANGLER_LOG_PATH"]
     )
 
-    case ARGV
-    when %w[wrangler d1 migrations apply agent-coord --local]
+    def persist_to_arg
+      index = ARGV.index("--persist-to")
+      index && ARGV.fetch(index + 1)
+    end
+
+    if ARGV[0, 5] == %w[wrangler d1 migrations apply agent-coord] &&
+        ARGV.include?("--local") &&
+        persist_to_arg
       exit 0
-    when %w[wrangler dev --local --port 8787]
+    elsif ARGV[0, 2] == %w[wrangler dev] &&
+        ARGV.include?("--local") &&
+        ARGV.include?("--port") &&
+        ARGV.include?("8787") &&
+        persist_to_arg
       require "socket"
 
       File.write(ENV.fetch("FAKE_WRANGLER_PID"), Process.pid.to_s)
       server = TCPServer.new("127.0.0.1", 8787)
       trap("TERM") do
         write_event("signal" => "TERM")
+        File.write(ENV.fetch("FAKE_WRANGLER_STOPPED"), "1")
         server.close
         exit 0
       end
@@ -69,16 +80,16 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
         socket.write "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok"
         socket.close
       end
-    else
-      if ARGV[0, 5] == %w[wrangler d1 execute agent-coord --local] && (index = ARGV.index("--command"))
-        command = ARGV.fetch(index + 1)
-        write_event("argv" => ARGV, "command" => command)
-        exit 0 if command.match?(/\\b[0-9a-f]{64}\\b/) && !command.include?("integration-token-")
-      end
-
-      warn "unexpected npx command: \#{ARGV.join(" ")}"
-      exit 1
+    elsif ARGV[0, 5] == %w[wrangler d1 execute agent-coord --local] &&
+        persist_to_arg &&
+        (index = ARGV.index("--command"))
+      command = ARGV.fetch(index + 1)
+      write_event("argv" => ARGV, "command" => command)
+      exit 0 if command.match?(/\\b[0-9a-f]{64}\\b/) && !command.include?("integration-token-")
     end
+
+    warn "unexpected npx command: \#{ARGV.join(" ")}"
+    exit 1
   RUBY
   load BIN
 
@@ -2078,7 +2089,8 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
       tmpdir: File.join(root, "tmp"),
       npx_log: File.join(root, "npx.jsonl"),
       bundle_log: File.join(root, "bundle.log"),
-      wrangler_pid: File.join(root, "wrangler.pid")
+      wrangler_pid: File.join(root, "wrangler.pid"),
+      wrangler_stopped: File.join(root, "wrangler.stopped")
     }
   end
 
@@ -2089,7 +2101,8 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
       "TMPDIR" => "#{paths.fetch(:tmpdir)}/",
       "FAKE_NPX_LOG" => paths.fetch(:npx_log),
       "FAKE_BUNDLE_LOG" => paths.fetch(:bundle_log),
-      "FAKE_WRANGLER_PID" => paths.fetch(:wrangler_pid)
+      "FAKE_WRANGLER_PID" => paths.fetch(:wrangler_pid),
+      "FAKE_WRANGLER_STOPPED" => paths.fetch(:wrangler_stopped)
     }
   end
 
@@ -2113,14 +2126,29 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     assert_match(/\b[0-9a-f]{64}\b/, execute.fetch("command"))
     refute_includes execute.fetch("command"), "integration-token-"
 
-    dev = events.find { |event| event["argv"] == %w[wrangler dev --local --port 8787] }
+    migration = events.find { |event| event["argv"][0, 5] == %w[wrangler d1 migrations apply agent-coord] }
+    assert migration, "no d1 migrations command was recorded: #{events.inspect}"
+
+    dev = events.find { |event| event["argv"][0, 2] == %w[wrangler dev] }
     assert dev, "no wrangler dev command was recorded: #{events.inspect}"
     assert_includes dev.fetch("wrangler_output_log"), paths.fetch(:tmpdir)
+    assert_fake_harness_persistence(paths, migration, execute, dev)
     assert_fake_harness_cleanup(paths)
   end
 
+  def assert_fake_harness_persistence(paths, *events)
+    persist_dirs = events.map { |event| persist_to_arg(event.fetch("argv")) }
+    assert_equal 1, persist_dirs.uniq.size, "expected one Wrangler persistence dir: #{events.inspect}"
+    assert_includes persist_dirs.first, paths.fetch(:tmpdir)
+  end
+
+  def persist_to_arg(argv)
+    index = argv.index("--persist-to")
+    index && argv.fetch(index + 1)
+  end
+
   def assert_fake_harness_cleanup(paths)
-    refute process_alive?(Integer(File.read(paths.fetch(:wrangler_pid)))), "fake wrangler survived cleanup"
+    assert File.exist?(paths.fetch(:wrangler_stopped)), "fake wrangler did not receive TERM"
   end
 
   def fake_harness_events(paths)
@@ -2132,15 +2160,6 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     File.write(File.join(fake_bin, "bundle"), FAKE_BUNDLE)
     File.write(File.join(fake_bin, "npx"), FAKE_NPX)
     %w[shasum bundle npx].each { |name| FileUtils.chmod(0o755, File.join(fake_bin, name)) }
-  end
-
-  def process_alive?(pid)
-    Process.kill(0, pid)
-    true
-  rescue Errno::ESRCH
-    false
-  rescue Errno::EPERM
-    true
   end
 
   def write_fake_gh(fake_bin)

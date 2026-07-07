@@ -1025,11 +1025,18 @@ git add -A && git commit -m "Teach doctor the HTTP backend"
 set -euo pipefail
 cd "$(dirname "$0")/.."
 TMP_ROOT=$(mktemp -d "${TMPDIR:-/tmp}/agent-coord-wrangler.XXXXXX")
+WRANGLER_STATE_DIR="$TMP_ROOT/state"
 WRANGLER_PID=""
+set -m 2>/dev/null || true
 
 process_alive() {
   local pid="$1"
   kill -0 "$pid" 2>/dev/null
+}
+
+process_group_alive() {
+  local pid="$1"
+  kill -0 "-$pid" 2>/dev/null
 }
 
 collect_tree() {
@@ -1053,10 +1060,17 @@ signal_pids() {
   done
 }
 
-wait_for_tree_exit() {
+signal_wrangler() {
+  local signal="$1"
+  kill "$signal" "-$WRANGLER_PID" 2>/dev/null || signal_pids "$signal" <<<"$(collect_tree "$WRANGLER_PID")"
+}
+
+wait_for_wrangler_exit() {
   local deadline=$((SECONDS + 5))
   while [ "$SECONDS" -lt "$deadline" ]; do
-    [ -z "$(collect_tree "$WRANGLER_PID")" ] && return 0
+    if ! process_group_alive "$WRANGLER_PID" && [ -z "$(collect_tree "$WRANGLER_PID")" ]; then
+      return 0
+    fi
     sleep 0.2
   done
   return 1
@@ -1065,9 +1079,9 @@ wait_for_tree_exit() {
 cleanup() {
   local status=$?
   if [ -n "$WRANGLER_PID" ]; then
-    signal_pids -TERM <<<"$(collect_tree "$WRANGLER_PID")"
-    if ! wait_for_tree_exit; then
-      signal_pids -KILL <<<"$(collect_tree "$WRANGLER_PID")"
+    signal_wrangler -TERM
+    if ! wait_for_wrangler_exit; then
+      signal_wrangler -KILL
     fi
     wait "$WRANGLER_PID" 2>/dev/null || true
   fi
@@ -1097,15 +1111,19 @@ health_ready() {
   ' >/dev/null 2>&1
 }
 
-(cd worker && npx wrangler d1 migrations apply agent-coord --local >/dev/null)
+(cd worker && npx wrangler d1 migrations apply agent-coord --local --persist-to "$WRANGLER_STATE_DIR" >/dev/null)
 (cd worker && npx wrangler d1 execute agent-coord --local --command \
-  "INSERT OR REPLACE INTO machines (machine, token_hash, created_at) VALUES ('integration', '${HASH}', '2026-07-04T00:00:00Z')" >/dev/null)
-(cd worker && npx wrangler dev --local --port 8787 >"$WRANGLER_OUTPUT_LOG" 2>&1) &
+  "INSERT OR REPLACE INTO machines (machine, token_hash, created_at) VALUES ('integration', '${HASH}', '2026-07-04T00:00:00Z')" \
+  --persist-to "$WRANGLER_STATE_DIR" >/dev/null)
+(cd worker && npx wrangler dev --local --persist-to "$WRANGLER_STATE_DIR" --port 8787 >"$WRANGLER_OUTPUT_LOG" 2>&1) &
 WRANGLER_PID=$!
+set +m 2>/dev/null || true
 for _ in $(seq 1 60); do
+  process_alive "$WRANGLER_PID" || { echo "wrangler dev exited before becoming healthy"; cat "$WRANGLER_OUTPUT_LOG"; exit 1; }
   health_ready && break
   sleep 0.5
 done
+process_alive "$WRANGLER_PID" || { echo "wrangler dev exited before becoming healthy"; cat "$WRANGLER_OUTPUT_LOG"; exit 1; }
 health_ready || { echo "wrangler dev never became healthy"; cat "$WRANGLER_OUTPUT_LOG"; exit 1; }
 AGENT_COORD_API_URL=http://127.0.0.1:8787 AGENT_COORD_API_TOKEN="$TOKEN" \
   bundle exec ruby test/http_backend_integration_test.rb
