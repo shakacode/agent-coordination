@@ -109,7 +109,7 @@ class ProvisionTokenTest < Minitest::Test
     end
   end
 
-  def test_wrangler_failure_reports_generic_failure_and_duplicate_hint_without_printing_token
+  def test_wrangler_auth_failure_reports_generic_failure_without_duplicate_hint_or_token
     stdout, stderr, status = run_script(
       { "NPX_EXIT" => "19", "NPX_STDERR" => "wrangler auth expired" },
       "m5"
@@ -117,6 +117,19 @@ class ProvisionTokenTest < Minitest::Test
 
     refute status.success?
     assert_includes stderr, "wrangler auth expired"
+    assert_includes stderr, "wrangler d1 execute failed"
+    refute_includes stderr, "If this was a duplicate machine"
+    refute_includes stdout, TOKEN
+  end
+
+  def test_wrangler_constraint_failure_reports_duplicate_hint_without_printing_token
+    stdout, stderr, status = run_script(
+      { "NPX_EXIT" => "19", "NPX_STDERR" => "D1_ERROR: UNIQUE constraint failed: machines.machine" },
+      "m5"
+    )
+
+    refute status.success?
+    assert_includes stderr, "UNIQUE constraint failed: machines.machine"
     assert_includes stderr, "wrangler d1 execute failed"
     assert_includes stderr, "If this was a duplicate machine"
     refute_includes stdout, TOKEN

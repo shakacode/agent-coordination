@@ -1323,11 +1323,17 @@ cd "$(dirname "$0")/.."
 COMMAND=("$NPX_BIN" wrangler d1 execute agent-coord)
 COMMAND+=("$SCOPE")
 COMMAND+=(--command "$SQL")
-if ! "${COMMAND[@]}"; then
+WRANGLER_STDERR=$(mktemp "${TMPDIR:-/tmp}/agent-coord-wrangler-stderr.XXXXXX")
+trap 'rm -f "$WRANGLER_STDERR"' EXIT
+if ! "${COMMAND[@]}" 2> >(tee "$WRANGLER_STDERR" >&2); then
   echo "wrangler d1 execute failed while provisioning ${MACHINE}; see wrangler output above" >&2
-  echo "If this was a duplicate machine or token constraint, delete or update the existing D1 machines row before re-provisioning" >&2
+  if grep -Eqi "UNIQUE constraint failed|PRIMARY KEY|constraint failed" "$WRANGLER_STDERR"; then
+    echo "If this was a duplicate machine or token constraint, delete or update the existing D1 machines row before re-provisioning" >&2
+  fi
   exit 1
 fi
+rm -f "$WRANGLER_STDERR"
+trap - EXIT
 
 echo "machine:  ${MACHINE}"
 echo "token:    ${TOKEN}"
