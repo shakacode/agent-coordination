@@ -4,9 +4,15 @@ cd "$(dirname "$0")/.."
 TMP_ROOT=$(mktemp -d "${TMPDIR:-/tmp}/agent-coord-wrangler.XXXXXX")
 WRANGLER_PID=""
 
+process_alive() {
+  local pid="$1"
+  kill -0 "$pid" 2>/dev/null
+}
+
 collect_tree() {
   local pid="$1"
   local child
+  process_alive "$pid" || return 0
   if command -v pgrep >/dev/null 2>&1; then
     for child in $(pgrep -P "$pid" 2>/dev/null || true); do
       collect_tree "$child"
@@ -24,14 +30,22 @@ signal_pids() {
   done
 }
 
+wait_for_tree_exit() {
+  local deadline=$((SECONDS + 5))
+  while [ "$SECONDS" -lt "$deadline" ]; do
+    [ -z "$(collect_tree "$WRANGLER_PID")" ] && return 0
+    sleep 0.2
+  done
+  return 1
+}
+
 cleanup() {
   local status=$?
   if [ -n "$WRANGLER_PID" ]; then
-    local wrangler_tree
-    wrangler_tree=$(collect_tree "$WRANGLER_PID")
-    signal_pids -TERM <<<"$wrangler_tree"
-    sleep 1
-    signal_pids -KILL <<<"$wrangler_tree"
+    signal_pids -TERM <<<"$(collect_tree "$WRANGLER_PID")"
+    if ! wait_for_tree_exit; then
+      signal_pids -KILL <<<"$(collect_tree "$WRANGLER_PID")"
+    fi
     wait "$WRANGLER_PID" 2>/dev/null || true
   fi
   ruby -rfileutils -e 'FileUtils.rm_rf(ARGV.fetch(0))' "$TMP_ROOT"
@@ -47,7 +61,7 @@ export WRANGLER_OUTPUT_LOG="$TMP_ROOT/wrangler-integration.log"
 export WRANGLER_SEND_METRICS=false
 export WRANGLER_SEND_ERROR_REPORTS=false
 mkdir -p "$XDG_CONFIG_HOME" "$XDG_CACHE_HOME" "$WRANGLER_LOG_PATH"
-TOKEN="integration-token-$$"
+TOKEN=$(ruby -rsecurerandom -e 'print SecureRandom.hex(24)')
 HASH=$(ruby -rdigest -e 'print Digest::SHA256.hexdigest(ARGV.fetch(0))' "$TOKEN")
 
 health_ready() {
