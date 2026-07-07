@@ -1,15 +1,18 @@
-# Coordination Backend v2 Design
+# Coordination Backend Design
 
 Date: 2026-07-04
-Status: proposed (implements #3, #4, #6; decisions from the 2026-07-03 planning grill)
+Status: accepted direction. The current implementation is the Worker/D1 HTTP
+state API used by `agent-coord` through `HttpStore`; the relational claim,
+heartbeat, event, cancellation, and reservation endpoints described below are
+the next protocol evolution.
 
 ## Problem
 
-The current backend stores claims, heartbeats, and batches as JSON files committed
-to this repository through the GitHub Contents API. That design forces coarse
-liveness (300s heartbeats, 15-minute TTL, stale zone to 75 minutes), exposes every
-write to API rate limits, makes the dashboard read a locally refreshed checkout of
-already-stale data, and mints every heartbeat as a commit authored by the
+The first backend stored claims, heartbeats, and batches as JSON files written
+through the GitHub Contents API. That design forced coarse
+liveness (300s heartbeats, 15-minute TTL, stale zone to 75 minutes), exposed every
+write to API rate limits, made the dashboard read a locally refreshed checkout of
+already-stale data, and minted every heartbeat as a commit authored by the
 operator's account — inflating their GitHub contribution graph by hundreds of
 commits per active day. A 2026-07-02 concurrency review additionally proved four
 protocol failure modes (unfenced takeover, same-agent-id double starts, sidecar
@@ -35,11 +38,11 @@ Non-functional (measured against current fleet):
 - Write latency: sub-second from bash/curl on any machine (Codex CLI, Claude Code,
   launchd sidecar, lifecycle hooks).
 - Liveness resolution: minutes, not hours — 60s heartbeat cadence, 2–5 min TTL.
-- Operator surface: one person; near-zero maintenance; no servers to patch.
+- Operator surface: small; near-zero maintenance; no servers to patch.
 - Cost target: ~$0 at this scale.
 - Access: read-only dashboard reachable from any machine or phone.
 - No commits attributed to a human account for routine state changes.
-- Rollback: the GitHub store remains selectable via env vars.
+- Compatibility: the GitHub store remains selectable for legacy/debug fallback.
 
 ## Options considered
 
@@ -296,23 +299,19 @@ write's WHERE clause*:
 - State content (repo names, branches, batch instructions) is org-internal; both
   the Worker route and the D1 database live in the shakacode Cloudflare account.
 
-## Migration and rollback
+## Current rollout and compatibility
 
-Per the grill decisions:
+The current user-facing path is the Worker/D1 HTTP state API:
 
-1. Deploy Worker + D1; implement `HttpStore` behind `AGENT_COORD_API_URL` +
-   `AGENT_COORD_API_TOKEN`. Existing GitHub/local stores untouched.
-2. Pilot on shakacode/react_on_rails: drain in-flight batches, set the env vars on
-   every machine that touches the repo, run one full batch end-to-end on HTTP.
-3. Flip remaining repos. Never mix backends within one repo's active work; no
-   dual-write shadow mode (claims are the exclusion primitive — two stores can
-   disagree about the winner).
-4. Rollback at any point = unset the env vars.
-5. Interim relief before cutover: point `AGENT_COORD_REF` at a non-default
-   `state` branch so Contents-API commits stop counting toward the operator's
-   contribution graph (GitHub counts default-branch and gh-pages commits only).
-6. After cutover this repo becomes the audit archive: one bot-authored batched
-   export commit per day via Worker cron.
+1. Deploy Worker + D1.
+2. Provision one machine token per participating machine.
+3. Set `AGENT_COORD_API_URL` and `AGENT_COORD_API_TOKEN`.
+4. Run `agent-coord doctor`.
+5. Keep all active work for a repo on the same backend; do not dual-write claims.
+
+`LocalStore` remains the deterministic test and smoke-check backend.
+`GitHubStore` remains available as a legacy/debug fallback, but new team/client
+setup should not start there.
 
 ## Risks
 
@@ -322,8 +321,7 @@ Per the grill decisions:
 - **TS/Worker unfamiliarity**: surface kept small (~300 lines, no framework);
   the contract lives in the Ruby CLI tests, not the Worker.
 - **Cloudflare outage**: CLI reports operational error (exit 2) and workflows
-  already treat that as `private_state: UNKNOWN` with hard-stop rules; rollback
-  env vars restore the GitHub store.
+  already treat that as coordination state `UNKNOWN` with hard-stop rules.
 - **Hook availability drift** (Claude hook events, Codex `notify` coverage):
   hooks are additive; prompt-driven heartbeats remain the portable floor, so a
   host losing an event degrades resolution, not correctness.

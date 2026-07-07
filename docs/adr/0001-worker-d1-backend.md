@@ -8,8 +8,9 @@ Status: accepted
 The v2 coordination backend (#3) needs an always-on HTTP store for claims,
 heartbeats, batches, events, and reservations, replacing JSON files committed to
 this repo via the GitHub Contents API. The load is tiny (~14k writes/day), the
-schema is five small tables, and the operator is one person. ShakaCode is a Rails
-shop, so "why isn't this a Rails app?" is the obvious future question — and
+schema is five small tables, and the operator surface should stay small.
+ShakaCode is a Rails shop, so "why isn't this a Rails app?" is the obvious
+future question — and
 Supabase was a credible third option since gbrain already targets it. Full
 comparison: [backend-design.md](../backend-design.md) → Options considered.
 

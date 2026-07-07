@@ -7,7 +7,7 @@ require "open3"
 require "tmpdir"
 
 SCRIPT = File.expand_path("../worker/bin/provision-token", __dir__)
-PLAN = File.expand_path("../docs/plans/2026-07-04-backend-v2-phase1.md", __dir__)
+PLAN = File.expand_path("../docs/archive/plans/2026-07-04-backend-v2-phase1.md", __dir__)
 
 class ProvisionTokenTest < Minitest::Test
   TOKEN = "0123456789abcdef0123456789abcdef0123456789abcdef"

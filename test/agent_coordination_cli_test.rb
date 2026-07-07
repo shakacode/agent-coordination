@@ -12,10 +12,8 @@ require "tmpdir"
 class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
   ROOT = File.expand_path("..", __dir__)
   BIN = File.join(ROOT, "bin", "agent-coord")
-  UNDERSCORE_BIN = File.join(ROOT, "bin", "agent_coord")
   HTTP_INTEGRATION_BIN = File.join(ROOT, "bin", "test-http-integration")
   LAUNCHD_HEARTBEAT_TEMPLATE = File.join(ROOT, "launchd", "com.shakacode.agent-coord-heartbeat.plist.example")
-  LAUNCHD_REFRESH_TEMPLATE = File.join(ROOT, "launchd", "com.shakacode.agent-coord-refresh.plist.example")
   SYSTEMD_TEMPLATE = File.join(ROOT, "systemd", "agent-coord-heartbeat.service.example")
   FAKE_SHASUM = <<~RUBY
     #!/usr/bin/env ruby
@@ -129,13 +127,6 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
 
     assert_equal 0, result.status.exitstatus, result.stderr
     refute_includes result.stdout, "--deep"
-  end
-
-  def test_underscore_alias_runs_the_same_cli
-    result = run_command("ruby", UNDERSCORE_BIN, "--help")
-
-    assert_equal 0, result.status.exitstatus, result.stderr
-    assert_includes result.stdout, "agent-coord <command>"
   end
 
   def test_http_integration_harness_uses_portable_hashing_and_cleans_up_wrangler
@@ -319,19 +310,19 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     assert_equal 0, result.status.exitstatus, result.stderr
   end
 
-  def test_bootstrap_installs_command_and_underscore_alias
+  def test_bootstrap_installs_command_and_removes_generated_underscore_alias
     install_dir = Dir.mktmpdir("agent-coord-bin")
+    legacy_alias = File.join(install_dir, "agent_coord")
+    FileUtils.ln_sf(File.join(ROOT, "bin", "agent_coord"), legacy_alias)
+
     result = run_agent_coord("bootstrap", "--install-dir", install_dir, "--no-profile", state_root: nil)
 
     assert_equal 0, result.status.exitstatus, result.stderr
     assert_includes result.stdout, "installed agent-coord"
+    assert_includes result.stdout, "removed legacy agent_coord"
     assert File.exist?(File.join(install_dir, "agent-coord"))
-    assert File.exist?(File.join(install_dir, "agent_coord"))
-
-    alias_result = run_command(File.join(install_dir, "agent_coord"), "version", "--json")
-    assert_equal 0, alias_result.status.exitstatus, alias_result.stderr
-    assert_equal JSON.parse(run_agent_coord("version", "--json", state_root: nil).stdout),
-                 JSON.parse(alias_result.stdout)
+    refute File.exist?(legacy_alias)
+    refute File.symlink?(legacy_alias)
   ensure
     FileUtils.remove_entry(install_dir) if install_dir && Dir.exist?(install_dir)
   end
@@ -413,25 +404,25 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     refute_match(/ExecStart=.*__BRANCH__/, template)
   end
 
-  def test_scheduler_templates_pin_github_state_to_state_branch
+  def test_scheduler_templates_use_cli_without_state_branch_pinning
     launchd_heartbeat = File.read(LAUNCHD_HEARTBEAT_TEMPLATE)
-    launchd_refresh = File.read(LAUNCHD_REFRESH_TEMPLATE)
     systemd_heartbeat = File.read(SYSTEMD_TEMPLATE)
 
-    assert_includes launchd_heartbeat, "AGENT_COORD_REF=state bin/agent-coord heartbeat"
-    assert_includes systemd_heartbeat, "AGENT_COORD_REF=state bin/agent-coord heartbeat"
-    assert_includes launchd_refresh, "git fetch --quiet origin state"
-    refute_includes launchd_refresh, "origin main"
+    assert_includes launchd_heartbeat, "bin/agent-coord heartbeat"
+    assert_includes systemd_heartbeat, "bin/agent-coord heartbeat"
+    refute_includes launchd_heartbeat, "AGENT_COORD_REF=state"
+    refute_includes systemd_heartbeat, "AGENT_COORD_REF=state"
   end
 
-  def test_readme_documents_state_branch_rollout
+  def test_readme_documents_http_first_setup
     readme = File.read(File.join(ROOT, "README.md"))
 
-    assert_includes readme, "Runtime JSON coordination records live in the private"
-    assert_includes readme, "shakacode/agent-coordination-state"
-    assert_includes readme, "Keep this repository code-only"
-    assert_includes readme, "export AGENT_COORD_REF=state"
-    assert_includes readme, "git clone --branch state --single-branch"
+    assert_includes readme, "The team/client runtime path is the HTTP backend"
+    assert_includes readme, "AGENT_COORD_API_URL"
+    assert_includes readme, "AGENT_COORD_API_TOKEN"
+    assert_includes readme, "Keep this public repository code-only"
+    refute_includes readme, "agent_coord --help"
+    refute_includes readme, "git clone --branch state --single-branch"
   end
 
   def test_operational_holder_heartbeat_read_failure_is_not_treated_as_missing

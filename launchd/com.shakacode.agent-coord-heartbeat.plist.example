@@ -10,7 +10,7 @@
   <array>
     <string>/bin/zsh</string>
     <string>-lc</string>
-    <string>cd "__AGENT_COORD_REPO__" &amp;&amp; AGENT_COORD_REF=state bin/agent-coord heartbeat --agent-id "__AGENT_ID__" --repo "__TARGET_REPO__" --target "__TARGET__" --batch-id "__BATCH_ID__" --branch "__BRANCH__" --status "${AGENT_COORD_STATUS:-in_progress}"</string>
+    <string>cd "__AGENT_COORD_REPO__" &amp;&amp; bin/agent-coord heartbeat --agent-id "__AGENT_ID__" --repo "__TARGET_REPO__" --target "__TARGET__" --batch-id "__BATCH_ID__" --branch "__BRANCH__" --status "${AGENT_COORD_STATUS:-in_progress}"</string>
   </array>
 
   <key>StartInterval</key>
