@@ -52,6 +52,64 @@ export AGENT_COORD_REF=state
 For local smoke checks, set `AGENT_COORD_STATE_ROOT` or pass `--state-root` to
 use a temporary filesystem state directory instead of GitHub.
 
+## HTTP backend
+
+HTTP backend selection follows this rule:
+
+1. `--state-root` flag → `LocalStore`
+2. `--api-url` flag or `AGENT_COORD_API_URL` env → `HttpStore` (requires `AGENT_COORD_API_TOKEN`, else `OperationalError` exit 2)
+3. `AGENT_COORD_STATE_ROOT` env → `LocalStore`
+4. otherwise → `GitHubStore`
+
+When both `AGENT_COORD_API_URL` and `AGENT_COORD_STATE_ROOT` env vars are set, warn once on stderr: `warning: AGENT_COORD_API_URL and AGENT_COORD_STATE_ROOT are both set; using the HTTP backend. Pass --state-root to force local.`
+
+Set both HTTP backend env vars on each participating machine:
+
+```bash
+export AGENT_COORD_API_URL=<worker-url>
+export AGENT_COORD_API_TOKEN=<machine-token>
+```
+
+Provision one token per machine from the repository root:
+
+```bash
+worker/bin/provision-token <machine-name>
+```
+
+For a local Wrangler/D1 environment, pass `--local`:
+
+```bash
+worker/bin/provision-token <machine-name> --local
+```
+
+The command prints the token once and stores only its SHA-256 hash in D1. If
+`wrangler d1 execute` fails, the script preserves Wrangler's output and, when
+the failure looks like a duplicate-machine or token constraint, adds a hint to
+delete or update the existing D1 `machines` row before re-provisioning. Machine
+names may contain letters, numbers, dots, underscores, colons, and hyphens.
+The raw token is intentionally printed to stdout once; run the command in a
+private terminal rather than CI or logged shell sessions.
+
+Operator deploy sketch:
+
+```bash
+cd worker
+npx wrangler login
+npx wrangler d1 create agent-coord
+# Paste the created database_id into wrangler.toml before continuing.
+npx wrangler d1 migrations apply agent-coord --remote
+npx wrangler deploy
+curl -s <worker-url>/v1/health
+```
+
+For the first M5 pilot, keep `AGENT_COORD_API_URL` and
+`AGENT_COORD_API_TOKEN` temporary shell-only until both an HTTP `doctor` check
+and a pilot batch pass. Use the seeded simulation repos as the first live HTTP
+batch target, then run a `shakacode/react_on_rails` pilot before persisting the
+M5 env vars or expanding to additional machines.
+
+Unset `AGENT_COORD_API_URL` to fall back to the GitHub store.
+
 React on Rails workflow docs assume `agent-coord` is available on `PATH`.
 `bin/agent-coord bootstrap` installs both `agent-coord` and the compatibility
 alias `agent_coord` into `$HOME/.local/bin` by default and appends that directory

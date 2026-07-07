@@ -1277,7 +1277,7 @@ Expected: all jobs green including `worker-integration`.
 **Interfaces:**
 - Produces: deployed Worker URL, one provisioned token per machine.
 
-- [ ] **Step 1: Write the provisioning script**
+- [x] **Step 1: Write the provisioning script**
 
 `worker/bin/provision-token`:
 
@@ -1299,7 +1299,11 @@ case "$MACHINE" in
   --*) usage ;;
 esac
 
-SCOPE="${2:---remote}"
+if [ "$#" -eq 2 ]; then
+  SCOPE="$2"
+else
+  SCOPE="--remote"
+fi
 
 if [[ ! "$MACHINE" =~ ^[A-Za-z0-9._:-]+$ ]]; then
   echo "machine name may contain only letters, numbers, dots, underscores, colons, and hyphens" >&2
@@ -1322,12 +1326,23 @@ SQL="INSERT INTO machines (machine, token_hash, created_at) VALUES ('${MACHINE}'
 cd "$(dirname "$0")/.."
 COMMAND=("$NPX_BIN" wrangler d1 execute agent-coord)
 COMMAND+=("$SCOPE")
+if [ "$SCOPE" = "--remote" ]; then
+  COMMAND+=(--yes)
+fi
 COMMAND+=(--command "$SQL")
-if ! "${COMMAND[@]}"; then
+WRANGLER_STDERR=$(mktemp "${TMPDIR:-/tmp}/agent-coord-wrangler-stderr.XXXXXX")
+trap 'rm -f "$WRANGLER_STDERR"' EXIT
+if ! "${COMMAND[@]}" 2>"$WRANGLER_STDERR"; then
+  cat "$WRANGLER_STDERR" >&2
   echo "wrangler d1 execute failed while provisioning ${MACHINE}; see wrangler output above" >&2
-  echo "If this was a duplicate machine or token constraint, delete or update the existing D1 machines row before re-provisioning" >&2
+  if grep -Eqi "PRIMARY KEY|constraint failed" "$WRANGLER_STDERR"; then
+    echo "If this was a duplicate machine or token constraint, delete or update the existing D1 machines row before re-provisioning" >&2
+  fi
   exit 1
 fi
+cat "$WRANGLER_STDERR" >&2
+rm -f "$WRANGLER_STDERR"
+trap - EXIT
 
 echo "machine:  ${MACHINE}"
 echo "token:    ${TOKEN}"
@@ -1340,7 +1355,7 @@ echo "  export AGENT_COORD_API_TOKEN=${TOKEN}"
 chmod +x worker/bin/provision-token
 ```
 
-- [ ] **Step 2: [OPERATOR] Deploy**
+- [x] **Step 2: [OPERATOR] Deploy**
 
 ```bash
 cd worker
@@ -1354,11 +1369,18 @@ curl -s <worker-url>/v1/health
 
 Expected: `{"status":"ok"}`
 
-- [ ] **Step 3: Document**
+Completed 2026-07-07 UTC: D1 database `agent-coord`
+(`0d75340b-8414-405a-9beb-97a857b80d2c`) is bound to Worker
+`agent-coord-api`, migrations were applied, and the deployed endpoint
+`https://agent-coord-api.justin-fed.workers.dev/v1/health` returned
+`{"status":"ok"}`. M5 was provisioned with a private token; no bearer tokens are
+committed.
+
+- [x] **Step 3: Document**
 
 Add to `README.md` a section “HTTP backend” containing: the selection precedence from Task 9 verbatim, the two env vars, `worker/bin/provision-token` usage, and the rollback line: “unset `AGENT_COORD_API_URL` to fall back to the GitHub store.”
 
-- [ ] **Step 4: Commit**
+- [x] **Step 4: Commit**
 
 ```bash
 bundle exec rubocop && git add -A && git commit -m "Add token provisioning script and HTTP backend docs"
@@ -1370,11 +1392,19 @@ bundle exec rubocop && git add -A && git commit -m "Add token provisioning scrip
 
 No file changes. Execute the grill-decided cutover:
 
-- [ ] 1. Drain in-flight batches on shakacode/react_on_rails (no live claims for that repo in `agent-coord status`).
-- [ ] 2. On every machine that touches react_on_rails: set `AGENT_COORD_API_URL` + `AGENT_COORD_API_TOKEN`.
-- [ ] 3. Run `agent-coord doctor` on each — expect `backend: http`, `status: ok`.
-- [ ] 4. Run one full batch end-to-end on HTTP; watch it in the state (`agent-coord status --json`).
-- [ ] 5. On success, flip remaining repos’ machines. Rollback at any point: unset the two env vars.
+- [x] 1. On M5 only, set `AGENT_COORD_API_URL` + `AGENT_COORD_API_TOKEN` in a temporary shell. Do not persist them to shell profiles, launchd units, or shared config yet.
+- [x] 2. Run `agent-coord doctor --json` on M5 — expect `backend: http`, `status: ok`.
+- [x] 3. Create or grant access to `shakacode/agent-coord-sim-alpha` and `shakacode/agent-coord-sim-beta`, seed them from `sim/template/`, and run one seeded sim batch end-to-end on HTTP.
+- [x] 4. Drain in-flight batches on `shakacode/react_on_rails` (no live claims for that repo in `agent-coord status`), then run one `react_on_rails` batch end-to-end on HTTP.
+- [x] 5. On success, persist the M5 env vars. Rollback at any point before persistence: unset the two env vars or close the shell.
+
+Pilot evidence recorded 2026-07-07 UTC: both sim repos scored `SCORE 3/3`,
+`shakacode/react_on_rails` PR
+[`#4514`](https://github.com/shakacode/react_on_rails/pull/4514) merged through
+the merge queue at `765e74b4be5717f876cc8acc6a29766530f9430b`, and a fresh M5
+login shell resolved `agent-coord` to the canonical public checkout with
+`doctor --json` reporting `backend: http` and `status: ok`. Additional machine
+or repo flips remain explicit follow-up rollout decisions.
 
 ---
 
