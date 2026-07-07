@@ -1024,19 +1024,89 @@ git add -A && git commit -m "Teach doctor the HTTP backend"
 #!/usr/bin/env bash
 set -euo pipefail
 cd "$(dirname "$0")/.."
-TOKEN="integration-token-$$"
-HASH=$(printf %s "$TOKEN" | shasum -a 256 | cut -d' ' -f1)
+TMP_ROOT=$(mktemp -d "${TMPDIR:-/tmp}/agent-coord-wrangler.XXXXXX")
+WRANGLER_PID=""
+
+process_alive() {
+  local pid="$1"
+  kill -0 "$pid" 2>/dev/null
+}
+
+collect_tree() {
+  local pid="$1"
+  local child
+  process_alive "$pid" || return 0
+  if command -v pgrep >/dev/null 2>&1; then
+    for child in $(pgrep -P "$pid" 2>/dev/null || true); do
+      collect_tree "$child"
+    done
+  fi
+  printf '%s\n' "$pid"
+}
+
+signal_pids() {
+  local signal="$1"
+  local pid
+  while IFS= read -r pid; do
+    [ -n "$pid" ] || continue
+    kill "$signal" "$pid" 2>/dev/null || true
+  done
+}
+
+wait_for_tree_exit() {
+  local deadline=$((SECONDS + 5))
+  while [ "$SECONDS" -lt "$deadline" ]; do
+    [ -z "$(collect_tree "$WRANGLER_PID")" ] && return 0
+    sleep 0.2
+  done
+  return 1
+}
+
+cleanup() {
+  local status=$?
+  if [ -n "$WRANGLER_PID" ]; then
+    signal_pids -TERM <<<"$(collect_tree "$WRANGLER_PID")"
+    if ! wait_for_tree_exit; then
+      signal_pids -KILL <<<"$(collect_tree "$WRANGLER_PID")"
+    fi
+    wait "$WRANGLER_PID" 2>/dev/null || true
+  fi
+  ruby -rfileutils -e 'FileUtils.rm_rf(ARGV.fetch(0))' "$TMP_ROOT"
+  return "$status"
+}
+trap cleanup EXIT
+trap 'exit 130' INT TERM
+
+export XDG_CONFIG_HOME="$TMP_ROOT/config"
+export XDG_CACHE_HOME="$TMP_ROOT/cache"
+export WRANGLER_LOG_PATH="$TMP_ROOT/logs"
+export WRANGLER_OUTPUT_LOG="$TMP_ROOT/wrangler-integration.log"
+export WRANGLER_SEND_METRICS=false
+export WRANGLER_SEND_ERROR_REPORTS=false
+mkdir -p "$XDG_CONFIG_HOME" "$XDG_CACHE_HOME" "$WRANGLER_LOG_PATH"
+TOKEN=$(ruby -rsecurerandom -e 'print SecureRandom.hex(24)')
+HASH=$(ruby -rdigest -e 'print Digest::SHA256.hexdigest(ARGV.fetch(0))' "$TOKEN")
+
+health_ready() {
+  ruby -rnet/http -ruri -e '
+    uri = URI("http://127.0.0.1:8787/v1/health")
+    response = Net::HTTP.start(uri.host, uri.port, open_timeout: 1, read_timeout: 1) do |http|
+      http.get(uri.request_uri)
+    end
+    exit(response.is_a?(Net::HTTPSuccess) ? 0 : 1)
+  ' >/dev/null 2>&1
+}
+
 (cd worker && npx wrangler d1 migrations apply agent-coord --local >/dev/null)
 (cd worker && npx wrangler d1 execute agent-coord --local --command \
   "INSERT OR REPLACE INTO machines (machine, token_hash, created_at) VALUES ('integration', '${HASH}', '2026-07-04T00:00:00Z')" >/dev/null)
-(cd worker && npx wrangler dev --local --port 8787 >/tmp/wrangler-integration.log 2>&1) &
+(cd worker && npx wrangler dev --local --port 8787 >"$WRANGLER_OUTPUT_LOG" 2>&1) &
 WRANGLER_PID=$!
-trap 'kill ${WRANGLER_PID} 2>/dev/null || true' EXIT
 for _ in $(seq 1 60); do
-  curl -fs http://127.0.0.1:8787/v1/health >/dev/null 2>&1 && break
+  health_ready && break
   sleep 0.5
 done
-curl -fs http://127.0.0.1:8787/v1/health >/dev/null || { echo "wrangler dev never became healthy"; exit 1; }
+health_ready || { echo "wrangler dev never became healthy"; cat "$WRANGLER_OUTPUT_LOG"; exit 1; }
 AGENT_COORD_API_URL=http://127.0.0.1:8787 AGENT_COORD_API_TOKEN="$TOKEN" \
   bundle exec ruby test/http_backend_integration_test.rb
 echo INTEGRATION_OK
@@ -1198,15 +1268,49 @@ Expected: all jobs green including `worker-integration`.
 # Usage: worker/bin/provision-token <machine-name> [--local]
 # Prints a fresh token once; stores only its SHA-256 hash in D1.
 set -euo pipefail
-MACHINE="${1:?usage: provision-token <machine-name> [--local]}"
+
+usage() {
+  echo "usage: worker/bin/provision-token <machine-name> [--local]" >&2
+  exit 1
+}
+
+[ "$#" -ge 1 ] && [ "$#" -le 2 ] || usage
+
+MACHINE="$1"
+case "$MACHINE" in
+  --*) usage ;;
+esac
+
 SCOPE="${2:---remote}"
-TOKEN=$(openssl rand -hex 24)
-HASH=$(printf %s "$TOKEN" | shasum -a 256 | cut -d' ' -f1)
-FLAG=""
-[ "$SCOPE" = "--local" ] && FLAG="--local"
+
+if [[ ! "$MACHINE" =~ ^[A-Za-z0-9._:-]+$ ]]; then
+  echo "machine name may contain only letters, numbers, dots, underscores, colons, and hyphens" >&2
+  exit 1
+fi
+
+case "$SCOPE" in
+  --remote) ;;
+  --local) ;;
+  *) usage ;;
+esac
+
+OPENSSL_BIN="${OPENSSL_BIN:-openssl}"
+NPX_BIN="${NPX_BIN:-npx}"
+
+TOKEN=$("$OPENSSL_BIN" rand -hex 24)
+HASH=$(printf %s "$TOKEN" | "$OPENSSL_BIN" dgst -sha256 -r | cut -d' ' -f1)
+SQL="INSERT INTO machines (machine, token_hash, created_at) VALUES ('${MACHINE}', '${HASH}', strftime('%Y-%m-%dT%H:%M:%SZ','now'))"
+
 cd "$(dirname "$0")/.."
-npx wrangler d1 execute agent-coord $FLAG --command \
-  "INSERT INTO machines (machine, token_hash, created_at) VALUES ('${MACHINE}', '${HASH}', strftime('%Y-%m-%dT%H:%M:%SZ','now'))"
+COMMAND=("$NPX_BIN" wrangler d1 execute agent-coord)
+COMMAND+=("$SCOPE")
+COMMAND+=(--command "$SQL")
+if ! "${COMMAND[@]}"; then
+  echo "wrangler d1 execute failed while provisioning ${MACHINE}; see wrangler output above" >&2
+  echo "If this was a duplicate machine or token constraint, delete or update the existing D1 machines row before re-provisioning" >&2
+  exit 1
+fi
+
 echo "machine:  ${MACHINE}"
 echo "token:    ${TOKEN}"
 echo "Set on that machine:"
