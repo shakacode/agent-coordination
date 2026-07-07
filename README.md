@@ -83,10 +83,10 @@ worker/bin/provision-token <machine-name> --local
 ```
 
 The command prints the token once and stores only its SHA-256 hash in D1. If
-`wrangler d1 execute` fails, the script preserves Wrangler's output and adds a
-duplicate-machine hint: delete or update the existing D1 `machines` row before
-re-provisioning. Machine names may contain letters, numbers, dots, underscores,
-colons, and hyphens.
+`wrangler d1 execute` fails, the script preserves Wrangler's output and, when
+the failure looks like a duplicate-machine or token constraint, adds a hint to
+delete or update the existing D1 `machines` row before re-provisioning. Machine
+names may contain letters, numbers, dots, underscores, colons, and hyphens.
 
 Operator deploy sketch:
 
