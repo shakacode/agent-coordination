@@ -2109,10 +2109,12 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
   def assert_fake_harness_events(paths)
     events = fake_harness_events(paths)
     execute = events.find { |event| event.key?("command") }
+    assert execute, "no d1 execute command was recorded: #{events.inspect}"
     assert_match(/\b[0-9a-f]{64}\b/, execute.fetch("command"))
     refute_includes execute.fetch("command"), "integration-token-"
 
     dev = events.find { |event| event["argv"] == %w[wrangler dev --local --port 8787] }
+    assert dev, "no wrangler dev command was recorded: #{events.inspect}"
     assert_includes dev.fetch("wrangler_output_log"), paths.fetch(:tmpdir)
     assert_fake_harness_cleanup(paths)
   end
