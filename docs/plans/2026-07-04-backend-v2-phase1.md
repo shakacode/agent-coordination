@@ -1252,7 +1252,7 @@ echo "  export AGENT_COORD_API_TOKEN=${TOKEN}"
 chmod +x worker/bin/provision-token
 ```
 
-- [ ] **Step 2: [OPERATOR] Deploy**
+- [x] **Step 2: [OPERATOR] Deploy**
 
 ```bash
 cd worker
@@ -1265,6 +1265,13 @@ curl -s <worker-url>/v1/health
 ```
 
 Expected: `{"status":"ok"}`
+
+Completed 2026-07-07 UTC: D1 database `agent-coord`
+(`0d75340b-8414-405a-9beb-97a857b80d2c`) is bound to Worker
+`agent-coord-api`, migrations were applied, and the deployed endpoint
+`https://agent-coord-api.justin-fed.workers.dev/v1/health` returned
+`{"status":"ok"}`. M5 was provisioned with a private token; no bearer tokens are
+committed.
 
 - [x] **Step 3: Document**
 
@@ -1282,11 +1289,19 @@ bundle exec rubocop && git add -A && git commit -m "Add token provisioning scrip
 
 No file changes. Execute the grill-decided cutover:
 
-- [ ] 1. On M5 only, set `AGENT_COORD_API_URL` + `AGENT_COORD_API_TOKEN` in a temporary shell. Do not persist them to shell profiles, launchd units, or shared config yet.
-- [ ] 2. Run `agent-coord doctor --json` on M5 — expect `backend: http`, `status: ok`.
-- [ ] 3. Create or grant access to `shakacode/agent-coord-sim-alpha` and `shakacode/agent-coord-sim-beta`, seed them from `sim/template/`, and run one seeded sim batch end-to-end on HTTP.
-- [ ] 4. Drain in-flight batches on `shakacode/react_on_rails` (no live claims for that repo in `agent-coord status`), then run one `react_on_rails` batch end-to-end on HTTP.
-- [ ] 5. On success, persist the M5 env vars and then flip additional machines or repos. Rollback at any point before persistence: unset the two env vars or close the shell.
+- [x] 1. On M5 only, set `AGENT_COORD_API_URL` + `AGENT_COORD_API_TOKEN` in a temporary shell. Do not persist them to shell profiles, launchd units, or shared config yet.
+- [x] 2. Run `agent-coord doctor --json` on M5 — expect `backend: http`, `status: ok`.
+- [x] 3. Create or grant access to `shakacode/agent-coord-sim-alpha` and `shakacode/agent-coord-sim-beta`, seed them from `sim/template/`, and run one seeded sim batch end-to-end on HTTP.
+- [x] 4. Drain in-flight batches on `shakacode/react_on_rails` (no live claims for that repo in `agent-coord status`), then run one `react_on_rails` batch end-to-end on HTTP.
+- [x] 5. On success, persist the M5 env vars. Rollback at any point before persistence: unset the two env vars or close the shell.
+
+Pilot evidence recorded 2026-07-07 UTC: both sim repos scored `SCORE 3/3`,
+`shakacode/react_on_rails` PR
+[`#4514`](https://github.com/shakacode/react_on_rails/pull/4514) merged through
+the merge queue at `765e74b4be5717f876cc8acc6a29766530f9430b`, and a fresh M5
+login shell resolved `agent-coord` to the canonical public checkout with
+`doctor --json` reporting `backend: http` and `status: ok`. Additional machine
+or repo flips remain explicit follow-up rollout decisions.
 
 ---
 
