@@ -87,6 +87,8 @@ The command prints the token once and stores only its SHA-256 hash in D1. If
 the failure looks like a duplicate-machine or token constraint, adds a hint to
 delete or update the existing D1 `machines` row before re-provisioning. Machine
 names may contain letters, numbers, dots, underscores, colons, and hyphens.
+The raw token is intentionally printed to stdout once; run the command in a
+private terminal rather than CI or logged shell sessions.
 
 Operator deploy sketch:
 
@@ -106,7 +108,7 @@ and a pilot batch pass. Use the seeded simulation repos as the first live HTTP
 batch target, then run a `shakacode/react_on_rails` pilot before persisting the
 M5 env vars or expanding to additional machines.
 
-unset `AGENT_COORD_API_URL` to fall back to the GitHub store.
+Unset `AGENT_COORD_API_URL` to fall back to the GitHub store.
 
 React on Rails workflow docs assume `agent-coord` is available on `PATH`.
 `bin/agent-coord bootstrap` installs both `agent-coord` and the compatibility

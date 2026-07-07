@@ -69,6 +69,7 @@ class ProvisionTokenTest < Minitest::Test
       "--command",
       expected_sql
     ], npx_args
+    refute_includes npx_args, "--yes"
     assert_includes stdout, "machine:  m5"
     assert_includes stdout, "token:    #{TOKEN}"
     assert_includes stdout, "export AGENT_COORD_API_TOKEN=#{TOKEN}"
@@ -80,6 +81,7 @@ class ProvisionTokenTest < Minitest::Test
 
     assert status.success?, stderr
     assert_includes npx_args, "--remote"
+    assert_includes npx_args, "--yes"
     refute_includes npx_args, "--local"
   end
 

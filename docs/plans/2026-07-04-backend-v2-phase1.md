@@ -1326,13 +1326,16 @@ SQL="INSERT INTO machines (machine, token_hash, created_at) VALUES ('${MACHINE}'
 cd "$(dirname "$0")/.."
 COMMAND=("$NPX_BIN" wrangler d1 execute agent-coord)
 COMMAND+=("$SCOPE")
+if [ "$SCOPE" = "--remote" ]; then
+  COMMAND+=(--yes)
+fi
 COMMAND+=(--command "$SQL")
 WRANGLER_STDERR=$(mktemp "${TMPDIR:-/tmp}/agent-coord-wrangler-stderr.XXXXXX")
 trap 'rm -f "$WRANGLER_STDERR"' EXIT
 if ! "${COMMAND[@]}" 2>"$WRANGLER_STDERR"; then
   cat "$WRANGLER_STDERR" >&2
   echo "wrangler d1 execute failed while provisioning ${MACHINE}; see wrangler output above" >&2
-  if grep -Eqi "UNIQUE constraint failed|PRIMARY KEY|constraint failed" "$WRANGLER_STDERR"; then
+  if grep -Eqi "PRIMARY KEY|constraint failed" "$WRANGLER_STDERR"; then
     echo "If this was a duplicate machine or token constraint, delete or update the existing D1 machines row before re-provisioning" >&2
   fi
   exit 1
