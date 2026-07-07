@@ -224,14 +224,14 @@ module AgentCoord
         opts.separator "    --repo OWNER/REPO --target N  target read; claim plus holder heartbeat only"
         opts.separator "    --batch-id ID                 batch read; batch, lane heartbeats, dependencies"
         opts.separator "Scoped JSON includes a degraded array for intentionally omitted state."
-        opts.separator "Exit 2 means the private state for that command is UNKNOWN."
+        opts.separator "Exit 2 means coordination state for that command is UNKNOWN."
         opts.separator ""
       when "doctor"
         opts.separator ""
         opts.separator "Doctor modes:"
         opts.separator "    default  lightweight auth, ref, and layout checks without reading every JSON file"
         opts.separator "    --deep   parse every claim, heartbeat, and batch JSON file"
-        opts.separator "Exit 2 means private coordination state is UNKNOWN until backend access is fixed."
+        opts.separator "Exit 2 means coordination state is UNKNOWN until backend access is fixed."
         opts.separator ""
       end
     end
@@ -1143,7 +1143,7 @@ module AgentCoord
         return true
       end
 
-      content = File.read(destination, 512)
+      content = File.read(destination, 16 * 1024)
       return false unless content.start_with?("#!/bin/sh") && content.include?(legacy_source)
 
       FileUtils.rm_f(destination)

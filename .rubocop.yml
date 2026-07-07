@@ -9,7 +9,6 @@ AllCops:
   Include:
     - "**/*.rb"
     - bin/agent-coord
-    - bin/agent_coord
     - Gemfile
 
 Layout/LineLength:

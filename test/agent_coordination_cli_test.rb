@@ -329,6 +329,18 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
 
   def test_bootstrap_can_install_status_state_root_wrappers
     install_dir = Dir.mktmpdir("agent-coord-bin")
+    legacy_alias = File.join(install_dir, "agent_coord")
+    legacy_state_root = File.join(@state_root, "status-root-#{'x' * 700}")
+    File.write(
+      legacy_alias,
+      <<~SH
+        #!/bin/sh
+        export AGENT_COORD_STATUS_STATE_ROOT=#{Shellwords.escape(legacy_state_root)}
+        exec #{Shellwords.escape(File.join(ROOT, 'bin', 'agent_coord'))} "$@"
+      SH
+    )
+    FileUtils.chmod(0o755, legacy_alias)
+
     now = Time.now.utc
     write_heartbeat(
       "worker-bootstrap-wrapper",
@@ -348,6 +360,7 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     wrapper = File.join(install_dir, "agent-coord")
     assert File.executable?(wrapper)
     assert_includes File.read(wrapper), "AGENT_COORD_STATUS_STATE_ROOT"
+    refute File.exist?(legacy_alias)
 
     status = run_command({ "AGENT_COORD_STATE_ROOT" => nil }, wrapper, "status")
 

@@ -3,10 +3,11 @@
 CLI, workflow helpers, Worker code, tests, and simulation fixtures for
 coordinating concurrent agent work.
 
-The team/client runtime path is the HTTP backend: a Cloudflare Worker backed by
-D1, selected with `AGENT_COORD_API_URL` and `AGENT_COORD_API_TOKEN`. Local file
-state is for tests and smoke checks. Advanced fallback backends are available
-for maintainers, but new users should start with HTTP.
+The team/client runtime path is the HTTP backend: `AGENT_COORD_API_URL` points
+the CLI at the Cloudflare Worker backed by D1, and `AGENT_COORD_API_TOKEN`
+authenticates this machine to that Worker. Local file state is for tests and
+smoke checks. Advanced fallback backends are available for maintainers, but new
+users should start with HTTP.
 
 Keep this public repository code-only. Do not commit live `claims/`,
 `heartbeats/`, `batches/`, `*.json.lock`, secrets, environment files, customer
@@ -26,8 +27,6 @@ bin/agent-coord --help
 bin/agent-coord bootstrap
 export PATH="$HOME/.local/bin:$PATH"
 agent-coord --help
-agent-coord doctor
-agent-coord doctor --deep
 ```
 
 The versioned pre-commit hook in `.githooks/pre-commit` runs RuboCop on staged
