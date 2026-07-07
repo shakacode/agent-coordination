@@ -1016,7 +1016,7 @@ git add -A && git commit -m "Teach doctor the HTTP backend"
 - Consumes: everything above.
 - Produces: one command that proves the #3 acceptance criteria: contention refusal (exit 3), dead-holder takeover, two-concurrent-claims single winner, heartbeat/status/release parity.
 
-- [ ] **Step 1: Write the harness**
+- [x] **Step 1: Write the harness**
 
 `bin/test-http-integration`:
 
@@ -1024,19 +1024,107 @@ git add -A && git commit -m "Teach doctor the HTTP backend"
 #!/usr/bin/env bash
 set -euo pipefail
 cd "$(dirname "$0")/.."
-TOKEN="integration-token-$$"
-HASH=$(printf %s "$TOKEN" | shasum -a 256 | cut -d' ' -f1)
-(cd worker && npx wrangler d1 migrations apply agent-coord --local >/dev/null)
+TMP_ROOT=$(mktemp -d "${TMPDIR:-/tmp}/agent-coord-wrangler.XXXXXX")
+WRANGLER_STATE_DIR="$TMP_ROOT/state"
+WRANGLER_PID=""
+set -m 2>/dev/null || true
+
+process_alive() {
+  local pid="$1"
+  kill -0 "$pid" 2>/dev/null
+}
+
+process_group_alive() {
+  local pid="$1"
+  kill -0 "-$pid" 2>/dev/null
+}
+
+collect_tree() {
+  local pid="$1"
+  local child
+  process_alive "$pid" || return 0
+  if command -v pgrep >/dev/null 2>&1; then
+    for child in $(pgrep -P "$pid" 2>/dev/null || true); do
+      collect_tree "$child"
+    done
+  fi
+  printf '%s\n' "$pid"
+}
+
+signal_pids() {
+  local signal="$1"
+  local pid
+  while IFS= read -r pid; do
+    [ -n "$pid" ] || continue
+    kill "$signal" "$pid" 2>/dev/null || true
+  done
+}
+
+signal_wrangler() {
+  local signal="$1"
+  kill "$signal" "-$WRANGLER_PID" 2>/dev/null || signal_pids "$signal" <<<"$(collect_tree "$WRANGLER_PID")"
+}
+
+wait_for_wrangler_exit() {
+  local deadline=$((SECONDS + 5))
+  while [ "$SECONDS" -lt "$deadline" ]; do
+    if ! process_group_alive "$WRANGLER_PID" && [ -z "$(collect_tree "$WRANGLER_PID")" ]; then
+      return 0
+    fi
+    sleep 0.2
+  done
+  return 1
+}
+
+cleanup() {
+  local status=$?
+  if [ -n "$WRANGLER_PID" ]; then
+    signal_wrangler -TERM
+    if ! wait_for_wrangler_exit; then
+      signal_wrangler -KILL
+    fi
+    wait "$WRANGLER_PID" 2>/dev/null || true
+  fi
+  ruby -rfileutils -e 'FileUtils.rm_rf(ARGV.fetch(0))' "$TMP_ROOT"
+  return "$status"
+}
+trap cleanup EXIT
+trap 'exit 130' INT TERM
+
+export XDG_CONFIG_HOME="$TMP_ROOT/config"
+export XDG_CACHE_HOME="$TMP_ROOT/cache"
+export WRANGLER_LOG_PATH="$TMP_ROOT/logs"
+export WRANGLER_OUTPUT_LOG="$TMP_ROOT/wrangler-integration.log"
+export WRANGLER_SEND_METRICS=false
+export WRANGLER_SEND_ERROR_REPORTS=false
+mkdir -p "$XDG_CONFIG_HOME" "$XDG_CACHE_HOME" "$WRANGLER_LOG_PATH"
+TOKEN=$(ruby -rsecurerandom -e 'print SecureRandom.hex(24)')
+HASH=$(ruby -rdigest -e 'print Digest::SHA256.hexdigest(ARGV.fetch(0))' "$TOKEN")
+
+health_ready() {
+  ruby -rnet/http -ruri -e '
+    uri = URI("http://127.0.0.1:8787/v1/health")
+    response = Net::HTTP.start(uri.host, uri.port, open_timeout: 1, read_timeout: 1) do |http|
+      http.get(uri.request_uri)
+    end
+    exit(response.is_a?(Net::HTTPSuccess) ? 0 : 1)
+  ' >/dev/null 2>&1
+}
+
+(cd worker && npx wrangler d1 migrations apply agent-coord --local --persist-to "$WRANGLER_STATE_DIR" >/dev/null)
 (cd worker && npx wrangler d1 execute agent-coord --local --command \
-  "INSERT OR REPLACE INTO machines (machine, token_hash, created_at) VALUES ('integration', '${HASH}', '2026-07-04T00:00:00Z')" >/dev/null)
-(cd worker && npx wrangler dev --local --port 8787 >/tmp/wrangler-integration.log 2>&1) &
+  "INSERT OR REPLACE INTO machines (machine, token_hash, created_at) VALUES ('integration', '${HASH}', '2026-07-04T00:00:00Z')" \
+  --persist-to "$WRANGLER_STATE_DIR" >/dev/null)
+(cd worker && npx wrangler dev --local --persist-to "$WRANGLER_STATE_DIR" --port 8787 >"$WRANGLER_OUTPUT_LOG" 2>&1) &
 WRANGLER_PID=$!
-trap 'kill ${WRANGLER_PID} 2>/dev/null || true' EXIT
+set +m 2>/dev/null || true
 for _ in $(seq 1 60); do
-  curl -fs http://127.0.0.1:8787/v1/health >/dev/null 2>&1 && break
+  process_alive "$WRANGLER_PID" || { echo "wrangler dev exited before becoming healthy"; cat "$WRANGLER_OUTPUT_LOG"; exit 1; }
+  health_ready && break
   sleep 0.5
 done
-curl -fs http://127.0.0.1:8787/v1/health >/dev/null || { echo "wrangler dev never became healthy"; exit 1; }
+process_alive "$WRANGLER_PID" || { echo "wrangler dev exited before becoming healthy"; cat "$WRANGLER_OUTPUT_LOG"; exit 1; }
+health_ready || { echo "wrangler dev never became healthy"; cat "$WRANGLER_OUTPUT_LOG"; exit 1; }
 AGENT_COORD_API_URL=http://127.0.0.1:8787 AGENT_COORD_API_TOKEN="$TOKEN" \
   bundle exec ruby test/http_backend_integration_test.rb
 echo INTEGRATION_OK
@@ -1046,7 +1134,7 @@ echo INTEGRATION_OK
 chmod +x bin/test-http-integration
 ```
 
-- [ ] **Step 2: Write the integration test**
+- [x] **Step 2: Write the integration test**
 
 `test/http_backend_integration_test.rb`:
 
@@ -1115,12 +1203,12 @@ class HttpBackendIntegrationTest < Minitest::Test
 end
 ```
 
-- [ ] **Step 3: Run it**
+- [x] **Step 3: Run it**
 
 Run: `bin/test-http-integration`
 Expected: both tests pass, then `INTEGRATION_OK`.
 
-- [ ] **Step 4: Commit**
+- [x] **Step 4: Commit**
 
 ```bash
 bundle exec rubocop && git add -A && git commit -m "Add end-to-end HTTP backend parity harness"
@@ -1137,7 +1225,7 @@ bundle exec rubocop && git add -A && git commit -m "Add end-to-end HTTP backend 
 - Consumes: `bin/test-http-integration`.
 - Produces: a `worker-integration` job on every PR.
 
-- [ ] **Step 1: Add the job**
+- [x] **Step 1: Add the job**
 
 Append to `.github/workflows/ci.yml` under `jobs:` (match the checkout/Ruby-setup steps of the existing `test` job verbatim, then add Node):
 
@@ -1165,7 +1253,7 @@ Append to `.github/workflows/ci.yml` under `jobs:` (match the checkout/Ruby-setu
 
 (If the existing jobs pin `ruby/setup-ruby` / `setup-node` to SHAs, copy those exact pins instead of the tags above.)
 
-- [ ] **Step 2: Verify locally, then push and watch CI**
+- [x] **Step 2: Verify locally, then push and watch CI**
 
 Run: `bin/test-http-integration`
 Expected: `INTEGRATION_OK`.
@@ -1198,15 +1286,49 @@ Expected: all jobs green including `worker-integration`.
 # Usage: worker/bin/provision-token <machine-name> [--local]
 # Prints a fresh token once; stores only its SHA-256 hash in D1.
 set -euo pipefail
-MACHINE="${1:?usage: provision-token <machine-name> [--local]}"
+
+usage() {
+  echo "usage: worker/bin/provision-token <machine-name> [--local]" >&2
+  exit 1
+}
+
+[ "$#" -ge 1 ] && [ "$#" -le 2 ] || usage
+
+MACHINE="$1"
+case "$MACHINE" in
+  --*) usage ;;
+esac
+
 SCOPE="${2:---remote}"
-TOKEN=$(openssl rand -hex 24)
-HASH=$(printf %s "$TOKEN" | shasum -a 256 | cut -d' ' -f1)
-FLAG=""
-[ "$SCOPE" = "--local" ] && FLAG="--local"
+
+if [[ ! "$MACHINE" =~ ^[A-Za-z0-9._:-]+$ ]]; then
+  echo "machine name may contain only letters, numbers, dots, underscores, colons, and hyphens" >&2
+  exit 1
+fi
+
+case "$SCOPE" in
+  --remote) ;;
+  --local) ;;
+  *) usage ;;
+esac
+
+OPENSSL_BIN="${OPENSSL_BIN:-openssl}"
+NPX_BIN="${NPX_BIN:-npx}"
+
+TOKEN=$("$OPENSSL_BIN" rand -hex 24)
+HASH=$(printf %s "$TOKEN" | "$OPENSSL_BIN" dgst -sha256 -r | cut -d' ' -f1)
+SQL="INSERT INTO machines (machine, token_hash, created_at) VALUES ('${MACHINE}', '${HASH}', strftime('%Y-%m-%dT%H:%M:%SZ','now'))"
+
 cd "$(dirname "$0")/.."
-npx wrangler d1 execute agent-coord $FLAG --command \
-  "INSERT INTO machines (machine, token_hash, created_at) VALUES ('${MACHINE}', '${HASH}', strftime('%Y-%m-%dT%H:%M:%SZ','now'))"
+COMMAND=("$NPX_BIN" wrangler d1 execute agent-coord)
+COMMAND+=("$SCOPE")
+COMMAND+=(--command "$SQL")
+if ! "${COMMAND[@]}"; then
+  echo "wrangler d1 execute failed while provisioning ${MACHINE}; see wrangler output above" >&2
+  echo "If this was a duplicate machine or token constraint, delete or update the existing D1 machines row before re-provisioning" >&2
+  exit 1
+fi
+
 echo "machine:  ${MACHINE}"
 echo "token:    ${TOKEN}"
 echo "Set on that machine:"
