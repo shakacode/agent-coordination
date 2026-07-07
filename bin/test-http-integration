@@ -96,9 +96,11 @@ health_ready() {
 WRANGLER_PID=$!
 set +m 2>/dev/null || true
 for _ in $(seq 1 60); do
+  process_alive "$WRANGLER_PID" || { echo "wrangler dev exited before becoming healthy"; cat "$WRANGLER_OUTPUT_LOG"; exit 1; }
   health_ready && break
   sleep 0.5
 done
+process_alive "$WRANGLER_PID" || { echo "wrangler dev exited before becoming healthy"; cat "$WRANGLER_OUTPUT_LOG"; exit 1; }
 health_ready || { echo "wrangler dev never became healthy"; cat "$WRANGLER_OUTPUT_LOG"; exit 1; }
 AGENT_COORD_API_URL=http://127.0.0.1:8787 AGENT_COORD_API_TOKEN="$TOKEN" \
   bundle exec ruby test/http_backend_integration_test.rb
