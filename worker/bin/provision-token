@@ -15,7 +15,11 @@ case "$MACHINE" in
   --*) usage ;;
 esac
 
-SCOPE="${2:---remote}"
+if [ "$#" -eq 2 ]; then
+  SCOPE="$2"
+else
+  SCOPE="--remote"
+fi
 
 if [[ ! "$MACHINE" =~ ^[A-Za-z0-9._:-]+$ ]]; then
   echo "machine name may contain only letters, numbers, dots, underscores, colons, and hyphens" >&2

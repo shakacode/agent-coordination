@@ -99,6 +99,14 @@ class ProvisionTokenTest < Minitest::Test
     refute_path_exists @npx_args_file
   end
 
+  def test_rejects_empty_scope
+    _, stderr, status = run_script("m5", "")
+
+    refute status.success?
+    assert_includes stderr, "usage:"
+    refute_path_exists @npx_args_file
+  end
+
   def test_rejects_lone_scope_flag_as_machine_name
     ["--local", "--remote"].each do |flag|
       _, stderr, status = run_script(flag)
