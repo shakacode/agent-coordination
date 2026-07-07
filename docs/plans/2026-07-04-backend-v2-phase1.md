@@ -1282,11 +1282,11 @@ bundle exec rubocop && git add -A && git commit -m "Add token provisioning scrip
 
 No file changes. Execute the grill-decided cutover:
 
-- [ ] 1. Drain in-flight batches on shakacode/react_on_rails (no live claims for that repo in `agent-coord status`).
-- [ ] 2. On every machine that touches react_on_rails: set `AGENT_COORD_API_URL` + `AGENT_COORD_API_TOKEN`.
-- [ ] 3. Run `agent-coord doctor` on each — expect `backend: http`, `status: ok`.
-- [ ] 4. Run one full batch end-to-end on HTTP; watch it in the state (`agent-coord status --json`).
-- [ ] 5. On success, flip remaining repos’ machines. Rollback at any point: unset the two env vars.
+- [ ] 1. On M5 only, set `AGENT_COORD_API_URL` + `AGENT_COORD_API_TOKEN` in a temporary shell. Do not persist them to shell profiles, launchd units, or shared config yet.
+- [ ] 2. Run `agent-coord doctor --json` on M5 — expect `backend: http`, `status: ok`.
+- [ ] 3. Create or grant access to `shakacode/agent-coord-sim-alpha` and `shakacode/agent-coord-sim-beta`, seed them from `sim/template/`, and run one seeded sim batch end-to-end on HTTP.
+- [ ] 4. Drain in-flight batches on `shakacode/react_on_rails` (no live claims for that repo in `agent-coord status`), then run one `react_on_rails` batch end-to-end on HTTP.
+- [ ] 5. On success, persist the M5 env vars and then flip additional machines or repos. Rollback at any point before persistence: unset the two env vars or close the shell.
 
 ---
 

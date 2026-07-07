@@ -100,6 +100,12 @@ npx wrangler deploy
 curl -s <worker-url>/v1/health
 ```
 
+For the first M5 pilot, keep `AGENT_COORD_API_URL` and
+`AGENT_COORD_API_TOKEN` temporary shell-only until both an HTTP `doctor` check
+and a pilot batch pass. Use the seeded simulation repos as the first live HTTP
+batch target, then run a `shakacode/react_on_rails` pilot before persisting the
+M5 env vars or expanding to additional machines.
+
 unset `AGENT_COORD_API_URL` to fall back to the GitHub store.
 
 React on Rails workflow docs assume `agent-coord` is available on `PATH`.
