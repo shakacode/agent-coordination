@@ -37,7 +37,7 @@ module AgentCoord
     batch_id branch thread_handle chat_handle host pr_url dashboard_url operator phase generation instance_id
   ].freeze
   HEARTBEAT_TARGET_FIELDS = %w[repo target].freeze
-  HEARTBEAT_LANE_FIELDS = (%w[batch_id branch] + STATUS_HEARTBEAT_METADATA_FIELDS).uniq.freeze
+  HEARTBEAT_LANE_FIELDS = STATUS_HEARTBEAT_METADATA_FIELDS
   METADATA_OPTION_FIELDS = %w[
     thread_handle chat_handle host pr_url dashboard_url operator phase generation instance_id
   ].freeze
@@ -584,7 +584,9 @@ module AgentCoord
     def heartbeat_changed_fields(existing, options)
       return {} unless existing&.data.is_a?(Hash)
 
-      changed_identity_fields(existing, options, "repo", "target", "batch_id", "branch")
+      changed_fields = changed_identity_fields(existing, options, "repo", "target", "batch_id", "branch")
+      changed_fields["target"] = nil if options.key?(:repo) && !options.key?(:target) && existing.data.key?("target")
+      changed_fields
     end
 
     def heartbeat_target_fields_to_preserve(changed_fields)
