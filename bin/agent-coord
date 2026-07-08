@@ -36,11 +36,13 @@ module AgentCoord
   STATUS_HEARTBEAT_METADATA_FIELDS = %w[
     batch_id branch thread_handle chat_handle host pr_url dashboard_url operator phase generation instance_id
   ].freeze
+  HEARTBEAT_TARGET_FIELDS = %w[repo target].freeze
+  HEARTBEAT_LANE_FIELDS = (%w[batch_id branch] + STATUS_HEARTBEAT_METADATA_FIELDS).uniq.freeze
   METADATA_OPTION_FIELDS = %w[
     thread_handle chat_handle host pr_url dashboard_url operator phase generation instance_id
   ].freeze
   CLAIM_PRESERVED_FIELDS = (%w[batch_id branch] + STATUS_CLAIM_METADATA_FIELDS).uniq.freeze
-  HEARTBEAT_PRESERVED_FIELDS = (%w[repo target batch_id branch] + STATUS_HEARTBEAT_METADATA_FIELDS).uniq.freeze
+  HEARTBEAT_PRESERVED_FIELDS = (HEARTBEAT_TARGET_FIELDS + HEARTBEAT_LANE_FIELDS).uniq.freeze
   EXIT_USAGE = 1
   EXIT_OPERATIONAL = 2
   EXIT_CLAIM_REFUSED = 3
@@ -558,7 +560,8 @@ module AgentCoord
     def renewed_claim?(existing, options)
       existing&.data.is_a?(Hash) &&
         active_claim_record?(existing.data) &&
-        existing.data["agent_id"] == options[:agent_id]
+        existing.data["agent_id"] == options[:agent_id] &&
+        !claim_lane_changed?(existing, options)
     end
 
     def claim_timestamp(existing, options, now)
@@ -567,27 +570,34 @@ module AgentCoord
       existing.data.fetch("claimed_at", timestamp(now))
     end
 
+    def claim_lane_changed?(existing, options)
+      changed_identity_fields(existing, options, "batch_id", "branch").any?
+    end
+
     def heartbeat_preserved_fields(existing, options)
-      return [] if heartbeat_target_changed?(existing, options)
+      return HEARTBEAT_TARGET_FIELDS if heartbeat_lane_changed?(existing, options)
 
       HEARTBEAT_PRESERVED_FIELDS
     end
 
-    def heartbeat_target_changed?(existing, options)
+    def heartbeat_lane_changed?(existing, options)
       return false unless existing&.data.is_a?(Hash)
 
-      heartbeat_identity_fields(options).any? do |field, value|
+      changed_identity_fields(existing, options, "repo", "target", "batch_id", "branch").any?
+    end
+
+    def changed_identity_fields(existing, options, *fields)
+      identity_fields(options, *fields).select do |field, value|
         existing.data.key?(field) && existing.data[field] != value
       end
     end
 
-    def heartbeat_identity_fields(options)
-      {
-        "repo" => options[:repo],
-        "target" => options[:target]&.to_s,
-        "batch_id" => options[:batch_id],
-        "branch" => options[:branch]
-      }.compact
+    def identity_fields(options, *fields)
+      fields.each_with_object({}) do |field, payload|
+        value = options[field.tr("-", "_").to_sym]
+        value = value.to_s if field == "target" && !value.nil?
+        payload[field] = value unless value.nil?
+      end
     end
 
     def register_batch(options)
