@@ -230,11 +230,11 @@ export BRANCH=jg-codex/3969-agent-coord-backend
 export AGENT_COORD_REPO="$(pwd)"
 export AGENT_COORD_ENV_FILE="$HOME/.config/agent-coord/env"
 mkdir -p "$(dirname "$AGENT_COORD_ENV_FILE")"
+install -m 600 /dev/null "$AGENT_COORD_ENV_FILE"
 cat > "$AGENT_COORD_ENV_FILE" <<'EOF'
 AGENT_COORD_API_URL=<worker-url>
 AGENT_COORD_API_TOKEN=<machine-token>
 EOF
-chmod 600 "$AGENT_COORD_ENV_FILE"
 perl -pe 's#__AGENT_ID__#$ENV{AGENT_ID}#g;
           s#__TARGET_REPO__#$ENV{TARGET_REPO}#g;
           s#__TARGET__#$ENV{TARGET}#g;

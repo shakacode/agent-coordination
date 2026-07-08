@@ -450,8 +450,10 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
 
     assert_includes template, 'Environment="PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin"'
     assert_includes template, 'Environment="AGENT_COORD_STATUS=in_progress"'
-    assert_includes template, "EnvironmentFile=-__AGENT_COORD_ENV_FILE__"
+    assert_includes template, "EnvironmentFile=__AGENT_COORD_ENV_FILE__"
     assert_includes template, "ExecStart=/bin/bash -lc"
+    assert_includes template, 'AGENT_COORD_API_URL:?set AGENT_COORD_API_URL'
+    assert_includes template, 'AGENT_COORD_API_TOKEN:?set AGENT_COORD_API_TOKEN'
     assert_includes template, '--status "$$AGENT_COORD_STATUS"'
     assert_includes template, 'Environment="BRANCH=__BRANCH__"'
     refute_match(/ExecStart=.*__BRANCH__/, template)
@@ -465,6 +467,7 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     assert_includes systemd_heartbeat, "bin/agent-coord heartbeat"
     assert_includes launchd_heartbeat, "__AGENT_COORD_ENV_FILE__"
     assert_includes systemd_heartbeat, "__AGENT_COORD_ENV_FILE__"
+    assert_includes launchd_heartbeat, 'AGENT_COORD_API_URL:?set in __AGENT_COORD_ENV_FILE__'
     refute_includes launchd_heartbeat, "AGENT_COORD_REF=state"
     refute_includes systemd_heartbeat, "AGENT_COORD_REF=state"
   end
@@ -479,6 +482,7 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     assert_includes readme, "Deploy the Worker/D1 backend"
     assert_includes readme, "npx wrangler d1 migrations apply agent-coord --remote"
     assert_includes readme, 'curl -fsS "$AGENT_COORD_API_URL/v1/health"'
+    assert_includes readme, 'install -m 600 /dev/null "$AGENT_COORD_ENV_FILE"'
     assert_includes readme, "cat > \"$AGENT_COORD_ENV_FILE\" <<'EOF'\nAGENT_COORD_API_URL=<worker-url>"
     refute_includes readme, "cat > \"$AGENT_COORD_ENV_FILE\" <<'EOF'\nexport AGENT_COORD_API_URL"
     assert_includes readme, "Keep this public repository code-only"

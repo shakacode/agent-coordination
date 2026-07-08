@@ -10,7 +10,7 @@
   <array>
     <string>/bin/zsh</string>
     <string>-lc</string>
-    <string>set -a; [ -f "__AGENT_COORD_ENV_FILE__" ] &amp;&amp; . "__AGENT_COORD_ENV_FILE__"; set +a; cd "__AGENT_COORD_REPO__" &amp;&amp; bin/agent-coord heartbeat --agent-id "__AGENT_ID__" --repo "__TARGET_REPO__" --target "__TARGET__" --batch-id "__BATCH_ID__" --branch "__BRANCH__" --status "${AGENT_COORD_STATUS:-in_progress}"</string>
+    <string>set -a; . "__AGENT_COORD_ENV_FILE__"; : "${AGENT_COORD_API_URL:?set in __AGENT_COORD_ENV_FILE__}"; : "${AGENT_COORD_API_TOKEN:?set in __AGENT_COORD_ENV_FILE__}"; set +a; cd "__AGENT_COORD_REPO__" &amp;&amp; bin/agent-coord heartbeat --agent-id "__AGENT_ID__" --repo "__TARGET_REPO__" --target "__TARGET__" --batch-id "__BATCH_ID__" --branch "__BRANCH__" --status "${AGENT_COORD_STATUS:-in_progress}"</string>
   </array>
 
   <key>StartInterval</key>
