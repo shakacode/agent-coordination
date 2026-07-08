@@ -360,6 +360,21 @@ class HttpBackendSelectionTest < HttpEnvTestCase
     end
   end
 
+  def test_missing_http_or_local_backend_does_not_fall_back_to_github
+    with_env("AGENT_COORD_API_TOKEN" => nil,
+             "AGENT_COORD_API_URL" => nil,
+             "AGENT_COORD_BACKEND" => nil,
+             "AGENT_COORD_STATE_ROOT" => nil,
+             "AGENT_COORD_STATUS_STATE_ROOT" => nil) do
+      runner = AgentCoord::Runner.new([], stdout: StringIO.new, stderr: StringIO.new)
+      options = runner.send(:parse_options, "status", [])
+      error = assert_raises(AgentCoord::OperationalError) { runner.send(:build_store, options) }
+      assert_includes error.message, "no coordination backend configured"
+      assert_includes error.message, "AGENT_COORD_API_URL"
+      assert_includes error.message, "AGENT_COORD_STATE_ROOT"
+    end
+  end
+
   def test_doctor_json_omits_backend_url_when_state_root_wins
     Dir.mktmpdir do |root|
       with_env("AGENT_COORD_API_TOKEN" => nil) do
