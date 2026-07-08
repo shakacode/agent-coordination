@@ -71,11 +71,11 @@ tokens:
 cd worker
 npm install
 npx wrangler login
-npx wrangler d1 create agent-coordination
+npx wrangler d1 create agent-coord
 # Copy the printed database_id into worker/wrangler.toml if this is a new D1 DB.
-npx wrangler d1 migrations apply agent-coordination --remote
+npx wrangler d1 migrations apply agent-coord --remote
 npx wrangler deploy
-curl -fsS "$AGENT_COORD_API_URL/health"
+curl -fsS "$AGENT_COORD_API_URL/v1/health"
 cd ..
 ```
 
