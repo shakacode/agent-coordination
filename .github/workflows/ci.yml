@@ -49,13 +49,16 @@ jobs:
 
       - name: Run tests
         run: |
-          bundle exec ruby -Itest test/agent_coordination_cli_test.rb
-          bundle exec ruby -Itest test/http_store_test.rb
+          for test_file in test/*_test.rb; do
+            case "$test_file" in
+              test/http_backend_integration_test.rb) continue ;;
+            esac
+            bundle exec ruby -Itest "$test_file"
+          done
           bundle exec ruby sim/test/scripted_worker_test.rb
           bundle exec ruby sim/test/race_test.rb
           bundle exec ruby sim/test/verify_batch_test.rb
           bundle exec ruby sim/test/llm_worker_test.rb
-          bundle exec ruby -Itest test/provision_token_test.rb
 
   worker-typecheck:
     runs-on: ubuntu-latest

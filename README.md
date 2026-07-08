@@ -13,6 +13,24 @@ Keep this public repository code-only. Do not commit live `claims/`,
 `heartbeats/`, `batches/`, `*.json.lock`, secrets, environment files, customer
 data, credentials, or source-code patches here.
 
+## License
+
+This repository is the MIT License protocol plane for Agent Coordination. That
+plane includes the CLI, Cloudflare Worker API, Worker-served read-only
+dashboard, simulation harness, tests, documentation, ADRs, and examples.
+
+The runtime state is private data, not product source. Live claims, heartbeats,
+batches, lock files, tokens, credentials, customer data, and source-code patches
+must stay outside this repository.
+
+A future hosted or monetized ShakaStack product plane can use a different
+license and repository boundary. Product-plane dashboards and batch-planning
+features should consume the protocol-plane API rather than relicense the
+protocol primitives in this repository. The standalone
+`shakacode/agent-coordination-dashboard` repository should carry the same MIT
+protocol-plane stance while it remains the local/protocol dashboard. See
+[ADR 0002](docs/adr/0002-mit-protocol-plane-open-core-boundary.md).
+
 ## Setup
 
 ```bash
