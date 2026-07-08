@@ -211,8 +211,8 @@ export AGENT_COORD_REPO="$(pwd)"
 export AGENT_COORD_ENV_FILE="$HOME/.config/agent-coord/env"
 mkdir -p "$(dirname "$AGENT_COORD_ENV_FILE")"
 cat > "$AGENT_COORD_ENV_FILE" <<'EOF'
-export AGENT_COORD_API_URL=<worker-url>
-export AGENT_COORD_API_TOKEN=<machine-token>
+AGENT_COORD_API_URL=<worker-url>
+AGENT_COORD_API_TOKEN=<machine-token>
 EOF
 chmod 600 "$AGENT_COORD_ENV_FILE"
 perl -pe 's#__AGENT_ID__#$ENV{AGENT_ID}#g;

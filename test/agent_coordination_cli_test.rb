@@ -458,6 +458,8 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     assert_includes readme, "AGENT_COORD_API_URL"
     assert_includes readme, "AGENT_COORD_API_TOKEN"
     assert_includes readme, "AGENT_COORD_ENV_FILE"
+    assert_includes readme, "cat > \"$AGENT_COORD_ENV_FILE\" <<'EOF'\nAGENT_COORD_API_URL=<worker-url>"
+    refute_includes readme, "cat > \"$AGENT_COORD_ENV_FILE\" <<'EOF'\nexport AGENT_COORD_API_URL"
     assert_includes readme, "Keep this public repository code-only"
     refute_includes readme, "agent_coord --help"
     refute_includes readme, "git clone --branch state --single-branch"
