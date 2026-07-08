@@ -1143,6 +1143,8 @@ module AgentCoord
         return true
       end
 
+      return false unless File.file?(destination)
+
       content = File.binread(destination, 16 * 1024)
       escaped_legacy_source = Shellwords.escape(legacy_source)
       return false unless content.start_with?("#!/bin/sh".b) &&
