@@ -203,6 +203,9 @@ same degraded notes as a footer when rows are present. In large backends, prefer
 target or batch scoped status for React on Rails batch lanes and treat a timed
 out full coordination read as degraded/`UNKNOWN` rather than guessing.
 `release` marks a claim released while preserving the record for auditability.
+Only the recorded holder can release or restamp metadata on an existing claim;
+another agent should claim the target after release instead of re-releasing the
+old holder's record.
 `version` prints the CLI contract version. `config show --json` prints runtime
 defaults and machine-readable exit codes. Default `doctor` verifies the current
 backend without writing state or parsing every record; `doctor --deep` adds full
@@ -359,9 +362,9 @@ invalid.
 
 Optional lane metadata fields on claims are `thread_handle`, `chat_handle`,
 `host`, `pr_url`, `dashboard_url`, `operator`, `phase`, `generation`, and
-`instance_id`. `release` preserves the existing claim record and may update the
-same metadata fields for terminal states, such as adding a final `pr_url` or
-`phase`.
+`instance_id`. `release` preserves the existing claim record and the recorded
+holder may update the same metadata fields for terminal states, such as adding a
+final `pr_url` or `phase`.
 
 ## Heartbeat Schema
 

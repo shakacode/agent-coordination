@@ -575,15 +575,23 @@ module AgentCoord
     end
 
     def heartbeat_preserved_fields(existing, options)
-      return HEARTBEAT_TARGET_FIELDS if heartbeat_lane_changed?(existing, options)
+      changed_fields = heartbeat_changed_fields(existing, options)
+      return HEARTBEAT_PRESERVED_FIELDS if changed_fields.empty?
 
-      HEARTBEAT_PRESERVED_FIELDS
+      heartbeat_target_fields_to_preserve(changed_fields)
     end
 
-    def heartbeat_lane_changed?(existing, options)
-      return false unless existing&.data.is_a?(Hash)
+    def heartbeat_changed_fields(existing, options)
+      return {} unless existing&.data.is_a?(Hash)
 
-      changed_identity_fields(existing, options, "repo", "target", "batch_id", "branch").any?
+      changed_identity_fields(existing, options, "repo", "target", "batch_id", "branch")
+    end
+
+    def heartbeat_target_fields_to_preserve(changed_fields)
+      fields = []
+      fields << "repo" unless changed_fields.key?("repo")
+      fields << "target" unless changed_fields.key?("target") || changed_fields.key?("repo")
+      fields
     end
 
     def changed_identity_fields(existing, options, *fields)
@@ -594,7 +602,7 @@ module AgentCoord
 
     def identity_fields(options, *fields)
       fields.each_with_object({}) do |field, payload|
-        value = options[field.tr("-", "_").to_sym]
+        value = options[field.to_sym]
         value = value.to_s if field == "target" && !value.nil?
         payload[field] = value unless value.nil?
       end
