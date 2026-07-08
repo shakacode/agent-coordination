@@ -1289,6 +1289,26 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     refute_path_exists File.join(@state_root, "batches", "batch-b.json")
   end
 
+  def test_register_batch_rejects_duplicate_lane_names
+    manifest_path = File.join(@state_root, "batch-manifest.json")
+    File.write(
+      manifest_path,
+      JSON.pretty_generate(
+        "batch_id" => "batch-b",
+        "lanes" => [
+          { "name" => "docs", "owner" => "worker-docs-a", "targets" => ["3972"] },
+          { "name" => "docs", "owner" => "worker-docs-b", "targets" => ["3973"] }
+        ]
+      )
+    )
+
+    result = run_agent_coord("register-batch", "--file", manifest_path)
+
+    assert_equal 1, result.status.exitstatus
+    assert_includes result.stderr, "batch lane docs is duplicated"
+    refute_path_exists File.join(@state_root, "batches", "batch-b.json")
+  end
+
   def test_status_batch_scope_reports_missing_lane_owner_heartbeats
     write_batch(
       "batch-b",
@@ -1320,6 +1340,19 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
 
     assert_equal 0, status.status.exitstatus, status.stderr
     assert_includes JSON.parse(status.stdout).fetch("degraded"), "lane-owner heartbeats not found: UNKNOWN"
+  end
+
+  def test_status_batch_scope_handles_non_object_lanes_as_degraded
+    write_batch("batch-b", lanes: ["stray-lane"])
+
+    status = run_agent_coord("status", "--batch-id", "batch-b", "--json")
+
+    assert_equal 0, status.status.exitstatus, status.stderr
+    payload = JSON.parse(status.stdout)
+    lane = payload.fetch("batches").first.fetch("lanes").first
+    assert_equal "UNKNOWN", lane.fetch("name")
+    assert_equal "UNKNOWN", lane.fetch("owner")
+    assert_includes payload.fetch("degraded"), "lane-owner heartbeats not found: UNKNOWN"
   end
 
   def test_status_batch_scope_reports_malformed_batch_as_unknown

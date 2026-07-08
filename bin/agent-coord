@@ -521,16 +521,18 @@ module AgentCoord
 
       now = now_utc
       path = AgentCoord.batch_path(batch_id)
-      store = build_store(options)
-      existing = store.read_json(path)
       payload = manifest.merge(
         "schema_version" => SCHEMA_VERSION,
         "batch_id" => batch_id.to_s,
-        "registered_at" => manifest["registered_at"] || existing&.data&.fetch("registered_at", nil) || timestamp(now),
+        "registered_at" => manifest["registered_at"] || timestamp(now),
         "updated_at" => timestamp(now)
       )
       validate_batch_manifest!(payload)
 
+      store = build_store(options)
+      existing = store.read_json(path)
+      payload["registered_at"] = manifest["registered_at"] || existing&.data&.fetch("registered_at", nil) ||
+                                 payload.fetch("registered_at")
       write_with_cas(store, path, payload, existing, "Register batch #{batch_id}")
       @stdout.puts "registered batch #{batch_id}"
       0
@@ -864,6 +866,8 @@ module AgentCoord
     end
 
     def status_metadata(data, fields)
+      return {} unless data.is_a?(Hash)
+
       fields.each_with_object({}) do |field, metadata|
         metadata[field] = data[field] if data.key?(field) && !data[field].nil?
       end
@@ -1145,19 +1149,22 @@ module AgentCoord
       raise Error, "batch manifest lanes must be an array" unless lanes.is_a?(Array)
       raise Error, "batch manifest lanes must not be empty" if lanes.empty?
 
-      lanes.each_with_index { |lane, index| validate_batch_lane!(lane, index + 1) }
+      seen_names = {}
+      lanes.each_with_index do |lane, index|
+        name = validate_batch_lane!(lane, index + 1)
+        raise Error, "batch lane #{name} is duplicated" if seen_names[name]
+
+        seen_names[name] = true
+      end
     end
 
     def validate_batch_lane!(lane, position)
       raise Error, "batch lane #{position} must be a JSON object" unless lane.is_a?(Hash)
 
-      name = lane_name(lane).to_s
-      raise Error, "batch lane #{position} missing name" if name.empty? || name == "UNKNOWN"
+      name = batch_lane_name_for_validation(lane, position)
       raise Error, "batch lane #{name} cannot contain ':'" if malformed_lane_name?(name)
 
-      owner = lane_owner(lane)
-      raise Error, "batch lane #{name} missing owner" if owner == "UNKNOWN"
-
+      owner = batch_lane_owner_for_validation(lane, name)
       AgentCoord.validate_segment!(owner, "lane owner")
       targets = Array(lane["targets"] || lane["target"]).compact.map(&:to_s).reject(&:empty?)
       raise Error, "batch lane #{name} missing targets" if targets.empty?
@@ -1170,6 +1177,21 @@ module AgentCoord
 
         raise Error, "batch lane #{name} has invalid dependency ref: #{dependency}"
       end
+      name
+    end
+
+    def batch_lane_name_for_validation(lane, position)
+      name = (lane["name"] || lane["id"]).to_s
+      raise Error, "batch lane #{position} missing name" if name.empty?
+
+      name
+    end
+
+    def batch_lane_owner_for_validation(lane, name)
+      owner = (lane["owner"] || lane["agent_id"]).to_s
+      raise Error, "batch lane #{name} missing owner" if owner.empty?
+
+      owner
     end
 
     def require_options(options, *names)
