@@ -352,7 +352,7 @@ class HttpBackendSelectionTest < HttpEnvTestCase
   end
 
   def test_empty_state_root_env_is_ignored
-    with_env("AGENT_COORD_STATE_ROOT" => "") do
+    with_env("AGENT_COORD_API_TOKEN" => nil, "AGENT_COORD_API_URL" => nil, "AGENT_COORD_STATE_ROOT" => "") do
       options = AgentCoord::Runner.new([], stdout: StringIO.new, stderr: StringIO.new)
                                   .send(:parse_options, "status", [])
       assert_nil options[:state_root]

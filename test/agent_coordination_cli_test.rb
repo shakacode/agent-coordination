@@ -1222,6 +1222,133 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     assert_empty payload.fetch("batches")
   end
 
+  def test_register_batch_writes_manifest_and_status_metadata
+    manifest = {
+      "batch_id" => "batch-b",
+      "repo" => "shakacode/react_on_rails",
+      "objective" => "Ship a low-risk batch",
+      "operator" => "justin",
+      "dashboard_url" => "https://coord.example.test/batches/batch-b",
+      "lanes" => [
+        {
+          "name" => "docs",
+          "owner" => "worker-docs",
+          "targets" => ["3972"],
+          "depends_on" => [],
+          "thread_handle" => "thread-docs",
+          "host" => "m5",
+          "pr_url" => "https://github.com/shakacode/react_on_rails/pull/3972",
+          "dashboard_url" => "https://coord.example.test/batches/batch-b/docs"
+        }
+      ]
+    }
+    manifest_path = File.join(@state_root, "batch-manifest.json")
+    File.write(manifest_path, JSON.pretty_generate(manifest))
+
+    result = run_agent_coord("register-batch", "--file", manifest_path)
+
+    assert_equal 0, result.status.exitstatus, result.stderr
+    assert_includes result.stdout, "registered batch batch-b"
+    stored = JSON.parse(File.read(File.join(@state_root, "batches", "batch-b.json")))
+    assert_equal 1, stored.fetch("schema_version")
+    assert_equal "batch-b", stored.fetch("batch_id")
+    assert_equal "Ship a low-risk batch", stored.fetch("objective")
+    assert_equal "justin", stored.fetch("operator")
+    assert_match(/\A\d{4}-\d{2}-\d{2}T/, stored.fetch("updated_at"))
+    assert_match(/\A\d{4}-\d{2}-\d{2}T/, stored.fetch("registered_at"))
+
+    status = run_agent_coord("status", "--batch-id", "batch-b", "--json")
+
+    assert_equal 0, status.status.exitstatus, status.stderr
+    batch = JSON.parse(status.stdout).fetch("batches").first
+    assert_equal "shakacode/react_on_rails", batch.fetch("repo")
+    assert_equal "https://coord.example.test/batches/batch-b", batch.fetch("dashboard_url")
+    lane = batch.fetch("lanes").first
+    assert_equal "thread-docs", lane.fetch("thread_handle")
+    assert_equal "m5", lane.fetch("host")
+    assert_equal "https://github.com/shakacode/react_on_rails/pull/3972", lane.fetch("pr_url")
+    assert_equal "https://coord.example.test/batches/batch-b/docs", lane.fetch("dashboard_url")
+  end
+
+  def test_register_batch_rejects_malformed_lane_name
+    manifest_path = File.join(@state_root, "batch-manifest.json")
+    File.write(
+      manifest_path,
+      JSON.pretty_generate(
+        "batch_id" => "batch-b",
+        "lanes" => [
+          { "name" => "docs:copy", "owner" => "worker-docs", "targets" => ["3972"] }
+        ]
+      )
+    )
+
+    result = run_agent_coord("register-batch", "--file", manifest_path)
+
+    assert_equal 1, result.status.exitstatus
+    assert_includes result.stderr, "batch lane docs:copy cannot contain ':'"
+    refute_path_exists File.join(@state_root, "batches", "batch-b.json")
+  end
+
+  def test_register_batch_rejects_duplicate_lane_names
+    manifest_path = File.join(@state_root, "batch-manifest.json")
+    File.write(
+      manifest_path,
+      JSON.pretty_generate(
+        "batch_id" => "batch-b",
+        "lanes" => [
+          { "name" => "docs", "owner" => "worker-docs-a", "targets" => ["3972"] },
+          { "name" => "docs", "owner" => "worker-docs-b", "targets" => ["3973"] }
+        ]
+      )
+    )
+
+    result = run_agent_coord("register-batch", "--file", manifest_path)
+
+    assert_equal 1, result.status.exitstatus
+    assert_includes result.stderr, "batch lane docs is duplicated"
+    refute_path_exists File.join(@state_root, "batches", "batch-b.json")
+  end
+
+  def test_register_batch_rejects_non_string_repo_without_backtrace
+    manifest_path = File.join(@state_root, "batch-manifest.json")
+    File.write(
+      manifest_path,
+      JSON.pretty_generate(
+        "batch_id" => "batch-b",
+        "repo" => 12_345,
+        "lanes" => [
+          { "name" => "docs", "owner" => "worker-docs", "targets" => ["3972"] }
+        ]
+      )
+    )
+
+    result = run_agent_coord("register-batch", "--file", manifest_path)
+
+    assert_equal 1, result.status.exitstatus
+    assert_includes result.stderr, "invalid batch repo: 12345"
+    refute_includes result.stderr, "NoMethodError"
+    refute_path_exists File.join(@state_root, "batches", "batch-b.json")
+  end
+
+  def test_register_batch_rejects_non_string_lane_name
+    manifest_path = File.join(@state_root, "batch-manifest.json")
+    File.write(
+      manifest_path,
+      JSON.pretty_generate(
+        "batch_id" => "batch-b",
+        "lanes" => [
+          { "name" => 1, "owner" => "worker-docs", "targets" => ["3972"] }
+        ]
+      )
+    )
+
+    result = run_agent_coord("register-batch", "--file", manifest_path)
+
+    assert_equal 1, result.status.exitstatus
+    assert_includes result.stderr, "batch lane 1 name must be a string"
+    refute_path_exists File.join(@state_root, "batches", "batch-b.json")
+  end
+
   def test_status_batch_scope_reports_missing_lane_owner_heartbeats
     write_batch(
       "batch-b",
@@ -1253,6 +1380,19 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
 
     assert_equal 0, status.status.exitstatus, status.stderr
     assert_includes JSON.parse(status.stdout).fetch("degraded"), "lane-owner heartbeats not found: UNKNOWN"
+  end
+
+  def test_status_batch_scope_handles_non_object_lanes_as_degraded
+    write_batch("batch-b", lanes: ["stray-lane"])
+
+    status = run_agent_coord("status", "--batch-id", "batch-b", "--json")
+
+    assert_equal 0, status.status.exitstatus, status.stderr
+    payload = JSON.parse(status.stdout)
+    lane = payload.fetch("batches").first.fetch("lanes").first
+    assert_equal "UNKNOWN", lane.fetch("name")
+    assert_equal "UNKNOWN", lane.fetch("owner")
+    assert_includes payload.fetch("degraded"), "lane-owner heartbeats not found: UNKNOWN"
   end
 
   def test_status_batch_scope_reports_malformed_batch_as_unknown
@@ -1640,6 +1780,12 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
   end
 
   CommandResult = Struct.new(:stdout, :stderr, :status, keyword_init: true)
+  COMMAND_ENV = {
+    "AGENT_COORD_API_TOKEN" => nil,
+    "AGENT_COORD_API_URL" => nil,
+    "AGENT_COORD_STATE_ROOT" => nil,
+    "AGENT_COORD_STATUS_STATE_ROOT" => nil
+  }.freeze
 
   FixedClock = Struct.new(:time) do
     def now
@@ -2115,7 +2261,7 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
 
   def run_command(*args)
     env = args.first.is_a?(Hash) ? args.shift : {}
-    stdout, stderr, status = Open3.capture3(env, *args)
+    stdout, stderr, status = Open3.capture3(COMMAND_ENV.merge(env), *args)
     CommandResult.new(stdout: stdout, stderr: stderr, status: status)
   end
 

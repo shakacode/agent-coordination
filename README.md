@@ -152,6 +152,7 @@ rm -rf "$STATE_ROOT"
 bin/agent-coord claim     --agent-id ID --repo OWNER/REPO --target ISSUE_OR_PR [--batch-id ID] [--branch BRANCH] [--ttl SECONDS]
 bin/agent-coord release   --agent-id ID --repo OWNER/REPO --target ISSUE_OR_PR
 bin/agent-coord heartbeat --agent-id ID [--repo OWNER/REPO] [--target ISSUE_OR_PR] [--batch-id ID] [--branch BRANCH] [--status STATUS]
+bin/agent-coord register-batch --file PATH
 bin/agent-coord status [--json]
 bin/agent-coord status --repo OWNER/REPO --target ISSUE_OR_PR [--json]
 bin/agent-coord status --batch-id ID [--json]
@@ -168,6 +169,12 @@ holder heartbeat is missing or invalid, `expires_at` is the safe fallback and th
 claim can be taken over only after that fallback has passed. Existing claim
 updates use the active store's compare-and-swap token, so competing updates fail
 instead of silently overwriting each other.
+
+`register-batch --file PATH` validates and writes a JSON batch manifest to
+`batches/<batch-id>.json` using the active store. It stamps `schema_version`,
+`registered_at`, and `updated_at`, preserves optional operator/dashboard/thread
+metadata, and rejects malformed lane names or owner/target fields before workers
+claim lanes.
 
 `heartbeat` upserts `heartbeats/<agent-id>.json`. `status` renders coordination
 state in text or JSON. Full `status` renders compact claims, heartbeats, batch
@@ -363,25 +370,35 @@ Required fields: `schema_version`, `agent_id`, `status`, `updated_at`,
   "schema_version": 1,
   "batch_id": "batch-2026-06-13",
   "repo": "shakacode/react_on_rails",
+  "objective": "Ship backend and docs updates",
+  "operator": "justin",
+  "dashboard_url": "https://coord.example.test/batches/batch-2026-06-13",
   "lanes": [
     {
       "name": "backend",
       "owner": "worker-3969",
       "targets": ["3969"],
+      "thread_handle": "thread-backend",
+      "host": "m5",
+      "pr_url": "https://github.com/shakacode/react_on_rails/pull/3969",
       "depends_on": []
     },
     {
       "name": "docs",
       "owner": "worker-3972",
       "targets": ["3972"],
+      "thread_handle": "thread-docs",
+      "host": "m1",
       "depends_on": ["batch-2026-06-13:backend"]
     }
   ],
+  "registered_at": "2026-06-13T00:30:00Z",
   "updated_at": "2026-06-13T00:30:00Z"
 }
 ```
 
-Required fields: `schema_version`, `batch_id`, `lanes`, `updated_at`.
+Required manifest fields before registration: `batch_id` and non-empty `lanes`.
+`register-batch` writes `schema_version`, `registered_at`, and `updated_at`.
 
 Each lane should include `name`, `owner`, and `targets`. `owner` is the stable
 agent id used by `heartbeat`, so `status` can attach the lane's latest heartbeat
@@ -389,8 +406,11 @@ status and liveness. Lane names must not contain `:`; batch ids may contain `:`.
 `depends_on` is optional and accepts a string or array of lane refs in the form
 `<batch-id>:<lane-name>`, split at the last colon.
 
-`status` is intentionally read-only in v1. A dependency is considered met when
-the referenced lane owner's heartbeat reports a terminal status such as `done`,
+Top-level batch metadata such as `repo`, `objective`, `instructions`, `operator`,
+`dashboard_url`, and lane metadata such as `thread_handle`, `chat_handle`,
+`host`, `pr_url`, `dashboard_url`, `operator`, and `phase` are preserved and
+included in JSON status output. A dependency is considered met when the
+referenced lane owner's heartbeat reports a terminal status such as `done`,
 `complete`, `completed`, `merged`, or `ready`. A released claim is preserved for
 auditability and does not unblock dependent lanes by itself. Unmet dependencies
 appear in the lane's `blocked_on` field:
@@ -408,7 +428,7 @@ resuming, rebasing, or pushing dependency-sensitive work.
 
 ## Lifecycle
 
-1. Coordinator creates or updates a batch file describing lanes and dependencies.
+1. Coordinator registers a batch manifest describing lanes and dependencies.
 2. Worker acquires a claim for its issue or PR target.
 3. Worker refreshes a heartbeat during active work.
 4. Coordinator uses targeted `status --repo ... --target ...` or
