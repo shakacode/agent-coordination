@@ -458,6 +458,8 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     assert_includes readme, "AGENT_COORD_API_URL"
     assert_includes readme, "AGENT_COORD_API_TOKEN"
     assert_includes readme, "AGENT_COORD_ENV_FILE"
+    assert_includes readme, "Deploy the Worker/D1 backend"
+    assert_includes readme, "npx wrangler d1 migrations apply agent-coordination --remote"
     assert_includes readme, "cat > \"$AGENT_COORD_ENV_FILE\" <<'EOF'\nAGENT_COORD_API_URL=<worker-url>"
     refute_includes readme, "cat > \"$AGENT_COORD_ENV_FILE\" <<'EOF'\nexport AGENT_COORD_API_URL"
     assert_includes readme, "Keep this public repository code-only"

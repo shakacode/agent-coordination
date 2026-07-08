@@ -1144,7 +1144,9 @@ module AgentCoord
       end
 
       content = File.read(destination, 16 * 1024)
-      return false unless content.start_with?("#!/bin/sh") && content.include?(legacy_source)
+      escaped_legacy_source = Shellwords.escape(legacy_source)
+      return false unless content.start_with?("#!/bin/sh") &&
+                          (content.include?(legacy_source) || content.include?(escaped_legacy_source))
 
       FileUtils.rm_f(destination)
       true

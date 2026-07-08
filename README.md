@@ -62,6 +62,26 @@ hyphens. If `wrangler d1 execute` fails, the script preserves Wrangler's output
 and, when the failure looks like a duplicate-machine or token constraint, adds a
 hint to delete or update the existing D1 `machines` row before re-provisioning.
 
+### Deploy the Worker/D1 backend
+
+Run this once for each Cloudflare environment before provisioning machine
+tokens:
+
+```bash
+cd worker
+npm install
+npx wrangler login
+npx wrangler d1 create agent-coordination
+# Copy the printed database_id into worker/wrangler.toml if this is a new D1 DB.
+npx wrangler d1 migrations apply agent-coordination --remote
+npx wrangler deploy
+curl -fsS "$AGENT_COORD_API_URL/health"
+cd ..
+```
+
+Keep deployment credentials and generated tokens out of git. The CLI only needs
+the deployed Worker URL and a machine token at runtime.
+
 Backend selection follows this rule:
 
 1. `--state-root` flag -> `LocalStore`
