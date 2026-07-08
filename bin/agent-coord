@@ -1681,7 +1681,8 @@ module AgentCoord
   end
 
   def self.validate_repo!(repo, field)
-    return if repo.match?(%r{\A[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+\z})
+    value = repo.to_s
+    return if value.match?(%r{\A[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+\z})
 
     raise Error, "invalid #{field} repo: #{repo}"
   end

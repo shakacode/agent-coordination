@@ -1309,6 +1309,27 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     refute_path_exists File.join(@state_root, "batches", "batch-b.json")
   end
 
+  def test_register_batch_rejects_non_string_repo_without_backtrace
+    manifest_path = File.join(@state_root, "batch-manifest.json")
+    File.write(
+      manifest_path,
+      JSON.pretty_generate(
+        "batch_id" => "batch-b",
+        "repo" => 12_345,
+        "lanes" => [
+          { "name" => "docs", "owner" => "worker-docs", "targets" => ["3972"] }
+        ]
+      )
+    )
+
+    result = run_agent_coord("register-batch", "--file", manifest_path)
+
+    assert_equal 1, result.status.exitstatus
+    assert_includes result.stderr, "invalid batch repo: 12345"
+    refute_includes result.stderr, "NoMethodError"
+    refute_path_exists File.join(@state_root, "batches", "batch-b.json")
+  end
+
   def test_status_batch_scope_reports_missing_lane_owner_heartbeats
     write_batch(
       "batch-b",
