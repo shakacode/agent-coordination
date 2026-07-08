@@ -149,9 +149,9 @@ rm -rf "$STATE_ROOT"
 ## CLI
 
 ```text
-bin/agent-coord claim     --agent-id ID --repo OWNER/REPO --target ISSUE_OR_PR [--batch-id ID] [--branch BRANCH] [--ttl SECONDS]
-bin/agent-coord release   --agent-id ID --repo OWNER/REPO --target ISSUE_OR_PR
-bin/agent-coord heartbeat --agent-id ID [--repo OWNER/REPO] [--target ISSUE_OR_PR] [--batch-id ID] [--branch BRANCH] [--status STATUS]
+bin/agent-coord claim     --agent-id ID --repo OWNER/REPO --target ISSUE_OR_PR [--batch-id ID] [--branch BRANCH] [--metadata options] [--ttl SECONDS]
+bin/agent-coord release   --agent-id ID --repo OWNER/REPO --target ISSUE_OR_PR [--metadata options]
+bin/agent-coord heartbeat --agent-id ID [--repo OWNER/REPO] [--target ISSUE_OR_PR] [--batch-id ID] [--branch BRANCH] [--metadata options] [--status STATUS]
 bin/agent-coord register-batch --file PATH
 bin/agent-coord status [--json]
 bin/agent-coord status --repo OWNER/REPO --target ISSUE_OR_PR [--json]
@@ -169,6 +169,13 @@ holder heartbeat is missing or invalid, `expires_at` is the safe fallback and th
 claim can be taken over only after that fallback has passed. Existing claim
 updates use the active store's compare-and-swap token, so competing updates fail
 instead of silently overwriting each other.
+
+Metadata options available on `claim`, `heartbeat`, and `release` are
+`--thread-handle`, `--chat-handle`, `--host`, `--pr-url`, `--dashboard-url`,
+`--operator`, `--phase`, `--generation`, and `--instance-id`. These fields are
+additive, optional, and included in JSON status output when present. Workers use
+them to connect a lane, chat, host app, branch, PR, operator, and dashboard deep
+link without parsing handoff prose.
 
 `register-batch --file PATH` validates and writes a JSON batch manifest to
 `batches/<batch-id>.json` using the active store. It stamps `schema_version`,
@@ -196,6 +203,9 @@ same degraded notes as a footer when rows are present. In large backends, prefer
 target or batch scoped status for React on Rails batch lanes and treat a timed
 out full coordination read as degraded/`UNKNOWN` rather than guessing.
 `release` marks a claim released while preserving the record for auditability.
+Only the recorded holder can release or restamp metadata on an existing claim;
+another agent should claim the target after release instead of re-releasing the
+old holder's record.
 `version` prints the CLI contract version. `config show --json` prints runtime
 defaults and machine-readable exit codes. Default `doctor` verifies the current
 backend without writing state or parsing every record; `doctor --deep` adds full
@@ -328,6 +338,12 @@ does not show fake work.
   "agent_id": "worker-3969",
   "batch_id": "batch-2026-06-13",
   "branch": "jg-codex/3969-agent-coord-backend",
+  "thread_handle": "batch13-backend-quokka",
+  "host": "codex",
+  "operator": "justin",
+  "phase": "claimed",
+  "generation": 3,
+  "instance_id": "m5-codex-20260708T180000Z",
   "status": "active",
   "claimed_at": "2026-06-13T00:30:00Z",
   "updated_at": "2026-06-13T00:30:00Z",
@@ -344,6 +360,12 @@ even if the claim `expires_at` timestamp is still in the future. `expires_at`
 remains useful for audit and as the fallback when the heartbeat is missing or
 invalid.
 
+Optional lane metadata fields on claims are `thread_handle`, `chat_handle`,
+`host`, `pr_url`, `dashboard_url`, `operator`, `phase`, `generation`, and
+`instance_id`. `release` preserves the existing claim record and the recorded
+holder may update the same metadata fields for terminal states, such as adding a
+final `pr_url` or `phase`.
+
 ## Heartbeat Schema
 
 ```json
@@ -354,6 +376,14 @@ invalid.
   "target": "3969",
   "batch_id": "batch-2026-06-13",
   "branch": "jg-codex/3969-agent-coord-backend",
+  "thread_handle": "batch13-backend-quokka",
+  "host": "codex",
+  "pr_url": "https://github.com/shakacode/react_on_rails/pull/3969",
+  "dashboard_url": "https://coord.example.test/batches/batch-2026-06-13/backend",
+  "operator": "justin",
+  "phase": "validating",
+  "generation": 3,
+  "instance_id": "m5-codex-20260708T180000Z",
   "status": "in_progress",
   "updated_at": "2026-06-13T00:40:00Z",
   "expires_at": "2026-06-13T00:55:00Z"
@@ -362,6 +392,11 @@ invalid.
 
 Required fields: `schema_version`, `agent_id`, `status`, `updated_at`,
 `expires_at`.
+
+Optional lane metadata fields on heartbeats are `thread_handle`, `chat_handle`,
+`host`, `pr_url`, `dashboard_url`, `operator`, `phase`, `generation`, and
+`instance_id`. Status readers should treat missing metadata as `UNKNOWN` rather
+than inferring it from branch names or handoff text.
 
 ## Batch Schema
 

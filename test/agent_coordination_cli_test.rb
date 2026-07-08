@@ -839,6 +839,428 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     assert_equal "jg-codex/released-branch", payload.fetch("branch")
   end
 
+  def test_claim_and_heartbeat_round_trip_lane_metadata
+    claim = run_agent_coord(
+      "claim",
+      "--agent-id", "worker-a",
+      "--repo", "shakacode/react_on_rails",
+      "--target", "3973",
+      "--batch-id", "batch-1",
+      "--branch", "jg-codex/metadata",
+      *lane_metadata_args(phase: "claimed", pr_url: nil)
+    )
+    assert_equal 0, claim.status.exitstatus, claim.stderr
+
+    heartbeat = run_agent_coord(
+      "heartbeat",
+      "--agent-id", "worker-a",
+      "--repo", "shakacode/react_on_rails",
+      "--target", "3973",
+      "--batch-id", "batch-1",
+      "--branch", "jg-codex/metadata",
+      *lane_metadata_args(phase: "validating")
+    )
+    assert_equal 0, heartbeat.status.exitstatus, heartbeat.stderr
+
+    status = run_agent_coord("status", "--repo", "shakacode/react_on_rails", "--target", "3973", "--json")
+    assert_equal 0, status.status.exitstatus, status.stderr
+    payload = JSON.parse(status.stdout)
+    claim_payload = payload.fetch("claims").first
+    heartbeat_payload = payload.fetch("heartbeats").first
+
+    assert_lane_metadata(claim_payload, phase: "claimed", pr_url: nil)
+    assert_lane_metadata(heartbeat_payload, phase: "validating")
+  end
+
+  def test_release_updates_lane_metadata
+    claim = run_agent_coord(
+      "claim",
+      "--agent-id", "worker-a",
+      "--repo", "shakacode/react_on_rails",
+      "--target", "3973"
+    )
+    assert_equal 0, claim.status.exitstatus, claim.stderr
+
+    release = run_agent_coord(
+      "release",
+      "--agent-id", "worker-a",
+      "--repo", "shakacode/react_on_rails",
+      "--target", "3973",
+      "--pr-url", "https://github.com/shakacode/react_on_rails/pull/3973",
+      "--phase", "merged"
+    )
+    assert_equal 0, release.status.exitstatus, release.stderr
+
+    claim_path = File.join(@state_root, "claims", "shakacode", "react_on_rails", "3973.json")
+    released_payload = JSON.parse(File.read(claim_path))
+    assert_equal "released", released_payload.fetch("status")
+    assert_equal "https://github.com/shakacode/react_on_rails/pull/3973", released_payload.fetch("pr_url")
+    assert_equal "merged", released_payload.fetch("phase")
+  end
+
+  def test_release_rejects_metadata_update_from_non_holder_after_release
+    claim = run_agent_coord(
+      "claim",
+      "--agent-id", "worker-a",
+      "--repo", "shakacode/react_on_rails",
+      "--target", "3978"
+    )
+    assert_equal 0, claim.status.exitstatus, claim.stderr
+
+    release = run_agent_coord(
+      "release",
+      "--agent-id", "worker-a",
+      "--repo", "shakacode/react_on_rails",
+      "--target", "3978",
+      "--pr-url", "https://github.com/shakacode/react_on_rails/pull/3978",
+      "--phase", "merged"
+    )
+    assert_equal 0, release.status.exitstatus, release.stderr
+
+    spoof = run_agent_coord(
+      "release",
+      "--agent-id", "worker-b",
+      "--repo", "shakacode/react_on_rails",
+      "--target", "3978",
+      "--pr-url", "https://example.test/spoof",
+      "--phase", "claimed"
+    )
+    refute_equal 0, spoof.status.exitstatus
+    assert_includes spoof.stderr, "claim belongs to worker-a"
+
+    claim_path = File.join(@state_root, "claims", "shakacode", "react_on_rails", "3978.json")
+    released_payload = JSON.parse(File.read(claim_path))
+    assert_equal "worker-a", released_payload.fetch("agent_id")
+    assert_equal "https://github.com/shakacode/react_on_rails/pull/3978", released_payload.fetch("pr_url")
+    assert_equal "merged", released_payload.fetch("phase")
+  end
+
+  def test_claim_renewal_preserves_lane_metadata
+    first_claim = run_agent_coord(
+      "claim",
+      "--agent-id", "worker-a",
+      "--repo", "shakacode/react_on_rails",
+      "--target", "3974",
+      "--batch-id", "batch-1",
+      "--branch", "jg-codex/metadata",
+      *lane_metadata_args(phase: "claimed", pr_url: nil)
+    )
+    assert_equal 0, first_claim.status.exitstatus, first_claim.stderr
+
+    renewal = run_agent_coord(
+      "claim",
+      "--agent-id", "worker-a",
+      "--repo", "shakacode/react_on_rails",
+      "--target", "3974"
+    )
+    assert_equal 0, renewal.status.exitstatus, renewal.stderr
+
+    claim_path = File.join(@state_root, "claims", "shakacode", "react_on_rails", "3974.json")
+    renewed_payload = JSON.parse(File.read(claim_path))
+    assert_equal "batch-1", renewed_payload.fetch("batch_id")
+    assert_equal "jg-codex/metadata", renewed_payload.fetch("branch")
+    assert_lane_metadata(renewed_payload, phase: "claimed", pr_url: nil)
+  end
+
+  def test_claim_takeover_does_not_preserve_previous_holder_lane_metadata
+    first_claim = run_agent_coord(
+      "claim",
+      "--agent-id", "worker-a",
+      "--repo", "shakacode/react_on_rails",
+      "--target", "3976",
+      "--batch-id", "batch-1",
+      "--branch", "jg-codex/metadata",
+      *lane_metadata_args(phase: "merged")
+    )
+    assert_equal 0, first_claim.status.exitstatus, first_claim.stderr
+
+    release = run_agent_coord(
+      "release",
+      "--agent-id", "worker-a",
+      "--repo", "shakacode/react_on_rails",
+      "--target", "3976"
+    )
+    assert_equal 0, release.status.exitstatus, release.stderr
+
+    takeover = run_agent_coord(
+      "claim",
+      "--agent-id", "worker-b",
+      "--repo", "shakacode/react_on_rails",
+      "--target", "3976"
+    )
+    assert_equal 0, takeover.status.exitstatus, takeover.stderr
+
+    claim_path = File.join(@state_root, "claims", "shakacode", "react_on_rails", "3976.json")
+    takeover_payload = JSON.parse(File.read(claim_path))
+    assert_equal "worker-b", takeover_payload.fetch("agent_id")
+    assert_absent_lane_metadata(takeover_payload, "batch_id", "branch")
+  end
+
+  def test_claim_after_release_does_not_preserve_terminal_lane_metadata
+    first_claim = run_agent_coord(
+      "claim",
+      "--agent-id", "worker-a",
+      "--repo", "shakacode/react_on_rails",
+      "--target", "3979",
+      "--batch-id", "batch-1",
+      "--branch", "jg-codex/metadata",
+      *lane_metadata_args(phase: "claimed")
+    )
+    assert_equal 0, first_claim.status.exitstatus, first_claim.stderr
+
+    release = run_agent_coord(
+      "release",
+      "--agent-id", "worker-a",
+      "--repo", "shakacode/react_on_rails",
+      "--target", "3979",
+      "--phase", "merged"
+    )
+    assert_equal 0, release.status.exitstatus, release.stderr
+
+    reclaim = run_agent_coord(
+      "claim",
+      "--agent-id", "worker-a",
+      "--repo", "shakacode/react_on_rails",
+      "--target", "3979"
+    )
+    assert_equal 0, reclaim.status.exitstatus, reclaim.stderr
+
+    claim_path = File.join(@state_root, "claims", "shakacode", "react_on_rails", "3979.json")
+    reclaimed_payload = JSON.parse(File.read(claim_path))
+    assert_equal "active", reclaimed_payload.fetch("status")
+    assert_equal "worker-a", reclaimed_payload.fetch("agent_id")
+    assert_absent_lane_metadata(reclaimed_payload, "batch_id", "branch")
+  end
+
+  def test_claim_batch_change_does_not_preserve_old_lane_metadata
+    first_claim = run_agent_coord(
+      "claim",
+      "--agent-id", "worker-a",
+      "--repo", "shakacode/react_on_rails",
+      "--target", "3981",
+      "--batch-id", "batch-1",
+      "--branch", "jg-codex/metadata",
+      *lane_metadata_args(phase: "claimed")
+    )
+    assert_equal 0, first_claim.status.exitstatus, first_claim.stderr
+
+    changed_lane = run_agent_coord(
+      "claim",
+      "--agent-id", "worker-a",
+      "--repo", "shakacode/react_on_rails",
+      "--target", "3981",
+      "--batch-id", "batch-2"
+    )
+    assert_equal 0, changed_lane.status.exitstatus, changed_lane.stderr
+
+    claim_path = File.join(@state_root, "claims", "shakacode", "react_on_rails", "3981.json")
+    changed_payload = JSON.parse(File.read(claim_path))
+    assert_equal "batch-2", changed_payload.fetch("batch_id")
+    assert_absent_lane_metadata(changed_payload, "branch")
+  end
+
+  def test_plain_heartbeat_tick_preserves_lane_metadata
+    first_heartbeat = run_agent_coord(
+      "heartbeat",
+      "--agent-id", "worker-a",
+      "--repo", "shakacode/react_on_rails",
+      "--target", "3975",
+      "--batch-id", "batch-1",
+      "--branch", "jg-codex/metadata",
+      *lane_metadata_args(phase: "validating")
+    )
+    assert_equal 0, first_heartbeat.status.exitstatus, first_heartbeat.stderr
+
+    tick = run_agent_coord(
+      "heartbeat",
+      "--agent-id", "worker-a",
+      "--status", "alive"
+    )
+    assert_equal 0, tick.status.exitstatus, tick.stderr
+
+    heartbeat_path = File.join(@state_root, "heartbeats", "worker-a.json")
+    heartbeat_payload = JSON.parse(File.read(heartbeat_path))
+    assert_equal "shakacode/react_on_rails", heartbeat_payload.fetch("repo")
+    assert_equal "3975", heartbeat_payload.fetch("target")
+    assert_equal "batch-1", heartbeat_payload.fetch("batch_id")
+    assert_equal "jg-codex/metadata", heartbeat_payload.fetch("branch")
+    assert_equal "alive", heartbeat_payload.fetch("status")
+    assert_lane_metadata(heartbeat_payload, phase: "validating")
+  end
+
+  def test_heartbeat_target_change_does_not_preserve_old_lane_metadata
+    first_heartbeat = run_agent_coord(
+      "heartbeat",
+      "--agent-id", "worker-a",
+      "--repo", "shakacode/react_on_rails",
+      "--target", "3977",
+      "--batch-id", "batch-1",
+      "--branch", "jg-codex/metadata",
+      *lane_metadata_args(phase: "validating")
+    )
+    assert_equal 0, first_heartbeat.status.exitstatus, first_heartbeat.stderr
+
+    retargeted = run_agent_coord(
+      "heartbeat",
+      "--agent-id", "worker-a",
+      "--repo", "shakacode/agent-workflows",
+      "--target", "76",
+      "--status", "validating"
+    )
+    assert_equal 0, retargeted.status.exitstatus, retargeted.stderr
+
+    heartbeat_path = File.join(@state_root, "heartbeats", "worker-a.json")
+    heartbeat_payload = JSON.parse(File.read(heartbeat_path))
+    assert_equal "shakacode/agent-workflows", heartbeat_payload.fetch("repo")
+    assert_equal "76", heartbeat_payload.fetch("target")
+    assert_equal "validating", heartbeat_payload.fetch("status")
+    assert_absent_lane_metadata(heartbeat_payload, "batch_id", "branch")
+  end
+
+  def test_heartbeat_batch_change_does_not_preserve_old_lane_metadata
+    first_heartbeat = run_agent_coord(
+      "heartbeat",
+      "--agent-id", "worker-a",
+      "--repo", "shakacode/react_on_rails",
+      "--target", "3980",
+      "--batch-id", "batch-1",
+      "--branch", "jg-codex/metadata",
+      *lane_metadata_args(phase: "validating")
+    )
+    assert_equal 0, first_heartbeat.status.exitstatus, first_heartbeat.stderr
+
+    retargeted = run_agent_coord(
+      "heartbeat",
+      "--agent-id", "worker-a",
+      "--repo", "shakacode/react_on_rails",
+      "--target", "3980",
+      "--batch-id", "batch-2",
+      "--status", "validating"
+    )
+    assert_equal 0, retargeted.status.exitstatus, retargeted.stderr
+
+    heartbeat_path = File.join(@state_root, "heartbeats", "worker-a.json")
+    heartbeat_payload = JSON.parse(File.read(heartbeat_path))
+    assert_equal "shakacode/react_on_rails", heartbeat_payload.fetch("repo")
+    assert_equal "3980", heartbeat_payload.fetch("target")
+    assert_equal "batch-2", heartbeat_payload.fetch("batch_id")
+    assert_equal "validating", heartbeat_payload.fetch("status")
+    assert_absent_lane_metadata(heartbeat_payload, "branch")
+  end
+
+  def test_heartbeat_batch_change_without_target_args_preserves_repo_target
+    first_heartbeat = run_agent_coord(
+      "heartbeat",
+      "--agent-id", "worker-a",
+      "--repo", "shakacode/react_on_rails",
+      "--target", "3982",
+      "--batch-id", "batch-1",
+      "--branch", "jg-codex/metadata",
+      *lane_metadata_args(phase: "validating")
+    )
+    assert_equal 0, first_heartbeat.status.exitstatus, first_heartbeat.stderr
+
+    retargeted = run_agent_coord(
+      "heartbeat",
+      "--agent-id", "worker-a",
+      "--batch-id", "batch-2",
+      "--status", "validating"
+    )
+    assert_equal 0, retargeted.status.exitstatus, retargeted.stderr
+
+    heartbeat_path = File.join(@state_root, "heartbeats", "worker-a.json")
+    heartbeat_payload = JSON.parse(File.read(heartbeat_path))
+    assert_equal "shakacode/react_on_rails", heartbeat_payload.fetch("repo")
+    assert_equal "3982", heartbeat_payload.fetch("target")
+    assert_equal "batch-2", heartbeat_payload.fetch("batch_id")
+    assert_equal "validating", heartbeat_payload.fetch("status")
+    assert_absent_lane_metadata(heartbeat_payload, "branch")
+  end
+
+  def test_heartbeat_repo_change_without_target_does_not_preserve_old_target
+    first_heartbeat = run_agent_coord(
+      "heartbeat",
+      "--agent-id", "worker-a",
+      "--repo", "shakacode/react_on_rails",
+      "--target", "3983",
+      "--batch-id", "batch-1",
+      "--branch", "jg-codex/metadata",
+      *lane_metadata_args(phase: "validating")
+    )
+    assert_equal 0, first_heartbeat.status.exitstatus, first_heartbeat.stderr
+
+    repo_only = run_agent_coord(
+      "heartbeat",
+      "--agent-id", "worker-a",
+      "--repo", "shakacode/agent-workflows",
+      "--status", "validating"
+    )
+    assert_equal 0, repo_only.status.exitstatus, repo_only.stderr
+
+    heartbeat_path = File.join(@state_root, "heartbeats", "worker-a.json")
+    heartbeat_payload = JSON.parse(File.read(heartbeat_path))
+    assert_equal "shakacode/agent-workflows", heartbeat_payload.fetch("repo")
+    refute heartbeat_payload.key?("target"), "expected target to be absent"
+    assert_equal "validating", heartbeat_payload.fetch("status")
+    assert_absent_lane_metadata(heartbeat_payload, "batch_id", "branch")
+  end
+
+  def test_heartbeat_same_repo_without_target_clears_old_target
+    first_heartbeat = run_agent_coord(
+      "heartbeat",
+      "--agent-id", "worker-a",
+      "--repo", "shakacode/react_on_rails",
+      "--target", "3984",
+      "--batch-id", "batch-1",
+      "--branch", "jg-codex/metadata",
+      *lane_metadata_args(phase: "validating")
+    )
+    assert_equal 0, first_heartbeat.status.exitstatus, first_heartbeat.stderr
+
+    repo_only = run_agent_coord(
+      "heartbeat",
+      "--agent-id", "worker-a",
+      "--repo", "shakacode/react_on_rails",
+      "--status", "validating"
+    )
+    assert_equal 0, repo_only.status.exitstatus, repo_only.stderr
+
+    heartbeat_path = File.join(@state_root, "heartbeats", "worker-a.json")
+    heartbeat_payload = JSON.parse(File.read(heartbeat_path))
+    assert_equal "shakacode/react_on_rails", heartbeat_payload.fetch("repo")
+    refute heartbeat_payload.key?("target"), "expected target to be absent"
+    assert_equal "validating", heartbeat_payload.fetch("status")
+    assert_absent_lane_metadata(heartbeat_payload, "batch_id", "branch")
+  end
+
+  def test_heartbeat_adding_target_clears_repo_only_lane_metadata
+    first_heartbeat = run_agent_coord(
+      "heartbeat",
+      "--agent-id", "worker-a",
+      "--repo", "shakacode/react_on_rails",
+      "--batch-id", "batch-1",
+      "--branch", "jg-codex/metadata",
+      *lane_metadata_args(phase: "validating")
+    )
+    assert_equal 0, first_heartbeat.status.exitstatus, first_heartbeat.stderr
+
+    target_specific = run_agent_coord(
+      "heartbeat",
+      "--agent-id", "worker-a",
+      "--repo", "shakacode/react_on_rails",
+      "--target", "3985",
+      "--status", "validating"
+    )
+    assert_equal 0, target_specific.status.exitstatus, target_specific.stderr
+
+    heartbeat_path = File.join(@state_root, "heartbeats", "worker-a.json")
+    heartbeat_payload = JSON.parse(File.read(heartbeat_path))
+    assert_equal "shakacode/react_on_rails", heartbeat_payload.fetch("repo")
+    assert_equal "3985", heartbeat_payload.fetch("target")
+    assert_equal "validating", heartbeat_payload.fetch("status")
+    assert_absent_lane_metadata(heartbeat_payload, "batch_id", "branch")
+  end
+
   def test_concurrent_claims_for_same_item_have_exactly_one_winner
     results = %w[worker-a worker-b].map do |agent_id|
       Thread.new do
@@ -2273,6 +2695,56 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
       FileUtils.cp(BIN, copied_bin)
       yield copied_bin
     end
+  end
+
+  def lane_metadata_args(overrides = {})
+    {
+      thread_handle: "p93s1v-docs-quokka",
+      chat_handle: "codex-thread-123",
+      host: "codex",
+      pr_url: "https://github.com/shakacode/react_on_rails/pull/3973",
+      dashboard_url: "https://coord.example.test/batches/batch-1/docs",
+      operator: "justin",
+      phase: "validating",
+      instance_id: "instance-a",
+      generation: 3
+    }.merge(overrides).flat_map do |name, value|
+      value.nil? ? [] : ["--#{name.to_s.tr('_', '-')}", value.to_s]
+    end
+  end
+
+  def assert_lane_metadata(payload, overrides = {})
+    {
+      "thread_handle" => "p93s1v-docs-quokka",
+      "chat_handle" => "codex-thread-123",
+      "host" => "codex",
+      "pr_url" => "https://github.com/shakacode/react_on_rails/pull/3973",
+      "dashboard_url" => "https://coord.example.test/batches/batch-1/docs",
+      "operator" => "justin",
+      "phase" => "validating",
+      "instance_id" => "instance-a",
+      "generation" => 3
+    }.merge(stringify_keys(overrides)).each do |key, value|
+      if value.nil?
+        refute(payload.key?(key), "expected #{key} to be absent")
+      else
+        assert_equal(value, payload.fetch(key))
+      end
+    end
+  end
+
+  def assert_absent_lane_metadata(payload, *extra_fields)
+    expected_fields = %w[
+      thread_handle chat_handle host pr_url dashboard_url operator phase generation instance_id
+    ] + extra_fields
+
+    expected_fields.each do |key|
+      refute(payload.key?(key), "expected #{key} to be absent")
+    end
+  end
+
+  def stringify_keys(hash)
+    hash.transform_keys(&:to_s)
   end
 
   def with_fake_http_harness

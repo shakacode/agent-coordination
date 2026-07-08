@@ -36,6 +36,12 @@ module AgentCoord
   STATUS_HEARTBEAT_METADATA_FIELDS = %w[
     batch_id branch thread_handle chat_handle host pr_url dashboard_url operator phase generation instance_id
   ].freeze
+  HEARTBEAT_TARGET_FIELDS = %w[repo target].freeze
+  METADATA_OPTION_FIELDS = %w[
+    thread_handle chat_handle host pr_url dashboard_url operator phase generation instance_id
+  ].freeze
+  CLAIM_PRESERVED_FIELDS = (%w[batch_id branch] + STATUS_CLAIM_METADATA_FIELDS).uniq.freeze
+  HEARTBEAT_PRESERVED_FIELDS = (HEARTBEAT_TARGET_FIELDS + STATUS_HEARTBEAT_METADATA_FIELDS).uniq.freeze
   EXIT_USAGE = 1
   EXIT_OPERATIONAL = 2
   EXIT_CLAIM_REFUSED = 3
@@ -182,6 +188,17 @@ module AgentCoord
       opts.on("--target ISSUE_OR_PR", "target issue or PR id") { |value| options[:target] = value }
       opts.on("--batch-id ID", "batch identifier") { |value| options[:batch_id] = value }
       opts.on("--branch BRANCH", "branch for the target") { |value| options[:branch] = value }
+      opts.on("--thread-handle HANDLE", "worker chat thread handle") { |value| options[:thread_handle] = value }
+      opts.on("--chat-handle HANDLE", "host-specific chat handle") { |value| options[:chat_handle] = value }
+      opts.on("--host HOST", "host app or wrapper, e.g. codex or claude-code/conductor") do |value|
+        options[:host] = value
+      end
+      opts.on("--pr-url URL", "pull request URL for the lane") { |value| options[:pr_url] = value }
+      opts.on("--dashboard-url URL", "dashboard deep link for the lane") { |value| options[:dashboard_url] = value }
+      opts.on("--operator NAME", "human operator for the lane") { |value| options[:operator] = value }
+      opts.on("--phase PHASE", "lane phase") { |value| options[:phase] = value }
+      opts.on("--generation GENERATION", Integer, "claim/lane generation") { |value| options[:generation] = value }
+      opts.on("--instance-id ID", "agent process instance identifier") { |value| options[:instance_id] = value }
       opts.on("--ttl SECONDS", Integer, "lease/heartbeat TTL in seconds") { |value| options[:ttl] = value }
       opts.on("--status STATUS", "heartbeat status") { |value| options[:status] = value }
     end
@@ -286,6 +303,7 @@ module AgentCoord
       # Keep this in sync with value-taking opts.on definitions in parse_options.
       value_options = %w[
         --backend --ref --state-root --api-url --agent-id --repo --target --batch-id --branch
+        --thread-handle --chat-handle --host --pr-url --dashboard-url --operator --phase --generation --instance-id
         --ttl --status --file --install-dir --status-state-root --profile
       ]
       skip_next = false
@@ -318,7 +336,7 @@ module AgentCoord
         end
       end
 
-      payload = {
+      claim_updates = {
         "schema_version" => SCHEMA_VERSION,
         "repo" => options.fetch(:repo),
         "target" => options.fetch(:target).to_s,
@@ -326,10 +344,14 @@ module AgentCoord
         "batch_id" => options[:batch_id],
         "branch" => options[:branch],
         "status" => "active",
-        "claimed_at" => existing&.data&.fetch("claimed_at", timestamp(now)),
+        "claimed_at" => claim_timestamp(existing, options, now),
         "updated_at" => timestamp(now),
         "expires_at" => timestamp(expires_at)
       }.compact
+      payload = preserved_payload(existing, claim_preserved_fields(existing, options))
+                .merge(claim_updates)
+                .merge(metadata_payload(options))
+                .compact
 
       begin
         write_with_cas(store, path, payload, existing, "Claim #{options[:repo]}##{options[:target]}")
@@ -350,8 +372,8 @@ module AgentCoord
       raise Error, "no claim exists for #{options[:repo]}##{options[:target]}" unless existing
 
       holder = existing.data["agent_id"]
-      if active_claim_record?(existing.data) && holder != options[:agent_id]
-        raise Error, "active claim belongs to #{holder}; #{options[:agent_id]} cannot release it"
+      if holder && holder != options[:agent_id]
+        raise Error, "claim belongs to #{holder}; #{options[:agent_id]} cannot release it"
       end
 
       payload = existing.data.merge(
@@ -361,7 +383,7 @@ module AgentCoord
         "released_at" => timestamp(now),
         "updated_at" => timestamp(now),
         "expires_at" => timestamp(now)
-      )
+      ).merge(metadata_payload(options))
       payload["branch"] = options[:branch] if options[:branch]
 
       store.write_json(path, payload, message: "Release #{options[:repo]}##{options[:target]}", sha: existing.sha)
@@ -503,9 +525,91 @@ module AgentCoord
         "expires_at" => timestamp(now + ttl)
       }.compact
 
-      upsert_json(store, path, payload, message: "Heartbeat #{options[:agent_id]}")
+      upsert_json(store, path, message: "Heartbeat #{options[:agent_id]}") do |existing|
+        preserved_payload(existing, heartbeat_preserved_fields(existing, options))
+          .merge(payload)
+          .merge(metadata_payload(options))
+          .compact
+      end
       @stdout.puts "heartbeat #{options[:agent_id]} #{timestamp(now)}"
       0
+    end
+
+    def preserved_payload(existing, fields)
+      status_metadata(existing&.data, fields)
+    end
+
+    def metadata_payload(options)
+      METADATA_OPTION_FIELDS.each_with_object({}) do |field, metadata|
+        option_name = field.to_sym
+        metadata[field] = options[option_name] if options.key?(option_name) && !options[option_name].nil?
+      end
+    end
+
+    def claim_preserved_fields(existing, options)
+      return [] unless renewed_claim?(existing, options)
+
+      CLAIM_PRESERVED_FIELDS
+    end
+
+    def renewed_claim?(existing, options)
+      existing&.data.is_a?(Hash) &&
+        active_claim_record?(existing.data) &&
+        existing.data["agent_id"] == options[:agent_id] &&
+        !claim_lane_changed?(existing, options)
+    end
+
+    def claim_timestamp(existing, options, now)
+      return timestamp(now) unless renewed_claim?(existing, options)
+
+      existing.data.fetch("claimed_at", timestamp(now))
+    end
+
+    def claim_lane_changed?(existing, options)
+      changed_identity_fields(existing, options, "batch_id", "branch").any?
+    end
+
+    def heartbeat_preserved_fields(existing, options)
+      changed_fields = heartbeat_changed_fields(existing, options)
+      return HEARTBEAT_PRESERVED_FIELDS if changed_fields.empty?
+
+      heartbeat_target_fields_to_preserve(changed_fields)
+    end
+
+    def heartbeat_changed_fields(existing, options)
+      return {} unless existing&.data.is_a?(Hash)
+
+      changed_fields = changed_identity_fields(existing, options, "repo", "target", "batch_id", "branch")
+                       .merge(added_identity_fields(existing, options, "repo", "target", "batch_id", "branch"))
+      changed_fields["target"] = nil if options.key?(:repo) && !options.key?(:target) && existing.data.key?("target")
+      changed_fields
+    end
+
+    def heartbeat_target_fields_to_preserve(changed_fields)
+      fields = []
+      fields << "repo" unless changed_fields.key?("repo")
+      fields << "target" unless changed_fields.key?("target") || changed_fields.key?("repo")
+      fields
+    end
+
+    def changed_identity_fields(existing, options, *fields)
+      identity_fields(options, *fields).select do |field, value|
+        existing.data.key?(field) && existing.data[field] != value
+      end
+    end
+
+    def added_identity_fields(existing, options, *fields)
+      identity_fields(options, *fields).reject do |field, _value|
+        existing.data.key?(field)
+      end
+    end
+
+    def identity_fields(options, *fields)
+      fields.each_with_object({}) do |field, payload|
+        value = options[field.to_sym]
+        value = value.to_s if field == "target" && !value.nil?
+        payload[field] = value unless value.nil?
+      end
     end
 
     def register_batch(options)
@@ -1046,10 +1150,11 @@ module AgentCoord
       end
     end
 
-    def upsert_json(store, path, payload, message:)
+    def upsert_json(store, path, message:)
       2.times do
         existing = store.read_json(path)
-        store.write_json(path, payload, message: message, sha: existing&.sha, create: existing.nil?)
+        next_payload = yield(existing)
+        store.write_json(path, next_payload, message: message, sha: existing&.sha, create: existing.nil?)
         return
       rescue Conflict
         next
