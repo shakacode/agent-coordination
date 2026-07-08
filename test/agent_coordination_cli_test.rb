@@ -166,6 +166,13 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     assert_equal "state", payload.fetch("default_ref")
   end
 
+  def test_version_text_renders_missing_default_backend_as_none
+    result = run_agent_coord("version", state_root: nil)
+
+    assert_equal 0, result.status.exitstatus, result.stderr
+    assert_includes result.stdout, "default_backend: none"
+  end
+
   def test_config_json_exposes_runtime_defaults_and_exit_codes
     result = run_agent_coord("config", "--json", state_root: nil)
 
@@ -178,6 +185,13 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     assert_includes payload.fetch("dependency_terminal_statuses"), "done"
     assert_equal 3, payload.fetch("exit_codes").fetch("claim_refused")
     assert_equal 2, payload.fetch("exit_codes").fetch("operational")
+  end
+
+  def test_config_text_renders_missing_default_backend_as_none
+    result = run_agent_coord("config", state_root: nil)
+
+    assert_equal 0, result.status.exitstatus, result.stderr
+    assert_includes result.stdout, "default_backend: none"
   end
 
   def test_doctor_verifies_local_backend_without_github
@@ -262,6 +276,22 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
       assert_equal 2, result.status.exitstatus
       assert_includes result.stderr, "gh auth status failed"
       refute_includes result.stderr, "from "
+    end
+  end
+
+  def test_doctor_reports_missing_backend_when_unconfigured
+    with_agent_coord_without_source_state do |bin|
+      result = run_command(
+        { "AGENT_COORD_STATE_ROOT" => nil, "AGENT_COORD_STATUS_STATE_ROOT" => nil },
+        RbConfig.ruby,
+        bin,
+        "doctor"
+      )
+
+      assert_equal 2, result.status.exitstatus
+      assert_includes result.stderr, "no coordination backend configured"
+      assert_includes result.stderr, "AGENT_COORD_API_URL"
+      refute_includes result.stdout, "status: ok"
     end
   end
 

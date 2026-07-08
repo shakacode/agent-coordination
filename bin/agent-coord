@@ -401,7 +401,7 @@ module AgentCoord
       emit_payload(payload, options) do
         @stdout.puts "agent-coord #{VERSION}"
         @stdout.puts "schema_version: #{SCHEMA_VERSION}"
-        @stdout.puts "default_backend: #{DEFAULT_BACKEND}"
+        @stdout.puts "default_backend: #{default_backend_text}"
         @stdout.puts "default_ref: #{DEFAULT_REF}"
       end
       0
@@ -412,7 +412,7 @@ module AgentCoord
       emit_payload(payload, options) do
         @stdout.puts "agent-coord config"
         @stdout.puts "version: #{payload.fetch('version')}"
-        @stdout.puts "default_backend: #{payload.fetch('default_backend')}"
+        @stdout.puts "default_backend: #{default_backend_text}"
         @stdout.puts "default_claim_ttl_seconds: #{payload.fetch('default_claim_ttl_seconds')}"
         @stdout.puts "default_heartbeat_ttl_seconds: #{payload.fetch('default_heartbeat_ttl_seconds')}"
         @stdout.puts "heartbeat_dead_after_ttl_multiplier: #{payload.fetch('heartbeat_dead_after_ttl_multiplier')}"
@@ -420,6 +420,10 @@ module AgentCoord
         @stdout.puts "exit_codes: #{payload.fetch('exit_codes').map { |name, code| "#{name}=#{code}" }.join(',')}"
       end
       0
+    end
+
+    def default_backend_text
+      DEFAULT_BACKEND || "none"
     end
 
     def doctor(options)
