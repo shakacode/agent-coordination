@@ -36,6 +36,17 @@ module AgentCoord
   STATUS_HEARTBEAT_METADATA_FIELDS = %w[
     batch_id branch thread_handle chat_handle host pr_url dashboard_url operator phase generation instance_id
   ].freeze
+  METADATA_OPTION_FIELDS = {
+    thread_handle: "thread_handle",
+    chat_handle: "chat_handle",
+    host: "host",
+    pr_url: "pr_url",
+    dashboard_url: "dashboard_url",
+    operator: "operator",
+    phase: "phase",
+    generation: "generation",
+    instance_id: "instance_id"
+  }.freeze
   EXIT_USAGE = 1
   EXIT_OPERATIONAL = 2
   EXIT_CLAIM_REFUSED = 3
@@ -182,6 +193,17 @@ module AgentCoord
       opts.on("--target ISSUE_OR_PR", "target issue or PR id") { |value| options[:target] = value }
       opts.on("--batch-id ID", "batch identifier") { |value| options[:batch_id] = value }
       opts.on("--branch BRANCH", "branch for the target") { |value| options[:branch] = value }
+      opts.on("--thread-handle HANDLE", "worker chat thread handle") { |value| options[:thread_handle] = value }
+      opts.on("--chat-handle HANDLE", "host-specific chat handle") { |value| options[:chat_handle] = value }
+      opts.on("--host HOST", "host app or wrapper, e.g. codex or claude-code/conductor") do |value|
+        options[:host] = value
+      end
+      opts.on("--pr-url URL", "pull request URL for the lane") { |value| options[:pr_url] = value }
+      opts.on("--dashboard-url URL", "dashboard deep link for the lane") { |value| options[:dashboard_url] = value }
+      opts.on("--operator NAME", "human operator for the lane") { |value| options[:operator] = value }
+      opts.on("--phase PHASE", "lane phase") { |value| options[:phase] = value }
+      opts.on("--generation GENERATION", Integer, "claim/lane generation") { |value| options[:generation] = value }
+      opts.on("--instance-id ID", "agent process instance identifier") { |value| options[:instance_id] = value }
       opts.on("--ttl SECONDS", Integer, "lease/heartbeat TTL in seconds") { |value| options[:ttl] = value }
       opts.on("--status STATUS", "heartbeat status") { |value| options[:status] = value }
     end
@@ -286,6 +308,7 @@ module AgentCoord
       # Keep this in sync with value-taking opts.on definitions in parse_options.
       value_options = %w[
         --backend --ref --state-root --api-url --agent-id --repo --target --batch-id --branch
+        --thread-handle --chat-handle --host --pr-url --dashboard-url --operator --phase --generation --instance-id
         --ttl --status --file --install-dir --status-state-root --profile
       ]
       skip_next = false
@@ -329,7 +352,7 @@ module AgentCoord
         "claimed_at" => existing&.data&.fetch("claimed_at", timestamp(now)),
         "updated_at" => timestamp(now),
         "expires_at" => timestamp(expires_at)
-      }.compact
+      }.merge(metadata_payload(options)).compact
 
       begin
         write_with_cas(store, path, payload, existing, "Claim #{options[:repo]}##{options[:target]}")
@@ -361,7 +384,7 @@ module AgentCoord
         "released_at" => timestamp(now),
         "updated_at" => timestamp(now),
         "expires_at" => timestamp(now)
-      )
+      ).merge(metadata_payload(options))
       payload["branch"] = options[:branch] if options[:branch]
 
       store.write_json(path, payload, message: "Release #{options[:repo]}##{options[:target]}", sha: existing.sha)
@@ -501,11 +524,17 @@ module AgentCoord
         "status" => options.fetch(:status),
         "updated_at" => timestamp(now),
         "expires_at" => timestamp(now + ttl)
-      }.compact
+      }.merge(metadata_payload(options)).compact
 
       upsert_json(store, path, payload, message: "Heartbeat #{options[:agent_id]}")
       @stdout.puts "heartbeat #{options[:agent_id]} #{timestamp(now)}"
       0
+    end
+
+    def metadata_payload(options)
+      METADATA_OPTION_FIELDS.each_with_object({}) do |(option_name, field), metadata|
+        metadata[field] = options[option_name] if options.key?(option_name) && !options[option_name].nil?
+      end
     end
 
     def register_batch(options)

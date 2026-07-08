@@ -839,6 +839,65 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     assert_equal "jg-codex/released-branch", payload.fetch("branch")
   end
 
+  def test_claim_and_heartbeat_round_trip_lane_metadata
+    claim = run_agent_coord(
+      "claim",
+      "--agent-id", "worker-a",
+      "--repo", "shakacode/react_on_rails",
+      "--target", "3973",
+      "--batch-id", "batch-1",
+      "--branch", "jg-codex/metadata",
+      *lane_metadata_args(phase: "claimed", pr_url: nil)
+    )
+    assert_equal 0, claim.status.exitstatus, claim.stderr
+
+    heartbeat = run_agent_coord(
+      "heartbeat",
+      "--agent-id", "worker-a",
+      "--repo", "shakacode/react_on_rails",
+      "--target", "3973",
+      "--batch-id", "batch-1",
+      "--branch", "jg-codex/metadata",
+      *lane_metadata_args(phase: "validating")
+    )
+    assert_equal 0, heartbeat.status.exitstatus, heartbeat.stderr
+
+    status = run_agent_coord("status", "--repo", "shakacode/react_on_rails", "--target", "3973", "--json")
+    assert_equal 0, status.status.exitstatus, status.stderr
+    payload = JSON.parse(status.stdout)
+    claim_payload = payload.fetch("claims").first
+    heartbeat_payload = payload.fetch("heartbeats").first
+
+    assert_lane_metadata(claim_payload, phase: "claimed", pr_url: nil)
+    assert_lane_metadata(heartbeat_payload, phase: "validating")
+  end
+
+  def test_release_updates_lane_metadata
+    claim = run_agent_coord(
+      "claim",
+      "--agent-id", "worker-a",
+      "--repo", "shakacode/react_on_rails",
+      "--target", "3973"
+    )
+    assert_equal 0, claim.status.exitstatus, claim.stderr
+
+    release = run_agent_coord(
+      "release",
+      "--agent-id", "worker-a",
+      "--repo", "shakacode/react_on_rails",
+      "--target", "3973",
+      "--pr-url", "https://github.com/shakacode/react_on_rails/pull/3973",
+      "--phase", "merged"
+    )
+    assert_equal 0, release.status.exitstatus, release.stderr
+
+    claim_path = File.join(@state_root, "claims", "shakacode", "react_on_rails", "3973.json")
+    released_payload = JSON.parse(File.read(claim_path))
+    assert_equal "released", released_payload.fetch("status")
+    assert_equal "https://github.com/shakacode/react_on_rails/pull/3973", released_payload.fetch("pr_url")
+    assert_equal "merged", released_payload.fetch("phase")
+  end
+
   def test_concurrent_claims_for_same_item_have_exactly_one_winner
     results = %w[worker-a worker-b].map do |agent_id|
       Thread.new do
@@ -2273,6 +2332,46 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
       FileUtils.cp(BIN, copied_bin)
       yield copied_bin
     end
+  end
+
+  def lane_metadata_args(overrides = {})
+    {
+      thread_handle: "p93s1v-docs-quokka",
+      chat_handle: "codex-thread-123",
+      host: "codex",
+      pr_url: "https://github.com/shakacode/react_on_rails/pull/3973",
+      dashboard_url: "https://coord.example.test/batches/batch-1/docs",
+      operator: "justin",
+      phase: "validating",
+      instance_id: "instance-a",
+      generation: 3
+    }.merge(overrides).flat_map do |name, value|
+      value.nil? ? [] : ["--#{name.to_s.tr('_', '-')}", value.to_s]
+    end
+  end
+
+  def assert_lane_metadata(payload, overrides = {})
+    {
+      "thread_handle" => "p93s1v-docs-quokka",
+      "chat_handle" => "codex-thread-123",
+      "host" => "codex",
+      "pr_url" => "https://github.com/shakacode/react_on_rails/pull/3973",
+      "dashboard_url" => "https://coord.example.test/batches/batch-1/docs",
+      "operator" => "justin",
+      "phase" => "validating",
+      "instance_id" => "instance-a",
+      "generation" => 3
+    }.merge(stringify_keys(overrides)).each do |key, value|
+      if value.nil?
+        refute(payload.key?(key), "expected #{key} to be absent")
+      else
+        assert_equal(value, payload.fetch(key))
+      end
+    end
+  end
+
+  def stringify_keys(hash)
+    hash.transform_keys(&:to_s)
   end
 
   def with_fake_http_harness
