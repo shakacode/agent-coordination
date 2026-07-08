@@ -391,6 +391,24 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     FileUtils.remove_entry(install_dir) if install_dir && Dir.exist?(install_dir)
   end
 
+  def test_bootstrap_leaves_binary_underscore_command_untouched
+    install_dir = Dir.mktmpdir("agent-coord-bin")
+    unrelated_alias = File.join(install_dir, "agent_coord")
+    binary_content = "\xff\xfe\x00not a shell wrapper".b
+    File.binwrite(unrelated_alias, binary_content)
+    FileUtils.chmod(0o755, unrelated_alias)
+
+    result = run_agent_coord("bootstrap", "--install-dir", install_dir, "--no-profile", state_root: nil)
+
+    assert_equal 0, result.status.exitstatus, result.stderr
+    assert_includes result.stdout, "installed agent-coord"
+    refute_includes result.stdout, "removed legacy agent_coord"
+    assert_equal binary_content, File.binread(unrelated_alias)
+    assert File.executable?(unrelated_alias)
+  ensure
+    FileUtils.remove_entry(install_dir) if install_dir && Dir.exist?(install_dir)
+  end
+
   def test_bootstrap_reports_install_dir_errors_as_operational
     install_dir = File.join(@state_root, "install-dir-file")
     File.write(install_dir, "not a directory")
