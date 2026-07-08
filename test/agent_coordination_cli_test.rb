@@ -898,6 +898,62 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     assert_equal "merged", released_payload.fetch("phase")
   end
 
+  def test_claim_renewal_preserves_lane_metadata
+    first_claim = run_agent_coord(
+      "claim",
+      "--agent-id", "worker-a",
+      "--repo", "shakacode/react_on_rails",
+      "--target", "3974",
+      "--batch-id", "batch-1",
+      "--branch", "jg-codex/metadata",
+      *lane_metadata_args(phase: "claimed", pr_url: nil)
+    )
+    assert_equal 0, first_claim.status.exitstatus, first_claim.stderr
+
+    renewal = run_agent_coord(
+      "claim",
+      "--agent-id", "worker-a",
+      "--repo", "shakacode/react_on_rails",
+      "--target", "3974"
+    )
+    assert_equal 0, renewal.status.exitstatus, renewal.stderr
+
+    claim_path = File.join(@state_root, "claims", "shakacode", "react_on_rails", "3974.json")
+    renewed_payload = JSON.parse(File.read(claim_path))
+    assert_equal "batch-1", renewed_payload.fetch("batch_id")
+    assert_equal "jg-codex/metadata", renewed_payload.fetch("branch")
+    assert_lane_metadata(renewed_payload, phase: "claimed", pr_url: nil)
+  end
+
+  def test_plain_heartbeat_tick_preserves_lane_metadata
+    first_heartbeat = run_agent_coord(
+      "heartbeat",
+      "--agent-id", "worker-a",
+      "--repo", "shakacode/react_on_rails",
+      "--target", "3975",
+      "--batch-id", "batch-1",
+      "--branch", "jg-codex/metadata",
+      *lane_metadata_args(phase: "validating")
+    )
+    assert_equal 0, first_heartbeat.status.exitstatus, first_heartbeat.stderr
+
+    tick = run_agent_coord(
+      "heartbeat",
+      "--agent-id", "worker-a",
+      "--status", "alive"
+    )
+    assert_equal 0, tick.status.exitstatus, tick.stderr
+
+    heartbeat_path = File.join(@state_root, "heartbeats", "worker-a.json")
+    heartbeat_payload = JSON.parse(File.read(heartbeat_path))
+    assert_equal "shakacode/react_on_rails", heartbeat_payload.fetch("repo")
+    assert_equal "3975", heartbeat_payload.fetch("target")
+    assert_equal "batch-1", heartbeat_payload.fetch("batch_id")
+    assert_equal "jg-codex/metadata", heartbeat_payload.fetch("branch")
+    assert_equal "alive", heartbeat_payload.fetch("status")
+    assert_lane_metadata(heartbeat_payload, phase: "validating")
+  end
+
   def test_concurrent_claims_for_same_item_have_exactly_one_winner
     results = %w[worker-a worker-b].map do |agent_id|
       Thread.new do
