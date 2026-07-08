@@ -35,13 +35,26 @@ full RuboCop check on every pull request.
 
 ## HTTP backend
 
-Set both HTTP backend env vars on each participating machine:
+### Deploy the Worker/D1 backend
+
+Run this once for each Cloudflare environment before provisioning machine
+tokens:
 
 ```bash
+cd worker
+npm install
+npx wrangler login
+npx wrangler d1 create agent-coord
+# Copy the printed database_id into worker/wrangler.toml if this is a new D1 DB.
+npx wrangler d1 migrations apply agent-coord --remote
+npx wrangler deploy
 export AGENT_COORD_API_URL=<worker-url>
-export AGENT_COORD_API_TOKEN=<machine-token>
-agent-coord doctor
+curl -fsS "$AGENT_COORD_API_URL/v1/health"
+cd ..
 ```
+
+Keep deployment credentials and generated tokens out of git. The CLI only needs
+the deployed Worker URL and a machine token at runtime.
 
 Provision one token per machine from the repository root. The command prints the
 token once and stores only its SHA-256 hash in D1, so run it in a private
@@ -62,25 +75,14 @@ hyphens. If `wrangler d1 execute` fails, the script preserves Wrangler's output
 and, when the failure looks like a duplicate-machine or token constraint, adds a
 hint to delete or update the existing D1 `machines` row before re-provisioning.
 
-### Deploy the Worker/D1 backend
-
-Run this once for each Cloudflare environment before provisioning machine
-tokens:
+After the Worker is deployed and this machine has a token, set both HTTP backend
+env vars and verify the backend:
 
 ```bash
-cd worker
-npm install
-npx wrangler login
-npx wrangler d1 create agent-coord
-# Copy the printed database_id into worker/wrangler.toml if this is a new D1 DB.
-npx wrangler d1 migrations apply agent-coord --remote
-npx wrangler deploy
-curl -fsS "$AGENT_COORD_API_URL/v1/health"
-cd ..
+export AGENT_COORD_API_URL=<worker-url>
+export AGENT_COORD_API_TOKEN=<machine-token>
+agent-coord doctor
 ```
-
-Keep deployment credentials and generated tokens out of git. The CLI only needs
-the deployed Worker URL and a machine token at runtime.
 
 Backend selection follows this rule:
 
