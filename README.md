@@ -6,8 +6,8 @@ coordinating concurrent agent work.
 The team/client runtime path is the HTTP backend: `AGENT_COORD_API_URL` points
 the CLI at the Cloudflare Worker backed by D1, and `AGENT_COORD_API_TOKEN`
 authenticates this machine to that Worker. Local file state is for tests and
-smoke checks. Advanced fallback backends are available for maintainers, but new
-users should start with HTTP.
+smoke checks. The legacy GitHub backend is available only when explicitly
+requested by maintainers; new users should start with HTTP.
 
 Keep this public repository code-only. Do not commit live `claims/`,
 `heartbeats/`, `batches/`, `*.json.lock`, secrets, environment files, customer
@@ -107,7 +107,8 @@ Backend selection follows this rule:
 1. `--state-root` flag -> `LocalStore`
 2. `--api-url` flag or `AGENT_COORD_API_URL` env -> `HttpStore`
 3. `AGENT_COORD_STATE_ROOT` env -> `LocalStore`
-4. otherwise -> legacy `GitHubStore`
+4. `--backend` flag or `AGENT_COORD_BACKEND` env -> legacy `GitHubStore`
+5. otherwise -> operational setup error
 
 When both `AGENT_COORD_API_URL` and `AGENT_COORD_STATE_ROOT` are set, the CLI
 uses the HTTP backend and warns once. Pass `--state-root` only for an explicit
@@ -127,8 +128,10 @@ export PATH="$HOME/.local/bin:$PATH"
 Run `agent-coord doctor` after setup. The default doctor is intentionally
 lightweight: it verifies backend access and the expected state layout without
 downloading and parsing every JSON record. Use `agent-coord doctor --deep` for a
-full audit that parses every claim, heartbeat, and batch file. If doctor fails,
-agents should report coordination state as `UNKNOWN` and use the public
+full audit that parses every claim, heartbeat, and batch file. If doctor reports
+that no backend is configured, set HTTP credentials or an explicit local state
+root before using coordination commands. If doctor fails for another operational
+reason, agents should report coordination state as `UNKNOWN` and use the public
 claim-comment fallback until the operator fixes backend access.
 
 For local smoke checks, set `AGENT_COORD_STATE_ROOT` or pass `--state-root` to

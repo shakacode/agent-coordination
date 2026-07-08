@@ -16,7 +16,7 @@ require "uri"
 module AgentCoord
   VERSION = "0.1.0"
   SCHEMA_VERSION = 1
-  DEFAULT_BACKEND = "shakacode/agent-coordination-state"
+  DEFAULT_BACKEND = nil
   DEFAULT_REF = "state"
   DEFAULT_CLAIM_TTL = 4 * 60 * 60
   DEFAULT_HEARTBEAT_TTL = 15 * 60
@@ -140,7 +140,7 @@ module AgentCoord
         Common options:
           --api-url URL              use the HTTP backend at URL
           --state-root PATH          use local files for tests or smoke checks
-          --backend OWNER/REPO       legacy GitHub backend repository (default: #{DEFAULT_BACKEND})
+          --backend OWNER/REPO       explicit legacy GitHub backend repository
           --ref REF                  legacy GitHub backend branch/ref (default: #{DEFAULT_REF})
           --json                     emit JSON for supported commands
           -h, --help                 show command help
@@ -425,24 +425,9 @@ module AgentCoord
     def doctor(options)
       doctor_options = options.dup
       doctor_options[:state_root] ||= default_status_state_root unless doctor_options[:api_url]
-      backend_kind =
-        if doctor_options[:api_url] && !doctor_options[:state_root] then "http"
-        elsif doctor_options[:state_root] then "local"
-        else "github"
-        end
+      backend_kind = doctor_backend_kind(doctor_options)
       begin
-        if backend_kind == "http"
-          store = build_store(doctor_options)
-          store.verify_readable!
-        elsif doctor_options[:state_root]
-          store = LocalStore.new(doctor_options.fetch(:state_root))
-          store.verify_root!
-        else
-          check_command!("gh", "auth", "status")
-          check_command!("gh", "repo", "view", doctor_options.fetch(:backend))
-          store = build_store(doctor_options)
-          store.verify_readable!
-        end
+        store = verify_doctor_store(doctor_options, backend_kind)
         store.verify_layout!(JSON_PREFIXES)
         check_state_readable!(store) if options[:deep]
       rescue JSON::ParserError, SystemCallError => e
@@ -469,6 +454,33 @@ module AgentCoord
         @stdout.puts "status: ok"
       end
       0
+    end
+
+    def doctor_backend_kind(options)
+      return "http" if options[:api_url] && !options[:state_root]
+      return "local" if options[:state_root]
+      return "github" unless options[:backend].to_s.empty?
+
+      "unconfigured"
+    end
+
+    def verify_doctor_store(options, backend_kind)
+      case backend_kind
+      when "http"
+        store = build_store(options)
+        store.verify_readable!
+      when "local"
+        store = LocalStore.new(options.fetch(:state_root))
+        store.verify_root!
+      when "github"
+        check_command!("gh", "auth", "status")
+        check_command!("gh", "repo", "view", options.fetch(:backend))
+        store = build_store(options)
+        store.verify_readable!
+      else
+        store = build_store(options)
+      end
+      store
     end
 
     def active_backend_url(options, backend_kind)
@@ -1131,7 +1143,15 @@ module AgentCoord
         return HttpStore.new(base_url: options[:api_url], token: token)
       end
 
+      raise OperationalError, missing_backend_message if options[:backend].to_s.empty?
+
       GitHubStore.new(backend: options.fetch(:backend), ref: options.fetch(:ref))
+    end
+
+    def missing_backend_message
+      "no coordination backend configured; set AGENT_COORD_API_URL and AGENT_COORD_API_TOKEN " \
+        "for the HTTP backend, set AGENT_COORD_STATE_ROOT for local state, or pass --backend " \
+        "or AGENT_COORD_BACKEND to explicitly use the legacy GitHub backend"
     end
 
     def default_status_state_root

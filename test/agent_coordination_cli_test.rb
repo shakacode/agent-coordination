@@ -162,7 +162,7 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     payload = JSON.parse(result.stdout)
     assert_match(/\A\d+\.\d+\.\d+\z/, payload.fetch("version"))
     assert_equal 1, payload.fetch("schema_version")
-    assert_equal "shakacode/agent-coordination-state", payload.fetch("default_backend")
+    assert_nil payload.fetch("default_backend")
     assert_equal "state", payload.fetch("default_ref")
   end
 
@@ -254,7 +254,9 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
         { "AGENT_COORD_STATE_ROOT" => nil, "AGENT_COORD_STATUS_STATE_ROOT" => nil, "PATH" => "/nonexistent" },
         RbConfig.ruby,
         bin,
-        "doctor"
+        "doctor",
+        "--backend",
+        "shakacode/agent-coordination-state"
       )
 
       assert_equal 2, result.status.exitstatus
@@ -277,6 +279,8 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
         RbConfig.ruby,
         bin,
         "doctor",
+        "--backend",
+        "shakacode/agent-coordination-state",
         "--ref",
         "missing-ref"
       )
@@ -2205,6 +2209,7 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
   COMMAND_ENV = {
     "AGENT_COORD_API_TOKEN" => nil,
     "AGENT_COORD_API_URL" => nil,
+    "AGENT_COORD_BACKEND" => nil,
     "AGENT_COORD_STATE_ROOT" => nil,
     "AGENT_COORD_STATUS_STATE_ROOT" => nil
   }.freeze
