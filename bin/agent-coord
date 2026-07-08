@@ -418,7 +418,7 @@ module AgentCoord
           File.join(install_dir, "agent-coord"),
           status_state_root: status_state_root
         )
-        legacy_alias = remove_legacy_alias(File.join(install_dir, "agent_coord"))
+        legacy_alias_removed = remove_legacy_alias(File.join(install_dir, "agent_coord"))
 
         profile = nil
         unless options[:no_profile]
@@ -430,7 +430,7 @@ module AgentCoord
       end
 
       @stdout.puts "installed agent-coord -> #{File.join(install_dir, 'agent-coord')}"
-      @stdout.puts "removed legacy agent_coord -> #{File.join(install_dir, 'agent_coord')}" if legacy_alias
+      @stdout.puts "removed legacy agent_coord -> #{File.join(install_dir, 'agent_coord')}" if legacy_alias_removed
       if profile
         @stdout.puts "profile updated: #{profile}"
       else

@@ -370,6 +370,27 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     FileUtils.remove_entry(install_dir) if install_dir && Dir.exist?(install_dir)
   end
 
+  def test_bootstrap_leaves_unrelated_underscore_command_untouched
+    install_dir = Dir.mktmpdir("agent-coord-bin")
+    unrelated_alias = File.join(install_dir, "agent_coord")
+    unrelated_content = <<~SH
+      #!/bin/sh
+      echo personal helper
+    SH
+    File.write(unrelated_alias, unrelated_content)
+    FileUtils.chmod(0o755, unrelated_alias)
+
+    result = run_agent_coord("bootstrap", "--install-dir", install_dir, "--no-profile", state_root: nil)
+
+    assert_equal 0, result.status.exitstatus, result.stderr
+    assert_includes result.stdout, "installed agent-coord"
+    refute_includes result.stdout, "removed legacy agent_coord"
+    assert_equal unrelated_content, File.read(unrelated_alias)
+    assert File.executable?(unrelated_alias)
+  ensure
+    FileUtils.remove_entry(install_dir) if install_dir && Dir.exist?(install_dir)
+  end
+
   def test_bootstrap_reports_install_dir_errors_as_operational
     install_dir = File.join(@state_root, "install-dir-file")
     File.write(install_dir, "not a directory")
@@ -411,6 +432,7 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
 
     assert_includes template, 'Environment="PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin"'
     assert_includes template, 'Environment="AGENT_COORD_STATUS=in_progress"'
+    assert_includes template, "EnvironmentFile=-__AGENT_COORD_ENV_FILE__"
     assert_includes template, "ExecStart=/bin/bash -lc"
     assert_includes template, '--status "$$AGENT_COORD_STATUS"'
     assert_includes template, 'Environment="BRANCH=__BRANCH__"'
@@ -423,6 +445,8 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
 
     assert_includes launchd_heartbeat, "bin/agent-coord heartbeat"
     assert_includes systemd_heartbeat, "bin/agent-coord heartbeat"
+    assert_includes launchd_heartbeat, "__AGENT_COORD_ENV_FILE__"
+    assert_includes systemd_heartbeat, "__AGENT_COORD_ENV_FILE__"
     refute_includes launchd_heartbeat, "AGENT_COORD_REF=state"
     refute_includes systemd_heartbeat, "AGENT_COORD_REF=state"
   end
@@ -433,6 +457,7 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     assert_includes readme, "The team/client runtime path is the HTTP backend"
     assert_includes readme, "AGENT_COORD_API_URL"
     assert_includes readme, "AGENT_COORD_API_TOKEN"
+    assert_includes readme, "AGENT_COORD_ENV_FILE"
     assert_includes readme, "Keep this public repository code-only"
     refute_includes readme, "agent_coord --help"
     refute_includes readme, "git clone --branch state --single-branch"

@@ -208,11 +208,19 @@ export TARGET=3970
 export BATCH_ID=agent-coord-2026-06-13
 export BRANCH=jg-codex/3969-agent-coord-backend
 export AGENT_COORD_REPO="$(pwd)"
+export AGENT_COORD_ENV_FILE="$HOME/.config/agent-coord/env"
+mkdir -p "$(dirname "$AGENT_COORD_ENV_FILE")"
+cat > "$AGENT_COORD_ENV_FILE" <<'EOF'
+export AGENT_COORD_API_URL=<worker-url>
+export AGENT_COORD_API_TOKEN=<machine-token>
+EOF
+chmod 600 "$AGENT_COORD_ENV_FILE"
 perl -pe 's#__AGENT_ID__#$ENV{AGENT_ID}#g;
           s#__TARGET_REPO__#$ENV{TARGET_REPO}#g;
           s#__TARGET__#$ENV{TARGET}#g;
           s#__BATCH_ID__#$ENV{BATCH_ID}#g;
           s#__BRANCH__#$ENV{BRANCH}#g;
+          s#__AGENT_COORD_ENV_FILE__#$ENV{AGENT_COORD_ENV_FILE}#g;
           s#__AGENT_COORD_REPO__#$ENV{AGENT_COORD_REPO}#g' \
   launchd/com.shakacode.agent-coord-heartbeat.plist.example \
   > "$HOME/Library/LaunchAgents/com.shakacode.agent-coord-heartbeat.${AGENT_ID}.plist"
@@ -220,10 +228,10 @@ launchctl bootstrap "gui/$(id -u)" \
   "$HOME/Library/LaunchAgents/com.shakacode.agent-coord-heartbeat.${AGENT_ID}.plist"
 ```
 
-You can also replace the `__PLACEHOLDER__` values manually. Do not put secrets
-in the plist. Scheduler jobs should inherit `AGENT_COORD_API_URL` and
-`AGENT_COORD_API_TOKEN` from a machine profile or another secrets mechanism you
-control; do not paste raw tokens into checked-in templates.
+You can also replace the `__PLACEHOLDER__` values manually. Keep the env file
+private (`chmod 600`) and never commit it. The checked-in template loads
+`AGENT_COORD_API_URL` and `AGENT_COORD_API_TOKEN` from that local file instead
+of storing token values in the repository.
 
 ### Linux systemd --user
 
@@ -238,6 +246,7 @@ sed -e "s#__AGENT_ID__#${AGENT_ID}#g" \
     -e "s#__TARGET__#${TARGET}#g" \
     -e "s#__BATCH_ID__#${BATCH_ID}#g" \
     -e "s#__BRANCH__#${BRANCH}#g" \
+    -e "s#__AGENT_COORD_ENV_FILE__#${AGENT_COORD_ENV_FILE}#g" \
     -e "s#__AGENT_COORD_REPO__#${AGENT_COORD_REPO}#g" \
     systemd/agent-coord-heartbeat.service.example \
     > "$HOME/.config/systemd/user/agent-coord-heartbeat.${AGENT_ID}.service"
@@ -245,9 +254,8 @@ systemctl --user daemon-reload
 systemctl --user enable --now "agent-coord-heartbeat.${AGENT_ID}.service"
 ```
 
-The systemd template expects the machine environment to provide
-`AGENT_COORD_API_URL` and `AGENT_COORD_API_TOKEN`, or for those values to be set
-by a local drop-in that is not checked in.
+The systemd template loads the same private env file for
+`AGENT_COORD_API_URL` and `AGENT_COORD_API_TOKEN`.
 
 ## State Layout
 
