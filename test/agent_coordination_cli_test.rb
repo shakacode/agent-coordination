@@ -925,6 +925,40 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     assert_lane_metadata(renewed_payload, phase: "claimed", pr_url: nil)
   end
 
+  def test_claim_takeover_does_not_preserve_previous_holder_lane_metadata
+    first_claim = run_agent_coord(
+      "claim",
+      "--agent-id", "worker-a",
+      "--repo", "shakacode/react_on_rails",
+      "--target", "3976",
+      "--batch-id", "batch-1",
+      "--branch", "jg-codex/metadata",
+      *lane_metadata_args(phase: "merged")
+    )
+    assert_equal 0, first_claim.status.exitstatus, first_claim.stderr
+
+    release = run_agent_coord(
+      "release",
+      "--agent-id", "worker-a",
+      "--repo", "shakacode/react_on_rails",
+      "--target", "3976"
+    )
+    assert_equal 0, release.status.exitstatus, release.stderr
+
+    takeover = run_agent_coord(
+      "claim",
+      "--agent-id", "worker-b",
+      "--repo", "shakacode/react_on_rails",
+      "--target", "3976"
+    )
+    assert_equal 0, takeover.status.exitstatus, takeover.stderr
+
+    claim_path = File.join(@state_root, "claims", "shakacode", "react_on_rails", "3976.json")
+    takeover_payload = JSON.parse(File.read(claim_path))
+    assert_equal "worker-b", takeover_payload.fetch("agent_id")
+    assert_absent_lane_metadata(takeover_payload, "batch_id", "branch")
+  end
+
   def test_plain_heartbeat_tick_preserves_lane_metadata
     first_heartbeat = run_agent_coord(
       "heartbeat",
@@ -952,6 +986,35 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     assert_equal "jg-codex/metadata", heartbeat_payload.fetch("branch")
     assert_equal "alive", heartbeat_payload.fetch("status")
     assert_lane_metadata(heartbeat_payload, phase: "validating")
+  end
+
+  def test_heartbeat_target_change_does_not_preserve_old_lane_metadata
+    first_heartbeat = run_agent_coord(
+      "heartbeat",
+      "--agent-id", "worker-a",
+      "--repo", "shakacode/react_on_rails",
+      "--target", "3977",
+      "--batch-id", "batch-1",
+      "--branch", "jg-codex/metadata",
+      *lane_metadata_args(phase: "validating")
+    )
+    assert_equal 0, first_heartbeat.status.exitstatus, first_heartbeat.stderr
+
+    retargeted = run_agent_coord(
+      "heartbeat",
+      "--agent-id", "worker-a",
+      "--repo", "shakacode/agent-workflows",
+      "--target", "76",
+      "--status", "validating"
+    )
+    assert_equal 0, retargeted.status.exitstatus, retargeted.stderr
+
+    heartbeat_path = File.join(@state_root, "heartbeats", "worker-a.json")
+    heartbeat_payload = JSON.parse(File.read(heartbeat_path))
+    assert_equal "shakacode/agent-workflows", heartbeat_payload.fetch("repo")
+    assert_equal "76", heartbeat_payload.fetch("target")
+    assert_equal "validating", heartbeat_payload.fetch("status")
+    assert_absent_lane_metadata(heartbeat_payload, "batch_id", "branch")
   end
 
   def test_concurrent_claims_for_same_item_have_exactly_one_winner
@@ -2423,6 +2486,16 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
       else
         assert_equal(value, payload.fetch(key))
       end
+    end
+  end
+
+  def assert_absent_lane_metadata(payload, *extra_fields)
+    expected_fields = %w[
+      thread_handle chat_handle host pr_url dashboard_url operator phase generation instance_id
+    ] + extra_fields
+
+    expected_fields.each do |key|
+      refute(payload.key?(key), "expected #{key} to be absent")
     end
   end
 
