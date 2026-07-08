@@ -21,9 +21,15 @@ host-neutral by design.
 
 ## Use case 2: Worktrees — parallel lanes on one machine
 
-`git worktree` solves two *sessions* editing one *checkout*. It does not solve
-two sessions working one *branch or issue* — nothing stops you from pasting the
-same lane prompt into two chats an hour apart. Claims extend the worktree idea
+`git worktree` solves two *sessions* editing one *checkout* — and a new class
+of desktop apps industrializes the pattern: [Conductor](https://conductor.build)
+runs parallel Claude Code sessions in isolated worktrees, and
+[Orca](https://www.onorca.dev) orchestrates multiple coding-agent sessions the
+same way. These are first-class host environments for this plane: coordination
+runs *inside* their sessions (claims, handles, and lane-context files in the
+worktrees they manage), because the worktree layer still does not solve two
+sessions working one *branch or issue* — nothing stops you from starting the
+same lane in two apps an hour apart. Claims extend the worktree idea
 one level up: a worktree isolates the working directory, a **claim isolates the
 target**. The batch rules pair them: claim before worktree, one lane = one
 worktree = one claim, and a second session that tries the same target gets
@@ -74,6 +80,23 @@ handoffs record what's next. Recovery from any dead session is: read the lane's
 record, supersede the claim, continue. The dashboard's job is the inverse —
 surfacing lanes whose sessions went quiet *before* you notice a PR sat idle for
 a day.
+
+## Use case 5: Pairing — two humans, one fleet
+
+A common working mode: two developers side by side, both rapidly launching
+agentic tasks across the same repos — many small lanes per hour, mixed hosts,
+mixed machines. Everything above compounds here: claims stop the two humans
+from double-working a target just as they stop two chats; machine tokens carry
+an **operator** identity so every lane answers "whose is this?"; and the
+dashboard becomes the shared source of truth that replaces shoulder-taps.
+
+This mode also exposes the sharpest gap in the host apps today: **chat search
+cannot find sessions by PR number**. When a sub-agent opened PR #4123 an hour
+ago, neither operator can search their sidebar for `4123` and find the thread.
+The dashboard is the index the chats lack: search any reference — PR number,
+issue number, branch, thread handle — and get the lane row with its handle,
+machine, host app, operator, and phase. One lookup answers "who has it, where,
+and how far along."
 
 ## When you don't need this
 
