@@ -37,12 +37,11 @@ module AgentCoord
     batch_id branch thread_handle chat_handle host pr_url dashboard_url operator phase generation instance_id
   ].freeze
   HEARTBEAT_TARGET_FIELDS = %w[repo target].freeze
-  HEARTBEAT_LANE_FIELDS = STATUS_HEARTBEAT_METADATA_FIELDS
   METADATA_OPTION_FIELDS = %w[
     thread_handle chat_handle host pr_url dashboard_url operator phase generation instance_id
   ].freeze
   CLAIM_PRESERVED_FIELDS = (%w[batch_id branch] + STATUS_CLAIM_METADATA_FIELDS).uniq.freeze
-  HEARTBEAT_PRESERVED_FIELDS = (HEARTBEAT_TARGET_FIELDS + HEARTBEAT_LANE_FIELDS).uniq.freeze
+  HEARTBEAT_PRESERVED_FIELDS = (HEARTBEAT_TARGET_FIELDS + STATUS_HEARTBEAT_METADATA_FIELDS).uniq.freeze
   EXIT_USAGE = 1
   EXIT_OPERATIONAL = 2
   EXIT_CLAIM_REFUSED = 3
@@ -537,11 +536,7 @@ module AgentCoord
     end
 
     def preserved_payload(existing, fields)
-      return {} unless existing&.data.is_a?(Hash)
-
-      fields.each_with_object({}) do |field, metadata|
-        metadata[field] = existing.data[field] if existing.data.key?(field) && !existing.data[field].nil?
-      end
+      status_metadata(existing&.data, fields)
     end
 
     def metadata_payload(options)
@@ -585,6 +580,7 @@ module AgentCoord
       return {} unless existing&.data.is_a?(Hash)
 
       changed_fields = changed_identity_fields(existing, options, "repo", "target", "batch_id", "branch")
+                       .merge(added_identity_fields(existing, options, "repo", "target", "batch_id", "branch"))
       changed_fields["target"] = nil if options.key?(:repo) && !options.key?(:target) && existing.data.key?("target")
       changed_fields
     end
@@ -599,6 +595,12 @@ module AgentCoord
     def changed_identity_fields(existing, options, *fields)
       identity_fields(options, *fields).select do |field, value|
         existing.data.key?(field) && existing.data[field] != value
+      end
+    end
+
+    def added_identity_fields(existing, options, *fields)
+      identity_fields(options, *fields).reject do |field, _value|
+        existing.data.key?(field)
       end
     end
 

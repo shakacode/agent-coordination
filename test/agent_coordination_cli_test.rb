@@ -1233,6 +1233,34 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     assert_absent_lane_metadata(heartbeat_payload, "batch_id", "branch")
   end
 
+  def test_heartbeat_adding_target_clears_repo_only_lane_metadata
+    first_heartbeat = run_agent_coord(
+      "heartbeat",
+      "--agent-id", "worker-a",
+      "--repo", "shakacode/react_on_rails",
+      "--batch-id", "batch-1",
+      "--branch", "jg-codex/metadata",
+      *lane_metadata_args(phase: "validating")
+    )
+    assert_equal 0, first_heartbeat.status.exitstatus, first_heartbeat.stderr
+
+    target_specific = run_agent_coord(
+      "heartbeat",
+      "--agent-id", "worker-a",
+      "--repo", "shakacode/react_on_rails",
+      "--target", "3985",
+      "--status", "validating"
+    )
+    assert_equal 0, target_specific.status.exitstatus, target_specific.stderr
+
+    heartbeat_path = File.join(@state_root, "heartbeats", "worker-a.json")
+    heartbeat_payload = JSON.parse(File.read(heartbeat_path))
+    assert_equal "shakacode/react_on_rails", heartbeat_payload.fetch("repo")
+    assert_equal "3985", heartbeat_payload.fetch("target")
+    assert_equal "validating", heartbeat_payload.fetch("status")
+    assert_absent_lane_metadata(heartbeat_payload, "batch_id", "branch")
+  end
+
   def test_concurrent_claims_for_same_item_have_exactly_one_winner
     results = %w[worker-a worker-b].map do |agent_id|
       Thread.new do
