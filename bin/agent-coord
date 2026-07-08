@@ -1181,14 +1181,18 @@ module AgentCoord
     end
 
     def batch_lane_name_for_validation(lane, position)
-      name = (lane["name"] || lane["id"]).to_s
+      name = lane.key?("name") ? lane["name"] : lane["id"]
+      raise Error, "batch lane #{position} missing name" if name.nil?
+      raise Error, "batch lane #{position} name must be a string" unless name.is_a?(String)
       raise Error, "batch lane #{position} missing name" if name.empty?
 
       name
     end
 
     def batch_lane_owner_for_validation(lane, name)
-      owner = (lane["owner"] || lane["agent_id"]).to_s
+      owner = lane.key?("owner") ? lane["owner"] : lane["agent_id"]
+      raise Error, "batch lane #{name} missing owner" if owner.nil?
+      raise Error, "batch lane #{name} owner must be a string" unless owner.is_a?(String)
       raise Error, "batch lane #{name} missing owner" if owner.empty?
 
       owner

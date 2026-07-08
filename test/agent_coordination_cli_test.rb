@@ -1330,6 +1330,25 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     refute_path_exists File.join(@state_root, "batches", "batch-b.json")
   end
 
+  def test_register_batch_rejects_non_string_lane_name
+    manifest_path = File.join(@state_root, "batch-manifest.json")
+    File.write(
+      manifest_path,
+      JSON.pretty_generate(
+        "batch_id" => "batch-b",
+        "lanes" => [
+          { "name" => 1, "owner" => "worker-docs", "targets" => ["3972"] }
+        ]
+      )
+    )
+
+    result = run_agent_coord("register-batch", "--file", manifest_path)
+
+    assert_equal 1, result.status.exitstatus
+    assert_includes result.stderr, "batch lane 1 name must be a string"
+    refute_path_exists File.join(@state_root, "batches", "batch-b.json")
+  end
+
   def test_status_batch_scope_reports_missing_lane_owner_heartbeats
     write_batch(
       "batch-b",
