@@ -343,7 +343,7 @@ module AgentCoord
         "batch_id" => options[:batch_id],
         "branch" => options[:branch],
         "status" => "active",
-        "claimed_at" => existing&.data&.fetch("claimed_at", timestamp(now)),
+        "claimed_at" => claim_timestamp(existing, options, now),
         "updated_at" => timestamp(now),
         "expires_at" => timestamp(expires_at)
       }.compact
@@ -371,8 +371,8 @@ module AgentCoord
       raise Error, "no claim exists for #{options[:repo]}##{options[:target]}" unless existing
 
       holder = existing.data["agent_id"]
-      if active_claim_record?(existing.data) && holder != options[:agent_id]
-        raise Error, "active claim belongs to #{holder}; #{options[:agent_id]} cannot release it"
+      if holder && holder != options[:agent_id]
+        raise Error, "claim belongs to #{holder}; #{options[:agent_id]} cannot release it"
       end
 
       payload = existing.data.merge(
@@ -550,10 +550,21 @@ module AgentCoord
     end
 
     def claim_preserved_fields(existing, options)
-      return [] unless existing&.data.is_a?(Hash)
-      return [] unless existing.data["agent_id"] == options[:agent_id]
+      return [] unless renewed_claim?(existing, options)
 
       CLAIM_PRESERVED_FIELDS
+    end
+
+    def renewed_claim?(existing, options)
+      existing&.data.is_a?(Hash) &&
+        active_claim_record?(existing.data) &&
+        existing.data["agent_id"] == options[:agent_id]
+    end
+
+    def claim_timestamp(existing, options, now)
+      return timestamp(now) unless renewed_claim?(existing, options)
+
+      existing.data.fetch("claimed_at", timestamp(now))
     end
 
     def heartbeat_preserved_fields(existing, options)
@@ -573,7 +584,9 @@ module AgentCoord
     def heartbeat_identity_fields(options)
       {
         "repo" => options[:repo],
-        "target" => options[:target]&.to_s
+        "target" => options[:target]&.to_s,
+        "batch_id" => options[:batch_id],
+        "branch" => options[:branch]
       }.compact
     end
 
