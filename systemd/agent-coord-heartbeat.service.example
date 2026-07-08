@@ -12,8 +12,9 @@ Environment="TARGET=__TARGET__"
 Environment="BATCH_ID=__BATCH_ID__"
 Environment="BRANCH=__BRANCH__"
 Environment="AGENT_COORD_STATUS=in_progress"
+EnvironmentFile=__AGENT_COORD_ENV_FILE__
 WorkingDirectory=__AGENT_COORD_REPO__
-ExecStart=/bin/bash -lc 'while true; do AGENT_COORD_REF=state bin/agent-coord heartbeat --agent-id "$$AGENT_ID" --repo "$$TARGET_REPO" --target "$$TARGET" --batch-id "$$BATCH_ID" --branch "$$BRANCH" --status "$$AGENT_COORD_STATUS"; sleep 300; done'
+ExecStart=/bin/bash -lc ': "$${AGENT_COORD_API_URL:?set AGENT_COORD_API_URL in __AGENT_COORD_ENV_FILE__}"; : "$${AGENT_COORD_API_TOKEN:?set AGENT_COORD_API_TOKEN in __AGENT_COORD_ENV_FILE__}"; while true; do bin/agent-coord heartbeat --agent-id "$$AGENT_ID" --repo "$$TARGET_REPO" --target "$$TARGET" --batch-id "$$BATCH_ID" --branch "$$BRANCH" --status "$$AGENT_COORD_STATUS"; sleep 300; done'
 Restart=always
 RestartSec=15
 

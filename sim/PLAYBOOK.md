@@ -1,8 +1,8 @@
 # Simulation Playbook
 
-Prereqs: backend env set (`AGENT_COORD_API_URL`+token, or a shared
-`AGENT_COORD_BACKEND` state repo), `gh` authed, `codex` and/or `claude` CLIs
-installed, sim repos seeded (`sim/bin/seed <repo> --reset`).
+Prereqs: HTTP backend env set (`AGENT_COORD_API_URL` plus
+`AGENT_COORD_API_TOKEN`), `gh` authed, `codex` and/or `claude` CLIs installed,
+sim repos seeded (`sim/bin/seed <repo> --reset`).
 
 ## Scenario A -- split batch, one host per repo
 

@@ -122,7 +122,7 @@ async function putState(request: Request, env: Env, path: string): Promise<Respo
   return json(400, { error: "precondition_required" });
 }
 
-// Phase 1 preserves the existing shared JSON store contract: callers expect full prefix snapshots.
+// The state API preserves the shared JSON store contract: callers expect full prefix snapshots.
 // Do not add a server-side row limit until HttpStore supports pagination or resumable snapshots.
 async function listState(env: Env, prefix: string): Promise<Response> {
   if (!["claims", "heartbeats", "batches"].includes(prefix)) {
@@ -146,8 +146,8 @@ export default {
       return json(200, { status: "ok" });
     }
     const machine = await authenticate(request, env);
-    // SECURITY: Phase 1 trusts agent-coord Runner as the sole caller. This API authenticates
-    // machine tokens but does not provide per-path authorization until Phase 2 endpoints land.
+    // SECURITY: The state API trusts agent-coord Runner as the sole caller. This API
+    // authenticates machine tokens but does not provide per-path authorization yet.
     if (!machine) {
       return json(401, { error: "unauthorized" });
     }

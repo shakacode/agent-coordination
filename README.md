@@ -1,13 +1,17 @@
 # Agent Coordination
 
-CLI, workflow helpers, and backend protocol code for coordinating concurrent
-agent work.
+CLI, workflow helpers, Worker code, tests, and simulation fixtures for
+coordinating concurrent agent work.
 
-Runtime JSON coordination records live in the private
-`shakacode/agent-coordination-state` repository on its `state` branch. This
-public repository should contain code, docs, tests, templates, and simulation
-fixtures only. Do not commit live `claims/`, `heartbeats/`, `batches/`, secrets,
-environment files, customer data, credentials, or source-code patches here.
+The team/client runtime path is the HTTP backend: `AGENT_COORD_API_URL` points
+the CLI at the Cloudflare Worker backed by D1, and `AGENT_COORD_API_TOKEN`
+authenticates this machine to that Worker. Local file state is for tests and
+smoke checks. Advanced fallback backends are available for maintainers, but new
+users should start with HTTP.
+
+Keep this public repository code-only. Do not commit live `claims/`,
+`heartbeats/`, `batches/`, `*.json.lock`, secrets, environment files, customer
+data, credentials, or source-code patches here.
 
 ## Setup
 
@@ -18,136 +22,99 @@ cd agent-coordination
 bundle install
 git config core.hooksPath .githooks
 bundle exec rubocop
-ruby -Itest test/agent_coord_test.rb
+ruby -Itest test/agent_coordination_cli_test.rb
 bin/agent-coord --help
 bin/agent-coord bootstrap
 export PATH="$HOME/.local/bin:$PATH"
 agent-coord --help
-agent_coord --help
-agent-coord doctor
-agent-coord doctor --deep
 ```
 
 The versioned pre-commit hook in `.githooks/pre-commit` runs RuboCop on staged
 Ruby files before each commit after `core.hooksPath` is configured. CI runs the
 full RuboCop check on every pull request.
 
-The CLI defaults to the private `shakacode/agent-coordination-state` backend on
-the `state` branch and uses `gh api` for GitHub Contents API writes. `status`
-prefers a local state checkout: first `AGENT_COORD_STATE_ROOT` or
-`--state-root`, then `AGENT_COORD_STATUS_STATE_ROOT`, then the repo containing
-the installed `agent-coord` command if it has `claims`, `heartbeats`, and
-`batches`. This keeps normal status checks fast while preserving GitHub-backed
-writes for `claim`, `release`, and `heartbeat`.
-
-Production GitHub-store state lives in `shakacode/agent-coordination-state` on
-the `state` branch. Keep this repository code-only. Machines may still set
-`AGENT_COORD_REF=state` explicitly for clarity, but the CLI default already
-points at the state branch:
-
-```bash
-export AGENT_COORD_REF=state
-```
-
-For local smoke checks, set `AGENT_COORD_STATE_ROOT` or pass `--state-root` to
-use a temporary filesystem state directory instead of GitHub.
-
 ## HTTP backend
 
-HTTP backend selection follows this rule:
+### Deploy the Worker/D1 backend
 
-1. `--state-root` flag → `LocalStore`
-2. `--api-url` flag or `AGENT_COORD_API_URL` env → `HttpStore` (requires `AGENT_COORD_API_TOKEN`, else `OperationalError` exit 2)
-3. `AGENT_COORD_STATE_ROOT` env → `LocalStore`
-4. otherwise → `GitHubStore`
-
-When both `AGENT_COORD_API_URL` and `AGENT_COORD_STATE_ROOT` env vars are set, warn once on stderr: `warning: AGENT_COORD_API_URL and AGENT_COORD_STATE_ROOT are both set; using the HTTP backend. Pass --state-root to force local.`
-
-Set both HTTP backend env vars on each participating machine:
+Run this once for each Cloudflare environment before provisioning machine
+tokens:
 
 ```bash
+cd worker
+npm install
+npx wrangler login
+npx wrangler d1 create agent-coord
+# Copy the printed database_id into worker/wrangler.toml if this is a new D1 DB.
+npx wrangler d1 migrations apply agent-coord --remote
+npx wrangler deploy
 export AGENT_COORD_API_URL=<worker-url>
-export AGENT_COORD_API_TOKEN=<machine-token>
+curl -fsS "$AGENT_COORD_API_URL/v1/health"
+cd ..
 ```
 
-Provision one token per machine from the repository root:
+Keep deployment credentials and generated tokens out of git. The CLI only needs
+the deployed Worker URL and a machine token at runtime.
+
+Provision one token per machine from the repository root. The command prints the
+token once and stores only its SHA-256 hash in D1, so run it in a private
+terminal:
 
 ```bash
 worker/bin/provision-token <machine-name>
 ```
 
-For a local Wrangler/D1 environment, pass `--local`:
+For local Wrangler/D1 development, pass `--local`:
 
 ```bash
 worker/bin/provision-token <machine-name> --local
 ```
 
-The command prints the token once and stores only its SHA-256 hash in D1. If
-`wrangler d1 execute` fails, the script preserves Wrangler's output and, when
-the failure looks like a duplicate-machine or token constraint, adds a hint to
-delete or update the existing D1 `machines` row before re-provisioning. Machine
-names may contain letters, numbers, dots, underscores, colons, and hyphens.
-The raw token is intentionally printed to stdout once; run the command in a
-private terminal rather than CI or logged shell sessions.
+Machine names may contain letters, numbers, dots, underscores, colons, and
+hyphens. If `wrangler d1 execute` fails, the script preserves Wrangler's output
+and, when the failure looks like a duplicate-machine or token constraint, adds a
+hint to delete or update the existing D1 `machines` row before re-provisioning.
 
-Operator deploy sketch:
+After the Worker is deployed and this machine has a token, set both HTTP backend
+env vars and verify the backend:
 
 ```bash
-cd worker
-npx wrangler login
-npx wrangler d1 create agent-coord
-# Paste the created database_id into wrangler.toml before continuing.
-npx wrangler d1 migrations apply agent-coord --remote
-npx wrangler deploy
-curl -s <worker-url>/v1/health
+export AGENT_COORD_API_URL=<worker-url>
+export AGENT_COORD_API_TOKEN=<machine-token>
+agent-coord doctor
 ```
 
-For the first M5 pilot, keep `AGENT_COORD_API_URL` and
-`AGENT_COORD_API_TOKEN` temporary shell-only until both an HTTP `doctor` check
-and a pilot batch pass. Use the seeded simulation repos as the first live HTTP
-batch target, then run a `shakacode/react_on_rails` pilot before persisting the
-M5 env vars or expanding to additional machines.
+Backend selection follows this rule:
 
-Unset `AGENT_COORD_API_URL` to fall back to the GitHub store.
+1. `--state-root` flag -> `LocalStore`
+2. `--api-url` flag or `AGENT_COORD_API_URL` env -> `HttpStore`
+3. `AGENT_COORD_STATE_ROOT` env -> `LocalStore`
+4. otherwise -> legacy `GitHubStore`
+
+When both `AGENT_COORD_API_URL` and `AGENT_COORD_STATE_ROOT` are set, the CLI
+uses the HTTP backend and warns once. Pass `--state-root` only for an explicit
+local smoke check.
 
 React on Rails workflow docs assume `agent-coord` is available on `PATH`.
-`bin/agent-coord bootstrap` installs both `agent-coord` and the compatibility
-alias `agent_coord` into `$HOME/.local/bin` by default and appends that directory
-to the current shell profile. Use `--install-dir PATH` to choose another
-directory or `--no-profile` to skip profile edits. If the shell has not reloaded
-the profile yet, export the path in the active terminal:
+`bin/agent-coord bootstrap` installs `agent-coord` into `$HOME/.local/bin` by
+default and appends that directory to the current shell profile. Use
+`--install-dir PATH` to choose another directory or `--no-profile` to skip
+profile edits. If the shell has not reloaded the profile yet, export the path in
+the active terminal:
 
 ```bash
 export PATH="$HOME/.local/bin:$PATH"
 ```
 
 Run `agent-coord doctor` after setup. The default doctor is intentionally
-lightweight: it verifies `gh` auth, private backend/ref readability, and the
-expected state layout without downloading and parsing every JSON record. Use
-`agent-coord doctor --deep` for a full audit that parses every claim, heartbeat,
-and batch file. For a local `--state-root`, doctor also rejects missing,
-non-directory, or non-writable roots so the setup gate does not certify a backend
-that cannot later accept claims or heartbeats. If doctor fails, agents should
-report private state as `UNKNOWN` and use the public claim-comment fallback until
-the operator fixes bootstrap or auth.
+lightweight: it verifies backend access and the expected state layout without
+downloading and parsing every JSON record. Use `agent-coord doctor --deep` for a
+full audit that parses every claim, heartbeat, and batch file. If doctor fails,
+agents should report coordination state as `UNKNOWN` and use the public
+claim-comment fallback until the operator fixes backend access.
 
-For fast global `agent-coord status`, point the installed shim at one durable
-state checkout and refresh that checkout periodically:
-
-```bash
-git clone --branch state --single-branch \
-  git@github.com:shakacode/agent-coordination-state.git \
-  "$HOME/src/agent-coordination-status"
-bin/agent-coord bootstrap \
-  --status-state-root "$HOME/src/agent-coordination-status" \
-  --no-profile
-mkdir -p "$HOME/Library/LaunchAgents"
-sed "s#__AGENT_COORD_REPO__#$HOME/src/agent-coordination-status#g" \
-  launchd/com.shakacode.agent-coord-refresh.plist.example \
-  > "$HOME/Library/LaunchAgents/com.shakacode.agent-coord-refresh.plist"
-launchctl bootstrap "gui/$(id -u)" \
-  "$HOME/Library/LaunchAgents/com.shakacode.agent-coord-refresh.plist"
-```
+For local smoke checks, set `AGENT_COORD_STATE_ROOT` or pass `--state-root` to
+use a temporary filesystem state directory:
 
 ```bash
 STATE_ROOT=$(mktemp -d)
@@ -181,10 +148,8 @@ the holder's heartbeat is the normal liveness source: `live` or `stale`
 heartbeats refuse takeover, while a `dead` heartbeat allows takeover. If the
 holder heartbeat is missing or invalid, `expires_at` is the safe fallback and the
 claim can be taken over only after that fallback has passed. Existing claim
-updates use the GitHub Contents API `sha` precondition, so competing updates fail
-instead of silently overwriting each other. Creating a new claim relies on the
-Contents API create-file behavior, which rejects a path that appeared after the
-local read.
+updates use the active store's compare-and-swap token, so competing updates fail
+instead of silently overwriting each other.
 
 `heartbeat` upserts `heartbeats/<agent-id>.json`. `status` renders coordination
 state in text or JSON. Full `status` renders compact claims, heartbeats, batch
@@ -201,20 +166,16 @@ the preferred batch-workflow path:
 Scoped JSON payloads include `scope` and `degraded` fields. A scoped command can
 show `degraded` notes for intentionally omitted unrelated state, such as claims
 not checked in batch scope; that is different from exit 2. Exit 2 means the
-private backend result is `UNKNOWN` for that command. Text status renders the
+coordination backend result is `UNKNOWN` for that command. Text status renders the
 same degraded notes as a footer when rows are present. In large backends, prefer
 target or batch scoped status for React on Rails batch lanes and treat a timed
-out full private coordination read as degraded/`UNKNOWN` rather than guessing.
+out full coordination read as degraded/`UNKNOWN` rather than guessing.
 `release` marks a claim released while preserving the record for auditability.
 `version` prints the CLI contract version. `config show --json` prints runtime
 defaults and machine-readable exit codes. Default `doctor` verifies the current
 backend without writing state or parsing every record; `doctor --deep` adds full
-JSON validation. `bootstrap` installs the command shims used by public workflow
-docs.
-
-`agent_coord` is a compatibility alias for launchers, humans, and prompts that
-prefer underscore command names. It delegates to the same implementation as
-`agent-coord`.
+JSON validation. `bootstrap` installs the `agent-coord` command used by public
+workflow docs.
 
 ## CLI Contract And Exit Codes
 
@@ -228,7 +189,7 @@ Current exit code contract:
 | ---- | ---------------------------------------- | ------------------------------------------------------------------------------ |
 | 0    | Command succeeded                         | Use the returned state.                                                        |
 | 1    | Usage error                               | Fix the command invocation before proceeding.                                  |
-| 2    | Operational failure                       | Report private state as `UNKNOWN`; use advisory fallback when safe.            |
+| 2    | Operational failure                       | Report coordination state as `UNKNOWN`; use advisory fallback when safe.       |
 | 3    | `CLAIM_REFUSED` by live/stale/active hold | Hard stop for machine agents; report holder/liveness instead of competing.     |
 
 A refused claim is intentionally different from a bootstrap/auth/network
@@ -269,11 +230,19 @@ export TARGET=3970
 export BATCH_ID=agent-coord-2026-06-13
 export BRANCH=jg-codex/3969-agent-coord-backend
 export AGENT_COORD_REPO="$(pwd)"
+export AGENT_COORD_ENV_FILE="$HOME/.config/agent-coord/env"
+mkdir -p "$(dirname "$AGENT_COORD_ENV_FILE")"
+install -m 600 /dev/null "$AGENT_COORD_ENV_FILE"
+cat > "$AGENT_COORD_ENV_FILE" <<'EOF'
+AGENT_COORD_API_URL=<worker-url>
+AGENT_COORD_API_TOKEN=<machine-token>
+EOF
 perl -pe 's#__AGENT_ID__#$ENV{AGENT_ID}#g;
           s#__TARGET_REPO__#$ENV{TARGET_REPO}#g;
           s#__TARGET__#$ENV{TARGET}#g;
           s#__BATCH_ID__#$ENV{BATCH_ID}#g;
           s#__BRANCH__#$ENV{BRANCH}#g;
+          s#__AGENT_COORD_ENV_FILE__#$ENV{AGENT_COORD_ENV_FILE}#g;
           s#__AGENT_COORD_REPO__#$ENV{AGENT_COORD_REPO}#g' \
   launchd/com.shakacode.agent-coord-heartbeat.plist.example \
   > "$HOME/Library/LaunchAgents/com.shakacode.agent-coord-heartbeat.${AGENT_ID}.plist"
@@ -281,10 +250,10 @@ launchctl bootstrap "gui/$(id -u)" \
   "$HOME/Library/LaunchAgents/com.shakacode.agent-coord-heartbeat.${AGENT_ID}.plist"
 ```
 
-You can also replace the `__PLACEHOLDER__` values manually. Do not put secrets
-in the plist. The heartbeat command uses the existing `gh` auth available to the
-desktop session and pins `AGENT_COORD_REF=state` inline because launchd jobs do
-not reliably inherit interactive shell profile exports.
+You can also replace the `__PLACEHOLDER__` values manually. Keep the env file
+private (`chmod 600`) and never commit it. The checked-in template loads
+`AGENT_COORD_API_URL` and `AGENT_COORD_API_TOKEN` from that local file instead
+of storing token values in the repository.
 
 ### Linux systemd --user
 
@@ -299,6 +268,7 @@ sed -e "s#__AGENT_ID__#${AGENT_ID}#g" \
     -e "s#__TARGET__#${TARGET}#g" \
     -e "s#__BATCH_ID__#${BATCH_ID}#g" \
     -e "s#__BRANCH__#${BRANCH}#g" \
+    -e "s#__AGENT_COORD_ENV_FILE__#${AGENT_COORD_ENV_FILE}#g" \
     -e "s#__AGENT_COORD_REPO__#${AGENT_COORD_REPO}#g" \
     systemd/agent-coord-heartbeat.service.example \
     > "$HOME/.config/systemd/user/agent-coord-heartbeat.${AGENT_ID}.service"
@@ -306,9 +276,8 @@ systemctl --user daemon-reload
 systemctl --user enable --now "agent-coord-heartbeat.${AGENT_ID}.service"
 ```
 
-The systemd template also pins `AGENT_COORD_REF=state` inline so user services
-write to the live state branch even when interactive shell profile exports are
-not loaded.
+The systemd template loads the same private env file for
+`AGENT_COORD_API_URL` and `AGENT_COORD_API_TOKEN`.
 
 ## State Layout
 

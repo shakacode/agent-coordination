@@ -113,13 +113,13 @@ module AgentCoord
           version    print CLI contract version
           config     print runtime defaults and exit-code contract
           doctor     verify backend access and state layout
-          bootstrap  install agent-coord and agent_coord shims
+          bootstrap  install the agent-coord command
 
         Common options:
-          --backend OWNER/REPO       backend repository (default: #{DEFAULT_BACKEND})
-          --ref REF                  backend branch/ref (default: #{DEFAULT_REF})
-          --state-root PATH          use local files instead of GitHub API
           --api-url URL              use the HTTP backend at URL
+          --state-root PATH          use local files for tests or smoke checks
+          --backend OWNER/REPO       legacy GitHub backend repository (default: #{DEFAULT_BACKEND})
+          --ref REF                  legacy GitHub backend branch/ref (default: #{DEFAULT_REF})
           --json                     emit JSON for supported commands
           -h, --help                 show command help
       HELP
@@ -151,7 +151,7 @@ module AgentCoord
         opts.on("--status STATUS", "heartbeat status") { |value| options[:status] = value }
         opts.on("--deep", "doctor only: parse every JSON state record") { options[:deep] = true } if command == "doctor"
         opts.on("--install-dir PATH", "bootstrap install directory") { |value| options[:install_dir] = value }
-        opts.on("--status-state-root PATH", "install shims with a local status state root") do |value|
+        opts.on("--status-state-root PATH", "install agent-coord with a local status state root") do |value|
           options[:status_state_root] = value
         end
         opts.on("--profile PATH", "shell profile to update during bootstrap") { |value| options[:profile] = value }
@@ -224,14 +224,14 @@ module AgentCoord
         opts.separator "    --repo OWNER/REPO --target N  target read; claim plus holder heartbeat only"
         opts.separator "    --batch-id ID                 batch read; batch, lane heartbeats, dependencies"
         opts.separator "Scoped JSON includes a degraded array for intentionally omitted state."
-        opts.separator "Exit 2 means the private state for that command is UNKNOWN."
+        opts.separator "Exit 2 means coordination state for that command is UNKNOWN."
         opts.separator ""
       when "doctor"
         opts.separator ""
         opts.separator "Doctor modes:"
         opts.separator "    default  lightweight auth, ref, and layout checks without reading every JSON file"
         opts.separator "    --deep   parse every claim, heartbeat, and batch JSON file"
-        opts.separator "Exit 2 means private coordination state is UNKNOWN until backend access is fixed."
+        opts.separator "Exit 2 means coordination state is UNKNOWN until backend access is fixed."
         opts.separator ""
       end
     end
@@ -418,11 +418,7 @@ module AgentCoord
           File.join(install_dir, "agent-coord"),
           status_state_root: status_state_root
         )
-        install_command(
-          File.expand_path("agent_coord", __dir__),
-          File.join(install_dir, "agent_coord"),
-          status_state_root: status_state_root
-        )
+        legacy_alias_removed = remove_legacy_alias(File.join(install_dir, "agent_coord"))
 
         profile = nil
         unless options[:no_profile]
@@ -434,7 +430,7 @@ module AgentCoord
       end
 
       @stdout.puts "installed agent-coord -> #{File.join(install_dir, 'agent-coord')}"
-      @stdout.puts "installed agent_coord -> #{File.join(install_dir, 'agent_coord')}"
+      @stdout.puts "removed legacy agent_coord -> #{File.join(install_dir, 'agent_coord')}" if legacy_alias_removed
       if profile
         @stdout.puts "profile updated: #{profile}"
       else
@@ -1132,6 +1128,32 @@ module AgentCoord
         SH
       )
       FileUtils.chmod(0o755, destination)
+    end
+
+    def remove_legacy_alias(destination)
+      return false unless File.symlink?(destination) || File.exist?(destination)
+
+      legacy_source = File.expand_path("agent_coord", __dir__)
+      if File.symlink?(destination)
+        link_target = File.readlink(destination)
+        link_target = File.expand_path(link_target, File.dirname(destination)) unless link_target.start_with?("/")
+        return false unless link_target == legacy_source
+
+        FileUtils.rm_f(destination)
+        return true
+      end
+
+      return false unless File.file?(destination)
+
+      content = File.binread(destination, 16 * 1024)
+      escaped_legacy_source = Shellwords.escape(legacy_source)
+      return false unless content.start_with?("#!/bin/sh".b) &&
+                          (content.include?(legacy_source.b) || content.include?(escaped_legacy_source.b))
+
+      FileUtils.rm_f(destination)
+      true
+    rescue SystemCallError
+      false
     end
 
     def default_profile_path

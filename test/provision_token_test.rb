@@ -7,7 +7,6 @@ require "open3"
 require "tmpdir"
 
 SCRIPT = File.expand_path("../worker/bin/provision-token", __dir__)
-PLAN = File.expand_path("../docs/plans/2026-07-04-backend-v2-phase1.md", __dir__)
 
 class ProvisionTokenTest < Minitest::Test
   TOKEN = "0123456789abcdef0123456789abcdef0123456789abcdef"
@@ -143,14 +142,6 @@ class ProvisionTokenTest < Minitest::Test
     assert_includes stderr, "wrangler d1 execute failed"
     assert_includes stderr, "If this was a duplicate machine"
     refute_includes stdout, TOKEN
-  end
-
-  def test_plan_script_block_matches_real_script
-    plan_script = File.read(PLAN).match(
-      %r{`worker/bin/provision-token`:\n\n```bash\n(?<script>.*?)\n```}m
-    )[:script]
-
-    assert_equal File.read(SCRIPT).strip, plan_script.strip
   end
 
   private
