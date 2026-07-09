@@ -44,8 +44,10 @@ end
 class HttpStoreTestCase < Minitest::Test
   def with_stub(responses)
     stub = HttpStoreStub.new(responses)
-    yield AgentCoord::HttpStore.new(base_url: stub.base_url, token: "tok"), stub
+    store = AgentCoord::HttpStore.new(base_url: stub.base_url, token: "tok")
+    yield store, stub
   ensure
+    store&.close
     stub.shutdown
   end
 
@@ -59,6 +61,33 @@ class HttpStoreTestCase < Minitest::Test
 end
 
 class HttpStoreReadTest < HttpStoreTestCase
+  def test_reuses_http_session_across_requests
+    starts = 0
+    original_start = Net::HTTP.method(:start)
+    Net::HTTP.define_singleton_method(:start) do |*args, **kwargs, &block|
+      starts += 1
+      original_start.call(*args, **kwargs, &block)
+    end
+
+    responses = [
+      [200, { "entries" => [] }],
+      [
+        200,
+        { "path" => "claims/o/r/1.json", "data" => { "agent_id" => "a1" }, "version" => 7 }
+      ],
+      [200, { "status" => "ok" }]
+    ]
+    with_stub(responses) do |store, _|
+      store.list_json("claims")
+      store.read_json("claims/o/r/1.json")
+      store.verify_layout!(AgentCoord::JSON_PREFIXES)
+    end
+
+    assert_equal 1, starts
+  ensure
+    Net::HTTP.define_singleton_method(:start, original_start) if original_start
+  end
+
   def test_read_json_returns_stored_json_with_version_as_sha
     body = { "path" => "claims/o/r/1.json", "data" => { "agent_id" => "a1" }, "version" => 7 }
     with_stub([[200, body]]) do |store, stub|

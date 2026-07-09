@@ -1874,6 +1874,8 @@ module AgentCoord
       uri = parse_base_url(base_url)
       @base = uri.to_s.chomp("/")
       @token = token
+      @http = nil
+      @http_key = nil
     end
 
     def read_json(path)
@@ -1939,6 +1941,10 @@ module AgentCoord
       raise OperationalError, http_error("health", response) unless response.code == "200"
     end
 
+    def close
+      close_http_session
+    end
+
     private
 
     def parse_base_url(base_url)
@@ -1987,17 +1993,35 @@ module AgentCoord
         http_request["Content-Type"] = "application/json"
         http_request.body = JSON.generate(body)
       end
-      Net::HTTP.start(
+      http_session(uri).request(http_request)
+    rescue URI::InvalidURIError, SocketError, SystemCallError, Timeout::Error, IOError, OpenSSL::SSL::SSLError => e
+      close_http_session
+      raise OperationalError, "http backend unreachable: #{e.message}"
+    end
+
+    def http_session(uri)
+      key = [uri.scheme, uri.host, uri.port]
+      return @http if @http_key == key && @http&.active?
+
+      close_http_session
+      @http = Net::HTTP.start(
         uri.host,
         uri.port,
         use_ssl: uri.scheme == "https",
         open_timeout: OPEN_TIMEOUT,
         read_timeout: READ_TIMEOUT
-      ) do |http|
-        http.request(http_request)
-      end
-    rescue URI::InvalidURIError, SocketError, SystemCallError, Timeout::Error, IOError, OpenSSL::SSL::SSLError => e
-      raise OperationalError, "http backend unreachable: #{e.message}"
+      )
+      @http_key = key
+      @http
+    end
+
+    def close_http_session
+      @http&.finish if @http&.active?
+    rescue IOError
+      nil
+    ensure
+      @http = nil
+      @http_key = nil
     end
 
     def http_error(action, response)
