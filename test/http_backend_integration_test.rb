@@ -103,8 +103,18 @@ class HttpBackendIntegrationTest < Minitest::Test
     assert_equal "scoped", entry.fetch("updated_by")
 
     code, body = http_json("GET", "/v1/state?prefix=claims", token: scoped_token)
-    assert_equal 403, code
-    assert_equal "forbidden", body.fetch("error")
+    assert_equal 200, code
+    listed_paths = body.fetch("entries").map { |entry| entry.fetch("path") }
+    assert_equal [allowed_path], listed_paths
+
+    doctor_out, doctor_err, doctor_status = Open3.capture3(
+      { "AGENT_COORD_API_TOKEN" => scoped_token },
+      "ruby",
+      CLI,
+      "doctor"
+    )
+    assert doctor_status.success?, doctor_err
+    assert_includes doctor_out, "status: ok"
 
     code, body = http_json("GET", state_path(denied_path), token: scoped_token)
     assert_equal 403, code

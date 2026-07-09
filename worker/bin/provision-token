@@ -19,6 +19,8 @@ esac
 SCOPE="--remote"
 READ_PREFIXES=()
 WRITE_PREFIXES=()
+READ_PREFIXES_GIVEN=0
+WRITE_PREFIXES_GIVEN=0
 
 if [[ ! "$MACHINE" =~ ^[A-Za-z0-9._:-]+$ ]]; then
   echo "machine name may contain only letters, numbers, dots, underscores, colons, and hyphens" >&2
@@ -48,12 +50,14 @@ while [ "$#" -gt 0 ]; do
     --read-prefix)
       [ "$#" -ge 2 ] || usage
       valid_prefix "$2" || { echo "invalid read prefix: $2" >&2; exit 1; }
+      READ_PREFIXES_GIVEN=1
       READ_PREFIXES+=("$2")
       shift 2
       ;;
     --write-prefix)
       [ "$#" -ge 2 ] || usage
       valid_prefix "$2" || { echo "invalid write prefix: $2" >&2; exit 1; }
+      WRITE_PREFIXES_GIVEN=1
       WRITE_PREFIXES+=("$2")
       shift 2
       ;;
@@ -65,6 +69,9 @@ done
 
 [ "${#READ_PREFIXES[@]}" -gt 0 ] || READ_PREFIXES=("")
 [ "${#WRITE_PREFIXES[@]}" -gt 0 ] || WRITE_PREFIXES=("")
+if [ "$READ_PREFIXES_GIVEN" -ne "$WRITE_PREFIXES_GIVEN" ]; then
+  echo "warning: only one scope dimension was customized; the omitted dimension remains all-state [\"\"]" >&2
+fi
 
 json_array() {
   local out="["

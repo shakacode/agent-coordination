@@ -104,12 +104,31 @@ function scopeCoversListPrefix(scope: string, prefix: string): boolean {
   return prefix === scope || prefix.startsWith(`${scope}/`);
 }
 
-function canAccessPath(prefixes: string[], path: string): boolean {
-  return prefixes.some((prefix) => scopeCoversPath(prefix, path));
+type ScopedListFilter = { kind: "directory"; scope: string } | { kind: "path"; scope: string };
+type ListScopeFilter = { kind: "all" } | ScopedListFilter;
+
+function listScopeFilter(scope: string, prefix: string): ListScopeFilter | null {
+  if (scope === "") return { kind: "all" };
+  if (scopeCoversListPrefix(scope, prefix)) return { kind: "all" };
+  if (exactStatePathScope(scope)) {
+    return scope.startsWith(`${prefix}/`) ? { kind: "path", scope } : null;
+  }
+  return scope.startsWith(`${prefix}/`) ? { kind: "directory", scope } : null;
 }
 
-function canListPrefix(prefixes: string[], prefix: string): boolean {
-  return prefixes.some((scope) => scopeCoversListPrefix(scope, prefix));
+function listScopeFilters(prefixes: string[], prefix: string): ScopedListFilter[] | null {
+  const filters: ScopedListFilter[] = [];
+  for (const scope of prefixes) {
+    const filter = listScopeFilter(scope, prefix);
+    if (!filter) continue;
+    if (filter.kind === "all") return [];
+    filters.push(filter);
+  }
+  return filters.length > 0 ? filters : null;
+}
+
+function canAccessPath(prefixes: string[], path: string): boolean {
+  return prefixes.some((prefix) => scopeCoversPath(prefix, path));
 }
 
 async function readJsonBody(request: Request): Promise<{ body: unknown } | { response: Response }> {
@@ -212,7 +231,8 @@ async function listState(
   if (!validPrefix(prefix)) {
     return json(400, { error: "invalid_prefix" });
   }
-  if (!canListPrefix(auth.readPrefixes, prefix)) return json(403, { error: "forbidden" });
+  const scopeFilters = listScopeFilters(auth.readPrefixes, prefix);
+  if (scopeFilters === null) return json(403, { error: "forbidden" });
   const limitParam = searchParams.get("limit");
   let limit: number | null = null;
   if (limitParam !== null) {
@@ -228,6 +248,17 @@ async function listState(
   }
   const clauses = ["path LIKE ? ESCAPE '\\'"];
   const binds: (string | number)[] = [`${escapeLikePrefix(prefix)}/%`];
+  if (scopeFilters.length > 0) {
+    const scopeClauses = scopeFilters.map((filter) => {
+      if (filter.kind === "path") {
+        binds.push(filter.scope);
+        return "path = ?";
+      }
+      binds.push(`${escapeLikePrefix(filter.scope)}/%`);
+      return "path LIKE ? ESCAPE '\\'";
+    });
+    clauses.push(`(${scopeClauses.join(" OR ")})`);
+  }
   if (cursor !== null) {
     clauses.push("path > ?");
     binds.push(cursor);

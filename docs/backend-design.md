@@ -269,6 +269,9 @@ Machine tokens carry read/write path scopes:
   `claims/shakacode/react_on_rails` covers that repo's claim paths.
 - Valid record-path scopes cover exactly one flat record, for example
   `heartbeats/m5-codex.json`.
+- Listing a parent prefix above the token's read scope returns only covered
+  descendant paths, so scoped tokens can pass the default `agent-coord doctor`
+  read probe without leaking unrelated state.
 - Claim takeover checks may need to read the current holder's heartbeat. Use
   exact heartbeat write scopes only when the machine uses stable agent ids; use
   broader heartbeat read scopes where takeover/liveness decisions need to see

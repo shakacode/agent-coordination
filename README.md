@@ -101,6 +101,11 @@ Worker enforces read scopes for `GET /v1/state/<path>` and
 the authenticated machine as `updated_by` on each state write. Claim takeover
 checks may need read access to the current holder's heartbeat; use an exact
 heartbeat write scope only when the machine's agent id is stable.
+When listing a parent prefix above a scoped token's read scope, the Worker
+returns only covered descendants so scoped tokens can still pass the default
+`agent-coord doctor` read probe without seeing unrelated state. When customizing
+token scopes, pass both read and write prefixes intentionally; the provisioning
+script warns if only one dimension is customized and the other remains all-state.
 
 For local Wrangler/D1 development, pass `--local`:
 

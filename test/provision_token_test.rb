@@ -109,6 +109,20 @@ class ProvisionTokenTest < Minitest::Test
     refute_includes stdout, expected_hash
   end
 
+  def test_warns_when_only_one_scope_dimension_is_customized
+    stdout, stderr, status = run_script(
+      "m5",
+      "--local",
+      "--write-prefix",
+      "claims/shakacode/react_on_rails"
+    )
+
+    assert status.success?, stderr
+    assert_includes stderr, "warning: only one scope dimension was customized"
+    assert_includes stdout, "reads:    [\"\"]"
+    assert_includes stdout, "writes:   [\"claims/shakacode/react_on_rails\"]"
+  end
+
   def test_remote_mode_uses_remote_flag
     _, stderr, status = run_script("m1")
 
