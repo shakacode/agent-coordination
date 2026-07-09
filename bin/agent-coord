@@ -441,7 +441,7 @@ module AgentCoord
       payload["branch"] = options[:branch] if options[:branch]
 
       store.write_json(path, payload, message: "Release #{options[:repo]}##{options[:target]}", sha: existing.sha)
-      record_handoff_event(store, payload, options, now) if handoff_release?(options)
+      record_handoff_event(store, payload, now) if handoff_release?(options)
       @stdout.puts "released #{options[:repo]}##{options[:target]} by #{options[:agent_id]}"
       0
     end
@@ -757,17 +757,17 @@ module AgentCoord
       raise OperationalError, "event id collision while recording event for #{options[:batch_id]}"
     end
 
-    def record_handoff_event(store, release_payload, options, now)
+    def record_handoff_event(store, release_payload, now)
       batch_id = release_payload["batch_id"]
       return if batch_id.to_s.empty?
 
-      event_options = handoff_event_options(release_payload, options, batch_id)
+      event_options = handoff_event_options(release_payload, batch_id)
       write_event_record(store, event_options, now, output: false)
-    rescue Error => e
+    rescue Error, SystemCallError => e
       @stderr.puts "warning: handoff event not recorded: #{e.message}"
     end
 
-    def handoff_event_options(release_payload, options, batch_id)
+    def handoff_event_options(release_payload, batch_id)
       event_options = {
         batch_id: batch_id,
         type: "handoff",
@@ -783,8 +783,6 @@ module AgentCoord
         value = release_payload[field]
         event_options[field.to_sym] = value unless value.nil?
       end
-      event_options[:handoff_to] = options[:handoff_to] if options.key?(:handoff_to)
-      event_options[:handoff_note] = options[:handoff_note] if options.key?(:handoff_note)
       event_options
     end
 

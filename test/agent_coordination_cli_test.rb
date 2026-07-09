@@ -1073,6 +1073,35 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     assert_equal "Continue elsewhere.", released_payload.fetch("handoff_note")
   end
 
+  def test_release_handoff_tolerates_local_event_write_failure
+    claim = run_agent_coord(
+      "claim",
+      "--agent-id", "worker-a",
+      "--repo", "shakacode/react_on_rails",
+      "--target", "3980",
+      "--batch-id", "batch-file"
+    )
+    assert_equal 0, claim.status.exitstatus, claim.stderr
+    FileUtils.mkdir_p(File.join(@state_root, "events"))
+    File.write(File.join(@state_root, "events", "batch-file"), "not a directory")
+
+    release = run_agent_coord(
+      "release",
+      "--agent-id", "worker-a",
+      "--repo", "shakacode/react_on_rails",
+      "--target", "3980",
+      "--handoff-note", "Continue elsewhere."
+    )
+
+    assert_equal 0, release.status.exitstatus, release.stderr
+    assert_includes release.stderr, "warning: handoff event not recorded"
+    claim_path = File.join(@state_root, "claims", "shakacode", "react_on_rails", "3980.json")
+    released_payload = JSON.parse(File.read(claim_path))
+    assert_equal "released", released_payload.fetch("status")
+    assert_equal "handoff", released_payload.fetch("release_mode")
+    assert_equal "Continue elsewhere.", released_payload.fetch("handoff_note")
+  end
+
   def test_release_rejects_metadata_update_from_non_holder_after_release
     claim = run_agent_coord(
       "claim",
