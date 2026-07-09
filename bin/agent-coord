@@ -898,11 +898,11 @@ module AgentCoord
     end
 
     def broad_status_payload(store, now)
-      grouped = JSON_PREFIXES.to_h { |prefix| [prefix, store.list_json(prefix)] }
+      section_notes = {}
+      grouped = JSON_PREFIXES.to_h { |prefix| [prefix, status_list_entries(store, prefix, section_notes)] }
       heartbeats_by_id = heartbeats_by_agent(grouped.fetch("heartbeats"))
       lane_states = build_lane_states(grouped.fetch("batches"), heartbeats_by_id)
       malformed_names = malformed_batch_lane_names(grouped.fetch("batches"))
-      section_notes = {}
       section_notes["lanes"] = "malformed lane names: #{malformed_names.join(', ')}" unless malformed_names.empty?
       event_entries = status_event_entries(store, "events", section_notes)
 
@@ -1251,13 +1251,31 @@ module AgentCoord
       end
     end
 
+    def status_list_entries(store, prefix, section_notes)
+      store.list_json(prefix)
+    rescue OperationalError => e
+      raise unless scoped_http_forbidden_listing?(e, prefix)
+
+      section_notes[prefix] = "#{prefix} not readable by scoped token"
+      []
+    end
+
     def status_event_entries(store, prefix, section_notes)
       store.list_json(prefix).sort_by { |entry| [entry.data["at"].to_s, entry.path] }
     rescue OperationalError => e
-      raise unless unsupported_event_listing?(e)
+      raise unless unsupported_event_listing?(e) || scoped_http_forbidden_listing?(e, prefix)
 
-      section_notes["events"] = "event state not supported by backend"
+      section_notes["events"] =
+        if scoped_http_forbidden_listing?(e, prefix)
+          "events not readable by scoped token"
+        else
+          "event state not supported by backend"
+        end
       []
+    end
+
+    def scoped_http_forbidden_listing?(error, prefix)
+      error.message.match?(/\Ahttp backend list #{Regexp.escape(prefix)} failed: 403 forbidden\z/)
     end
 
     def unsupported_event_listing?(error)
@@ -1645,7 +1663,11 @@ module AgentCoord
     end
 
     def check_state_readable!(store)
-      STATE_PREFIXES.each { |prefix| store.list_json(prefix) }
+      STATE_PREFIXES.each do |prefix|
+        store.list_json(prefix)
+      rescue OperationalError => e
+        raise unless scoped_http_forbidden_listing?(e, prefix)
+      end
     end
 
     def install_link(source, destination)

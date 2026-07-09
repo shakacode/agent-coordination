@@ -474,6 +474,27 @@ class HttpBackendSelectionTest < HttpEnvTestCase
     stub.shutdown
   end
 
+  def test_status_degrades_for_scoped_http_forbidden_sections
+    responses = [
+      [200, { "entries" => [] }],
+      [403, { "error" => "forbidden" }],
+      [403, { "error" => "forbidden" }],
+      [403, { "error" => "forbidden" }]
+    ]
+    stub = HttpStoreStub.new(responses)
+    with_env("AGENT_COORD_API_URL" => stub.base_url, "AGENT_COORD_API_TOKEN" => "tok") do
+      code, out, = run_cli(["status", "--json"], {})
+      payload = JSON.parse(out)
+
+      assert_equal 0, code
+      assert_includes payload.fetch("degraded"), "heartbeats not readable by scoped token"
+      assert_includes payload.fetch("degraded"), "batches not readable by scoped token"
+      assert_includes payload.fetch("degraded"), "events not readable by scoped token"
+    end
+  ensure
+    stub.shutdown
+  end
+
   def test_missing_token_is_operational_error
     with_env("AGENT_COORD_API_URL" => "http://127.0.0.1:9", "AGENT_COORD_API_TOKEN" => nil) do
       code, _, err = run_cli(["status"], {})
@@ -696,6 +717,36 @@ class HttpDoctorTest < HttpEnvTestCase
 
       assert_equal 0, code
       assert_equal "events/batch", payload.fetch("doctor_prefix")
+    end
+  ensure
+    stub.shutdown
+  end
+
+  def test_doctor_deep_skips_forbidden_unscoped_http_prefixes
+    responses = [
+      [200, { "entries" => [] }],
+      [200, { "status" => "ok" }],
+      [200, { "entries" => [] }],
+      [403, { "error" => "forbidden" }],
+      [403, { "error" => "forbidden" }],
+      [403, { "error" => "forbidden" }]
+    ]
+    stub = HttpStoreStub.new(responses)
+    with_env("AGENT_COORD_API_URL" => stub.base_url, "AGENT_COORD_API_TOKEN" => "tok") do
+      stdout = StringIO.new
+      code = AgentCoord::Runner.new(["doctor", "--deep"], stdout: stdout, stderr: StringIO.new).run
+
+      assert_equal 0, code
+      assert_includes stdout.string, "status: ok"
+      expected_paths = [
+        "/v1/state?prefix=claims",
+        "/v1/health",
+        "/v1/state?prefix=claims",
+        "/v1/state?prefix=heartbeats",
+        "/v1/state?prefix=batches",
+        "/v1/state?prefix=events"
+      ]
+      assert_equal(expected_paths, stub.requests.map { |request| request[:path] })
     end
   ensure
     stub.shutdown
