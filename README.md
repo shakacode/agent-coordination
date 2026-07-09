@@ -432,11 +432,17 @@ than inferring it from branch names or handoff text.
 ```
 
 Required fields: `schema_version`, `event_id`, `batch_id`, `type`, and `at`.
-Lane events should include `lane` and `agent_id` when available. Event ids are
-time-sortable and unique per write. The current HTTP backend stores events in the
-same JSON state API as claims, heartbeats, and batches; the relational
-`/v1/events` endpoint in [backend-design.md](docs/backend-design.md) remains the
-later protocol evolution.
+Lane events should include `lane` and `agent_id` when available. Lane names
+follow the same rules as registered batch lanes: non-empty and no `:`
+characters, because dependency refs split on the last colon. Event ids are
+time-sortable and unique per write.
+
+The current HTTP backend stores events in the same JSON state API as claims,
+heartbeats, and batches, so `events/<batch-id>` is intended for low-volume phase
+transitions and audit breadcrumbs, not high-frequency telemetry. Keep event
+volume bounded per batch until the relational `/v1/events` endpoint in
+[backend-design.md](docs/backend-design.md) adds pagination and retention
+controls.
 
 ## Batch Schema
 

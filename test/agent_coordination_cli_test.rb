@@ -1793,6 +1793,19 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     refute_path_exists File.join(@state_root, "events", "batch-b")
   end
 
+  def test_record_event_accepts_registered_lane_name_characters
+    result = run_agent_coord(
+      "record-event",
+      "--batch-id", "batch-b",
+      "--type", "phase",
+      "--lane", "docs/api copy"
+    )
+
+    assert_equal 0, result.status.exitstatus, result.stderr
+    event = JSON.parse(File.read(Dir.glob(File.join(@state_root, "events", "batch-b", "*.json")).first))
+    assert_equal "docs/api copy", event.fetch("lane")
+  end
+
   def test_register_batch_rejects_malformed_lane_name
     manifest_path = File.join(@state_root, "batch-manifest.json")
     File.write(

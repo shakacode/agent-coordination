@@ -714,8 +714,6 @@ module AgentCoord
       lane = options[:lane].to_s
       raise Error, "--lane must not be empty" if lane.empty?
       raise Error, "event lane #{lane} cannot contain ':'" if malformed_lane_name?(lane)
-
-      AgentCoord.validate_segment!(lane, "event lane")
     end
 
     def event_payload(options, event_id, now)

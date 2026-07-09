@@ -25,6 +25,7 @@ expect nohdr    "$(curl -s -o /dev/null -w %{http_code} -X PUT "$BASE/v1/state/$
 expect nullbody "$(curl -s -o /dev/null -w %{http_code} -X PUT "$BASE/v1/state/$P" -H "$AUTH" -H 'If-Match: 2' -d 'null')" 400
 expect badmatch "$(curl -s -o /dev/null -w %{http_code} -X PUT "$BASE/v1/state/$P" -H "$AUTH" -H 'If-Match: 2x' -d '{"data":{"agent_id":"a4"}}')" 400
 expect hugever  "$(curl -s -o /dev/null -w %{http_code} -X PUT "$BASE/v1/state/$P" -H "$AUTH" -H 'If-Match: 999999999999999999999999999999' -d '{"data":{"agent_id":"a4"}}')" 400
+expect scopedclaims "$(curl -s -o /dev/null -w %{http_code} "$BASE/v1/state?prefix=claims/shakacode" -H "$AUTH")" 400
 expect badpath  "$(curl -s -o /dev/null -w %{http_code} "$BASE/v1/state/etc/passwd" -H "$AUTH")" 400
 expect badenc   "$(curl -s -o /dev/null -w %{http_code} "$BASE/v1/state/claims/%E0%A4%A.json" -H "$AUTH")" 400
 expect longpath "$(curl -s -o /dev/null -w %{http_code} "$BASE/v1/state/$LONG_PATH" -H "$AUTH")" 400

@@ -29,7 +29,7 @@ const MAX_STATE_BYTES = 256 * 1024;
 const MAX_REQUEST_BYTES = MAX_STATE_BYTES + 4096;
 const MAX_STATE_PATH_BYTES = 512;
 const STATE_PATH = /^(claims|heartbeats|batches|events)\/[A-Za-z0-9_.:/-]+\.json$/;
-const STATE_PREFIX = /^(claims|heartbeats|batches|events)(\/[A-Za-z0-9_.:/-]+)?$/;
+const STATE_PREFIX = /^(?:claims|heartbeats|batches|events(?:\/[A-Za-z0-9_.:/-]+)?)$/;
 
 function validPath(path: string): boolean {
   return new TextEncoder().encode(path).byteLength <= MAX_STATE_PATH_BYTES
