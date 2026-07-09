@@ -57,8 +57,8 @@ class ProvisionTokenTest < Minitest::Test
 
     assert status.success?, stderr
     expected_hash = Digest::SHA256.hexdigest(TOKEN)
-    expected_sql = "INSERT INTO machines (machine, token_hash, created_at) VALUES " \
-                   "('m5', '#{expected_hash}', strftime('%Y-%m-%dT%H:%M:%SZ','now'))"
+    expected_sql = "INSERT INTO machines (machine, token_hash, read_prefixes, write_prefixes, created_at) VALUES " \
+                   "('m5', '#{expected_hash}', '[\"\"]', '[\"\"]', strftime('%Y-%m-%dT%H:%M:%SZ','now'))"
     assert_equal [
       "wrangler",
       "d1",
@@ -70,9 +70,57 @@ class ProvisionTokenTest < Minitest::Test
     ], npx_args
     refute_includes npx_args, "--yes"
     assert_includes stdout, "machine:  m5"
+    assert_includes stdout, "reads:    [\"\"]"
+    assert_includes stdout, "writes:   [\"\"]"
     assert_includes stdout, "token:    #{TOKEN}"
     assert_includes stdout, "export AGENT_COORD_API_TOKEN=#{TOKEN}"
     refute_includes stdout, expected_hash
+  end
+
+  def test_provisions_scoped_prefixes
+    stdout, stderr, status = run_script(
+      "m5",
+      "--local",
+      "--read-prefix",
+      "claims/shakacode/react_on_rails",
+      "--write-prefix",
+      "claims/shakacode/react_on_rails",
+      "--write-prefix",
+      "heartbeats/m5-codex.json"
+    )
+
+    assert status.success?, stderr
+    expected_hash = Digest::SHA256.hexdigest(TOKEN)
+    expected_sql = "INSERT INTO machines (machine, token_hash, read_prefixes, write_prefixes, created_at) VALUES " \
+                   "('m5', '#{expected_hash}', '[\"claims/shakacode/react_on_rails\"]', " \
+                   "'[\"claims/shakacode/react_on_rails\",\"heartbeats/m5-codex.json\"]', " \
+                   "strftime('%Y-%m-%dT%H:%M:%SZ','now'))"
+    assert_equal [
+      "wrangler",
+      "d1",
+      "execute",
+      "agent-coord",
+      "--local",
+      "--command",
+      expected_sql
+    ], npx_args
+    assert_includes stdout, "reads:    [\"claims/shakacode/react_on_rails\"]"
+    assert_includes stdout, "writes:   [\"claims/shakacode/react_on_rails\",\"heartbeats/m5-codex.json\"]"
+    refute_includes stdout, expected_hash
+  end
+
+  def test_warns_when_only_one_scope_dimension_is_customized
+    stdout, stderr, status = run_script(
+      "m5",
+      "--local",
+      "--write-prefix",
+      "claims/shakacode/react_on_rails"
+    )
+
+    assert status.success?, stderr
+    assert_includes stderr, "warning: only one scope dimension was customized"
+    assert_includes stdout, "reads:    [\"\"]"
+    assert_includes stdout, "writes:   [\"claims/shakacode/react_on_rails\"]"
   end
 
   def test_remote_mode_uses_remote_flag
@@ -105,6 +153,14 @@ class ProvisionTokenTest < Minitest::Test
 
     refute status.success?
     assert_includes stderr, "usage:"
+    refute_path_exists @npx_args_file
+  end
+
+  def test_rejects_invalid_path_scope_before_generating_token
+    _, stderr, status = run_script("m5", "--read-prefix", "claims/../secret")
+
+    refute status.success?
+    assert_includes stderr, "invalid read prefix"
     refute_path_exists @npx_args_file
   end
 

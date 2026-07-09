@@ -2,7 +2,9 @@
 
 require "json"
 require "minitest/autorun"
+require "net/http"
 require "open3"
+require "uri"
 
 CLI = File.expand_path("../bin/agent-coord", __dir__)
 REPO = "shakacode/integration-#{Process.pid}".freeze
@@ -63,15 +65,135 @@ class HttpBackendIntegrationTest < Minitest::Test
   def test_batch_event_listing_escapes_like_wildcards
     batch = "batch_#{Process.pid}"
     neighbor = "batchX#{Process.pid}"
+    case_neighbor = "Batch_#{Process.pid}"
 
     code, = cli("record-event", "--batch-id", batch, "--type", "phase", "--lane", "docs")
     assert_equal 0, code
     code, = cli("record-event", "--batch-id", neighbor, "--type", "phase", "--lane", "docs")
+    assert_equal 0, code
+    code, = cli("record-event", "--batch-id", case_neighbor, "--type", "phase", "--lane", "docs")
     assert_equal 0, code
 
     code, out, err = cli("status", "--batch-id", batch, "--json")
     assert_equal 0, code, err
     events = JSON.parse(out).fetch("events")
     assert_equal([batch], events.map { |event| event.fetch("batch_id") })
+  end
+
+  def test_scoped_machine_token_enforces_path_prefix_and_records_writer
+    scoped_token = ENV.fetch("SCOPED_AGENT_COORD_API_TOKEN")
+    full_token = ENV.fetch("AGENT_COORD_API_TOKEN")
+    allowed_prefix = ENV.fetch("SCOPED_CLAIM_PREFIX")
+    secondary_prefix = ENV.fetch("SCOPED_SECONDARY_CLAIM_PREFIX")
+    allowed_path = "#{allowed_prefix}/300.json"
+    secondary_path = "#{secondary_prefix}/301.json"
+    hidden_path = "claims/shakacode/hidden/301.json"
+    mixed_case_hidden_path = "claims/ShakaCode/api.json/302.json"
+    denied_path = "claims/shakacode/outside/300.json"
+
+    code, body = http_json(
+      "PUT",
+      state_path(allowed_path),
+      token: scoped_token,
+      headers: { "If-None-Match" => "*" },
+      body: { "data" => { "schema_version" => 1, "agent_id" => "scoped-worker" } }
+    )
+    assert_equal 201, code
+    assert_equal "scoped", body.fetch("updated_by")
+
+    seed_full_token_claims(full_token, secondary_path, hidden_path, mixed_case_hidden_path)
+
+    code, body = http_json("GET", state_path(allowed_path), token: scoped_token)
+    assert_equal 200, code
+    assert_equal "scoped", body.fetch("updated_by")
+
+    code, body = http_json("GET", "/v1/state?#{URI.encode_www_form('prefix' => allowed_prefix)}", token: scoped_token)
+    assert_equal 200, code
+    entry = body.fetch("entries").find { |candidate| candidate.fetch("path") == allowed_path }
+    assert_equal "scoped", entry.fetch("updated_by")
+
+    code, body = http_json("GET", "/v1/state?prefix=claims", token: scoped_token)
+    assert_equal 200, code
+    assert_filtered_listed_paths body, allowed_path, secondary_path
+
+    assert_scoped_doctor_ok(scoped_token)
+
+    code, body = http_json("GET", state_path("#{allowed_prefix}/300/extra.json"), token: scoped_token)
+    assert_equal 400, code
+    assert_equal "invalid_path", body.fetch("error")
+
+    code, body = http_json("GET", state_path(denied_path), token: scoped_token)
+    assert_equal 403, code
+    assert_equal "forbidden", body.fetch("error")
+
+    code, body = http_json(
+      "PUT",
+      state_path(denied_path),
+      token: scoped_token,
+      headers: { "If-None-Match" => "*" },
+      body: { "data" => { "schema_version" => 1, "agent_id" => "scoped-worker" } }
+    )
+    assert_equal 403, code
+    assert_equal "forbidden", body.fetch("error")
+  end
+
+  private
+
+  def seed_full_token_claims(full_token, *paths)
+    paths.each do |path|
+      code, = http_json(
+        "PUT",
+        state_path(path),
+        token: full_token,
+        headers: { "If-None-Match" => "*" },
+        body: { "data" => { "schema_version" => 1, "agent_id" => "full-worker" } }
+      )
+      assert_equal 201, code
+    end
+  end
+
+  def assert_listed_paths(body, *paths)
+    listed_paths = body.fetch("entries").map { |entry| entry.fetch("path") }
+    assert_equal paths, listed_paths
+  end
+
+  def assert_filtered_listed_paths(body, *paths)
+    assert_equal true, body.fetch("filtered")
+    assert_listed_paths body, *paths
+  end
+
+  def assert_scoped_doctor_ok(scoped_token)
+    doctor_out, doctor_err, doctor_status = Open3.capture3(
+      { "AGENT_COORD_API_TOKEN" => scoped_token },
+      "ruby",
+      CLI,
+      "doctor"
+    )
+    assert doctor_status.success?, doctor_err
+    assert_includes doctor_out, "status: ok"
+  end
+
+  def state_path(path)
+    "/v1/state/#{URI.encode_www_form_component(path)}"
+  end
+
+  def http_json(method, path, token:, headers: {}, body: nil)
+    uri = URI("#{ENV.fetch('AGENT_COORD_API_URL')}#{path}")
+    request_class = {
+      "GET" => Net::HTTP::Get,
+      "PUT" => Net::HTTP::Put
+    }.fetch(method)
+    request = request_class.new(uri)
+    request["Authorization"] = "Bearer #{token}"
+    headers.each { |key, value| request[key] = value }
+    if body
+      request["Content-Type"] = "application/json"
+      request.body = JSON.generate(body)
+    end
+
+    response = Net::HTTP.start(uri.host, uri.port, open_timeout: 5, read_timeout: 10) do |http|
+      http.request(request)
+    end
+    [response.code.to_i, JSON.parse(response.body)]
   end
 end

@@ -1,43 +1,100 @@
 #!/usr/bin/env bash
-# Usage: worker/bin/provision-token <machine-name> [--local]
+# Usage: worker/bin/provision-token <machine-name> [--local] [--read-prefix PREFIX] [--write-prefix PREFIX]
 # Prints a fresh token once; stores only its SHA-256 hash in D1.
 set -euo pipefail
 
 usage() {
-  echo "usage: worker/bin/provision-token <machine-name> [--local]" >&2
+  echo "usage: worker/bin/provision-token <machine-name> [--local] [--read-prefix PREFIX] [--write-prefix PREFIX]" >&2
   exit 1
 }
 
-[ "$#" -ge 1 ] && [ "$#" -le 2 ] || usage
+[ "$#" -ge 1 ] || usage
 
 MACHINE="$1"
+shift
 case "$MACHINE" in
   --*) usage ;;
 esac
 
-if [ "$#" -eq 2 ]; then
-  SCOPE="$2"
-else
-  SCOPE="--remote"
-fi
+SCOPE="--remote"
+READ_PREFIXES=()
+WRITE_PREFIXES=()
+READ_PREFIXES_GIVEN=0
+WRITE_PREFIXES_GIVEN=0
 
 if [[ ! "$MACHINE" =~ ^[A-Za-z0-9._:-]+$ ]]; then
   echo "machine name may contain only letters, numbers, dots, underscores, colons, and hyphens" >&2
   exit 1
 fi
 
-case "$SCOPE" in
-  --remote) ;;
-  --local) ;;
-  *) usage ;;
-esac
+valid_prefix() {
+  local prefix="$1"
+  [ -z "$prefix" ] && return 0
+  [[ "$prefix" != *..* ]] || return 1
+  [[ "$prefix" != *//* ]] || return 1
+  local segment='[A-Za-z0-9_.:-]+'
+  local pattern="^(claims(/${segment}(/${segment}(/${segment}\\.json)?)?)?|heartbeats(/${segment}\\.json)?|batches(/${segment}\\.json)?|events(/${segment}(/${segment}\\.json)?)?)$"
+  [[ "$prefix" =~ $pattern ]]
+}
+
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --remote)
+      SCOPE="--remote"
+      shift
+      ;;
+    --local)
+      SCOPE="--local"
+      shift
+      ;;
+    --read-prefix)
+      [ "$#" -ge 2 ] || usage
+      valid_prefix "$2" || { echo "invalid read prefix: $2" >&2; exit 1; }
+      READ_PREFIXES_GIVEN=1
+      READ_PREFIXES+=("$2")
+      shift 2
+      ;;
+    --write-prefix)
+      [ "$#" -ge 2 ] || usage
+      valid_prefix "$2" || { echo "invalid write prefix: $2" >&2; exit 1; }
+      WRITE_PREFIXES_GIVEN=1
+      WRITE_PREFIXES+=("$2")
+      shift 2
+      ;;
+    *)
+      usage
+      ;;
+  esac
+done
+
+[ "${#READ_PREFIXES[@]}" -gt 0 ] || READ_PREFIXES=("")
+[ "${#WRITE_PREFIXES[@]}" -gt 0 ] || WRITE_PREFIXES=("")
+if [ "$READ_PREFIXES_GIVEN" -ne "$WRITE_PREFIXES_GIVEN" ]; then
+  echo "warning: only one scope dimension was customized; the omitted dimension remains all-state [\"\"]" >&2
+fi
+
+json_array() {
+  local out="["
+  local separator=""
+  local prefix
+  # Prefix validation disallows quotes and backslashes, so these strings are safe
+  # to embed in the JSON payload and the single-quoted SQL literal below. Keep
+  # valid_prefix in sync if the allowed character set ever changes.
+  for prefix in "$@"; do
+    out="${out}${separator}\"${prefix}\""
+    separator=","
+  done
+  printf '%s]' "$out"
+}
 
 OPENSSL_BIN="${OPENSSL_BIN:-openssl}"
 NPX_BIN="${NPX_BIN:-npx}"
 
 TOKEN=$("$OPENSSL_BIN" rand -hex 24)
 HASH=$(printf %s "$TOKEN" | "$OPENSSL_BIN" dgst -sha256 -r | cut -d' ' -f1)
-SQL="INSERT INTO machines (machine, token_hash, created_at) VALUES ('${MACHINE}', '${HASH}', strftime('%Y-%m-%dT%H:%M:%SZ','now'))"
+READ_PREFIX_JSON=$(json_array "${READ_PREFIXES[@]}")
+WRITE_PREFIX_JSON=$(json_array "${WRITE_PREFIXES[@]}")
+SQL="INSERT INTO machines (machine, token_hash, read_prefixes, write_prefixes, created_at) VALUES ('${MACHINE}', '${HASH}', '${READ_PREFIX_JSON}', '${WRITE_PREFIX_JSON}', strftime('%Y-%m-%dT%H:%M:%SZ','now'))"
 
 cd "$(dirname "$0")/.."
 COMMAND=("$NPX_BIN" wrangler d1 execute agent-coord)
@@ -61,6 +118,8 @@ rm -f "$WRANGLER_STDERR"
 trap - EXIT
 
 echo "machine:  ${MACHINE}"
+echo "reads:    ${READ_PREFIX_JSON}"
+echo "writes:   ${WRITE_PREFIX_JSON}"
 echo "token:    ${TOKEN}"
 echo "Set on that machine:"
 echo "  export AGENT_COORD_API_URL=<worker-url>"

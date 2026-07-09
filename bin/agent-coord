@@ -25,6 +25,12 @@ module AgentCoord
   STATUS_STATE_ROOT_ENV = "AGENT_COORD_STATUS_STATE_ROOT"
   JSON_PREFIXES = %w[claims heartbeats batches].freeze
   STATE_PREFIXES = (JSON_PREFIXES + %w[events]).freeze
+  STATE_PATH_PATTERN = %r{\A(?:
+    claims/[A-Za-z0-9_.:-]+/[A-Za-z0-9_.:-]+/[A-Za-z0-9_.:-]+\.json |
+    heartbeats/[A-Za-z0-9_.:-]+\.json |
+    batches/[A-Za-z0-9_.:-]+\.json |
+    events/[A-Za-z0-9_.:-]+/[A-Za-z0-9_.:-]+\.json
+  )\z}x
   DEPENDENCY_DONE_STATUSES = %w[complete completed done merged ready].freeze
   STATUS_BATCH_METADATA_FIELDS = %w[
     repo objective instructions operator dashboard_url status updated_at registered_at
@@ -247,7 +253,12 @@ module AgentCoord
     end
 
     def add_doctor_options(opts, options, command)
-      opts.on("--deep", "doctor only: parse every JSON state record") { options[:deep] = true } if command == "doctor"
+      return unless command == "doctor"
+
+      opts.on("--deep", "doctor only: parse every JSON state record") { options[:deep] = true }
+      opts.on("--doctor-prefix PREFIX", "doctor only: HTTP readable prefix probe") do |value|
+        options[:doctor_prefix] = value
+      end
     end
 
     def add_bootstrap_options(opts, options)
@@ -490,10 +501,11 @@ module AgentCoord
       doctor_options = options.dup
       doctor_options[:state_root] ||= default_status_state_root unless doctor_options[:api_url]
       backend_kind = doctor_backend_kind(doctor_options)
+      section_notes = {}
       begin
         store = verify_doctor_store(doctor_options, backend_kind)
         store.verify_layout!(STATE_PREFIXES)
-        check_state_readable!(store) if options[:deep]
+        section_notes = check_state_readable!(store) if options[:deep]
       rescue JSON::ParserError, SystemCallError => e
         raise OperationalError, "state unreadable: #{e.message}"
       end
@@ -507,15 +519,25 @@ module AgentCoord
         "deep" => !options[:deep].nil?,
         "status" => "ok"
       }
+      payload["doctor_prefix"] = doctor_read_prefix(doctor_options) if backend_kind == "http"
+      unless section_notes.empty?
+        payload["degraded"] = section_notes.values.uniq
+        payload["section_notes"] = section_notes
+      end
       emit_payload(payload, options) do
         @stdout.puts "agent-coord doctor"
         @stdout.puts "version: #{VERSION}"
         @stdout.puts "backend: #{backend_kind}"
         @stdout.puts "backend_repo: #{doctor_options.fetch(:backend)}"
         @stdout.puts "backend_url: #{doctor_options[:api_url]}" if backend_kind == "http"
+        @stdout.puts "doctor_prefix: #{doctor_read_prefix(doctor_options)}" if backend_kind == "http"
         @stdout.puts "state_root: #{doctor_options[:state_root] || '-'}"
         @stdout.puts "mode: #{options[:deep] ? 'deep' : 'lightweight'}"
         @stdout.puts "status: ok"
+        unless section_notes.empty?
+          @stdout.puts "degraded"
+          section_notes.values.uniq.each { |note| @stdout.puts "- #{note}" }
+        end
       end
       0
     ensure
@@ -535,7 +557,7 @@ module AgentCoord
       case backend_kind
       when "http"
         store = build_store(options)
-        store.verify_readable!
+        store.verify_readable!(doctor_read_prefix(options))
       when "local"
         store = LocalStore.new(options.fetch(:state_root))
         store.verify_root!
@@ -551,6 +573,10 @@ module AgentCoord
     rescue StandardError
       close_store(store)
       raise
+    end
+
+    def doctor_read_prefix(options)
+      options[:doctor_prefix] || JSON_PREFIXES.first
     end
 
     def active_backend_url(options, backend_kind)
@@ -881,11 +907,11 @@ module AgentCoord
     end
 
     def broad_status_payload(store, now)
-      grouped = JSON_PREFIXES.to_h { |prefix| [prefix, store.list_json(prefix)] }
+      section_notes = {}
+      grouped = JSON_PREFIXES.to_h { |prefix| [prefix, status_list_entries(store, prefix, section_notes)] }
       heartbeats_by_id = heartbeats_by_agent(grouped.fetch("heartbeats"))
       lane_states = build_lane_states(grouped.fetch("batches"), heartbeats_by_id)
       malformed_names = malformed_batch_lane_names(grouped.fetch("batches"))
-      section_notes = {}
       section_notes["lanes"] = "malformed lane names: #{malformed_names.join(', ')}" unless malformed_names.empty?
       event_entries = status_event_entries(store, "events", section_notes)
 
@@ -1234,13 +1260,39 @@ module AgentCoord
       end
     end
 
-    def status_event_entries(store, prefix, section_notes)
-      store.list_json(prefix).sort_by { |entry| [entry.data["at"].to_s, entry.path] }
+    def status_list_entries(store, prefix, section_notes)
+      entries = store.list_json(prefix)
+      section_notes[prefix] = "#{prefix} filtered by scoped token" if filtered_status_list?(store, prefix)
+      entries
     rescue OperationalError => e
-      raise unless unsupported_event_listing?(e)
+      raise unless scoped_http_forbidden_listing?(e, prefix)
 
-      section_notes["events"] = "event state not supported by backend"
+      section_notes[prefix] = "#{prefix} not readable by scoped token"
       []
+    end
+
+    def status_event_entries(store, prefix, section_notes)
+      entries = store.list_json(prefix).sort_by { |entry| [entry.data["at"].to_s, entry.path] }
+      section_notes["events"] = "events filtered by scoped token" if filtered_status_list?(store, prefix)
+      entries
+    rescue OperationalError => e
+      raise unless unsupported_event_listing?(e) || scoped_http_forbidden_listing?(e, prefix)
+
+      section_notes["events"] =
+        if scoped_http_forbidden_listing?(e, prefix)
+          "events not readable by scoped token"
+        else
+          "event state not supported by backend"
+        end
+      []
+    end
+
+    def filtered_status_list?(store, prefix)
+      store.respond_to?(:filtered_list?) && store.filtered_list?(prefix)
+    end
+
+    def scoped_http_forbidden_listing?(error, prefix)
+      error.message.match?(/\Ahttp backend list #{Regexp.escape(prefix)} failed: 403 forbidden\z/)
     end
 
     def unsupported_event_listing?(error)
@@ -1628,7 +1680,16 @@ module AgentCoord
     end
 
     def check_state_readable!(store)
-      STATE_PREFIXES.each { |prefix| store.list_json(prefix) }
+      section_notes = {}
+      STATE_PREFIXES.each do |prefix|
+        store.list_json(prefix)
+        section_notes[prefix] = "#{prefix} filtered by scoped token" if filtered_status_list?(store, prefix)
+      rescue OperationalError => e
+        raise unless scoped_http_forbidden_listing?(e, prefix)
+
+        section_notes[prefix] = "#{prefix} not readable by scoped token"
+      end
+      section_notes
     end
 
     def install_link(source, destination)
@@ -1898,6 +1959,7 @@ module AgentCoord
       @base = uri.to_s.chomp("/")
       @token = token
       @http = nil
+      @list_filtered = {}
     end
 
     def read_json(path)
@@ -1921,12 +1983,14 @@ module AgentCoord
       entries = []
       cursor = nil
       seen_cursors = {}
+      @list_filtered[prefix] = false
 
       loop do
         response = request(Net::HTTP::Get, state_list_path(prefix, cursor))
         raise OperationalError, http_error("list #{prefix}", response) unless response.code == "200"
 
         body = parsed_json_object(response, "list #{prefix}")
+        @list_filtered[prefix] = true if body["filtered"] == true
         entries.concat(parse_list_entries(body, prefix))
         cursor = next_list_cursor(body, prefix)
         break unless cursor
@@ -1940,6 +2004,10 @@ module AgentCoord
       end
 
       entries
+    end
+
+    def filtered_list?(prefix)
+      @list_filtered.fetch(prefix, false)
     end
 
     # message is accepted for interface parity; the HTTP backend has no commit messages.
@@ -1958,9 +2026,14 @@ module AgentCoord
       end
     end
 
-    def verify_readable!
-      response = request(Net::HTTP::Get, "/v1/state?prefix=#{escape_component(JSON_PREFIXES.first)}")
-      raise OperationalError, http_error("verify readable", response) unless response.code == "200"
+    def verify_readable!(prefix = JSON_PREFIXES.first)
+      AgentCoord.safe_path!(prefix)
+      if AgentCoord.state_record_path?(prefix)
+        read_json(prefix)
+      else
+        response = request(Net::HTTP::Get, "/v1/state?prefix=#{escape_component(prefix)}")
+        raise OperationalError, http_error("verify readable", response) unless response.code == "200"
+      end
     end
 
     def verify_layout!(_prefixes)
@@ -2131,6 +2204,10 @@ module AgentCoord
     return unless path.to_s.empty? || path.include?("..") || path.start_with?("/") || path.split("/").any?(&:empty?)
 
     raise PathValidationError, "unsafe state path: #{path}"
+  end
+
+  def self.state_record_path?(path)
+    path.to_s.match?(STATE_PATH_PATTERN)
   end
 
   def self.validate_repo!(repo, field)
