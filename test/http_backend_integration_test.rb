@@ -59,4 +59,19 @@ class HttpBackendIntegrationTest < Minitest::Test
     assert_equal 1, winners, "expected exactly one winner, got exits #{results.inspect}"
     assert results.all? { |code| [0, 2, 3].include?(code) }, "unexpected exit in #{results.inspect}"
   end
+
+  def test_batch_event_listing_escapes_like_wildcards
+    batch = "batch_#{Process.pid}"
+    neighbor = "batchX#{Process.pid}"
+
+    code, = cli("record-event", "--batch-id", batch, "--type", "phase", "--lane", "docs")
+    assert_equal 0, code
+    code, = cli("record-event", "--batch-id", neighbor, "--type", "phase", "--lane", "docs")
+    assert_equal 0, code
+
+    code, out, err = cli("status", "--batch-id", batch, "--json")
+    assert_equal 0, code, err
+    events = JSON.parse(out).fetch("events")
+    assert_equal([batch], events.map { |event| event.fetch("batch_id") })
+  end
 end

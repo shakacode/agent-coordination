@@ -241,6 +241,7 @@ class HttpBackendSelectionTest < HttpEnvTestCase
     responses = [
       [200, { "entries" => [] }],
       [200, { "entries" => [] }],
+      [200, { "entries" => [] }],
       [200, { "entries" => [] }]
     ]
     stub = HttpStoreStub.new(responses)
@@ -249,8 +250,27 @@ class HttpBackendSelectionTest < HttpEnvTestCase
       code, out, = run_cli(["status"], env)
       assert_equal 0, code
       assert_includes out, "claims"
+      assert_includes out, "events"
     end
-    assert_equal 3, stub.requests.length
+    assert_equal 4, stub.requests.length
+  ensure
+    stub.shutdown
+  end
+
+  def test_status_degrades_when_http_backend_does_not_support_events_yet
+    responses = [
+      [200, { "entries" => [] }],
+      [200, { "entries" => [] }],
+      [200, { "entries" => [] }],
+      [400, { "error" => "invalid_prefix" }]
+    ]
+    stub = HttpStoreStub.new(responses)
+    with_env("AGENT_COORD_API_URL" => stub.base_url, "AGENT_COORD_API_TOKEN" => "tok") do
+      code, out, = run_cli(["status"], {})
+      assert_equal 0, code
+      assert_includes out, "event state not supported by backend"
+    end
+    assert_equal 4, stub.requests.length
   ensure
     stub.shutdown
   end
@@ -299,6 +319,7 @@ class HttpBackendSelectionTest < HttpEnvTestCase
     responses = [
       [200, { "entries" => [] }],
       [200, { "entries" => [] }],
+      [200, { "entries" => [] }],
       [200, { "entries" => [] }]
     ]
     stub = HttpStoreStub.new(responses)
@@ -314,6 +335,7 @@ class HttpBackendSelectionTest < HttpEnvTestCase
 
   def test_api_url_flag_warning_names_flag_when_state_root_env_set
     responses = [
+      [200, { "entries" => [] }],
       [200, { "entries" => [] }],
       [200, { "entries" => [] }],
       [200, { "entries" => [] }]

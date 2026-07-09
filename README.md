@@ -10,8 +10,8 @@ smoke checks. The legacy GitHub backend is available only when explicitly
 requested by maintainers; new users should start with HTTP.
 
 Keep this public repository code-only. Do not commit live `claims/`,
-`heartbeats/`, `batches/`, `*.json.lock`, secrets, environment files, customer
-data, credentials, or source-code patches here.
+`heartbeats/`, `batches/`, `events/`, `*.json.lock`, secrets, environment files,
+customer data, credentials, or source-code patches here.
 
 ## License
 
@@ -20,8 +20,8 @@ plane includes the CLI, Cloudflare Worker API, Worker-served read-only
 dashboard, simulation harness, tests, documentation, ADRs, and examples.
 
 The runtime state is private data, not product source. Live claims, heartbeats,
-batches, lock files, tokens, credentials, customer data, and source-code patches
-must stay outside this repository.
+batches, events, lock files, tokens, credentials, customer data, and source-code
+patches must stay outside this repository.
 
 A future hosted or monetized ShakaStack product plane can use a different
 license and repository boundary. Product-plane dashboards and batch-planning
@@ -156,6 +156,7 @@ bin/agent-coord claim     --agent-id ID --repo OWNER/REPO --target ISSUE_OR_PR [
 bin/agent-coord release   --agent-id ID --repo OWNER/REPO --target ISSUE_OR_PR [--metadata options]
 bin/agent-coord heartbeat --agent-id ID [--repo OWNER/REPO] [--target ISSUE_OR_PR] [--batch-id ID] [--branch BRANCH] [--metadata options] [--status STATUS]
 bin/agent-coord register-batch --file PATH
+bin/agent-coord record-event --batch-id ID --type TYPE [--lane NAME] [--agent-id ID] [--repo OWNER/REPO] [--target ISSUE_OR_PR] [--branch BRANCH] [--status STATUS] [--metadata options] [--message TEXT]
 bin/agent-coord status [--json]
 bin/agent-coord status --repo OWNER/REPO --target ISSUE_OR_PR [--json]
 bin/agent-coord status --batch-id ID [--json]
@@ -186,17 +187,23 @@ link without parsing handoff prose.
 metadata, and rejects malformed lane names or owner/target fields before workers
 claim lanes.
 
+`record-event` appends immutable batch or lane events under
+`events/<batch-id>/<event-id>.json`. Use it for phase changes and noteworthy
+operator-visible milestones that should remain visible even when a heartbeat is
+overwritten by the next phase. Event records accept the same optional metadata
+fields as claims and heartbeats, plus `--type`, `--lane`, and `--message`.
+
 `heartbeat` upserts `heartbeats/<agent-id>.json`. `status` renders coordination
 state in text or JSON. Full `status` renders compact claims, heartbeats, batch
-lanes, lane dependencies, and blocked-on refs for broad audits. Scoped status is
-the preferred batch-workflow path:
+lanes, lane dependencies, blocked-on refs, and recent events for broad audits.
+Scoped status is the preferred batch-workflow path:
 
 - `status --repo OWNER/REPO --target ISSUE_OR_PR` reads only
   `claims/<owner>/<repo>/<issue-or-pr>.json` and that claim holder's heartbeat
   when a holder exists.
-- `status --batch-id ID` reads only `batches/<id>.json`, lane-owner heartbeats,
-  and dependency batch files plus referenced lane-owner heartbeats needed to
-  compute `blocked_on`.
+- `status --batch-id ID` reads only `batches/<id>.json`, `events/<id>/`,
+  lane-owner heartbeats, and dependency batch files plus referenced lane-owner
+  heartbeats needed to compute `blocked_on`.
 
 Scoped JSON payloads include `scope` and `degraded` fields. A scoped command can
 show `degraded` notes for intentionally omitted unrelated state, such as claims
@@ -325,6 +332,7 @@ Runtime state lives in these directories:
 claims/<owner>/<repo>/<issue-or-pr>.json
 heartbeats/<agent-id>.json
 batches/<batch-id>.json
+events/<batch-id>/<event-id>.json
 ```
 
 The checked-in `.gitkeep` files only preserve the directories. Schema examples
@@ -401,6 +409,41 @@ Optional lane metadata fields on heartbeats are `thread_handle`, `chat_handle`,
 `instance_id`. Status readers should treat missing metadata as `UNKNOWN` rather
 than inferring it from branch names or handoff text.
 
+## Event Schema
+
+```json
+{
+  "schema_version": 1,
+  "event_id": "20260708T235500.123456Z-deadbeef",
+  "batch_id": "batch-2026-06-13",
+  "type": "phase",
+  "lane": "docs",
+  "agent_id": "worker-3972",
+  "repo": "shakacode/react_on_rails",
+  "target": "3972",
+  "branch": "jg-codex/3972-docs",
+  "thread_handle": "thread-docs",
+  "host": "codex",
+  "operator": "justin",
+  "phase": "validating",
+  "message": "running tests",
+  "at": "2026-06-13T00:42:00Z"
+}
+```
+
+Required fields: `schema_version`, `event_id`, `batch_id`, `type`, and `at`.
+Lane events should include `lane` and `agent_id` when available. Lane names
+follow the same rules as registered batch lanes: non-empty and no `:`
+characters, because dependency refs split on the last colon. Event ids are
+time-sortable and unique per write.
+
+The current HTTP backend stores events in the same JSON state API as claims,
+heartbeats, and batches, so `events/<batch-id>` is intended for low-volume phase
+transitions and audit breadcrumbs, not high-frequency telemetry. Keep event
+volume bounded per batch until the relational `/v1/events` endpoint in
+[backend-design.md](docs/backend-design.md) adds pagination and retention
+controls.
+
 ## Batch Schema
 
 ```json
@@ -468,7 +511,8 @@ resuming, rebasing, or pushing dependency-sensitive work.
 
 1. Coordinator registers a batch manifest describing lanes and dependencies.
 2. Worker acquires a claim for its issue or PR target.
-3. Worker refreshes a heartbeat during active work.
+3. Worker refreshes a heartbeat during active work and records phase events for
+   milestones that should remain visible after later heartbeats overwrite state.
 4. Coordinator uses targeted `status --repo ... --target ...` or
    `status --batch-id ...` for lane decisions, and full `status` only for broad
    audits where an all-state scan is acceptable.

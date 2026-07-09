@@ -2,6 +2,7 @@
 /claims/
 /heartbeats/
 /batches/
+/events/
 *.json.lock
 
 # Local generated/runtime artifacts.
