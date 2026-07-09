@@ -531,6 +531,7 @@ module AgentCoord
     end
 
     def verify_doctor_store(options, backend_kind)
+      store = nil
       case backend_kind
       when "http"
         store = build_store(options)
@@ -547,6 +548,9 @@ module AgentCoord
         store = build_store(options)
       end
       store
+    rescue StandardError
+      close_store(store)
+      raise
     end
 
     def active_backend_url(options, backend_kind)

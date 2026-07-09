@@ -539,6 +539,26 @@ class HttpBackendSelectionTest < HttpEnvTestCase
 end
 
 class HttpDoctorTest < HttpEnvTestCase
+  def test_doctor_closes_http_store_when_readable_check_fails
+    closes = 0
+    original_close = AgentCoord::HttpStore.instance_method(:close)
+    AgentCoord::HttpStore.define_method(:close) do
+      closes += 1
+      original_close.bind_call(self)
+    end
+    stub = HttpStoreStub.new([[500, { "error" => "boom" }]])
+    with_env("AGENT_COORD_API_URL" => stub.base_url, "AGENT_COORD_API_TOKEN" => "tok") do
+      assert_raises(AgentCoord::OperationalError) do
+        AgentCoord::Runner.new(["doctor"], stdout: StringIO.new, stderr: StringIO.new).run
+      end
+    end
+
+    assert_equal 1, closes
+  ensure
+    AgentCoord::HttpStore.define_method(:close, original_close) if original_close
+    stub&.shutdown
+  end
+
   def test_doctor_reports_http_backend
     responses = [
       [200, { "entries" => [] }],
