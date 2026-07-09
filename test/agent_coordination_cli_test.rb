@@ -932,6 +932,112 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     assert_equal "merged", released_payload.fetch("phase")
   end
 
+  def test_release_handoff_preserves_resume_metadata_and_records_event
+    write_batch(
+      "batch-handoff",
+      lanes: [{ "name" => "docs", "owner" => "worker-a", "targets" => ["3975"] }]
+    )
+    claim = run_agent_coord(
+      "claim",
+      "--agent-id", "worker-a",
+      "--repo", "shakacode/react_on_rails",
+      "--target", "3975",
+      "--batch-id", "batch-handoff",
+      "--branch", "jg-codex/handoff",
+      "--thread-handle", "thread-docs",
+      "--host", "codex",
+      "--pr-url", "https://github.com/shakacode/react_on_rails/pull/3975",
+      "--operator", "justin",
+      "--phase", "validating",
+      "--generation", "4"
+    )
+    assert_equal 0, claim.status.exitstatus, claim.stderr
+
+    release = run_agent_coord(
+      "release",
+      "--agent-id", "worker-a",
+      "--repo", "shakacode/react_on_rails",
+      "--target", "3975",
+      "--handoff-to", "claude-code/conductor",
+      "--handoff-note", "Continue from the failing docs spec."
+    )
+    assert_equal 0, release.status.exitstatus, release.stderr
+
+    claim_path = File.join(@state_root, "claims", "shakacode", "react_on_rails", "3975.json")
+    assert_handoff_release_claim(JSON.parse(File.read(claim_path)))
+
+    event_files = Dir.glob(File.join(@state_root, "events", "batch-handoff", "*.json"))
+    assert_equal 1, event_files.length
+    event = JSON.parse(File.read(event_files.first))
+    assert_handoff_release_event(event)
+
+    status = run_agent_coord("status", "--batch-id", "batch-handoff", "--json")
+
+    assert_equal 0, status.status.exitstatus, status.stderr
+    status_event = JSON.parse(status.stdout).fetch("events").first
+    assert_handoff_status_event(status_event, event.fetch("event_id"))
+  end
+
+  def test_release_handoff_without_batch_keeps_claim_metadata_without_event
+    claim = run_agent_coord(
+      "claim",
+      "--agent-id", "worker-a",
+      "--repo", "shakacode/react_on_rails",
+      "--target", "3977"
+    )
+    assert_equal 0, claim.status.exitstatus, claim.stderr
+
+    release = run_agent_coord(
+      "release",
+      "--agent-id", "worker-a",
+      "--repo", "shakacode/react_on_rails",
+      "--target", "3977",
+      "--handoff-note", "Ready for another host to re-claim."
+    )
+    assert_equal 0, release.status.exitstatus, release.stderr
+
+    claim_path = File.join(@state_root, "claims", "shakacode", "react_on_rails", "3977.json")
+    released_payload = JSON.parse(File.read(claim_path))
+    assert_equal "released", released_payload.fetch("status")
+    assert_equal "handoff", released_payload.fetch("release_mode")
+    assert_equal "Ready for another host to re-claim.", released_payload.fetch("handoff_note")
+    refute_path_exists File.join(@state_root, "events")
+  end
+
+  def test_release_handoff_tolerates_invalid_existing_batch_id
+    claim_dir = File.join(@state_root, "claims", "shakacode", "react_on_rails")
+    FileUtils.mkdir_p(claim_dir)
+    File.write(
+      File.join(claim_dir, "3979.json"),
+      JSON.pretty_generate(
+        "schema_version" => 1,
+        "repo" => "shakacode/react_on_rails",
+        "target" => "3979",
+        "agent_id" => "worker-a",
+        "batch_id" => "../bad",
+        "status" => "active",
+        "claimed_at" => Time.now.utc.iso8601,
+        "updated_at" => Time.now.utc.iso8601,
+        "expires_at" => (Time.now.utc + 3600).iso8601
+      )
+    )
+
+    release = run_agent_coord(
+      "release",
+      "--agent-id", "worker-a",
+      "--repo", "shakacode/react_on_rails",
+      "--target", "3979",
+      "--handoff-note", "Continue elsewhere."
+    )
+
+    assert_equal 0, release.status.exitstatus, release.stderr
+    assert_includes release.stderr, "warning: handoff event not recorded"
+    released_payload = JSON.parse(File.read(File.join(claim_dir, "3979.json")))
+    assert_equal "released", released_payload.fetch("status")
+    assert_equal "handoff", released_payload.fetch("release_mode")
+    assert_equal "Continue elsewhere.", released_payload.fetch("handoff_note")
+  end
+
   def test_release_rejects_metadata_update_from_non_holder_after_release
     claim = run_agent_coord(
       "claim",
@@ -2864,6 +2970,42 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     expected_fields.each do |key|
       refute(payload.key?(key), "expected #{key} to be absent")
     end
+  end
+
+  def assert_handoff_release_claim(payload)
+    {
+      "status" => "released",
+      "release_mode" => "handoff",
+      "handoff_to" => "claude-code/conductor",
+      "handoff_note" => "Continue from the failing docs spec.",
+      "branch" => "jg-codex/handoff",
+      "pr_url" => "https://github.com/shakacode/react_on_rails/pull/3975",
+      "phase" => "validating"
+    }.each { |key, value| assert_equal value, payload.fetch(key) }
+  end
+
+  def assert_handoff_release_event(event)
+    {
+      "type" => "handoff",
+      "batch_id" => "batch-handoff",
+      "agent_id" => "worker-a",
+      "repo" => "shakacode/react_on_rails",
+      "target" => "3975",
+      "branch" => "jg-codex/handoff",
+      "pr_url" => "https://github.com/shakacode/react_on_rails/pull/3975",
+      "phase" => "validating",
+      "status" => "released",
+      "release_mode" => "handoff",
+      "handoff_to" => "claude-code/conductor",
+      "message" => "Continue from the failing docs spec."
+    }.each { |key, value| assert_equal value, event.fetch(key) }
+  end
+
+  def assert_handoff_status_event(status_event, event_id)
+    assert_equal event_id, status_event.fetch("event_id")
+    assert_equal "handoff", status_event.fetch("type")
+    assert_equal "claude-code/conductor", status_event.fetch("handoff_to")
+    assert_equal "Continue from the failing docs spec.", status_event.fetch("message")
   end
 
   def stringify_keys(hash)
