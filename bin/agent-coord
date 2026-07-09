@@ -34,17 +34,24 @@ module AgentCoord
   ].freeze
   STATUS_CLAIM_METADATA_FIELDS = %w[
     batch_id thread_handle chat_handle host pr_url dashboard_url operator phase generation instance_id
+    release_mode handoff_to handoff_note
   ].freeze
   STATUS_HEARTBEAT_METADATA_FIELDS = %w[
     batch_id branch thread_handle chat_handle host pr_url dashboard_url operator phase generation instance_id
   ].freeze
   STATUS_EVENT_METADATA_FIELDS = %w[
     event_id lane agent_id repo target branch status message thread_handle chat_handle host pr_url dashboard_url
-    operator phase generation instance_id
+    operator phase generation instance_id release_mode handoff_to handoff_note
   ].freeze
   HEARTBEAT_TARGET_FIELDS = %w[repo target].freeze
   METADATA_OPTION_FIELDS = %w[
     thread_handle chat_handle host pr_url dashboard_url operator phase generation instance_id
+  ].freeze
+  HANDOFF_STATE_FIELDS = %w[
+    release_mode handoff_to handoff_note
+  ].freeze
+  HANDOFF_OPTION_FIELDS = %w[
+    handoff_to handoff_note
   ].freeze
   CLAIM_PRESERVED_FIELDS = (%w[batch_id branch] + STATUS_CLAIM_METADATA_FIELDS).uniq.freeze
   HEARTBEAT_PRESERVED_FIELDS = (HEARTBEAT_TARGET_FIELDS + STATUS_HEARTBEAT_METADATA_FIELDS).uniq.freeze
@@ -171,6 +178,7 @@ module AgentCoord
 
         add_backend_options(opts, options)
         add_target_options(opts, options)
+        add_release_options(opts, options, command)
         add_event_options(opts, options)
         add_register_batch_options(opts, options)
         add_doctor_options(opts, options, command)
@@ -214,6 +222,17 @@ module AgentCoord
       opts.on("--status STATUS", "heartbeat or event status") do |value|
         options[:status] = value
         options[:status_given] = true
+      end
+    end
+
+    def add_release_options(opts, options, command)
+      return unless command == "release"
+
+      opts.on("--handoff-to ID", "release handoff destination agent, host, or operator") do |value|
+        options[:handoff_to] = value
+      end
+      opts.on("--handoff-note TEXT", "resume note for a release handoff") do |value|
+        options[:handoff_note] = value
       end
     end
 
@@ -322,6 +341,12 @@ module AgentCoord
         opts.separator "    --batch-id ID --type TYPE  append an event under events/<batch-id>/"
         opts.separator "    --lane NAME                 attach the event to a registered lane"
         opts.separator ""
+      when "release"
+        opts.separator ""
+        opts.separator "Handoff release:"
+        opts.separator "    --handoff-to ID             intended next agent, host, or operator"
+        opts.separator "    --handoff-note TEXT         resume note for the next claimant"
+        opts.separator ""
       end
     end
 
@@ -330,7 +355,8 @@ module AgentCoord
       value_options = %w[
         --backend --ref --state-root --api-url --agent-id --repo --target --batch-id --branch
         --thread-handle --chat-handle --host --pr-url --dashboard-url --operator --phase --generation --instance-id
-        --ttl --status --type --lane --message --file --install-dir --status-state-root --profile
+        --handoff-to --handoff-note --ttl --status --type --lane --message --file --install-dir
+        --status-state-root --profile
       ]
       skip_next = false
       argv.any? do |arg|
@@ -402,17 +428,21 @@ module AgentCoord
         raise Error, "claim belongs to #{holder}; #{options[:agent_id]} cannot release it"
       end
 
-      payload = existing.data.merge(
+      release_updates = {
         "agent_id" => holder || options[:agent_id],
         "status" => "released",
         "released_by" => options[:agent_id],
         "released_at" => timestamp(now),
         "updated_at" => timestamp(now),
         "expires_at" => timestamp(now)
-      ).merge(metadata_payload(options))
+      }
+      payload = existing.data.merge(release_updates).merge(metadata_payload(options))
+      payload = without_handoff_payload(payload)
+      payload = payload.merge(handoff_payload(options)) if handoff_release?(options)
       payload["branch"] = options[:branch] if options[:branch]
 
       store.write_json(path, payload, message: "Release #{options[:repo]}##{options[:target]}", sha: existing.sha)
+      record_handoff_event(store, payload, now) if handoff_release?(options)
       @stdout.puts "released #{options[:repo]}##{options[:target]} by #{options[:agent_id]}"
       0
     end
@@ -588,6 +618,23 @@ module AgentCoord
       end
     end
 
+    def handoff_payload(options)
+      return {} unless handoff_release?(options)
+
+      HANDOFF_OPTION_FIELDS.each_with_object({ "release_mode" => "handoff" }) do |field, metadata|
+        option_name = field.to_sym
+        metadata[field] = options[option_name] if options.key?(option_name) && !options[option_name].nil?
+      end
+    end
+
+    def handoff_release?(options)
+      options.key?(:handoff_to) || options.key?(:handoff_note)
+    end
+
+    def without_handoff_payload(payload)
+      payload.except(*HANDOFF_STATE_FIELDS)
+    end
+
     def claim_preserved_fields(existing, options)
       return [] unless renewed_claim?(existing, options)
 
@@ -692,19 +739,52 @@ module AgentCoord
 
       store = build_store(options)
       now = now_utc
+      write_event_record(store, options, now, output: true)
+    end
+
+    def write_event_record(store, options, now, output:)
       3.times do
         event_id = build_event_id(now)
         path = AgentCoord.event_path(options.fetch(:batch_id), event_id)
         payload = event_payload(options, event_id, now)
         begin
           store.write_json(path, payload, message: "Record event #{options[:batch_id]} #{event_id}", create: true)
-          @stdout.puts "recorded event #{options[:batch_id]} #{event_id}"
+          @stdout.puts "recorded event #{options[:batch_id]} #{event_id}" if output
           return 0
         rescue Conflict
           next
         end
       end
       raise OperationalError, "event id collision while recording event for #{options[:batch_id]}"
+    end
+
+    def record_handoff_event(store, release_payload, now)
+      batch_id = release_payload["batch_id"]
+      return if batch_id.to_s.empty?
+
+      event_options = handoff_event_options(release_payload, batch_id)
+      write_event_record(store, event_options, now, output: false)
+    rescue Error, SystemCallError => e
+      @stderr.puts "warning: handoff event not recorded: #{e.message}"
+    end
+
+    def handoff_event_options(release_payload, batch_id)
+      event_options = {
+        batch_id: batch_id,
+        type: "handoff",
+        agent_id: release_payload["agent_id"],
+        repo: release_payload["repo"],
+        target: release_payload["target"],
+        branch: release_payload["branch"],
+        status: release_payload["status"],
+        status_given: true,
+        message: release_payload["handoff_note"]
+      }
+      (METADATA_OPTION_FIELDS + HANDOFF_OPTION_FIELDS).each do |field|
+        value = release_payload[field]
+        event_options[field.to_sym] = value unless value.nil?
+      end
+      event_options
     end
 
     def validate_record_event_options!(options)
@@ -732,7 +812,9 @@ module AgentCoord
         "at" => timestamp(now)
       }
       payload["status"] = options[:status] if options[:status_given]
-      payload.merge(metadata_payload(options)).compact
+      payload.merge(metadata_payload(options))
+             .merge(handoff_payload(options))
+             .compact
     end
 
     def build_event_id(now)

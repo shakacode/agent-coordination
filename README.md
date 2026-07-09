@@ -153,7 +153,7 @@ rm -rf "$STATE_ROOT"
 
 ```text
 bin/agent-coord claim     --agent-id ID --repo OWNER/REPO --target ISSUE_OR_PR [--batch-id ID] [--branch BRANCH] [--metadata options] [--ttl SECONDS]
-bin/agent-coord release   --agent-id ID --repo OWNER/REPO --target ISSUE_OR_PR [--metadata options]
+bin/agent-coord release   --agent-id ID --repo OWNER/REPO --target ISSUE_OR_PR [--metadata options] [--handoff-to ID] [--handoff-note TEXT]
 bin/agent-coord heartbeat --agent-id ID [--repo OWNER/REPO] [--target ISSUE_OR_PR] [--batch-id ID] [--branch BRANCH] [--metadata options] [--status STATUS]
 bin/agent-coord register-batch --file PATH
 bin/agent-coord record-event --batch-id ID --type TYPE [--lane NAME] [--agent-id ID] [--repo OWNER/REPO] [--target ISSUE_OR_PR] [--branch BRANCH] [--status STATUS] [--metadata options] [--message TEXT]
@@ -181,6 +181,14 @@ additive, optional, and included in JSON status output when present. Workers use
 them to connect a lane, chat, host app, branch, PR, operator, and dashboard deep
 link without parsing handoff prose.
 
+`release --handoff-to ID --handoff-note TEXT` is the structured handoff path for
+moving work between agents, hosts, machines, or operators. The released claim is
+stamped with `release_mode: "handoff"` plus `handoff_to` and `handoff_note`, so
+the next claimant can recover the branch, PR, phase, and resume note from the
+target-scoped record. When the claim has a `batch_id`, release also appends a
+`handoff` event to `events/<batch-id>/`; the event is best-effort because the
+released claim itself is the durable handoff source.
+
 `register-batch --file PATH` validates and writes a JSON batch manifest to
 `batches/<batch-id>.json` using the active store. It stamps `schema_version`,
 `registered_at`, and `updated_at`, preserves optional operator/dashboard/thread
@@ -192,6 +200,9 @@ claim lanes.
 operator-visible milestones that should remain visible even when a heartbeat is
 overwritten by the next phase. Event records accept the same optional metadata
 fields as claims and heartbeats, plus `--type`, `--lane`, and `--message`.
+`release --handoff-*` creates `handoff` events automatically when a batch id is
+available; use direct `record-event --type handoff` only for non-release
+breadcrumbs.
 
 `heartbeat` upserts `heartbeats/<agent-id>.json`. `status` renders coordination
 state in text or JSON. Full `status` renders compact claims, heartbeats, batch
@@ -215,7 +226,9 @@ out full coordination read as degraded/`UNKNOWN` rather than guessing.
 `release` marks a claim released while preserving the record for auditability.
 Only the recorded holder can release or restamp metadata on an existing claim;
 another agent should claim the target after release instead of re-releasing the
-old holder's record.
+old holder's record. For planned ownership moves, include `--handoff-to` and
+`--handoff-note` on the original release, then have the next worker claim the
+same repo/target and continue on the recorded branch/PR.
 `version` prints the CLI contract version. `config show --json` prints runtime
 defaults and machine-readable exit codes. Default `doctor` verifies the current
 backend without writing state or parsing every record; `doctor --deep` adds full

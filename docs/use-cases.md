@@ -43,11 +43,11 @@ move this PR's work to the other machine without racing myself?" Per-machine
 tokens give every record **machine attribution**; heartbeats carry the **host**
 (Codex vs Claude Code) so the dashboard can answer *which machine, which app,
 which chat*. Switching is an explicit, cheap operation instead of a hope:
-release-with-handoff on machine A (records branch, PR, and next steps as a
-resume note), then claim on machine B — or **supersede** when machine A's
-session is dead but its lease isn't. It's the worktree insight again, applied
-across machines: make the ownership boundary explicit and the switch becomes
-routine.
+`release --handoff-to ... --handoff-note ...` on machine A records branch, PR,
+phase, and next steps as a structured resume note; machine B then claims the same
+target — or **supersedes** when machine A's session is dead but its lease isn't.
+It's the worktree insight again, applied across machines: make the ownership
+boundary explicit and the switch becomes routine.
 
 ### Use case 3b: Plan windows — cap-aware work, cross-host failover
 
@@ -56,10 +56,10 @@ hits its cap, every lane it hosts stalls at once — and without limit tracking
 that looks identical to several broken workers. The coordination plane records
 cap state per machine+app pair, shows the reset countdown, and offers the move
 that actually helps: **hand the work item to the other vendor** — release with
-a handoff note (branch, PR, phase, next steps), re-claim from the other app,
-keep going on the same branch and PR. Claims, branches, and PRs are
-host-agnostic, so switching a work item from Codex to Claude Code mid-PR (or
-back) is a routine handoff, not a restart.
+`--handoff-to` and `--handoff-note`, re-claim from the other app, keep going on
+the same branch and PR. Claims, branches, and PRs are host-agnostic, so switching
+a work item from Codex to Claude Code mid-PR (or back) is a routine handoff, not
+a restart.
 
 A boundary worth stating plainly: this plane **respects vendor limits**. It
 surfaces caps and routes work to genuinely separate budget pools — the other
