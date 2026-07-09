@@ -24,6 +24,7 @@ module AgentCoord
   HEARTBEAT_DEAD_AFTER_TTL_MULTIPLIER = 4
   STATUS_STATE_ROOT_ENV = "AGENT_COORD_STATUS_STATE_ROOT"
   JSON_PREFIXES = %w[claims heartbeats batches].freeze
+  STATE_PREFIXES = (JSON_PREFIXES + %w[events]).freeze
   DEPENDENCY_DONE_STATUSES = %w[complete completed done merged ready].freeze
   STATUS_BATCH_METADATA_FIELDS = %w[
     repo objective instructions operator dashboard_url status updated_at registered_at
@@ -457,7 +458,7 @@ module AgentCoord
       backend_kind = doctor_backend_kind(doctor_options)
       begin
         store = verify_doctor_store(doctor_options, backend_kind)
-        store.verify_layout!(JSON_PREFIXES)
+        store.verify_layout!(STATE_PREFIXES)
         check_state_readable!(store) if options[:deep]
       rescue JSON::ParserError, SystemCallError => e
         raise OperationalError, "state unreadable: #{e.message}"
@@ -1522,7 +1523,7 @@ module AgentCoord
     end
 
     def check_state_readable!(store)
-      JSON_PREFIXES.each { |prefix| store.list_json(prefix) }
+      STATE_PREFIXES.each { |prefix| store.list_json(prefix) }
     end
 
     def install_link(source, destination)

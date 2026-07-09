@@ -225,7 +225,7 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
   end
 
   def test_doctor_deep_checks_all_local_state_prefixes
-    %w[claims batches].each do |prefix|
+    %w[claims batches events].each do |prefix|
       state_root = Dir.mktmpdir("agent-coord-test")
       FileUtils.mkdir_p(File.join(state_root, prefix))
       File.write(File.join(state_root, prefix, "broken.json"), "{")
