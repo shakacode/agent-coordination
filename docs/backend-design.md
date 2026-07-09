@@ -270,8 +270,9 @@ Machine tokens carry read/write path scopes:
 - Valid record-path scopes cover exactly one flat record, for example
   `heartbeats/m5-codex.json`.
 - Listing a parent prefix above the token's read scope returns only covered
-  descendant paths, so scoped tokens can pass the default `agent-coord doctor`
-  read probe without leaking unrelated state.
+  descendant paths. Claims-scoped tokens can pass the default `agent-coord
+  doctor` read probe without leaking unrelated state; tokens scoped only to
+  other prefixes should run `agent-coord doctor --doctor-prefix <read-prefix>`.
 - Claim takeover checks may need to read the current holder's heartbeat. Use
   exact heartbeat write scopes only when the machine uses stable agent ids; use
   broader heartbeat read scopes where takeover/liveness decisions need to see
@@ -363,7 +364,8 @@ The current user-facing path is the Worker/D1 HTTP state API:
 1. Deploy Worker + D1.
 2. Provision one machine token per participating machine.
 3. Set `AGENT_COORD_API_URL` and `AGENT_COORD_API_TOKEN`.
-4. Run `agent-coord doctor`.
+4. Run `agent-coord doctor`, or `agent-coord doctor --doctor-prefix
+   <read-prefix>` for HTTP tokens scoped outside `claims`.
 5. Keep all active work for a repo on the same backend; do not dual-write claims.
 
 `LocalStore` remains the deterministic test and smoke-check backend.

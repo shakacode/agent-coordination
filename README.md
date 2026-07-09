@@ -102,10 +102,11 @@ the authenticated machine as `updated_by` on each state write. Claim takeover
 checks may need read access to the current holder's heartbeat; use an exact
 heartbeat write scope only when the machine's agent id is stable.
 When listing a parent prefix above a scoped token's read scope, the Worker
-returns only covered descendants so scoped tokens can still pass the default
-`agent-coord doctor` read probe without seeing unrelated state. When customizing
-token scopes, pass both read and write prefixes intentionally; the provisioning
-script warns if only one dimension is customized and the other remains all-state.
+returns only covered descendants. Claims-scoped tokens can pass the default
+`agent-coord doctor` read probe; tokens scoped only to other prefixes should use
+`agent-coord doctor --doctor-prefix <read-prefix>`. When customizing token
+scopes, pass both read and write prefixes intentionally; the provisioning script
+warns if only one dimension is customized and the other remains all-state.
 
 For local Wrangler/D1 development, pass `--local`:
 
@@ -158,6 +159,8 @@ that no backend is configured, set HTTP credentials or an explicit local state
 root before using coordination commands. If doctor fails for another operational
 reason, agents should report coordination state as `UNKNOWN` and use the public
 claim-comment fallback until the operator fixes backend access.
+For HTTP tokens scoped outside `claims`, pass a readable scope:
+`agent-coord doctor --doctor-prefix events/<batch-id>`.
 
 For local smoke checks, set `AGENT_COORD_STATE_ROOT` or pass `--state-root` to
 use a temporary filesystem state directory:
@@ -187,7 +190,7 @@ bin/agent-coord status --repo OWNER/REPO --target ISSUE_OR_PR [--json]
 bin/agent-coord status --batch-id ID [--json]
 bin/agent-coord version [--json]
 bin/agent-coord config [show] [--json]
-bin/agent-coord doctor [--json] [--deep] [--state-root PATH]
+bin/agent-coord doctor [--json] [--deep] [--doctor-prefix PREFIX] [--state-root PATH]
 bin/agent-coord bootstrap [--install-dir PATH] [--profile PATH] [--no-profile]
 ```
 
@@ -257,7 +260,9 @@ same repo/target and continue on the recorded branch/PR.
 `version` prints the CLI contract version. `config show --json` prints runtime
 defaults and machine-readable exit codes. Default `doctor` verifies the current
 backend without writing state or parsing every record; `doctor --deep` adds full
-JSON validation. `bootstrap` installs the `agent-coord` command used by public
+JSON validation. For HTTP tokens whose read scope does not overlap `claims`, use
+`doctor --doctor-prefix <read-prefix>` to verify that scoped read path.
+`bootstrap` installs the `agent-coord` command used by public
 workflow docs.
 
 ## CLI Contract And Exit Codes

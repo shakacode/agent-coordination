@@ -247,7 +247,12 @@ module AgentCoord
     end
 
     def add_doctor_options(opts, options, command)
-      opts.on("--deep", "doctor only: parse every JSON state record") { options[:deep] = true } if command == "doctor"
+      return unless command == "doctor"
+
+      opts.on("--deep", "doctor only: parse every JSON state record") { options[:deep] = true }
+      opts.on("--doctor-prefix PREFIX", "doctor only: HTTP readable prefix probe") do |value|
+        options[:doctor_prefix] = value
+      end
     end
 
     def add_bootstrap_options(opts, options)
@@ -513,6 +518,7 @@ module AgentCoord
         @stdout.puts "backend: #{backend_kind}"
         @stdout.puts "backend_repo: #{doctor_options.fetch(:backend)}"
         @stdout.puts "backend_url: #{doctor_options[:api_url]}" if backend_kind == "http"
+        @stdout.puts "doctor_prefix: #{doctor_read_prefix(doctor_options)}" if backend_kind == "http"
         @stdout.puts "state_root: #{doctor_options[:state_root] || '-'}"
         @stdout.puts "mode: #{options[:deep] ? 'deep' : 'lightweight'}"
         @stdout.puts "status: ok"
@@ -535,7 +541,7 @@ module AgentCoord
       case backend_kind
       when "http"
         store = build_store(options)
-        store.verify_readable!
+        store.verify_readable!(doctor_read_prefix(options))
       when "local"
         store = LocalStore.new(options.fetch(:state_root))
         store.verify_root!
@@ -551,6 +557,10 @@ module AgentCoord
     rescue StandardError
       close_store(store)
       raise
+    end
+
+    def doctor_read_prefix(options)
+      options[:doctor_prefix] || JSON_PREFIXES.first
     end
 
     def active_backend_url(options, backend_kind)
@@ -1958,8 +1968,9 @@ module AgentCoord
       end
     end
 
-    def verify_readable!
-      response = request(Net::HTTP::Get, "/v1/state?prefix=#{escape_component(JSON_PREFIXES.first)}")
+    def verify_readable!(prefix = JSON_PREFIXES.first)
+      AgentCoord.safe_path!(prefix)
+      response = request(Net::HTTP::Get, "/v1/state?prefix=#{escape_component(prefix)}")
       raise OperationalError, http_error("verify readable", response) unless response.code == "200"
     end
 
