@@ -65,10 +65,13 @@ class HttpBackendIntegrationTest < Minitest::Test
   def test_batch_event_listing_escapes_like_wildcards
     batch = "batch_#{Process.pid}"
     neighbor = "batchX#{Process.pid}"
+    case_neighbor = "Batch_#{Process.pid}"
 
     code, = cli("record-event", "--batch-id", batch, "--type", "phase", "--lane", "docs")
     assert_equal 0, code
     code, = cli("record-event", "--batch-id", neighbor, "--type", "phase", "--lane", "docs")
+    assert_equal 0, code
+    code, = cli("record-event", "--batch-id", case_neighbor, "--type", "phase", "--lane", "docs")
     assert_equal 0, code
 
     code, out, err = cli("status", "--batch-id", batch, "--json")
@@ -85,6 +88,7 @@ class HttpBackendIntegrationTest < Minitest::Test
     allowed_path = "#{allowed_prefix}/300.json"
     secondary_path = "#{secondary_prefix}/301.json"
     hidden_path = "claims/shakacode/hidden/301.json"
+    mixed_case_hidden_path = "claims/ShakaCode/api.json/302.json"
     denied_path = "claims/shakacode/outside/300.json"
 
     code, body = http_json(
@@ -97,7 +101,7 @@ class HttpBackendIntegrationTest < Minitest::Test
     assert_equal 201, code
     assert_equal "scoped", body.fetch("updated_by")
 
-    seed_full_token_claims(full_token, secondary_path, hidden_path)
+    seed_full_token_claims(full_token, secondary_path, hidden_path, mixed_case_hidden_path)
 
     code, body = http_json("GET", state_path(allowed_path), token: scoped_token)
     assert_equal 200, code

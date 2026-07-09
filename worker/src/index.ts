@@ -41,8 +41,8 @@ function validPrefix(prefix: string): boolean {
     && !prefix.includes("//");
 }
 
-function escapeLikePrefix(prefix: string): string {
-  return prefix.replace(/[\\%_]/g, (value) => `\\${value}`);
+function globDescendantPrefix(prefix: string): string {
+  return `${prefix}/*`;
 }
 
 function validScopePrefix(prefix: string): boolean {
@@ -247,16 +247,16 @@ async function listState(
   if (cursor !== null && (!validPath(cursor) || !cursor.startsWith(`${prefix}/`))) {
     return json(400, { error: "invalid_cursor" });
   }
-  const clauses = ["path LIKE ? ESCAPE '\\'"];
-  const binds: (string | number)[] = [`${escapeLikePrefix(prefix)}/%`];
+  const clauses = ["path GLOB ?"];
+  const binds: (string | number)[] = [globDescendantPrefix(prefix)];
   if (scopeFilters.length > 0) {
     const scopeClauses = scopeFilters.map((filter) => {
       if (filter.kind === "path") {
         binds.push(filter.scope);
         return "path = ?";
       }
-      binds.push(`${escapeLikePrefix(filter.scope)}/%`);
-      return "path LIKE ? ESCAPE '\\'";
+      binds.push(globDescendantPrefix(filter.scope));
+      return "path GLOB ?";
     });
     clauses.push(`(${scopeClauses.join(" OR ")})`);
   }
