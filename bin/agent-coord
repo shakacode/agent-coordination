@@ -813,7 +813,10 @@ module AgentCoord
         heartbeat = read_status_heartbeat(store, holder)
         heartbeat_entries << heartbeat if valid_status_heartbeat?(heartbeat)
       end
-      section_notes = { "batches" => "not checked in target scope" }
+      section_notes = {
+        "batches" => "not checked in target scope",
+        "events" => "not checked in target scope"
+      }
       if claim && heartbeat_entries.empty?
         section_notes["heartbeats"] = if heartbeat == :invalid
                                         "holder heartbeat unreadable"
@@ -956,7 +959,7 @@ module AgentCoord
       {
         "version" => VERSION,
         "scope" => scope,
-        "degraded" => section_notes.values,
+        "degraded" => section_notes.values.uniq,
         "section_notes" => section_notes,
         "claims" => claim_entries.map { |entry| claim_status_hash(entry) },
         "heartbeats" => heartbeat_entries.map { |entry| heartbeat_status_hash(entry, now) },

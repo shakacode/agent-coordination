@@ -1511,6 +1511,7 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     assert_equal "4150", payload.fetch("scope").fetch("target")
     assert_equal ["not checked in target scope"], payload.fetch("degraded")
     assert_equal "not checked in target scope", payload.fetch("section_notes").fetch("batches")
+    assert_equal "not checked in target scope", payload.fetch("section_notes").fetch("events")
     assert_equal "jg-codex/4150-worker", payload.fetch("claims").first.fetch("branch")
     assert_equal "worker-4150", payload.fetch("heartbeats").first.fetch("agent_id")
   end
