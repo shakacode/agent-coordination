@@ -79,8 +79,12 @@ class HttpBackendIntegrationTest < Minitest::Test
 
   def test_scoped_machine_token_enforces_path_prefix_and_records_writer
     scoped_token = ENV.fetch("SCOPED_AGENT_COORD_API_TOKEN")
+    full_token = ENV.fetch("AGENT_COORD_API_TOKEN")
     allowed_prefix = ENV.fetch("SCOPED_CLAIM_PREFIX")
+    secondary_prefix = ENV.fetch("SCOPED_SECONDARY_CLAIM_PREFIX")
     allowed_path = "#{allowed_prefix}/300.json"
+    secondary_path = "#{secondary_prefix}/301.json"
+    hidden_path = "claims/shakacode/hidden/301.json"
     denied_path = "claims/shakacode/outside/300.json"
 
     code, body = http_json(
@@ -93,6 +97,8 @@ class HttpBackendIntegrationTest < Minitest::Test
     assert_equal 201, code
     assert_equal "scoped", body.fetch("updated_by")
 
+    seed_full_token_claims(full_token, secondary_path, hidden_path)
+
     code, body = http_json("GET", state_path(allowed_path), token: scoped_token)
     assert_equal 200, code
     assert_equal "scoped", body.fetch("updated_by")
@@ -104,8 +110,7 @@ class HttpBackendIntegrationTest < Minitest::Test
 
     code, body = http_json("GET", "/v1/state?prefix=claims", token: scoped_token)
     assert_equal 200, code
-    listed_paths = body.fetch("entries").map { |entry| entry.fetch("path") }
-    assert_equal [allowed_path], listed_paths
+    assert_listed_paths body, allowed_path, secondary_path
 
     assert_scoped_doctor_ok(scoped_token)
 
@@ -129,6 +134,24 @@ class HttpBackendIntegrationTest < Minitest::Test
   end
 
   private
+
+  def seed_full_token_claims(full_token, *paths)
+    paths.each do |path|
+      code, = http_json(
+        "PUT",
+        state_path(path),
+        token: full_token,
+        headers: { "If-None-Match" => "*" },
+        body: { "data" => { "schema_version" => 1, "agent_id" => "full-worker" } }
+      )
+      assert_equal 201, code
+    end
+  end
+
+  def assert_listed_paths(body, *paths)
+    listed_paths = body.fetch("entries").map { |entry| entry.fetch("path") }
+    assert_equal paths, listed_paths
+  end
 
   def assert_scoped_doctor_ok(scoped_token)
     doctor_out, doctor_err, doctor_status = Open3.capture3(
