@@ -267,7 +267,7 @@ Machine tokens carry read/write path scopes:
 - `""` grants all-state access for existing internal-machine migration.
 - Directory scopes cover descendants, for example
   `claims/shakacode/react_on_rails` covers that repo's claim paths.
-- `.json` scopes cover exactly one flat record, for example
+- Valid record-path scopes cover exactly one flat record, for example
   `heartbeats/m5-codex.json`.
 - Claim takeover checks may need to read the current holder's heartbeat. Use
   exact heartbeat write scopes only when the machine uses stable agent ids; use

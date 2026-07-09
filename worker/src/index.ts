@@ -49,6 +49,22 @@ function validScopePrefix(prefix: string): boolean {
   return prefix === "" || validPrefix(prefix) || validPath(prefix);
 }
 
+function exactStatePathScope(scope: string): boolean {
+  if (!validPath(scope)) return false;
+  const parts = scope.split("/");
+  switch (parts[0]) {
+    case "claims":
+      return parts.length === 4;
+    case "heartbeats":
+    case "batches":
+      return parts.length === 2;
+    case "events":
+      return parts.length === 3;
+    default:
+      return false;
+  }
+}
+
 function parsePrefixList(value: string): string[] | null {
   try {
     const parsed = JSON.parse(value);
@@ -79,12 +95,12 @@ async function authenticate(request: Request, env: Env): Promise<MachineAuth | n
 function scopeCoversPath(scope: string, path: string): boolean {
   if (scope === "") return true;
   if (path === scope) return true;
-  return !scope.endsWith(".json") && path.startsWith(`${scope}/`);
+  return !exactStatePathScope(scope) && path.startsWith(`${scope}/`);
 }
 
 function scopeCoversListPrefix(scope: string, prefix: string): boolean {
   if (scope === "") return true;
-  if (scope.endsWith(".json")) return false;
+  if (exactStatePathScope(scope)) return false;
   return prefix === scope || prefix.startsWith(`${scope}/`);
 }
 

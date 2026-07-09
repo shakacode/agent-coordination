@@ -70,6 +70,9 @@ json_array() {
   local out="["
   local separator=""
   local prefix
+  # Prefix validation disallows quotes and backslashes, so these strings are safe
+  # to embed in the JSON payload and the single-quoted SQL literal below. Keep
+  # valid_prefix in sync if the allowed character set ever changes.
   for prefix in "$@"; do
     out="${out}${separator}\"${prefix}\""
     separator=","

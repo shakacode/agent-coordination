@@ -79,7 +79,7 @@ TOKEN=$(ruby -rsecurerandom -e 'print SecureRandom.hex(24)')
 HASH=$(ruby -rdigest -e 'print Digest::SHA256.hexdigest(ARGV.fetch(0))' "$TOKEN")
 SCOPED_TOKEN=$(ruby -rsecurerandom -e 'print SecureRandom.hex(24)')
 SCOPED_HASH=$(ruby -rdigest -e 'print Digest::SHA256.hexdigest(ARGV.fetch(0))' "$SCOPED_TOKEN")
-SCOPED_CLAIM_PREFIX="claims/shakacode/scoped-integration"
+SCOPED_CLAIM_PREFIX="claims/shakacode/api.json"
 
 health_ready() {
   ruby -rnet/http -ruri -e '
