@@ -44,8 +44,10 @@ end
 class HttpStoreTestCase < Minitest::Test
   def with_stub(responses)
     stub = HttpStoreStub.new(responses)
-    yield AgentCoord::HttpStore.new(base_url: stub.base_url, token: "tok"), stub
+    store = AgentCoord::HttpStore.new(base_url: stub.base_url, token: "tok")
+    yield store, stub
   ensure
+    store&.close
     stub.shutdown
   end
 
@@ -59,6 +61,72 @@ class HttpStoreTestCase < Minitest::Test
 end
 
 class HttpStoreReadTest < HttpStoreTestCase
+  def test_reuses_http_session_across_requests
+    starts = 0
+    original_start = Net::HTTP.method(:start)
+    Net::HTTP.define_singleton_method(:start) do |*args, **kwargs, &block|
+      starts += 1
+      original_start.call(*args, **kwargs, &block)
+    end
+
+    responses = [
+      [200, { "entries" => [] }],
+      [
+        200,
+        { "path" => "claims/o/r/1.json", "data" => { "agent_id" => "a1" }, "version" => 7 }
+      ],
+      [200, { "status" => "ok" }]
+    ]
+    with_stub(responses) do |store, _|
+      store.list_json("claims")
+      store.read_json("claims/o/r/1.json")
+      store.verify_layout!(AgentCoord::JSON_PREFIXES)
+    end
+
+    assert_equal 1, starts
+  ensure
+    Net::HTTP.define_singleton_method(:start, original_start) if original_start
+  end
+
+  def test_read_json_retries_once_when_reused_get_session_is_stale
+    starts = 0
+    first_requests = 0
+    response = Struct.new(:code, :body)
+    original_start = Net::HTTP.method(:start)
+    stale_http = Object.new
+    stale_http.define_singleton_method(:active?) { true }
+    stale_http.define_singleton_method(:finish) { nil }
+    stale_http.define_singleton_method(:request) do |_request|
+      first_requests += 1
+      raise EOFError, "end of file reached" if first_requests > 1
+
+      response.new("200", JSON.generate("entries" => []))
+    end
+    fresh_http = Object.new
+    fresh_http.define_singleton_method(:active?) { true }
+    fresh_http.define_singleton_method(:finish) { nil }
+    fresh_http.define_singleton_method(:request) do |_request|
+      response.new(
+        "200",
+        JSON.generate("path" => "claims/o/r/1.json", "data" => { "agent_id" => "a1" }, "version" => 7)
+      )
+    end
+    Net::HTTP.define_singleton_method(:start) do |*|
+      starts += 1
+      starts == 1 ? stale_http : fresh_http
+    end
+
+    store = AgentCoord::HttpStore.new(base_url: "https://agent-coord.example", token: "tok")
+    store.list_json("claims")
+    entry = store.read_json("claims/o/r/1.json")
+
+    assert_equal({ "agent_id" => "a1" }, entry.data)
+    assert_equal 2, starts
+  ensure
+    store&.close
+    Net::HTTP.define_singleton_method(:start, original_start) if original_start
+  end
+
   def test_read_json_returns_stored_json_with_version_as_sha
     body = { "path" => "claims/o/r/1.json", "data" => { "agent_id" => "a1" }, "version" => 7 }
     with_stub([[200, body]]) do |store, stub|
@@ -179,6 +247,56 @@ class HttpStoreReadTest < HttpStoreTestCase
 end
 
 class HttpStoreWriteTest < HttpStoreTestCase
+  def test_http_session_disables_net_http_automatic_write_retries
+    response = Struct.new(:code, :body)
+    original_start = Net::HTTP.method(:start)
+    fake_http = Class.new do
+      attr_accessor :max_retries
+
+      def initialize(response)
+        @response = response
+        @max_retries = 1
+      end
+
+      def active? = true
+      def finish = nil
+      def request(_request) = @response
+    end.new(response.new("200", "{}"))
+    Net::HTTP.define_singleton_method(:start) { |*| fake_http }
+
+    store = AgentCoord::HttpStore.new(base_url: "https://agent-coord.example", token: "tok")
+    store.write_json("claims/o/r/1.json", {}, message: "m", sha: "7")
+
+    assert_equal 0, fake_http.max_retries
+  ensure
+    store&.close
+    Net::HTTP.define_singleton_method(:start, original_start) if original_start
+  end
+
+  def test_write_does_not_retry_stale_connection_errors
+    starts = 0
+    original_start = Net::HTTP.method(:start)
+    stale_http = Object.new
+    stale_http.define_singleton_method(:active?) { true }
+    stale_http.define_singleton_method(:finish) { nil }
+    stale_http.define_singleton_method(:request) { |_request| raise EOFError, "end of file reached" }
+    Net::HTTP.define_singleton_method(:start) do |*|
+      starts += 1
+      stale_http
+    end
+
+    store = AgentCoord::HttpStore.new(base_url: "https://agent-coord.example", token: "tok")
+    error = assert_raises(AgentCoord::OperationalError) do
+      store.write_json("claims/o/r/1.json", {}, message: "m", sha: "7")
+    end
+
+    assert_includes error.message, "http backend unreachable"
+    assert_equal 1, starts
+  ensure
+    store&.close
+    Net::HTTP.define_singleton_method(:start, original_start) if original_start
+  end
+
   def test_create_sends_if_none_match_and_succeeds_on_created
     with_stub([[201, { "path" => "claims/o/r/1.json", "version" => 1 }]]) do |store, stub|
       store.write_json("claims/o/r/1.json", { "a" => 1 }, message: "m", create: true)
@@ -255,6 +373,31 @@ class HttpBackendSelectionTest < HttpEnvTestCase
     assert_equal 4, stub.requests.length
   ensure
     stub.shutdown
+  end
+
+  def test_status_closes_http_store_after_command
+    closes = 0
+    original_close = AgentCoord::HttpStore.instance_method(:close)
+    AgentCoord::HttpStore.define_method(:close) do
+      closes += 1
+      original_close.bind_call(self)
+    end
+    responses = [
+      [200, { "entries" => [] }],
+      [200, { "entries" => [] }],
+      [200, { "entries" => [] }],
+      [200, { "entries" => [] }]
+    ]
+    stub = HttpStoreStub.new(responses)
+    with_env("AGENT_COORD_API_URL" => stub.base_url, "AGENT_COORD_API_TOKEN" => "tok") do
+      code, = run_cli(["status"], {})
+      assert_equal 0, code
+    end
+
+    assert_equal 1, closes
+  ensure
+    AgentCoord::HttpStore.define_method(:close, original_close) if original_close
+    stub&.shutdown
   end
 
   def test_status_degrades_when_http_backend_does_not_support_events_yet
@@ -422,6 +565,26 @@ class HttpBackendSelectionTest < HttpEnvTestCase
 end
 
 class HttpDoctorTest < HttpEnvTestCase
+  def test_doctor_closes_http_store_when_readable_check_fails
+    closes = 0
+    original_close = AgentCoord::HttpStore.instance_method(:close)
+    AgentCoord::HttpStore.define_method(:close) do
+      closes += 1
+      original_close.bind_call(self)
+    end
+    stub = HttpStoreStub.new([[500, { "error" => "boom" }]])
+    with_env("AGENT_COORD_API_URL" => stub.base_url, "AGENT_COORD_API_TOKEN" => "tok") do
+      assert_raises(AgentCoord::OperationalError) do
+        AgentCoord::Runner.new(["doctor"], stdout: StringIO.new, stderr: StringIO.new).run
+      end
+    end
+
+    assert_equal 1, closes
+  ensure
+    AgentCoord::HttpStore.define_method(:close, original_close) if original_close
+    stub&.shutdown
+  end
+
   def test_doctor_reports_http_backend
     responses = [
       [200, { "entries" => [] }],
