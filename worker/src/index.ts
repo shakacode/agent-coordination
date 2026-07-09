@@ -24,7 +24,7 @@ const MAX_STATE_BYTES = 256 * 1024;
 const MAX_REQUEST_BYTES = MAX_STATE_BYTES + 4096;
 const MAX_STATE_PATH_BYTES = 512;
 const MAX_LIST_LIMIT = 1000;
-const STATE_PATH = /^(claims|heartbeats|batches|events)\/[A-Za-z0-9_.:/-]+\.json$/;
+const STATE_PATH = /^(?:claims\/[A-Za-z0-9_.:-]+\/[A-Za-z0-9_.:-]+\/[A-Za-z0-9_.:-]+\.json|heartbeats\/[A-Za-z0-9_.:-]+\.json|batches\/[A-Za-z0-9_.:-]+\.json|events\/[A-Za-z0-9_.:-]+\/[A-Za-z0-9_.:-]+\.json)$/;
 const STATE_PREFIX = /^(?:claims(?:\/[A-Za-z0-9_.:-]+(?:\/[A-Za-z0-9_.:-]+)?)?|heartbeats|batches|events(?:\/[A-Za-z0-9_.:-]+)?)$/;
 
 function validPath(path: string): boolean {

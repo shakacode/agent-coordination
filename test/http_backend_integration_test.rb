@@ -107,14 +107,11 @@ class HttpBackendIntegrationTest < Minitest::Test
     listed_paths = body.fetch("entries").map { |entry| entry.fetch("path") }
     assert_equal [allowed_path], listed_paths
 
-    doctor_out, doctor_err, doctor_status = Open3.capture3(
-      { "AGENT_COORD_API_TOKEN" => scoped_token },
-      "ruby",
-      CLI,
-      "doctor"
-    )
-    assert doctor_status.success?, doctor_err
-    assert_includes doctor_out, "status: ok"
+    assert_scoped_doctor_ok(scoped_token)
+
+    code, body = http_json("GET", state_path("#{allowed_prefix}/300/extra.json"), token: scoped_token)
+    assert_equal 400, code
+    assert_equal "invalid_path", body.fetch("error")
 
     code, body = http_json("GET", state_path(denied_path), token: scoped_token)
     assert_equal 403, code
@@ -132,6 +129,17 @@ class HttpBackendIntegrationTest < Minitest::Test
   end
 
   private
+
+  def assert_scoped_doctor_ok(scoped_token)
+    doctor_out, doctor_err, doctor_status = Open3.capture3(
+      { "AGENT_COORD_API_TOKEN" => scoped_token },
+      "ruby",
+      CLI,
+      "doctor"
+    )
+    assert doctor_status.success?, doctor_err
+    assert_includes doctor_out, "status: ok"
+  end
 
   def state_path(path)
     "/v1/state/#{URI.encode_www_form_component(path)}"
