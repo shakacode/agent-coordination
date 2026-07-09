@@ -247,6 +247,32 @@ class HttpStoreReadTest < HttpStoreTestCase
 end
 
 class HttpStoreWriteTest < HttpStoreTestCase
+  def test_http_session_disables_net_http_automatic_write_retries
+    response = Struct.new(:code, :body)
+    original_start = Net::HTTP.method(:start)
+    fake_http = Class.new do
+      attr_accessor :max_retries
+
+      def initialize(response)
+        @response = response
+        @max_retries = 1
+      end
+
+      def active? = true
+      def finish = nil
+      def request(_request) = @response
+    end.new(response.new("200", "{}"))
+    Net::HTTP.define_singleton_method(:start) { |*| fake_http }
+
+    store = AgentCoord::HttpStore.new(base_url: "https://agent-coord.example", token: "tok")
+    store.write_json("claims/o/r/1.json", {}, message: "m", sha: "7")
+
+    assert_equal 0, fake_http.max_retries
+  ensure
+    store&.close
+    Net::HTTP.define_singleton_method(:start, original_start) if original_start
+  end
+
   def test_write_does_not_retry_stale_connection_errors
     starts = 0
     original_start = Net::HTTP.method(:start)

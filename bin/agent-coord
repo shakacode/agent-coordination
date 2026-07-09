@@ -2046,12 +2046,13 @@ module AgentCoord
         open_timeout: OPEN_TIMEOUT,
         read_timeout: READ_TIMEOUT
       )
+      @http.max_retries = 0 if @http.respond_to?(:max_retries=)
       @http
     end
 
     def close_http_session
       @http&.finish if @http&.active?
-    rescue IOError
+    rescue StandardError
       nil
     ensure
       @http = nil
