@@ -454,8 +454,12 @@ The current HTTP backend stores events in the same JSON state API as claims,
 heartbeats, and batches, so `events/<batch-id>` is intended for low-volume phase
 transitions and audit breadcrumbs, not high-frequency telemetry. Keep event
 volume bounded per batch until the relational `/v1/events` endpoint in
-[backend-design.md](docs/backend-design.md) adds pagination and retention
-controls.
+[backend-design.md](docs/backend-design.md) replaces the interim JSON store.
+The interim Worker state listing is resumable: `GET /v1/state?prefix=...` keeps
+the historical full-snapshot response, while callers may pass `limit` and then
+follow `next_cursor` with the same prefix to read additional pages. Prune or
+export released claims, expired heartbeats, and old batch/event records before
+prefix snapshots become expensive.
 
 ## Batch Schema
 

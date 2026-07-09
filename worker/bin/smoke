@@ -8,6 +8,7 @@ P="claims/shakacode/demo/smoke-$(date +%s)-$$.json"
 EVENT_BATCH="smoke_events_$(date +%s)_$$"
 OTHER_EVENT_BATCH="${EVENT_BATCH/_/X}"
 E="events/$EVENT_BATCH/$(date +%Y%m%dT%H%M%SZ)-smoke.json"
+E2="events/$EVENT_BATCH/$(date +%Y%m%dT%H%M%SZ)-smoke-2.json"
 OTHER_E="events/$OTHER_EVENT_BATCH/$(date +%Y%m%dT%H%M%SZ)-smoke.json"
 LONG_PATH="claims/$(python3 -c 'print("x"*600)').json"
 fail() { echo "SMOKE FAIL: $1"; exit 1; }
@@ -27,13 +28,21 @@ expect badmatch "$(curl -s -o /dev/null -w %{http_code} -X PUT "$BASE/v1/state/$
 expect hugever  "$(curl -s -o /dev/null -w %{http_code} -X PUT "$BASE/v1/state/$P" -H "$AUTH" -H 'If-Match: 999999999999999999999999999999' -d '{"data":{"agent_id":"a4"}}')" 400
 expect scopedclaims "$(curl -s -o /dev/null -w %{http_code} "$BASE/v1/state?prefix=claims/shakacode" -H "$AUTH")" 400
 expect nestedevents "$(curl -s -o /dev/null -w %{http_code} "$BASE/v1/state?prefix=events/a/b" -H "$AUTH")" 400
+expect badlimit "$(curl -s -o /dev/null -w %{http_code} "$BASE/v1/state?prefix=claims&limit=0" -H "$AUTH")" 400
+expect badcursor "$(curl -s -G -o /dev/null -w %{http_code} "$BASE/v1/state" -H "$AUTH" --data-urlencode prefix=claims --data-urlencode cursor=heartbeats/a1.json)" 400
 expect badpath  "$(curl -s -o /dev/null -w %{http_code} "$BASE/v1/state/etc/passwd" -H "$AUTH")" 400
 expect badenc   "$(curl -s -o /dev/null -w %{http_code} "$BASE/v1/state/claims/%E0%A4%A.json" -H "$AUTH")" 400
 expect longpath "$(curl -s -o /dev/null -w %{http_code} "$BASE/v1/state/$LONG_PATH" -H "$AUTH")" 400
 expect listpost "$(curl -s -o /dev/null -w %{http_code} -X POST "$BASE/v1/state" -H "$AUTH" -d '{}')" 405
 expect list     "$(curl -s "$BASE/v1/state?prefix=claims" -H "$AUTH" | python3 -c 'import json,sys; print(len(json.load(sys.stdin)["entries"]) >= 1)')" True
 expect eventcreate "$(curl -s -o /dev/null -w %{http_code} -X PUT "$BASE/v1/state/$E" -H "$AUTH" -H 'If-None-Match: *' -d '{"data":{"schema_version":1,"batch_id":"smoke","type":"phase"}}')" 201
+expect eventcreate2 "$(curl -s -o /dev/null -w %{http_code} -X PUT "$BASE/v1/state/$E2" -H "$AUTH" -H 'If-None-Match: *' -d '{"data":{"schema_version":1,"batch_id":"smoke","type":"phase"}}')" 201
 expect otherevent "$(curl -s -o /dev/null -w %{http_code} -X PUT "$BASE/v1/state/$OTHER_E" -H "$AUTH" -H 'If-None-Match: *' -d '{"data":{"schema_version":1,"batch_id":"other","type":"phase"}}')" 201
-expect eventlist "$(curl -s "$BASE/v1/state?prefix=events/$EVENT_BATCH" -H "$AUTH" | python3 -c 'import json,sys; print(len(json.load(sys.stdin)["entries"]) == 1)')" True
+expect eventlist "$(curl -s "$BASE/v1/state?prefix=events/$EVENT_BATCH" -H "$AUTH" | python3 -c 'import json,sys; print(len(json.load(sys.stdin)["entries"]) == 2)')" True
+PAGE1="$(curl -s -G "$BASE/v1/state" -H "$AUTH" --data-urlencode "prefix=events/$EVENT_BATCH" --data-urlencode limit=1)"
+expect page1 "$(python3 -c 'import json,sys; body=json.loads(sys.argv[1]); print(len(body["entries"]) == 1 and isinstance(body.get("next_cursor"), str))' "$PAGE1")" True
+CURSOR="$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["next_cursor"])' "$PAGE1")"
+PAGE2="$(curl -s -G "$BASE/v1/state" -H "$AUTH" --data-urlencode "prefix=events/$EVENT_BATCH" --data-urlencode limit=1 --data-urlencode "cursor=$CURSOR")"
+expect page2 "$(python3 -c 'import json,sys; body=json.loads(sys.argv[1]); print(len(body["entries"]) == 1 and "next_cursor" not in body)' "$PAGE2")" True
 expect large    "$(python3 -c 'import json; print(json.dumps({"data":"x"*(256*1024+1)}))' | curl -s -o /dev/null -w %{http_code} -X PUT "$BASE/v1/state/$P" -H "$AUTH" -H 'If-Match: 2' --data-binary @-)" 413
 echo SMOKE_OK
