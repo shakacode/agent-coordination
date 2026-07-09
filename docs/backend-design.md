@@ -273,6 +273,8 @@ Machine tokens carry read/write path scopes:
   descendant paths. Claims-scoped tokens can pass the default `agent-coord
   doctor` read probe without leaking unrelated state; tokens scoped only to
   other prefixes should run `agent-coord doctor --doctor-prefix <read-prefix>`.
+  Directory prefixes are checked with the list endpoint; exact record-path
+  prefixes such as `heartbeats/m5-codex.json` are checked with a record read.
 - Claim takeover checks may need to read the current holder's heartbeat. Use
   exact heartbeat write scopes only when the machine uses stable agent ids; use
   broader heartbeat read scopes where takeover/liveness decisions need to see

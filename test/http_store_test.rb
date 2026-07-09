@@ -204,6 +204,23 @@ class HttpStoreReadTest < HttpStoreTestCase
     end
   end
 
+  def test_verify_readable_uses_record_endpoint_for_exact_state_path
+    body = { "path" => "heartbeats/m5-codex.json", "data" => { "agent_id" => "m5-codex" }, "version" => 2 }
+    with_stub([[200, body]]) do |store, stub|
+      store.verify_readable!("heartbeats/m5-codex.json")
+
+      assert_equal "/v1/state/heartbeats%2Fm5-codex.json", stub.requests.first[:path]
+    end
+  end
+
+  def test_verify_readable_keeps_json_named_claim_repo_as_list_prefix
+    with_stub([[200, { "entries" => [] }]]) do |store, stub|
+      store.verify_readable!("claims/shakacode/api.json")
+
+      assert_equal "/v1/state?prefix=claims%2Fshakacode%2Fapi.json", stub.requests.first[:path]
+    end
+  end
+
   def test_list_json_follows_next_cursor_until_snapshot_complete
     responses = [
       [
@@ -657,6 +674,27 @@ class HttpDoctorTest < HttpEnvTestCase
       assert_equal 0, code
       assert_includes stdout.string, "doctor_prefix: events/batch"
       assert_equal "/v1/state?prefix=events%2Fbatch", stub.requests.first[:path]
+    end
+  ensure
+    stub.shutdown
+  end
+
+  def test_doctor_uses_record_get_for_exact_http_readable_path
+    responses = [
+      [200, { "path" => "heartbeats/m5-codex.json", "data" => { "agent_id" => "m5-codex" }, "version" => 1 }],
+      [200, { "status" => "ok" }]
+    ]
+    stub = HttpStoreStub.new(responses)
+    with_env("AGENT_COORD_API_URL" => stub.base_url, "AGENT_COORD_API_TOKEN" => "tok") do
+      stdout = StringIO.new
+      code = AgentCoord::Runner.new(
+        ["doctor", "--doctor-prefix", "heartbeats/m5-codex.json"],
+        stdout: stdout,
+        stderr: StringIO.new
+      ).run
+      assert_equal 0, code
+      assert_includes stdout.string, "doctor_prefix: heartbeats/m5-codex.json"
+      assert_equal "/v1/state/heartbeats%2Fm5-codex.json", stub.requests.first[:path]
     end
   ensure
     stub.shutdown

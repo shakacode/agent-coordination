@@ -104,9 +104,12 @@ heartbeat write scope only when the machine's agent id is stable.
 When listing a parent prefix above a scoped token's read scope, the Worker
 returns only covered descendants. Claims-scoped tokens can pass the default
 `agent-coord doctor` read probe; tokens scoped only to other prefixes should use
-`agent-coord doctor --doctor-prefix <read-prefix>`. When customizing token
-scopes, pass both read and write prefixes intentionally; the provisioning script
-warns if only one dimension is customized and the other remains all-state.
+`agent-coord doctor --doctor-prefix <read-prefix>`. Directory prefixes are
+checked with the list endpoint; exact record-path prefixes such as
+`heartbeats/m5-codex.json` are checked with a record read. When customizing
+token scopes, pass both read and write prefixes intentionally; the provisioning
+script warns if only one dimension is customized and the other remains
+all-state.
 
 For local Wrangler/D1 development, pass `--local`:
 

@@ -25,6 +25,12 @@ module AgentCoord
   STATUS_STATE_ROOT_ENV = "AGENT_COORD_STATUS_STATE_ROOT"
   JSON_PREFIXES = %w[claims heartbeats batches].freeze
   STATE_PREFIXES = (JSON_PREFIXES + %w[events]).freeze
+  STATE_PATH_PATTERN = %r{\A(?:
+    claims/[A-Za-z0-9_.:-]+/[A-Za-z0-9_.:-]+/[A-Za-z0-9_.:-]+\.json |
+    heartbeats/[A-Za-z0-9_.:-]+\.json |
+    batches/[A-Za-z0-9_.:-]+\.json |
+    events/[A-Za-z0-9_.:-]+/[A-Za-z0-9_.:-]+\.json
+  )\z}x
   DEPENDENCY_DONE_STATUSES = %w[complete completed done merged ready].freeze
   STATUS_BATCH_METADATA_FIELDS = %w[
     repo objective instructions operator dashboard_url status updated_at registered_at
@@ -1970,8 +1976,12 @@ module AgentCoord
 
     def verify_readable!(prefix = JSON_PREFIXES.first)
       AgentCoord.safe_path!(prefix)
-      response = request(Net::HTTP::Get, "/v1/state?prefix=#{escape_component(prefix)}")
-      raise OperationalError, http_error("verify readable", response) unless response.code == "200"
+      if AgentCoord.state_record_path?(prefix)
+        read_json(prefix)
+      else
+        response = request(Net::HTTP::Get, "/v1/state?prefix=#{escape_component(prefix)}")
+        raise OperationalError, http_error("verify readable", response) unless response.code == "200"
+      end
     end
 
     def verify_layout!(_prefixes)
@@ -2142,6 +2152,10 @@ module AgentCoord
     return unless path.to_s.empty? || path.include?("..") || path.start_with?("/") || path.split("/").any?(&:empty?)
 
     raise PathValidationError, "unsafe state path: #{path}"
+  end
+
+  def self.state_record_path?(path)
+    path.to_s.match?(STATE_PATH_PATTERN)
   end
 
   def self.validate_repo!(repo, field)
