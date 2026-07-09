@@ -45,6 +45,10 @@ function validPrefix(prefix: string): boolean {
     && !prefix.includes("//");
 }
 
+function escapeLikePrefix(prefix: string): string {
+  return prefix.replace(/[\\%_]/g, (value) => `\\${value}`);
+}
+
 async function readJsonBody(request: Request): Promise<{ body: unknown } | { response: Response }> {
   if (!request.body) return { response: json(400, { error: "invalid_json" }) };
 
@@ -137,8 +141,8 @@ async function listState(env: Env, prefix: string): Promise<Response> {
     return json(400, { error: "invalid_prefix" });
   }
   const rows = await env.DB.prepare(
-    "SELECT path, data, version FROM state WHERE path LIKE ? ORDER BY path",
-  ).bind(`${prefix}/%`).all<{ path: string; data: string; version: number }>();
+    "SELECT path, data, version FROM state WHERE path LIKE ? ESCAPE '\\' ORDER BY path",
+  ).bind(`${escapeLikePrefix(prefix)}/%`).all<{ path: string; data: string; version: number }>();
   const entries = (rows.results ?? []).map((r) => ({
     path: r.path,
     data: JSON.parse(r.data),
