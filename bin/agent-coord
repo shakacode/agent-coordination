@@ -413,6 +413,8 @@ module AgentCoord
       @stdout.puts "claimed #{options[:repo]}##{options[:target]} by #{options[:agent_id]} " \
                    "until #{timestamp(expires_at)}"
       0
+    ensure
+      close_store(store)
     end
 
     def release(options)
@@ -445,6 +447,8 @@ module AgentCoord
       record_handoff_event(store, payload, now) if handoff_release?(options)
       @stdout.puts "released #{options[:repo]}##{options[:target]} by #{options[:agent_id]}"
       0
+    ensure
+      close_store(store)
     end
 
     def render_version(options)
@@ -514,6 +518,8 @@ module AgentCoord
         @stdout.puts "status: ok"
       end
       0
+    ensure
+      close_store(store)
     end
 
     def doctor_backend_kind(options)
@@ -605,6 +611,8 @@ module AgentCoord
       end
       @stdout.puts "heartbeat #{options[:agent_id]} #{timestamp(now)}"
       0
+    ensure
+      close_store(store)
     end
 
     def preserved_payload(existing, fields)
@@ -731,6 +739,8 @@ module AgentCoord
       0
     rescue Conflict => e
       raise OperationalError, "batch registration write contention for #{batch_id}; #{e.message}"
+    ensure
+      close_store(store)
     end
 
     def record_event(options)
@@ -740,6 +750,8 @@ module AgentCoord
       store = build_store(options)
       now = now_utc
       write_event_record(store, options, now, output: true)
+    ensure
+      close_store(store)
     end
 
     def write_event_record(store, options, now, output:)
@@ -844,6 +856,8 @@ module AgentCoord
       0
     rescue JSON::ParserError => e
       raise OperationalError, "state unreadable: #{e.message}"
+    ensure
+      close_store(store)
     end
 
     def status_scope(options)
@@ -1374,6 +1388,10 @@ module AgentCoord
       GitHubStore.new(backend: options.fetch(:backend), ref: options.fetch(:ref))
     end
 
+    def close_store(store)
+      store.close if store.respond_to?(:close)
+    end
+
     def missing_backend_message
       "no coordination backend configured; set AGENT_COORD_API_URL and AGENT_COORD_API_TOKEN " \
         "for the HTTP backend, set AGENT_COORD_STATE_ROOT for local state, or pass --backend " \
@@ -1869,13 +1887,13 @@ module AgentCoord
     READ_TIMEOUT = 10
     LOOPBACK_HOSTS = %w[localhost 127.0.0.1 ::1].freeze
     PERCENT_ENCODE_UNSAFE = /[^A-Za-z0-9._~-]/
+    RETRYABLE_REUSED_CONNECTION_ERRORS = [EOFError, Errno::ECONNRESET, Errno::EPIPE].freeze
 
     def initialize(base_url:, token:)
       uri = parse_base_url(base_url)
       @base = uri.to_s.chomp("/")
       @token = token
       @http = nil
-      @http_key = nil
     end
 
     def read_json(path)
@@ -1986,6 +2004,23 @@ module AgentCoord
 
     def request(klass, request_path, body: nil, headers: {})
       uri = URI.parse("#{@base}#{request_path}")
+      attempts = 0
+
+      begin
+        http_session(uri).request(build_http_request(klass, uri, body, headers))
+      rescue *RETRYABLE_REUSED_CONNECTION_ERRORS => e
+        close_http_session
+        attempts += 1
+        retry if attempts == 1 && klass == Net::HTTP::Get
+
+        raise e
+      end
+    rescue URI::InvalidURIError, SocketError, SystemCallError, Timeout::Error, IOError, OpenSSL::SSL::SSLError => e
+      close_http_session
+      raise OperationalError, "http backend unreachable: #{e.message}"
+    end
+
+    def build_http_request(klass, uri, body, headers)
       http_request = klass.new(uri)
       http_request["Authorization"] = "Bearer #{@token}"
       headers.each { |name, value| http_request[name] = value }
@@ -1993,15 +2028,11 @@ module AgentCoord
         http_request["Content-Type"] = "application/json"
         http_request.body = JSON.generate(body)
       end
-      http_session(uri).request(http_request)
-    rescue URI::InvalidURIError, SocketError, SystemCallError, Timeout::Error, IOError, OpenSSL::SSL::SSLError => e
-      close_http_session
-      raise OperationalError, "http backend unreachable: #{e.message}"
+      http_request
     end
 
     def http_session(uri)
-      key = [uri.scheme, uri.host, uri.port]
-      return @http if @http_key == key && @http&.active?
+      return @http if @http&.active?
 
       close_http_session
       @http = Net::HTTP.start(
@@ -2011,7 +2042,6 @@ module AgentCoord
         open_timeout: OPEN_TIMEOUT,
         read_timeout: READ_TIMEOUT
       )
-      @http_key = key
       @http
     end
 
@@ -2021,7 +2051,6 @@ module AgentCoord
       nil
     ensure
       @http = nil
-      @http_key = nil
     end
 
     def http_error(action, response)
