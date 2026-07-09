@@ -200,7 +200,22 @@ class HttpStoreReadTest < HttpStoreTestCase
       assert_equal 1, entries.length
       assert_equal "heartbeats/a1.json", entries.first.path
       assert_equal "2", entries.first.sha
+      refute store.filtered_list?("heartbeats")
       assert_equal "/v1/state?prefix=heartbeats", stub.requests.first[:path]
+    end
+  end
+
+  def test_list_json_tracks_filtered_responses_per_prefix
+    responses = [
+      [200, { "entries" => [], "filtered" => true }],
+      [200, { "entries" => [] }]
+    ]
+    with_stub(responses) do |store, _|
+      store.list_json("claims")
+      assert store.filtered_list?("claims")
+
+      store.list_json("claims")
+      refute store.filtered_list?("claims")
     end
   end
 
@@ -476,7 +491,7 @@ class HttpBackendSelectionTest < HttpEnvTestCase
 
   def test_status_degrades_for_scoped_http_forbidden_sections
     responses = [
-      [200, { "entries" => [] }],
+      [200, { "entries" => [], "filtered" => true }],
       [403, { "error" => "forbidden" }],
       [403, { "error" => "forbidden" }],
       [403, { "error" => "forbidden" }]
@@ -487,6 +502,7 @@ class HttpBackendSelectionTest < HttpEnvTestCase
       payload = JSON.parse(out)
 
       assert_equal 0, code
+      assert_includes payload.fetch("degraded"), "claims filtered by scoped token"
       assert_includes payload.fetch("degraded"), "heartbeats not readable by scoped token"
       assert_includes payload.fetch("degraded"), "batches not readable by scoped token"
       assert_includes payload.fetch("degraded"), "events not readable by scoped token"
@@ -726,7 +742,7 @@ class HttpDoctorTest < HttpEnvTestCase
     responses = [
       [200, { "entries" => [] }],
       [200, { "status" => "ok" }],
-      [200, { "entries" => [] }],
+      [200, { "entries" => [], "filtered" => true }],
       [403, { "error" => "forbidden" }],
       [403, { "error" => "forbidden" }],
       [403, { "error" => "forbidden" }]
@@ -734,10 +750,16 @@ class HttpDoctorTest < HttpEnvTestCase
     stub = HttpStoreStub.new(responses)
     with_env("AGENT_COORD_API_URL" => stub.base_url, "AGENT_COORD_API_TOKEN" => "tok") do
       stdout = StringIO.new
-      code = AgentCoord::Runner.new(["doctor", "--deep"], stdout: stdout, stderr: StringIO.new).run
+      code = AgentCoord::Runner.new(["doctor", "--deep", "--json"], stdout: stdout, stderr: StringIO.new).run
+      payload = JSON.parse(stdout.string)
 
       assert_equal 0, code
-      assert_includes stdout.string, "status: ok"
+      assert_equal "ok", payload.fetch("status")
+      assert_includes payload.fetch("degraded"), "claims filtered by scoped token"
+      assert_includes payload.fetch("degraded"), "heartbeats not readable by scoped token"
+      assert_includes payload.fetch("degraded"), "batches not readable by scoped token"
+      assert_includes payload.fetch("degraded"), "events not readable by scoped token"
+      assert_equal "claims filtered by scoped token", payload.fetch("section_notes").fetch("claims")
       expected_paths = [
         "/v1/state?prefix=claims",
         "/v1/health",

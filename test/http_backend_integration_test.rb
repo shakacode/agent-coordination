@@ -114,7 +114,7 @@ class HttpBackendIntegrationTest < Minitest::Test
 
     code, body = http_json("GET", "/v1/state?prefix=claims", token: scoped_token)
     assert_equal 200, code
-    assert_listed_paths body, allowed_path, secondary_path
+    assert_filtered_listed_paths body, allowed_path, secondary_path
 
     assert_scoped_doctor_ok(scoped_token)
 
@@ -155,6 +155,11 @@ class HttpBackendIntegrationTest < Minitest::Test
   def assert_listed_paths(body, *paths)
     listed_paths = body.fetch("entries").map { |entry| entry.fetch("path") }
     assert_equal paths, listed_paths
+  end
+
+  def assert_filtered_listed_paths(body, *paths)
+    assert_equal true, body.fetch("filtered")
+    assert_listed_paths body, *paths
   end
 
   def assert_scoped_doctor_ok(scoped_token)

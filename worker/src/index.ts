@@ -284,7 +284,11 @@ async function listState(
     version: r.version,
     ...(r.updated_by === null ? {} : { updated_by: r.updated_by }),
   }));
-  return json(200, nextCursor ? { entries, next_cursor: nextCursor } : { entries });
+  return json(200, {
+    entries,
+    ...(scopeFilters.length > 0 ? { filtered: true } : {}),
+    ...(nextCursor ? { next_cursor: nextCursor } : {}),
+  });
 }
 
 export default {
