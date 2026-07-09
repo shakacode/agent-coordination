@@ -77,6 +77,9 @@ export WRANGLER_SEND_ERROR_REPORTS=false
 mkdir -p "$XDG_CONFIG_HOME" "$XDG_CACHE_HOME" "$WRANGLER_LOG_PATH"
 TOKEN=$(ruby -rsecurerandom -e 'print SecureRandom.hex(24)')
 HASH=$(ruby -rdigest -e 'print Digest::SHA256.hexdigest(ARGV.fetch(0))' "$TOKEN")
+SCOPED_TOKEN=$(ruby -rsecurerandom -e 'print SecureRandom.hex(24)')
+SCOPED_HASH=$(ruby -rdigest -e 'print Digest::SHA256.hexdigest(ARGV.fetch(0))' "$SCOPED_TOKEN")
+SCOPED_CLAIM_PREFIX="claims/shakacode/scoped-integration"
 
 health_ready() {
   ruby -rnet/http -ruri -e '
@@ -92,6 +95,9 @@ health_ready() {
 (cd worker && npx wrangler d1 execute agent-coord --local --command \
   "INSERT OR REPLACE INTO machines (machine, token_hash, created_at) VALUES ('integration', '${HASH}', '2026-07-04T00:00:00Z')" \
   --persist-to "$WRANGLER_STATE_DIR" >/dev/null)
+(cd worker && npx wrangler d1 execute agent-coord --local --command \
+  "INSERT OR REPLACE INTO machines (machine, token_hash, read_prefixes, write_prefixes, created_at) VALUES ('scoped', '${SCOPED_HASH}', '[\"${SCOPED_CLAIM_PREFIX}\"]', '[\"${SCOPED_CLAIM_PREFIX}\"]', '2026-07-04T00:00:00Z')" \
+  --persist-to "$WRANGLER_STATE_DIR" >/dev/null)
 (cd worker && npx wrangler dev --local --persist-to "$WRANGLER_STATE_DIR" --port 8787 >"$WRANGLER_OUTPUT_LOG" 2>&1) &
 WRANGLER_PID=$!
 set +m 2>/dev/null || true
@@ -102,6 +108,9 @@ for _ in $(seq 1 60); do
 done
 process_alive "$WRANGLER_PID" || { echo "wrangler dev exited before becoming healthy"; cat "$WRANGLER_OUTPUT_LOG"; exit 1; }
 health_ready || { echo "wrangler dev never became healthy"; cat "$WRANGLER_OUTPUT_LOG"; exit 1; }
-AGENT_COORD_API_URL=http://127.0.0.1:8787 AGENT_COORD_API_TOKEN="$TOKEN" \
+AGENT_COORD_API_URL=http://127.0.0.1:8787 \
+  AGENT_COORD_API_TOKEN="$TOKEN" \
+  SCOPED_AGENT_COORD_API_TOKEN="$SCOPED_TOKEN" \
+  SCOPED_CLAIM_PREFIX="$SCOPED_CLAIM_PREFIX" \
   bundle exec ruby test/http_backend_integration_test.rb
 echo INTEGRATION_OK

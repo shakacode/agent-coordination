@@ -82,6 +82,26 @@ terminal:
 worker/bin/provision-token <machine-name>
 ```
 
+Tokens default to all-state access for migration compatibility. For broader
+traffic, provision scoped tokens with repeatable read/write path scopes:
+
+```bash
+worker/bin/provision-token m5 \
+  --read-prefix claims/shakacode/react_on_rails \
+  --read-prefix heartbeats \
+  --write-prefix claims/shakacode/react_on_rails \
+  --write-prefix heartbeats/m5-codex.json
+```
+
+An empty scope (`""`, the default) grants all state. A directory scope such as
+`claims/shakacode/react_on_rails` covers descendant paths. A `.json` scope such
+as `heartbeats/m5-codex.json` covers exactly that flat record. The Worker
+enforces read scopes for `GET /v1/state/<path>` and `GET /v1/state?prefix=...`,
+write scopes for `PUT /v1/state/<path>`, and records the authenticated machine
+as `updated_by` on each state write. Claim takeover checks may need read access
+to the current holder's heartbeat; use an exact heartbeat write scope only when
+the machine's agent id is stable.
+
 For local Wrangler/D1 development, pass `--local`:
 
 ```bash

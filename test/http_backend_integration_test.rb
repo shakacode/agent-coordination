@@ -2,7 +2,9 @@
 
 require "json"
 require "minitest/autorun"
+require "net/http"
 require "open3"
+require "uri"
 
 CLI = File.expand_path("../bin/agent-coord", __dir__)
 REPO = "shakacode/integration-#{Process.pid}".freeze
@@ -73,5 +75,75 @@ class HttpBackendIntegrationTest < Minitest::Test
     assert_equal 0, code, err
     events = JSON.parse(out).fetch("events")
     assert_equal([batch], events.map { |event| event.fetch("batch_id") })
+  end
+
+  def test_scoped_machine_token_enforces_path_prefix_and_records_writer
+    scoped_token = ENV.fetch("SCOPED_AGENT_COORD_API_TOKEN")
+    allowed_prefix = ENV.fetch("SCOPED_CLAIM_PREFIX")
+    allowed_path = "#{allowed_prefix}/300.json"
+    denied_path = "claims/shakacode/outside/300.json"
+
+    code, body = http_json(
+      "PUT",
+      state_path(allowed_path),
+      token: scoped_token,
+      headers: { "If-None-Match" => "*" },
+      body: { "data" => { "schema_version" => 1, "agent_id" => "scoped-worker" } }
+    )
+    assert_equal 201, code
+    assert_equal "scoped", body.fetch("updated_by")
+
+    code, body = http_json("GET", state_path(allowed_path), token: scoped_token)
+    assert_equal 200, code
+    assert_equal "scoped", body.fetch("updated_by")
+
+    code, body = http_json("GET", "/v1/state?#{URI.encode_www_form('prefix' => allowed_prefix)}", token: scoped_token)
+    assert_equal 200, code
+    entry = body.fetch("entries").find { |candidate| candidate.fetch("path") == allowed_path }
+    assert_equal "scoped", entry.fetch("updated_by")
+
+    code, body = http_json("GET", "/v1/state?prefix=claims", token: scoped_token)
+    assert_equal 403, code
+    assert_equal "forbidden", body.fetch("error")
+
+    code, body = http_json("GET", state_path(denied_path), token: scoped_token)
+    assert_equal 403, code
+    assert_equal "forbidden", body.fetch("error")
+
+    code, body = http_json(
+      "PUT",
+      state_path(denied_path),
+      token: scoped_token,
+      headers: { "If-None-Match" => "*" },
+      body: { "data" => { "schema_version" => 1, "agent_id" => "scoped-worker" } }
+    )
+    assert_equal 403, code
+    assert_equal "forbidden", body.fetch("error")
+  end
+
+  private
+
+  def state_path(path)
+    "/v1/state/#{URI.encode_www_form_component(path)}"
+  end
+
+  def http_json(method, path, token:, headers: {}, body: nil)
+    uri = URI("#{ENV.fetch('AGENT_COORD_API_URL')}#{path}")
+    request_class = {
+      "GET" => Net::HTTP::Get,
+      "PUT" => Net::HTTP::Put
+    }.fetch(method)
+    request = request_class.new(uri)
+    request["Authorization"] = "Bearer #{token}"
+    headers.each { |key, value| request[key] = value }
+    if body
+      request["Content-Type"] = "application/json"
+      request.body = JSON.generate(body)
+    end
+
+    response = Net::HTTP.start(uri.host, uri.port, open_timeout: 5, read_timeout: 10) do |http|
+      http.request(request)
+    end
+    [response.code.to_i, JSON.parse(response.body)]
   end
 end
