@@ -204,6 +204,45 @@ class HttpStoreReadTest < HttpStoreTestCase
     end
   end
 
+  def test_list_json_follows_next_cursor_until_snapshot_complete
+    responses = [
+      [
+        200,
+        {
+          "entries" => [
+            { "path" => "heartbeats/a1.json", "data" => { "agent_id" => "a1" }, "version" => 2 }
+          ],
+          "next_cursor" => "heartbeats/a1.json"
+        }
+      ],
+      [
+        200,
+        {
+          "entries" => [
+            { "path" => "heartbeats/a2.json", "data" => { "agent_id" => "a2" }, "version" => 3 }
+          ]
+        }
+      ]
+    ]
+
+    with_stub(responses) do |store, stub|
+      entries = store.list_json("heartbeats")
+      assert_equal ["heartbeats/a1.json", "heartbeats/a2.json"], entries.map(&:path)
+      request_paths = stub.requests.map { |request| request[:path] }
+      assert_equal [
+        "/v1/state?prefix=heartbeats",
+        "/v1/state?prefix=heartbeats&cursor=heartbeats%2Fa1.json"
+      ], request_paths
+    end
+  end
+
+  def test_list_json_rejects_malformed_next_cursor
+    with_stub([[200, { "entries" => [], "next_cursor" => [] }]]) do |store, _|
+      error = assert_raises(AgentCoord::OperationalError) { store.list_json("heartbeats") }
+      assert_includes error.message, "next_cursor is not a string"
+    end
+  end
+
   def test_list_json_raises_operational_when_entries_is_not_array
     with_stub([[200, { "entries" => "oops" }]]) do |store, _|
       error = assert_raises(AgentCoord::OperationalError) { store.list_json("heartbeats") }

@@ -1918,10 +1918,38 @@ module AgentCoord
 
     def list_json(prefix)
       AgentCoord.safe_path!(prefix)
-      response = request(Net::HTTP::Get, "/v1/state?prefix=#{escape_component(prefix)}")
-      raise OperationalError, http_error("list #{prefix}", response) unless response.code == "200"
+      entries = []
+      cursor = nil
+      seen_cursors = {}
 
-      entries = fetch_field(parsed_json_object(response, "list #{prefix}"), "entries", "list #{prefix}")
+      loop do
+        response = request(Net::HTTP::Get, state_list_path(prefix, cursor))
+        raise OperationalError, http_error("list #{prefix}", response) unless response.code == "200"
+
+        body = parsed_json_object(response, "list #{prefix}")
+        entries.concat(parse_list_entries(body, prefix))
+        cursor = next_list_cursor(body, prefix)
+        break unless cursor
+
+        if seen_cursors[cursor]
+          message = "http backend list #{prefix} returned malformed response: repeated next_cursor"
+          raise OperationalError, message
+        end
+
+        seen_cursors[cursor] = true
+      end
+
+      entries
+    end
+
+    def state_list_path(prefix, cursor)
+      query = { "prefix" => prefix }
+      query["cursor"] = cursor if cursor
+      "/v1/state?#{URI.encode_www_form(query)}"
+    end
+
+    def parse_list_entries(body, prefix)
+      entries = fetch_field(body, "entries", "list #{prefix}")
       unless entries.is_a?(Array)
         raise OperationalError, "http backend list #{prefix} returned malformed response: entries is not an array"
       end
@@ -1935,6 +1963,18 @@ module AgentCoord
                        data: fetch_field(entry, "data", "list #{prefix}"),
                        sha: fetch_field(entry, "version", "list #{prefix}").to_s)
       end
+    end
+
+    def next_list_cursor(body, prefix)
+      return nil unless body.key?("next_cursor") && !body["next_cursor"].nil?
+
+      cursor = body["next_cursor"]
+      unless cursor.is_a?(String)
+        raise OperationalError, "http backend list #{prefix} returned malformed response: next_cursor is not a string"
+      end
+      return nil if cursor.empty?
+
+      cursor
     end
 
     # message is accepted for interface parity; the HTTP backend has no commit messages.

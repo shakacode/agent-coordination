@@ -252,6 +252,31 @@ All endpoints require `Authorization: Bearer <machine token>`; the Worker derive
 | `GET /v1/health` | Doctor target. |
 | `GET /dashboard` | Read-only view, behind Cloudflare Access (not bearer tokens). |
 
+### Interim JSON state listing
+
+The current Phase 1 Worker also exposes the lower-level JSON store used by
+`HttpStore`: `GET /v1/state/<path>`, `PUT /v1/state/<path>`, and
+`GET /v1/state?prefix=<prefix>`.
+
+Prefix listings are resumable without breaking existing clients:
+
+- A request without `limit` returns the same full snapshot shape as before:
+  `{"entries":[...]}`.
+- A request may pass `limit=<1..1000>` and receive at most that many entries.
+- When more rows remain, the response includes `next_cursor`, which is the last
+  returned state path.
+- The next page passes `cursor=<next_cursor>` with the same prefix. The Worker
+  resumes with paths lexicographically greater than the cursor.
+- `cursor` must be a valid state path under the requested prefix.
+
+`HttpStore` follows `next_cursor` when a Worker returns one, so server-side
+listing limits can be introduced later without losing store parity. Until
+relational claim/status/event endpoints replace the JSON store, pruning remains
+the operational pressure valve: released claims, expired heartbeats, and old
+batch/event records should be retained only while they are useful for active
+coordination or near-term audit, then exported or pruned before prefix snapshots
+become expensive.
+
 ## Concurrency semantics
 
 D1 does not support interactive transactions; it does guarantee single-statement

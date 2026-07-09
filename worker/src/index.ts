@@ -28,6 +28,7 @@ async function authenticate(request: Request, env: Env): Promise<string | null> 
 const MAX_STATE_BYTES = 256 * 1024;
 const MAX_REQUEST_BYTES = MAX_STATE_BYTES + 4096;
 const MAX_STATE_PATH_BYTES = 512;
+const MAX_LIST_LIMIT = 1000;
 const STATE_PATH = /^(claims|heartbeats|batches|events)\/[A-Za-z0-9_.:/-]+\.json$/;
 const STATE_PREFIX = /^(?:claims|heartbeats|batches|events(?:\/[A-Za-z0-9_.:-]+)?)$/;
 
@@ -134,21 +135,49 @@ async function putState(request: Request, env: Env, path: string): Promise<Respo
   return json(400, { error: "precondition_required" });
 }
 
-// The state API preserves the shared JSON store contract: callers expect full prefix snapshots.
-// Do not add a server-side row limit until HttpStore supports pagination or resumable snapshots.
-async function listState(env: Env, prefix: string): Promise<Response> {
+async function listState(env: Env, prefix: string, searchParams: URLSearchParams): Promise<Response> {
   if (!validPrefix(prefix)) {
     return json(400, { error: "invalid_prefix" });
   }
+  const limitParam = searchParams.get("limit");
+  let limit: number | null = null;
+  if (limitParam !== null) {
+    if (!/^\d+$/.test(limitParam)) return json(400, { error: "invalid_limit" });
+    limit = Number.parseInt(limitParam, 10);
+    if (!Number.isSafeInteger(limit) || limit < 1 || limit > MAX_LIST_LIMIT) {
+      return json(400, { error: "invalid_limit" });
+    }
+  }
+  const cursor = searchParams.get("cursor");
+  if (cursor !== null && (!validPath(cursor) || !cursor.startsWith(`${prefix}/`))) {
+    return json(400, { error: "invalid_cursor" });
+  }
+  const clauses = ["path LIKE ? ESCAPE '\\'"];
+  const binds: (string | number)[] = [`${escapeLikePrefix(prefix)}/%`];
+  if (cursor !== null) {
+    clauses.push("path > ?");
+    binds.push(cursor);
+  }
+  let sql = `SELECT path, data, version FROM state WHERE ${clauses.join(" AND ")} ORDER BY path`;
+  if (limit !== null) {
+    sql += " LIMIT ?";
+    binds.push(limit + 1);
+  }
   const rows = await env.DB.prepare(
-    "SELECT path, data, version FROM state WHERE path LIKE ? ESCAPE '\\' ORDER BY path",
-  ).bind(`${escapeLikePrefix(prefix)}/%`).all<{ path: string; data: string; version: number }>();
-  const entries = (rows.results ?? []).map((r) => ({
+    sql,
+  ).bind(...binds).all<{ path: string; data: string; version: number }>();
+  let results = rows.results ?? [];
+  let nextCursor: string | undefined;
+  if (limit !== null && results.length > limit) {
+    results = results.slice(0, limit);
+    nextCursor = results[results.length - 1]?.path;
+  }
+  const entries = results.map((r) => ({
     path: r.path,
     data: JSON.parse(r.data),
     version: r.version,
   }));
-  return json(200, { entries });
+  return json(200, nextCursor ? { entries, next_cursor: nextCursor } : { entries });
 }
 
 export default {
@@ -164,7 +193,9 @@ export default {
       return json(401, { error: "unauthorized" });
     }
     if (url.pathname === "/v1/state") {
-      if (request.method === "GET") return listState(env, url.searchParams.get("prefix") ?? "");
+      if (request.method === "GET") {
+        return listState(env, url.searchParams.get("prefix") ?? "", url.searchParams);
+      }
       return json(405, { error: "method_not_allowed" });
     }
     if (url.pathname.startsWith("/v1/state/")) {
