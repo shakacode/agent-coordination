@@ -437,7 +437,8 @@ module AgentCoord
         "expires_at" => timestamp(now)
       }
       payload = existing.data.merge(release_updates).merge(metadata_payload(options))
-      payload = handoff_release?(options) ? payload.merge(handoff_payload(options)) : without_handoff_payload(payload)
+      payload = without_handoff_payload(payload)
+      payload = payload.merge(handoff_payload(options)) if handoff_release?(options)
       payload["branch"] = options[:branch] if options[:branch]
 
       store.write_json(path, payload, message: "Release #{options[:repo]}##{options[:target]}", sha: existing.sha)
@@ -779,7 +780,7 @@ module AgentCoord
         status_given: true,
         message: release_payload["handoff_note"]
       }
-      (METADATA_OPTION_FIELDS + HANDOFF_STATE_FIELDS).each do |field|
+      (METADATA_OPTION_FIELDS + HANDOFF_OPTION_FIELDS).each do |field|
         value = release_payload[field]
         event_options[field.to_sym] = value unless value.nil?
       end

@@ -1039,6 +1039,41 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     refute_handoff_release_metadata(released_payload)
   end
 
+  def test_handoff_release_replaces_prior_handoff_metadata
+    claim = run_agent_coord(
+      "claim",
+      "--agent-id", "worker-a",
+      "--repo", "shakacode/react_on_rails",
+      "--target", "3979"
+    )
+    assert_equal 0, claim.status.exitstatus, claim.stderr
+
+    first_handoff = run_agent_coord(
+      "release",
+      "--agent-id", "worker-a",
+      "--repo", "shakacode/react_on_rails",
+      "--target", "3979",
+      "--handoff-to", "worker-b",
+      "--handoff-note", "Ready to continue."
+    )
+    assert_equal 0, first_handoff.status.exitstatus, first_handoff.stderr
+
+    second_handoff = run_agent_coord(
+      "release",
+      "--agent-id", "worker-a",
+      "--repo", "shakacode/react_on_rails",
+      "--target", "3979",
+      "--handoff-note", "Waiting on reviewer."
+    )
+    assert_equal 0, second_handoff.status.exitstatus, second_handoff.stderr
+
+    claim_path = File.join(@state_root, "claims", "shakacode", "react_on_rails", "3979.json")
+    released_payload = JSON.parse(File.read(claim_path))
+    assert_equal "handoff", released_payload.fetch("release_mode")
+    assert_equal "Waiting on reviewer.", released_payload.fetch("handoff_note")
+    refute(released_payload.key?("handoff_to"), "expected handoff_to to be absent")
+  end
+
   def test_release_handoff_tolerates_invalid_existing_batch_id
     claim_dir = File.join(@state_root, "claims", "shakacode", "react_on_rails")
     FileUtils.mkdir_p(claim_dir)
