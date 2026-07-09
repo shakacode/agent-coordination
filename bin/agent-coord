@@ -1942,41 +1942,6 @@ module AgentCoord
       entries
     end
 
-    def state_list_path(prefix, cursor)
-      query = { "prefix" => prefix }
-      query["cursor"] = cursor if cursor
-      "/v1/state?#{URI.encode_www_form(query)}"
-    end
-
-    def parse_list_entries(body, prefix)
-      entries = fetch_field(body, "entries", "list #{prefix}")
-      unless entries.is_a?(Array)
-        raise OperationalError, "http backend list #{prefix} returned malformed response: entries is not an array"
-      end
-
-      entries.map do |entry|
-        unless entry.is_a?(Hash)
-          raise OperationalError, "http backend list #{prefix} returned malformed response: entry is not an object"
-        end
-
-        StoredJson.new(path: fetch_field(entry, "path", "list #{prefix}"),
-                       data: fetch_field(entry, "data", "list #{prefix}"),
-                       sha: fetch_field(entry, "version", "list #{prefix}").to_s)
-      end
-    end
-
-    def next_list_cursor(body, prefix)
-      return nil unless body.key?("next_cursor") && !body["next_cursor"].nil?
-
-      cursor = body["next_cursor"]
-      unless cursor.is_a?(String)
-        raise OperationalError, "http backend list #{prefix} returned malformed response: next_cursor is not a string"
-      end
-      return nil if cursor.empty?
-
-      cursor
-    end
-
     # message is accepted for interface parity; the HTTP backend has no commit messages.
     def write_json(path, data, message:, sha: nil, create: false) # rubocop:disable Lint/UnusedMethodArgument
       AgentCoord.safe_path!(path)
@@ -2029,6 +1994,41 @@ module AgentCoord
 
     def escape_component(value)
       URI::DEFAULT_PARSER.escape(value.to_s, PERCENT_ENCODE_UNSAFE)
+    end
+
+    def state_list_path(prefix, cursor)
+      query = { "prefix" => prefix }
+      query["cursor"] = cursor if cursor
+      "/v1/state?#{URI.encode_www_form(query)}"
+    end
+
+    def parse_list_entries(body, prefix)
+      entries = fetch_field(body, "entries", "list #{prefix}")
+      unless entries.is_a?(Array)
+        raise OperationalError, "http backend list #{prefix} returned malformed response: entries is not an array"
+      end
+
+      entries.map do |entry|
+        unless entry.is_a?(Hash)
+          raise OperationalError, "http backend list #{prefix} returned malformed response: entry is not an object"
+        end
+
+        StoredJson.new(path: fetch_field(entry, "path", "list #{prefix}"),
+                       data: fetch_field(entry, "data", "list #{prefix}"),
+                       sha: fetch_field(entry, "version", "list #{prefix}").to_s)
+      end
+    end
+
+    def next_list_cursor(body, prefix)
+      return nil unless body.key?("next_cursor") && !body["next_cursor"].nil?
+
+      cursor = body["next_cursor"]
+      unless cursor.is_a?(String)
+        raise OperationalError, "http backend list #{prefix} returned malformed response: next_cursor is not a string"
+      end
+      return nil if cursor.empty?
+
+      cursor
     end
 
     def parsed_json_object(response, action)
