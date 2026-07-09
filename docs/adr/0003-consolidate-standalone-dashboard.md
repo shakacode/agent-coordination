@@ -54,7 +54,10 @@ operator dashboard of the MIT protocol plane, before starting that v2 work.
 - Establish a single documented state schema as the source of truth, validated by
   a contract test exercised against both the Ruby producer and the TypeScript
   consumer (the simulation harness is the home for that test). This replaces the
-  hand-mirrored `src/shared/types.ts`.
+  hand-mirrored `src/shared/types.ts`. The schema must carry the `workspace`
+  tenant-scoping key defined in ADR
+  [0004](0004-tenancy-ready-state-contract.md) from the outset, so the
+  product-plane graduation named in 0001 and 0002 needs no destructive re-key.
 - Preserve history with `git subtree` / `git filter-repo`; migrate
   `agent-coordination-dashboard#9` into this repository; path-filter CI so
   dashboard changes do not run the Ruby suite and vice versa.
