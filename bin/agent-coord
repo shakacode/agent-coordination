@@ -1144,6 +1144,7 @@ module AgentCoord
     end
 
     def unsupported_event_listing?(error)
+      # Broadly detects pre-events backends until the protocol has a version handshake.
       error.message.match?(/invalid_(prefix|path)|route_not_found/)
     end
 
