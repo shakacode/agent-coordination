@@ -47,8 +47,11 @@ module AgentCoord
   METADATA_OPTION_FIELDS = %w[
     thread_handle chat_handle host pr_url dashboard_url operator phase generation instance_id
   ].freeze
-  HANDOFF_OPTION_FIELDS = %w[
+  HANDOFF_STATE_FIELDS = %w[
     release_mode handoff_to handoff_note
+  ].freeze
+  HANDOFF_OPTION_FIELDS = %w[
+    handoff_to handoff_note
   ].freeze
   CLAIM_PRESERVED_FIELDS = (%w[batch_id branch] + STATUS_CLAIM_METADATA_FIELDS).uniq.freeze
   HEARTBEAT_PRESERVED_FIELDS = (HEARTBEAT_TARGET_FIELDS + STATUS_HEARTBEAT_METADATA_FIELDS).uniq.freeze
@@ -433,7 +436,8 @@ module AgentCoord
         "updated_at" => timestamp(now),
         "expires_at" => timestamp(now)
       }
-      payload = existing.data.merge(release_updates).merge(metadata_payload(options)).merge(handoff_payload(options))
+      payload = existing.data.merge(release_updates).merge(metadata_payload(options))
+      payload = handoff_release?(options) ? payload.merge(handoff_payload(options)) : without_handoff_payload(payload)
       payload["branch"] = options[:branch] if options[:branch]
 
       store.write_json(path, payload, message: "Release #{options[:repo]}##{options[:target]}", sha: existing.sha)
@@ -626,6 +630,10 @@ module AgentCoord
       options.key?(:handoff_to) || options.key?(:handoff_note)
     end
 
+    def without_handoff_payload(payload)
+      payload.except(*HANDOFF_STATE_FIELDS)
+    end
+
     def claim_preserved_fields(existing, options)
       return [] unless renewed_claim?(existing, options)
 
@@ -771,7 +779,7 @@ module AgentCoord
         status_given: true,
         message: release_payload["handoff_note"]
       }
-      (METADATA_OPTION_FIELDS + HANDOFF_OPTION_FIELDS).each do |field|
+      (METADATA_OPTION_FIELDS + HANDOFF_STATE_FIELDS).each do |field|
         value = release_payload[field]
         event_options[field.to_sym] = value unless value.nil?
       end

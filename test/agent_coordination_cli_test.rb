@@ -1004,6 +1004,41 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     refute_path_exists File.join(@state_root, "events")
   end
 
+  def test_non_handoff_release_clears_prior_handoff_metadata
+    claim = run_agent_coord(
+      "claim",
+      "--agent-id", "worker-a",
+      "--repo", "shakacode/react_on_rails",
+      "--target", "3978"
+    )
+    assert_equal 0, claim.status.exitstatus, claim.stderr
+
+    handoff = run_agent_coord(
+      "release",
+      "--agent-id", "worker-a",
+      "--repo", "shakacode/react_on_rails",
+      "--target", "3978",
+      "--handoff-to", "worker-b",
+      "--handoff-note", "Ready to continue."
+    )
+    assert_equal 0, handoff.status.exitstatus, handoff.stderr
+
+    restamp = run_agent_coord(
+      "release",
+      "--agent-id", "worker-a",
+      "--repo", "shakacode/react_on_rails",
+      "--target", "3978",
+      "--phase", "merged"
+    )
+    assert_equal 0, restamp.status.exitstatus, restamp.stderr
+
+    claim_path = File.join(@state_root, "claims", "shakacode", "react_on_rails", "3978.json")
+    released_payload = JSON.parse(File.read(claim_path))
+    assert_equal "released", released_payload.fetch("status")
+    assert_equal "merged", released_payload.fetch("phase")
+    refute_handoff_release_metadata(released_payload)
+  end
+
   def test_release_handoff_tolerates_invalid_existing_batch_id
     claim_dir = File.join(@state_root, "claims", "shakacode", "react_on_rails")
     FileUtils.mkdir_p(claim_dir)
@@ -3006,6 +3041,12 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     assert_equal "handoff", status_event.fetch("type")
     assert_equal "claude-code/conductor", status_event.fetch("handoff_to")
     assert_equal "Continue from the failing docs spec.", status_event.fetch("message")
+  end
+
+  def refute_handoff_release_metadata(payload)
+    %w[release_mode handoff_to handoff_note].each do |key|
+      refute(payload.key?(key), "expected #{key} to be absent")
+    end
   end
 
   def stringify_keys(hash)
