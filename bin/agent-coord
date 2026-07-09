@@ -9,6 +9,7 @@ require "net/http"
 require "openssl"
 require "open3"
 require "optparse"
+require "securerandom"
 require "shellwords"
 require "time"
 require "uri"
@@ -35,6 +36,10 @@ module AgentCoord
   ].freeze
   STATUS_HEARTBEAT_METADATA_FIELDS = %w[
     batch_id branch thread_handle chat_handle host pr_url dashboard_url operator phase generation instance_id
+  ].freeze
+  STATUS_EVENT_METADATA_FIELDS = %w[
+    event_id lane agent_id repo target branch status message thread_handle chat_handle host pr_url dashboard_url
+    operator phase generation instance_id
   ].freeze
   HEARTBEAT_TARGET_FIELDS = %w[repo target].freeze
   METADATA_OPTION_FIELDS = %w[
@@ -101,6 +106,8 @@ module AgentCoord
         heartbeat(parse_options(command, @argv))
       when "register-batch"
         register_batch(parse_options(command, @argv))
+      when "record-event"
+        record_event(parse_options(command, @argv))
       when "status"
         render_status(parse_options(command, @argv))
       when "version"
@@ -131,6 +138,8 @@ module AgentCoord
           heartbeat  upsert an agent heartbeat
           register-batch
                      write a batch manifest into coordination state
+          record-event
+                     append a lane or batch event into coordination state
           status     render full or scoped coordination state
           version    print CLI contract version
           config     print runtime defaults and exit-code contract
@@ -161,6 +170,7 @@ module AgentCoord
 
         add_backend_options(opts, options)
         add_target_options(opts, options)
+        add_event_options(opts, options)
         add_register_batch_options(opts, options)
         add_doctor_options(opts, options, command)
         add_bootstrap_options(opts, options)
@@ -200,7 +210,16 @@ module AgentCoord
       opts.on("--generation GENERATION", Integer, "claim/lane generation") { |value| options[:generation] = value }
       opts.on("--instance-id ID", "agent process instance identifier") { |value| options[:instance_id] = value }
       opts.on("--ttl SECONDS", Integer, "lease/heartbeat TTL in seconds") { |value| options[:ttl] = value }
-      opts.on("--status STATUS", "heartbeat status") { |value| options[:status] = value }
+      opts.on("--status STATUS", "heartbeat or event status") do |value|
+        options[:status] = value
+        options[:status_given] = true
+      end
+    end
+
+    def add_event_options(opts, options)
+      opts.on("--type TYPE", "record-event only: event type") { |value| options[:type] = value }
+      opts.on("--lane NAME", "record-event only: batch lane name") { |value| options[:lane] = value }
+      opts.on("--message TEXT", "record-event only: event message") { |value| options[:message] = value }
     end
 
     def add_register_batch_options(opts, options)
@@ -233,7 +252,7 @@ module AgentCoord
     end
 
     def backend_command?(command)
-      %w[claim release heartbeat register-batch status doctor].include?(command)
+      %w[claim release heartbeat register-batch record-event status doctor].include?(command)
     end
 
     def default_options
@@ -296,6 +315,12 @@ module AgentCoord
         opts.separator "Batch registration:"
         opts.separator "    --file PATH  JSON manifest with batch_id and lanes"
         opts.separator ""
+      when "record-event"
+        opts.separator ""
+        opts.separator "Event recording:"
+        opts.separator "    --batch-id ID --type TYPE  append an event under events/<batch-id>/"
+        opts.separator "    --lane NAME                 attach the event to a registered lane"
+        opts.separator ""
       end
     end
 
@@ -304,7 +329,7 @@ module AgentCoord
       value_options = %w[
         --backend --ref --state-root --api-url --agent-id --repo --target --batch-id --branch
         --thread-handle --chat-handle --host --pr-url --dashboard-url --operator --phase --generation --instance-id
-        --ttl --status --file --install-dir --status-state-root --profile
+        --ttl --status --type --lane --message --file --install-dir --status-state-root --profile
       ]
       skip_next = false
       argv.any? do |arg|
@@ -660,6 +685,61 @@ module AgentCoord
       raise OperationalError, "batch registration write contention for #{batch_id}; #{e.message}"
     end
 
+    def record_event(options)
+      require_options(options, :batch_id, :type)
+      validate_record_event_options!(options)
+
+      store = build_store(options)
+      now = now_utc
+      3.times do
+        event_id = build_event_id(now)
+        path = AgentCoord.event_path(options.fetch(:batch_id), event_id)
+        payload = event_payload(options, event_id, now)
+        begin
+          store.write_json(path, payload, message: "Record event #{options[:batch_id]} #{event_id}", create: true)
+          @stdout.puts "recorded event #{options[:batch_id]} #{event_id}"
+          return 0
+        rescue Conflict
+          next
+        end
+      end
+      raise OperationalError, "event id collision while recording event for #{options[:batch_id]}"
+    end
+
+    def validate_record_event_options!(options)
+      AgentCoord.batch_path(options.fetch(:batch_id))
+      AgentCoord.validate_segment!(options.fetch(:type), "event type")
+      return unless options.key?(:lane)
+
+      lane = options[:lane].to_s
+      raise Error, "--lane must not be empty" if lane.empty?
+      raise Error, "event lane #{lane} cannot contain ':'" if malformed_lane_name?(lane)
+
+      AgentCoord.validate_segment!(lane, "event lane")
+    end
+
+    def event_payload(options, event_id, now)
+      payload = {
+        "schema_version" => SCHEMA_VERSION,
+        "event_id" => event_id,
+        "batch_id" => options.fetch(:batch_id).to_s,
+        "type" => options.fetch(:type),
+        "lane" => options[:lane],
+        "agent_id" => options[:agent_id],
+        "repo" => options[:repo],
+        "target" => options[:target]&.to_s,
+        "branch" => options[:branch],
+        "message" => options[:message],
+        "at" => timestamp(now)
+      }
+      payload["status"] = options[:status] if options[:status_given]
+      payload.merge(metadata_payload(options)).compact
+    end
+
+    def build_event_id(now)
+      "#{now.utc.strftime('%Y%m%dT%H%M%S.%6NZ')}-#{SecureRandom.hex(4)}"
+    end
+
     def render_status(options)
       status_options = options.dup
       status_options[:state_root] ||= default_status_state_root unless status_options[:api_url]
@@ -708,6 +788,7 @@ module AgentCoord
       malformed_names = malformed_batch_lane_names(grouped.fetch("batches"))
       section_notes = {}
       section_notes["lanes"] = "malformed lane names: #{malformed_names.join(', ')}" unless malformed_names.empty?
+      event_entries = status_event_entries(store, "events", section_notes)
 
       status_payload(
         scope: { "kind" => "all" },
@@ -715,6 +796,7 @@ module AgentCoord
         claim_entries: grouped.fetch("claims"),
         heartbeat_entries: grouped.fetch("heartbeats"),
         batch_entries: grouped.fetch("batches"),
+        event_entries: event_entries,
         heartbeats_by_agent: heartbeats_by_id,
         lane_states: lane_states,
         now: now
@@ -754,6 +836,7 @@ module AgentCoord
         claim_entries: [claim].compact,
         heartbeat_entries: heartbeat_entries,
         batch_entries: [],
+        event_entries: [],
         heartbeats_by_agent: heartbeats_by_agent(heartbeat_entries),
         lane_states: {},
         now: now
@@ -767,6 +850,8 @@ module AgentCoord
       batch_entries = [batch_entry].compact
       lane_states = {}
       section_notes = { "claims" => "not checked in batch scope" }
+      event_entries =
+        status_event_entries(store, AgentCoord.event_batch_prefix(options.fetch(:batch_id)), section_notes)
       malformed_dependency_refs = []
       unresolved_dependency_refs = []
       malformed_lane_names = []
@@ -857,6 +942,7 @@ module AgentCoord
         claim_entries: [],
         heartbeat_entries: heartbeat_entries_by_agent.values.select { |entry| valid_status_heartbeat?(entry) },
         batch_entries: batch_entries,
+        event_entries: event_entries,
         heartbeats_by_agent: heartbeat_entries_by_agent,
         lane_states: lane_states,
         now: now
@@ -866,7 +952,7 @@ module AgentCoord
 
     # rubocop:disable Metrics/ParameterLists
     def status_payload(scope:, section_notes:, claim_entries:, heartbeat_entries:, batch_entries:,
-                       heartbeats_by_agent:, lane_states:, now:)
+                       event_entries:, heartbeats_by_agent:, lane_states:, now:)
       {
         "version" => VERSION,
         "scope" => scope,
@@ -874,7 +960,8 @@ module AgentCoord
         "section_notes" => section_notes,
         "claims" => claim_entries.map { |entry| claim_status_hash(entry) },
         "heartbeats" => heartbeat_entries.map { |entry| heartbeat_status_hash(entry, now) },
-        "batches" => batch_entries.map { |entry| batch_status_hash(entry, heartbeats_by_agent, lane_states, now) }
+        "batches" => batch_entries.map { |entry| batch_status_hash(entry, heartbeats_by_agent, lane_states, now) },
+        "events" => event_entries.map { |entry| event_status_hash(entry) }
       }
     end
     # rubocop:enable Metrics/ParameterLists
@@ -915,6 +1002,8 @@ module AgentCoord
           render_batch_status_hash(batch)
         end
       end
+
+      render_status_events(payload)
 
       degraded = payload.fetch("degraded", [])
       return if degraded.empty?
@@ -985,6 +1074,16 @@ module AgentCoord
       }.merge(status_metadata(batch, STATUS_BATCH_METADATA_FIELDS))
     end
 
+    def event_status_hash(entry)
+      data = entry.data
+      {
+        "path" => entry.path,
+        "batch_id" => data.fetch("batch_id", AgentCoord.event_batch_from_path(entry.path)),
+        "type" => data.fetch("type", "unknown"),
+        "at" => data.fetch("at", "UNKNOWN")
+      }.merge(status_metadata(data, STATUS_EVENT_METADATA_FIELDS))
+    end
+
     def status_metadata(data, fields)
       return {} unless data.is_a?(Hash)
 
@@ -1006,6 +1105,44 @@ module AgentCoord
                      "status #{lane.fetch('status')} #{lane.fetch('liveness')} " \
                      "deps #{format_list(lane.fetch('deps'))} blocked_on #{format_list(lane.fetch('blocked_on'))}"
       end
+    end
+
+    def render_event_status_hash(event)
+      details = [
+        "- #{event.fetch('batch_id')}",
+        event.fetch("lane", "-"),
+        event.fetch("type"),
+        event.fetch("phase", event.fetch("status", "-")),
+        "by #{event.fetch('agent_id', '-')}",
+        "at #{event.fetch('at')}"
+      ]
+      message = event["message"].to_s
+      details << message unless message.empty?
+      @stdout.puts details.join(" ")
+    end
+
+    def render_status_events(payload)
+      @stdout.puts "events"
+      if payload.fetch("events").empty?
+        @stdout.puts "- #{status_section_note(payload, 'events') || 'none'}"
+      else
+        payload.fetch("events").each do |event|
+          render_event_status_hash(event)
+        end
+      end
+    end
+
+    def status_event_entries(store, prefix, section_notes)
+      store.list_json(prefix).sort_by { |entry| [entry.data["at"].to_s, entry.path] }
+    rescue OperationalError => e
+      raise unless unsupported_event_listing?(e)
+
+      section_notes["events"] = "event state not supported by backend"
+      []
+    end
+
+    def unsupported_event_listing?(error)
+      error.message.match?(/invalid_(prefix|path)|route_not_found/)
     end
 
     def read_status_heartbeat(store, agent_id)
@@ -1840,6 +1977,22 @@ module AgentCoord
   def self.batch_path(batch_id)
     validate_segment!(batch_id, "batch-id")
     "batches/#{batch_id}.json"
+  end
+
+  def self.event_path(batch_id, event_id)
+    validate_segment!(batch_id, "batch-id")
+    validate_segment!(event_id, "event-id")
+    "events/#{batch_id}/#{event_id}.json"
+  end
+
+  def self.event_batch_prefix(batch_id)
+    validate_segment!(batch_id, "batch-id")
+    "events/#{batch_id}"
+  end
+
+  def self.event_batch_from_path(path)
+    parts = path.split("/")
+    parts.length >= 3 ? parts[1] : "UNKNOWN"
   end
 
   def self.repo_from_claim_path(path)

@@ -8,6 +8,7 @@ on:
     paths-ignore:
       - batches/**
       - claims/**
+      - events/**
       - heartbeats/**
 
 permissions:

@@ -1726,6 +1726,72 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     assert_equal "https://coord.example.test/batches/batch-b/docs", lane.fetch("dashboard_url")
   end
 
+  def test_record_event_writes_append_only_event_and_status_metadata
+    write_batch(
+      "batch-b",
+      lanes: [{ "name" => "docs", "owner" => "worker-docs", "targets" => ["3972"] }]
+    )
+
+    result = run_agent_coord(
+      "record-event",
+      "--batch-id", "batch-b",
+      "--type", "phase",
+      "--lane", "docs",
+      "--agent-id", "worker-docs",
+      "--repo", "shakacode/react_on_rails",
+      "--target", "3972",
+      "--branch", "jg-codex/docs",
+      "--phase", "validating",
+      "--status", "in_progress",
+      "--message", "running tests",
+      "--thread-handle", "thread-docs",
+      "--chat-handle", "codex-thread-123",
+      "--host", "codex",
+      "--operator", "justin",
+      "--instance-id", "instance-a",
+      "--generation", "3"
+    )
+
+    assert_equal 0, result.status.exitstatus, result.stderr
+    assert_includes result.stdout, "recorded event batch-b"
+    event_files = Dir.glob(File.join(@state_root, "events", "batch-b", "*.json"))
+    assert_equal 1, event_files.length
+
+    event = JSON.parse(File.read(event_files.first))
+    assert_equal 1, event.fetch("schema_version")
+    assert_equal "batch-b", event.fetch("batch_id")
+    assert_equal "phase", event.fetch("type")
+    assert_equal "docs", event.fetch("lane")
+    assert_equal "worker-docs", event.fetch("agent_id")
+    assert_equal "validating", event.fetch("phase")
+    assert_equal "in_progress", event.fetch("status")
+    assert_equal "running tests", event.fetch("message")
+    assert_match(/\A\d{8}T\d{6}\.\d{6}Z-[0-9a-f]{8}\z/, event.fetch("event_id"))
+    assert_match(/\A\d{4}-\d{2}-\d{2}T/, event.fetch("at"))
+
+    status = run_agent_coord("status", "--batch-id", "batch-b", "--json")
+
+    assert_equal 0, status.status.exitstatus, status.stderr
+    status_event = JSON.parse(status.stdout).fetch("events").first
+    assert_equal event.fetch("event_id"), status_event.fetch("event_id")
+    assert_equal "phase", status_event.fetch("type")
+    assert_equal "validating", status_event.fetch("phase")
+    assert_equal "running tests", status_event.fetch("message")
+  end
+
+  def test_record_event_rejects_malformed_lane_names
+    result = run_agent_coord(
+      "record-event",
+      "--batch-id", "batch-b",
+      "--type", "phase",
+      "--lane", "docs:copy"
+    )
+
+    assert_equal 1, result.status.exitstatus
+    assert_includes result.stderr, "event lane docs:copy cannot contain ':'"
+    refute_path_exists File.join(@state_root, "events", "batch-b")
+  end
+
   def test_register_batch_rejects_malformed_lane_name
     manifest_path = File.join(@state_root, "batch-manifest.json")
     File.write(
@@ -1944,6 +2010,7 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     assert_equal 0, result
     assert_equal [
       "batches/batch-b.json",
+      "events/batch-b",
       "heartbeats/worker-docs.json",
       "batches/batch-a.json",
       "heartbeats/worker-backend.json"
@@ -2380,6 +2447,13 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
       end
     end
     # rubocop:enable Metrics/MethodLength
+
+    def list_json(prefix)
+      raise "unexpected broad scan of #{prefix}" unless prefix == "events/batch-b"
+
+      @reads << prefix
+      []
+    end
   end
 
   FakeStatus = Struct.new(:successful) do

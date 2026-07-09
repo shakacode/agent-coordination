@@ -28,13 +28,21 @@ async function authenticate(request: Request, env: Env): Promise<string | null> 
 const MAX_STATE_BYTES = 256 * 1024;
 const MAX_REQUEST_BYTES = MAX_STATE_BYTES + 4096;
 const MAX_STATE_PATH_BYTES = 512;
-const STATE_PATH = /^(claims|heartbeats|batches)\/[A-Za-z0-9_.:/-]+\.json$/;
+const STATE_PATH = /^(claims|heartbeats|batches|events)\/[A-Za-z0-9_.:/-]+\.json$/;
+const STATE_PREFIX = /^(claims|heartbeats|batches|events)(\/[A-Za-z0-9_.:/-]+)?$/;
 
 function validPath(path: string): boolean {
   return new TextEncoder().encode(path).byteLength <= MAX_STATE_PATH_BYTES
     && STATE_PATH.test(path)
     && !path.includes("..")
     && !path.includes("//");
+}
+
+function validPrefix(prefix: string): boolean {
+  return new TextEncoder().encode(prefix).byteLength <= MAX_STATE_PATH_BYTES
+    && STATE_PREFIX.test(prefix)
+    && !prefix.includes("..")
+    && !prefix.includes("//");
 }
 
 async function readJsonBody(request: Request): Promise<{ body: unknown } | { response: Response }> {
@@ -125,7 +133,7 @@ async function putState(request: Request, env: Env, path: string): Promise<Respo
 // The state API preserves the shared JSON store contract: callers expect full prefix snapshots.
 // Do not add a server-side row limit until HttpStore supports pagination or resumable snapshots.
 async function listState(env: Env, prefix: string): Promise<Response> {
-  if (!["claims", "heartbeats", "batches"].includes(prefix)) {
+  if (!validPrefix(prefix)) {
     return json(400, { error: "invalid_prefix" });
   }
   const rows = await env.DB.prepare(

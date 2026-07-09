@@ -2,9 +2,10 @@
 
 Date: 2026-07-04
 Status: accepted direction. The current implementation is the Worker/D1 HTTP
-state API used by `agent-coord` through `HttpStore`; the relational claim,
-heartbeat, event, cancellation, and reservation endpoints described below are
-the next protocol evolution.
+state API used by `agent-coord` through `HttpStore`; claims, heartbeats,
+batches, and the interim append-only event log all use that JSON state API
+today. The relational claim, heartbeat, event, cancellation, and reservation
+endpoints described below are the next protocol evolution.
 
 ## Problem
 

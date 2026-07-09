@@ -34,8 +34,8 @@ Protocol plane means:
 
 Runtime state remains private data. It is not product source, is not licensed by
 this repository, and must not be committed here. That includes live `claims/`,
-`heartbeats/`, `batches/`, `*.json.lock`, machine tokens, credentials, customer
-data, and source-code patches.
+`heartbeats/`, `batches/`, `events/`, `*.json.lock`, machine tokens,
+credentials, customer data, and source-code patches.
 
 Future monetized or hosted ShakaStack product-plane code may use a different
 license, repository, and commercial boundary. Product-plane code consumes the
