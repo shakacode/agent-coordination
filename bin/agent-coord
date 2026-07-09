@@ -518,6 +518,7 @@ module AgentCoord
         "deep" => !options[:deep].nil?,
         "status" => "ok"
       }
+      payload["doctor_prefix"] = doctor_read_prefix(doctor_options) if backend_kind == "http"
       emit_payload(payload, options) do
         @stdout.puts "agent-coord doctor"
         @stdout.puts "version: #{VERSION}"

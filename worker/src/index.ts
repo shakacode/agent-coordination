@@ -51,6 +51,7 @@ function validScopePrefix(prefix: string): boolean {
 
 function exactStatePathScope(scope: string): boolean {
   if (!validPath(scope)) return false;
+  // Keep these explicit record shapes in sync with STATE_PATH if the state grammar expands.
   const parts = scope.split("/");
   switch (parts[0]) {
     case "claims":

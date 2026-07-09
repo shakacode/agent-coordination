@@ -679,6 +679,28 @@ class HttpDoctorTest < HttpEnvTestCase
     stub.shutdown
   end
 
+  def test_doctor_json_includes_custom_http_readable_prefix
+    responses = [
+      [200, { "entries" => [] }],
+      [200, { "status" => "ok" }]
+    ]
+    stub = HttpStoreStub.new(responses)
+    with_env("AGENT_COORD_API_URL" => stub.base_url, "AGENT_COORD_API_TOKEN" => "tok") do
+      stdout = StringIO.new
+      code = AgentCoord::Runner.new(
+        ["doctor", "--doctor-prefix", "events/batch", "--json"],
+        stdout: stdout,
+        stderr: StringIO.new
+      ).run
+      payload = JSON.parse(stdout.string)
+
+      assert_equal 0, code
+      assert_equal "events/batch", payload.fetch("doctor_prefix")
+    end
+  ensure
+    stub.shutdown
+  end
+
   def test_doctor_uses_record_get_for_exact_http_readable_path
     responses = [
       [200, { "path" => "heartbeats/m5-codex.json", "data" => { "agent_id" => "m5-codex" }, "version" => 1 }],
