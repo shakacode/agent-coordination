@@ -347,6 +347,12 @@ module AgentCoord
         return
       end
 
+      unless ENV.fetch("AGENT_COORD_API_TOKEN", "").empty?
+        raise OperationalError,
+              "AGENT_COORD_API_TOKEN is set but AGENT_COORD_API_URL is missing or empty; " \
+              "set AGENT_COORD_API_URL or unset AGENT_COORD_API_TOKEN"
+      end
+
       options[:state_root] = default_local_state_root
       options[:implicit_local] = true
       @stderr.puts "notice: local mode — single-machine only; state root: #{options[:state_root]}"

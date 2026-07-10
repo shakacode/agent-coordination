@@ -548,6 +548,36 @@ class HttpBackendSelectionTest < HttpEnvTestCase
     end
   end
 
+  def test_token_only_http_env_is_rejected_before_implicit_local_fallback
+    Dir.mktmpdir("agent-coord-token-only") do |root|
+      state_home = File.join(root, "state")
+      with_env("AGENT_COORD_API_TOKEN" => "token-without-url",
+               "AGENT_COORD_BACKEND" => nil,
+               "AGENT_COORD_STATE_ROOT" => nil,
+               "AGENT_COORD_STATUS_STATE_ROOT" => nil,
+               "XDG_STATE_HOME" => state_home,
+               "HOME" => File.join(root, "home"),
+               "TMPDIR" => File.join(root, "tmp")) do
+        [nil, ""].each do |api_url|
+          with_env("AGENT_COORD_API_URL" => api_url) do
+            [
+              ["status", "--json"],
+              ["claim", "--agent-id", "worker-a", "--repo", "demo/example", "--target", "1"]
+            ].each do |args|
+              code, out, err = run_cli(args, {})
+
+              assert_equal 2, code
+              assert_empty out
+              assert_includes err, "AGENT_COORD_API_TOKEN is set but AGENT_COORD_API_URL is missing or empty"
+              refute_includes err, "local mode — single-machine only"
+            end
+          end
+        end
+      end
+      refute_path_exists File.join(state_home, "agent-coordination")
+    end
+  end
+
   def test_api_url_with_empty_host_is_operational_error
     with_env("AGENT_COORD_API_URL" => "https://", "AGENT_COORD_API_TOKEN" => "tok") do
       code, _, err = run_cli(["status"], {})
