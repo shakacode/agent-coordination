@@ -200,7 +200,39 @@ class HttpStoreReadTest < HttpStoreTestCase
       assert_equal 1, entries.length
       assert_equal "heartbeats/a1.json", entries.first.path
       assert_equal "2", entries.first.sha
+      refute store.filtered_list?("heartbeats")
       assert_equal "/v1/state?prefix=heartbeats", stub.requests.first[:path]
+    end
+  end
+
+  def test_list_json_tracks_filtered_responses_per_prefix
+    responses = [
+      [200, { "entries" => [], "filtered" => true }],
+      [200, { "entries" => [] }]
+    ]
+    with_stub(responses) do |store, _|
+      store.list_json("claims")
+      assert store.filtered_list?("claims")
+
+      store.list_json("claims")
+      refute store.filtered_list?("claims")
+    end
+  end
+
+  def test_verify_readable_uses_record_endpoint_for_exact_state_path
+    body = { "path" => "heartbeats/m5-codex.json", "data" => { "agent_id" => "m5-codex" }, "version" => 2 }
+    with_stub([[200, body]]) do |store, stub|
+      store.verify_readable!("heartbeats/m5-codex.json")
+
+      assert_equal "/v1/state/heartbeats%2Fm5-codex.json", stub.requests.first[:path]
+    end
+  end
+
+  def test_verify_readable_keeps_json_named_claim_repo_as_list_prefix
+    with_stub([[200, { "entries" => [] }]]) do |store, stub|
+      store.verify_readable!("claims/shakacode/api.json")
+
+      assert_equal "/v1/state?prefix=claims%2Fshakacode%2Fapi.json", stub.requests.first[:path]
     end
   end
 
@@ -457,6 +489,28 @@ class HttpBackendSelectionTest < HttpEnvTestCase
     stub.shutdown
   end
 
+  def test_status_degrades_for_scoped_http_forbidden_sections
+    responses = [
+      [200, { "entries" => [], "filtered" => true }],
+      [403, { "error" => "forbidden" }],
+      [403, { "error" => "forbidden" }],
+      [403, { "error" => "forbidden" }]
+    ]
+    stub = HttpStoreStub.new(responses)
+    with_env("AGENT_COORD_API_URL" => stub.base_url, "AGENT_COORD_API_TOKEN" => "tok") do
+      code, out, = run_cli(["status", "--json"], {})
+      payload = JSON.parse(out)
+
+      assert_equal 0, code
+      assert_includes payload.fetch("degraded"), "claims filtered by scoped token"
+      assert_includes payload.fetch("degraded"), "heartbeats not readable by scoped token"
+      assert_includes payload.fetch("degraded"), "batches not readable by scoped token"
+      assert_includes payload.fetch("degraded"), "events not readable by scoped token"
+    end
+  ensure
+    stub.shutdown
+  end
+
   def test_missing_token_is_operational_error
     with_env("AGENT_COORD_API_URL" => "http://127.0.0.1:9", "AGENT_COORD_API_TOKEN" => nil) do
       code, _, err = run_cli(["status"], {})
@@ -636,6 +690,106 @@ class HttpDoctorTest < HttpEnvTestCase
       assert_equal 0, code
       assert_includes stdout.string, "backend: http"
       assert_includes stdout.string, stub.base_url
+    end
+  ensure
+    stub.shutdown
+  end
+
+  def test_doctor_uses_custom_http_readable_prefix
+    responses = [
+      [200, { "entries" => [] }],
+      [200, { "status" => "ok" }]
+    ]
+    stub = HttpStoreStub.new(responses)
+    with_env("AGENT_COORD_API_URL" => stub.base_url, "AGENT_COORD_API_TOKEN" => "tok") do
+      stdout = StringIO.new
+      code = AgentCoord::Runner.new(
+        ["doctor", "--doctor-prefix", "events/batch"],
+        stdout: stdout,
+        stderr: StringIO.new
+      ).run
+      assert_equal 0, code
+      assert_includes stdout.string, "doctor_prefix: events/batch"
+      assert_equal "/v1/state?prefix=events%2Fbatch", stub.requests.first[:path]
+    end
+  ensure
+    stub.shutdown
+  end
+
+  def test_doctor_json_includes_custom_http_readable_prefix
+    responses = [
+      [200, { "entries" => [] }],
+      [200, { "status" => "ok" }]
+    ]
+    stub = HttpStoreStub.new(responses)
+    with_env("AGENT_COORD_API_URL" => stub.base_url, "AGENT_COORD_API_TOKEN" => "tok") do
+      stdout = StringIO.new
+      code = AgentCoord::Runner.new(
+        ["doctor", "--doctor-prefix", "events/batch", "--json"],
+        stdout: stdout,
+        stderr: StringIO.new
+      ).run
+      payload = JSON.parse(stdout.string)
+
+      assert_equal 0, code
+      assert_equal "events/batch", payload.fetch("doctor_prefix")
+    end
+  ensure
+    stub.shutdown
+  end
+
+  def test_doctor_deep_skips_forbidden_unscoped_http_prefixes
+    responses = [
+      [200, { "entries" => [] }],
+      [200, { "status" => "ok" }],
+      [200, { "entries" => [], "filtered" => true }],
+      [403, { "error" => "forbidden" }],
+      [403, { "error" => "forbidden" }],
+      [403, { "error" => "forbidden" }]
+    ]
+    stub = HttpStoreStub.new(responses)
+    with_env("AGENT_COORD_API_URL" => stub.base_url, "AGENT_COORD_API_TOKEN" => "tok") do
+      stdout = StringIO.new
+      code = AgentCoord::Runner.new(["doctor", "--deep", "--json"], stdout: stdout, stderr: StringIO.new).run
+      payload = JSON.parse(stdout.string)
+
+      assert_equal 0, code
+      assert_equal "ok", payload.fetch("status")
+      assert_includes payload.fetch("degraded"), "claims filtered by scoped token"
+      assert_includes payload.fetch("degraded"), "heartbeats not readable by scoped token"
+      assert_includes payload.fetch("degraded"), "batches not readable by scoped token"
+      assert_includes payload.fetch("degraded"), "events not readable by scoped token"
+      assert_equal "claims filtered by scoped token", payload.fetch("section_notes").fetch("claims")
+      expected_paths = [
+        "/v1/state?prefix=claims",
+        "/v1/health",
+        "/v1/state?prefix=claims",
+        "/v1/state?prefix=heartbeats",
+        "/v1/state?prefix=batches",
+        "/v1/state?prefix=events"
+      ]
+      assert_equal(expected_paths, stub.requests.map { |request| request[:path] })
+    end
+  ensure
+    stub.shutdown
+  end
+
+  def test_doctor_uses_record_get_for_exact_http_readable_path
+    responses = [
+      [200, { "path" => "heartbeats/m5-codex.json", "data" => { "agent_id" => "m5-codex" }, "version" => 1 }],
+      [200, { "status" => "ok" }]
+    ]
+    stub = HttpStoreStub.new(responses)
+    with_env("AGENT_COORD_API_URL" => stub.base_url, "AGENT_COORD_API_TOKEN" => "tok") do
+      stdout = StringIO.new
+      code = AgentCoord::Runner.new(
+        ["doctor", "--doctor-prefix", "heartbeats/m5-codex.json"],
+        stdout: stdout,
+        stderr: StringIO.new
+      ).run
+      assert_equal 0, code
+      assert_includes stdout.string, "doctor_prefix: heartbeats/m5-codex.json"
+      assert_equal "/v1/state/heartbeats%2Fm5-codex.json", stub.requests.first[:path]
     end
   ensure
     stub.shutdown

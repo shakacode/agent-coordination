@@ -26,7 +26,7 @@ expect nohdr    "$(curl -s -o /dev/null -w %{http_code} -X PUT "$BASE/v1/state/$
 expect nullbody "$(curl -s -o /dev/null -w %{http_code} -X PUT "$BASE/v1/state/$P" -H "$AUTH" -H 'If-Match: 2' -d 'null')" 400
 expect badmatch "$(curl -s -o /dev/null -w %{http_code} -X PUT "$BASE/v1/state/$P" -H "$AUTH" -H 'If-Match: 2x' -d '{"data":{"agent_id":"a4"}}')" 400
 expect hugever  "$(curl -s -o /dev/null -w %{http_code} -X PUT "$BASE/v1/state/$P" -H "$AUTH" -H 'If-Match: 999999999999999999999999999999' -d '{"data":{"agent_id":"a4"}}')" 400
-expect scopedclaims "$(curl -s -o /dev/null -w %{http_code} "$BASE/v1/state?prefix=claims/shakacode" -H "$AUTH")" 400
+expect scopedclaims "$(curl -s -o /dev/null -w %{http_code} "$BASE/v1/state?prefix=claims/shakacode" -H "$AUTH")" 200
 expect nestedevents "$(curl -s -o /dev/null -w %{http_code} "$BASE/v1/state?prefix=events/a/b" -H "$AUTH")" 400
 expect badlimit "$(curl -s -o /dev/null -w %{http_code} "$BASE/v1/state?prefix=claims&limit=0" -H "$AUTH")" 400
 expect badcursor "$(curl -s -G -o /dev/null -w %{http_code} "$BASE/v1/state" -H "$AUTH" --data-urlencode prefix=claims --data-urlencode cursor=heartbeats/a1.json)" 400
