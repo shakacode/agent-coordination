@@ -1,7 +1,7 @@
 # 0003. Publish a state-schema contract and keep the dashboard a separate consumer
 
 Date: 2026-07-08
-Status: proposed
+Status: accepted
 
 ## Context
 
@@ -23,14 +23,17 @@ collaboration view (the "two developers on the same PR" use case).
 
 An earlier draft of this ADR proposed merging the standalone dashboard into this
 repository as `apps/dashboard/` before that v2 work. An engineering review with an
-independent second model rejected that ordering. The dashboard's coupling is
-isolated to one ~306-line reader (`readCoordinationState.ts`); that shows the seam
-is cheap to extract, not that none exists. ADR
-[0001](0001-worker-d1-backend.md) already establishes that the CLI/Worker API
-contract is the seam for consumers, and issue #9 is precisely the dashboard
-beginning to use that seam. Merging first would import a filesystem-coupled Express
-app into the protocol plane just before that coupling is rewritten, and would
-weaken the protocol plane's strongest proof: a real, separately-hosted consumer.
+independent second model rejected that ordering. The dashboard's coupling to this
+repository's state is isolated to a single reader module (`readCoordinationState.ts`
+in the dashboard repo, roughly 300 lines per the 2026-07 audit); that shows the
+seam is cheap to extract, not that none exists. ADR
+[0001](0001-worker-d1-backend.md) already treats the CLI/Worker API contract as the
+seam for swapping the backend implementation; issue #9 extends that same contract to
+be the dashboard's read path, so the dashboard becomes a consumer of the seam rather
+than of filesystem internals. Merging first would import a filesystem-coupled
+Express app into the protocol plane just before that coupling is rewritten, and
+would weaken the protocol plane's strongest proof: a real, separately-hosted
+consumer.
 
 ## Decision
 
