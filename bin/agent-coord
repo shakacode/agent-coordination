@@ -1617,8 +1617,22 @@ module AgentCoord
     def default_local_state_root
       state_home = ENV.fetch("XDG_STATE_HOME", nil)
       state_home = nil unless Pathname.new(state_home.to_s).absolute?
-      state_home ||= File.join(Dir.home, ".local", "state")
-      File.join(File.expand_path(state_home), "agent-coordination")
+      return File.join(File.expand_path(state_home), "agent-coordination") if state_home
+
+      home = home_directory
+      raise OperationalError, local_state_home_error unless Pathname.new(home.to_s).absolute?
+
+      File.join(File.expand_path(home), ".local", "state", "agent-coordination")
+    rescue ArgumentError
+      raise OperationalError, local_state_home_error
+    end
+
+    def home_directory
+      Dir.home
+    end
+
+    def local_state_home_error
+      "cannot determine local state root; set XDG_STATE_HOME or HOME to an absolute path, or pass --state-root"
     end
 
     def write_with_cas(store, path, payload, existing, message)

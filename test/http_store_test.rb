@@ -687,6 +687,51 @@ class HttpBackendSelectionTest < HttpEnvTestCase
     end
   end
 
+  def test_empty_home_rejects_implicit_local_for_missing_empty_or_relative_xdg
+    Dir.mktmpdir("agent-coord-empty-home") do |root|
+      cwd = File.join(root, "cwd")
+      FileUtils.mkdir_p(cwd)
+      Dir.chdir(cwd) do
+        [nil, "", "relative-state"].each do |xdg_state_home|
+          with_env("AGENT_COORD_API_TOKEN" => nil,
+                   "AGENT_COORD_API_URL" => nil,
+                   "AGENT_COORD_BACKEND" => nil,
+                   "AGENT_COORD_STATE_ROOT" => nil,
+                   "AGENT_COORD_STATUS_STATE_ROOT" => nil,
+                   "XDG_STATE_HOME" => xdg_state_home,
+                   "HOME" => "",
+                   "TMPDIR" => File.join(root, "tmp")) do
+            [["status", "--json"], ["doctor"]].each do |args|
+              code, out, err = run_cli(args, {})
+
+              assert_equal 2, code
+              assert_empty out
+              assert_includes err, "set XDG_STATE_HOME or HOME to an absolute path, or pass --state-root"
+              refute_includes err, "local mode — single-machine only"
+            end
+          end
+        end
+      end
+      assert_equal ["cwd"], Dir.children(root).sort
+    end
+  end
+
+  def test_unavailable_home_is_operational_but_absolute_xdg_does_not_consult_it
+    runner = AgentCoord::Runner.new([], stdout: StringIO.new, stderr: StringIO.new)
+    runner.define_singleton_method(:home_directory) { raise ArgumentError, "home unavailable" }
+    with_env("XDG_STATE_HOME" => nil, "HOME" => nil) do
+      error = assert_raises(AgentCoord::OperationalError) { runner.send(:default_local_state_root) }
+      assert_includes error.message, "set XDG_STATE_HOME or HOME to an absolute path, or pass --state-root"
+      refute_includes error.message, "home unavailable"
+    end
+
+    Dir.mktmpdir("agent-coord-absolute-xdg") do |state_home|
+      with_env("XDG_STATE_HOME" => state_home, "HOME" => nil) do
+        assert_equal File.join(state_home, "agent-coordination"), runner.send(:default_local_state_root)
+      end
+    end
+  end
+
   def test_doctor_json_omits_backend_url_when_state_root_wins
     Dir.mktmpdir do |root|
       with_env("AGENT_COORD_API_TOKEN" => nil) do
