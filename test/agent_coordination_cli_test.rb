@@ -111,6 +111,54 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     assert_includes result.stdout, "config"
     assert_includes result.stdout, "doctor"
     assert_includes result.stdout, "bootstrap"
+    assert_includes result.stdout, "demo"
+  end
+
+  def test_demo_walks_claim_liveness_and_takeover_deterministically
+    first = run_agent_coord("demo", state_root: nil)
+    second = run_agent_coord("demo", state_root: nil)
+
+    assert_equal 0, first.status.exitstatus, first.stderr
+    assert_equal 0, second.status.exitstatus, second.stderr
+    assert_equal first.stdout, second.stdout
+    assert_empty first.stderr
+    assert_includes first.stdout, "isolated local store — no remote writes"
+    assert_includes first.stdout, "CLAIM_REFUSED"
+    assert_includes first.stdout, "held by demo-alpha; heartbeat live"
+    assert_includes first.stdout, "demo-alpha heartbeat stale"
+    assert_includes first.stdout, "demo-alpha heartbeat dead"
+    assert_includes first.stdout, "takeover succeeded; holder is demo-beta"
+    assert_includes first.stdout, "temporary state removed"
+  end
+
+  def test_demo_ignores_remote_backends_and_removes_isolated_state
+    expected_refusal = "CLAIM_REFUSED: active claim for demo/example#1 held by demo-alpha; heartbeat live"
+    Dir.mktmpdir("agent-coord-demo-tmp") do |tmpdir|
+      xdg_state_home = File.join(tmpdir, "xdg-state")
+      common_env = { "TMPDIR" => tmpdir, "XDG_STATE_HOME" => xdg_state_home }
+      clean = run_command(common_env, RbConfig.ruby, BIN, "demo")
+      configured = run_command(
+        common_env.merge(
+          "AGENT_COORD_API_URL" => "http://127.0.0.1:1",
+          "AGENT_COORD_API_TOKEN" => "demo-must-not-use-this-token",
+          "AGENT_COORD_BACKEND" => "demo/must-not-use-this-repo",
+          "AGENT_COORD_STATE_ROOT" => File.join(tmpdir, "ambient-state"),
+          "AGENT_COORD_STATUS_STATE_ROOT" => File.join(tmpdir, "ambient-status-state")
+        ),
+        RbConfig.ruby,
+        BIN,
+        "demo"
+      )
+
+      assert_equal 0, clean.status.exitstatus, clean.stderr
+      assert_equal 0, configured.status.exitstatus, configured.stderr
+      assert_equal clean.stdout, configured.stdout
+      assert_includes configured.stdout, expected_refusal
+      refute_includes configured.stdout, "warning:"
+      assert_empty clean.stderr
+      assert_empty configured.stderr
+      assert_demo_left_no_state(tmpdir, xdg_state_home)
+    end
   end
 
   def test_global_help_omits_doctor_only_deep_option
@@ -195,6 +243,130 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
 
     assert_equal 0, result.status.exitstatus, result.stderr
     assert_includes result.stdout, "default_backend: none"
+  end
+
+  def test_unconfigured_status_defaults_to_labeled_xdg_local_store
+    Dir.mktmpdir("agent-coord-xdg-state") do |state_home|
+      result = run_command(
+        { "XDG_STATE_HOME" => state_home },
+        RbConfig.ruby,
+        BIN,
+        "status",
+        "--json"
+      )
+
+      assert_equal 0, result.status.exitstatus, result.stderr
+      assert_equal "all", JSON.parse(result.stdout).dig("scope", "kind")
+      assert_includes result.stderr, "local mode — single-machine only"
+      assert_includes result.stderr, File.join(state_home, "agent-coordination")
+    end
+  end
+
+  def test_unconfigured_claim_persists_only_to_labeled_xdg_local_store
+    Dir.mktmpdir("agent-coord-zero-config-claim") do |root|
+      state_home = File.join(root, "xdg-state")
+      home = File.join(root, "home")
+      state_root = File.join(state_home, "agent-coordination")
+      env = COMMAND_ENV.merge(
+        "XDG_STATE_HOME" => state_home,
+        "HOME" => home,
+        "TMPDIR" => File.join(root, "tmp"),
+        "PATH" => "/nonexistent"
+      )
+      result = run_command(
+        env, RbConfig.ruby, BIN, "claim",
+        "--agent-id", "zero-config-worker", "--repo", "demo/example", "--target", "1"
+      )
+
+      assert_equal 0, result.status.exitstatus, result.stderr
+      assert_includes result.stdout, "claimed demo/example#1 by zero-config-worker until "
+      assert_includes result.stderr, "local mode — single-machine only"
+      assert_includes result.stderr, "state root: #{state_root}"
+      claim_path = File.join(state_root, "claims", "demo", "example", "1.json")
+      claim = JSON.parse(File.read(claim_path))
+      assert_equal "zero-config-worker", claim.fetch("agent_id")
+      assert_equal "demo/example", claim.fetch("repo")
+      assert_equal "1", claim.fetch("target")
+      assert_equal "active", claim.fetch("status")
+      refute_path_exists File.join(home, ".local", "state", "agent-coordination")
+      assert_equal ["xdg-state"], Dir.children(root).sort
+    end
+  end
+
+  def test_unconfigured_doctor_initializes_and_reports_xdg_local_store
+    Dir.mktmpdir("agent-coord-xdg-state") do |state_home|
+      state_root = File.join(state_home, "agent-coordination")
+      result = run_command(
+        { "XDG_STATE_HOME" => state_home },
+        RbConfig.ruby,
+        BIN,
+        "doctor"
+      )
+
+      assert_equal 0, result.status.exitstatus, result.stderr
+      assert_includes result.stdout, "backend: local"
+      assert_includes result.stdout, "state_root: #{state_root}"
+      assert_includes result.stderr, "local mode — single-machine only"
+      assert_path_exists state_root
+    end
+  end
+
+  def test_relative_xdg_state_home_uses_home_fallback_independent_of_cwd
+    Dir.mktmpdir("agent-coord-relative-xdg") do |root|
+      home = File.join(root, "home")
+      cwd_a = File.join(root, "cwd-a")
+      cwd_b = File.join(root, "cwd-b")
+      FileUtils.mkdir_p([cwd_a, cwd_b])
+      env = {
+        "XDG_STATE_HOME" => "relative-state",
+        "HOME" => home,
+        "TMPDIR" => File.join(root, "tmp")
+      }
+      status = Dir.chdir(cwd_a) { run_command(env, RbConfig.ruby, BIN, "status", "--json") }
+      doctor = Dir.chdir(cwd_b) { run_command(env, RbConfig.ruby, BIN, "doctor") }
+      expected_root = File.join(home, ".local", "state", "agent-coordination")
+
+      assert_equal 0, status.status.exitstatus, status.stderr
+      assert_equal "all", JSON.parse(status.stdout).dig("scope", "kind")
+      assert_equal 0, doctor.status.exitstatus, doctor.stderr
+      assert_includes status.stderr, "state root: #{expected_root}"
+      assert_includes doctor.stderr, "state root: #{expected_root}"
+      assert_includes doctor.stdout, "state_root: #{expected_root}"
+      assert_path_exists expected_root
+      refute_path_exists File.join(cwd_a, "relative-state", "agent-coordination")
+      refute_path_exists File.join(cwd_b, "relative-state", "agent-coordination")
+    end
+  end
+
+  def test_token_only_http_env_rejects_implicit_source_state_for_status_and_doctor
+    with_agent_coord_source_state do |bin, source_root|
+      xdg_state_home = File.join(source_root, "xdg-state")
+
+      [nil, ""].each do |api_url|
+        [["status", "--json"], ["doctor"]].each do |args|
+          result = run_command(
+            {
+              "AGENT_COORD_API_URL" => api_url,
+              "AGENT_COORD_API_TOKEN" => "token-without-url",
+              "XDG_STATE_HOME" => xdg_state_home,
+              "HOME" => File.join(source_root, "home"),
+              "TMPDIR" => File.join(source_root, "tmp")
+            },
+            RbConfig.ruby,
+            bin,
+            *args
+          )
+
+          assert_equal 2, result.status.exitstatus
+          assert_empty result.stdout
+          assert_includes result.stderr, "AGENT_COORD_API_TOKEN is set but AGENT_COORD_API_URL is missing or empty"
+          refute_includes result.stderr, "local mode — single-machine only"
+        end
+      end
+
+      refute_path_exists File.join(xdg_state_home, "agent-coordination")
+      assert_empty Dir.glob(File.join(source_root, "{claims,heartbeats,batches,events}", "**", "*.json"))
+    end
   end
 
   def test_doctor_verifies_local_backend_without_github
@@ -282,19 +454,28 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     end
   end
 
-  def test_doctor_reports_missing_backend_when_unconfigured
-    with_agent_coord_without_source_state do |bin|
-      result = run_command(
-        { "AGENT_COORD_STATE_ROOT" => nil, "AGENT_COORD_STATUS_STATE_ROOT" => nil },
-        RbConfig.ruby,
-        bin,
-        "doctor"
-      )
+  def test_unconfigured_doctor_defaults_to_home_local_store_when_xdg_state_home_is_empty
+    Dir.mktmpdir("agent-coord-home") do |home|
+      with_agent_coord_without_source_state do |bin|
+        state_root = File.join(home, ".local", "state", "agent-coordination")
+        result = run_command(
+          {
+            "AGENT_COORD_STATE_ROOT" => nil,
+            "AGENT_COORD_STATUS_STATE_ROOT" => nil,
+            "XDG_STATE_HOME" => "",
+            "HOME" => home
+          },
+          RbConfig.ruby,
+          bin,
+          "doctor"
+        )
 
-      assert_equal 2, result.status.exitstatus
-      assert_includes result.stderr, "no coordination backend configured"
-      assert_includes result.stderr, "AGENT_COORD_API_URL"
-      refute_includes result.stdout, "status: ok"
+        assert_equal 0, result.status.exitstatus, result.stderr
+        assert_includes result.stdout, "backend: local"
+        assert_includes result.stdout, "state_root: #{state_root}"
+        assert_includes result.stderr, "local mode — single-machine only"
+        assert_path_exists state_root
+      end
     end
   end
 
@@ -510,10 +691,18 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     refute_includes systemd_heartbeat, "AGENT_COORD_REF=state"
   end
 
-  def test_readme_documents_http_first_setup
+  def test_readme_documents_local_first_run_and_team_http_setup
     readme = File.read(File.join(ROOT, "README.md"))
 
-    assert_includes readme, "The team/client runtime path is the HTTP backend"
+    assert_includes readme, "A zero-config first run uses a clearly labeled local store"
+    assert_includes readme, "The team and multi-machine runtime path is the HTTP"
+    assert_includes readme, "$XDG_STATE_HOME/agent-coordination"
+    assert_includes readme, "when `XDG_STATE_HOME` is an absolute path"
+    assert_includes readme, "Relative, empty, or unset values use"
+    assert_includes readme, "~/.local/state/agent-coordination"
+    assert_includes readme, "local mode — single-machine only"
+    assert_includes readme, "agent-coord demo"
+    assert_includes readme, "never writes demo data remotely"
     assert_includes readme, "AGENT_COORD_API_URL"
     assert_includes readme, "AGENT_COORD_API_TOKEN"
     assert_includes readme, "AGENT_COORD_ENV_FILE"
@@ -3027,6 +3216,24 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
       FileUtils.cp(BIN, copied_bin)
       yield copied_bin
     end
+  end
+
+  def with_agent_coord_source_state
+    Dir.mktmpdir("agent-coord-source-state") do |root|
+      bin_dir = File.join(root, "bin")
+      FileUtils.mkdir_p(bin_dir)
+      copied_bin = File.join(bin_dir, "agent-coord")
+      FileUtils.cp(BIN, copied_bin)
+      %w[claims heartbeats batches].each { |prefix| FileUtils.mkdir_p(File.join(root, prefix)) }
+      yield copied_bin, root
+    end
+  end
+
+  def assert_demo_left_no_state(tmpdir, xdg_state_home)
+    assert_empty Dir.children(tmpdir)
+    refute_path_exists File.join(xdg_state_home, "agent-coordination")
+    refute_path_exists File.join(tmpdir, "ambient-state")
+    refute_path_exists File.join(tmpdir, "ambient-status-state")
   end
 
   def lane_metadata_args(overrides = {})

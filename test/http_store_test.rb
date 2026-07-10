@@ -527,11 +527,54 @@ class HttpBackendSelectionTest < HttpEnvTestCase
     end
   end
 
-  def test_empty_api_url_is_operational_error
-    with_env("AGENT_COORD_API_URL" => "", "AGENT_COORD_API_TOKEN" => "tok") do
-      code, _, err = run_cli(["status"], {})
-      assert_equal 2, code
-      assert_includes err, "invalid HTTP backend URL"
+  def test_empty_api_url_env_uses_implicit_xdg_local_default
+    Dir.mktmpdir("agent-coord-empty-api") do |root|
+      state_home = File.join(root, "state")
+      with_env("AGENT_COORD_API_URL" => "",
+               "AGENT_COORD_API_TOKEN" => nil,
+               "AGENT_COORD_BACKEND" => nil,
+               "AGENT_COORD_STATE_ROOT" => nil,
+               "AGENT_COORD_STATUS_STATE_ROOT" => nil,
+               "XDG_STATE_HOME" => state_home,
+               "HOME" => File.join(root, "home"),
+               "TMPDIR" => File.join(root, "tmp")) do
+        code, out, err = run_cli(["status", "--json"], {})
+
+        assert_equal 0, code
+        assert_equal "all", JSON.parse(out).dig("scope", "kind")
+        assert_includes err, "local mode — single-machine only"
+        assert_includes err, File.join(state_home, "agent-coordination")
+      end
+    end
+  end
+
+  def test_token_only_http_env_is_rejected_before_implicit_local_fallback
+    Dir.mktmpdir("agent-coord-token-only") do |root|
+      state_home = File.join(root, "state")
+      with_env("AGENT_COORD_API_TOKEN" => "token-without-url",
+               "AGENT_COORD_BACKEND" => nil,
+               "AGENT_COORD_STATE_ROOT" => nil,
+               "AGENT_COORD_STATUS_STATE_ROOT" => nil,
+               "XDG_STATE_HOME" => state_home,
+               "HOME" => File.join(root, "home"),
+               "TMPDIR" => File.join(root, "tmp")) do
+        [nil, ""].each do |api_url|
+          with_env("AGENT_COORD_API_URL" => api_url) do
+            [
+              ["status", "--json"],
+              ["claim", "--agent-id", "worker-a", "--repo", "demo/example", "--target", "1"]
+            ].each do |args|
+              code, out, err = run_cli(args, {})
+
+              assert_equal 2, code
+              assert_empty out
+              assert_includes err, "AGENT_COORD_API_TOKEN is set but AGENT_COORD_API_URL is missing or empty"
+              refute_includes err, "local mode — single-machine only"
+            end
+          end
+        end
+      end
+      refute_path_exists File.join(state_home, "agent-coordination")
     end
   end
 
@@ -609,27 +652,83 @@ class HttpBackendSelectionTest < HttpEnvTestCase
     end
   end
 
-  def test_empty_state_root_env_is_ignored
-    with_env("AGENT_COORD_API_TOKEN" => nil, "AGENT_COORD_API_URL" => nil, "AGENT_COORD_STATE_ROOT" => "") do
-      options = AgentCoord::Runner.new([], stdout: StringIO.new, stderr: StringIO.new)
-                                  .send(:parse_options, "status", [])
-      assert_nil options[:state_root]
-      assert_nil options[:api_url]
+  def test_empty_state_root_env_uses_implicit_xdg_local_default
+    Dir.mktmpdir("agent-coord-xdg-state") do |state_home|
+      with_env("AGENT_COORD_API_TOKEN" => nil,
+               "AGENT_COORD_API_URL" => nil,
+               "AGENT_COORD_STATE_ROOT" => "",
+               "XDG_STATE_HOME" => state_home) do
+        stderr = StringIO.new
+        options = AgentCoord::Runner.new([], stdout: StringIO.new, stderr: stderr)
+                                    .send(:parse_options, "status", [])
+
+        assert_equal File.join(state_home, "agent-coordination"), options[:state_root]
+        assert_nil options[:api_url]
+        assert_includes stderr.string, "local mode — single-machine only"
+      end
     end
   end
 
-  def test_missing_http_or_local_backend_does_not_fall_back_to_github
-    with_env("AGENT_COORD_API_TOKEN" => nil,
-             "AGENT_COORD_API_URL" => nil,
-             "AGENT_COORD_BACKEND" => nil,
-             "AGENT_COORD_STATE_ROOT" => nil,
-             "AGENT_COORD_STATUS_STATE_ROOT" => nil) do
-      runner = AgentCoord::Runner.new([], stdout: StringIO.new, stderr: StringIO.new)
-      options = runner.send(:parse_options, "status", [])
-      error = assert_raises(AgentCoord::OperationalError) { runner.send(:build_store, options) }
-      assert_includes error.message, "no coordination backend configured"
-      assert_includes error.message, "AGENT_COORD_API_URL"
-      assert_includes error.message, "AGENT_COORD_STATE_ROOT"
+  def test_missing_explicit_backend_defaults_to_labeled_xdg_local_store
+    Dir.mktmpdir("agent-coord-xdg-state") do |state_home|
+      with_env("AGENT_COORD_API_TOKEN" => nil,
+               "AGENT_COORD_API_URL" => nil,
+               "AGENT_COORD_BACKEND" => nil,
+               "AGENT_COORD_STATE_ROOT" => nil,
+               "AGENT_COORD_STATUS_STATE_ROOT" => nil,
+               "XDG_STATE_HOME" => state_home) do
+        code, out, err = run_cli(["status", "--json"], {})
+
+        assert_equal 0, code
+        assert_equal "all", JSON.parse(out).dig("scope", "kind")
+        assert_includes err, "local mode — single-machine only"
+        assert_includes err, File.join(state_home, "agent-coordination")
+      end
+    end
+  end
+
+  def test_empty_home_rejects_implicit_local_for_missing_empty_or_relative_xdg
+    Dir.mktmpdir("agent-coord-empty-home") do |root|
+      cwd = File.join(root, "cwd")
+      FileUtils.mkdir_p(cwd)
+      Dir.chdir(cwd) do
+        [nil, "", "relative-state"].each do |xdg_state_home|
+          with_env("AGENT_COORD_API_TOKEN" => nil,
+                   "AGENT_COORD_API_URL" => nil,
+                   "AGENT_COORD_BACKEND" => nil,
+                   "AGENT_COORD_STATE_ROOT" => nil,
+                   "AGENT_COORD_STATUS_STATE_ROOT" => nil,
+                   "XDG_STATE_HOME" => xdg_state_home,
+                   "HOME" => "",
+                   "TMPDIR" => File.join(root, "tmp")) do
+            [["status", "--json"], ["doctor"]].each do |args|
+              code, out, err = run_cli(args, {})
+
+              assert_equal 2, code
+              assert_empty out
+              assert_includes err, "set XDG_STATE_HOME or HOME to an absolute path, or pass --state-root"
+              refute_includes err, "local mode — single-machine only"
+            end
+          end
+        end
+      end
+      assert_equal ["cwd"], Dir.children(root).sort
+    end
+  end
+
+  def test_unavailable_home_is_operational_but_absolute_xdg_does_not_consult_it
+    runner = AgentCoord::Runner.new([], stdout: StringIO.new, stderr: StringIO.new)
+    runner.define_singleton_method(:home_directory) { raise ArgumentError, "home unavailable" }
+    with_env("XDG_STATE_HOME" => nil, "HOME" => nil) do
+      error = assert_raises(AgentCoord::OperationalError) { runner.send(:default_local_state_root) }
+      assert_includes error.message, "set XDG_STATE_HOME or HOME to an absolute path, or pass --state-root"
+      refute_includes error.message, "home unavailable"
+    end
+
+    Dir.mktmpdir("agent-coord-absolute-xdg") do |state_home|
+      with_env("XDG_STATE_HOME" => state_home, "HOME" => nil) do
+        assert_equal File.join(state_home, "agent-coordination"), runner.send(:default_local_state_root)
+      end
     end
   end
 

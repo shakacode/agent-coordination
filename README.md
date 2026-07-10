@@ -3,11 +3,12 @@
 CLI, workflow helpers, Worker code, tests, and simulation fixtures for
 coordinating concurrent agent work.
 
-The team/client runtime path is the HTTP backend: `AGENT_COORD_API_URL` points
-the CLI at the Cloudflare Worker backed by D1, and `AGENT_COORD_API_TOKEN`
-authenticates this machine to that Worker. Local file state is for tests and
-smoke checks. The legacy GitHub backend is available only when explicitly
-requested by maintainers; new users should start with HTTP.
+A zero-config first run uses a clearly labeled local store so one person can
+try the CLI immediately. The team and multi-machine runtime path is the HTTP
+backend: `AGENT_COORD_API_URL` points the CLI at the Cloudflare Worker backed by
+D1, and `AGENT_COORD_API_TOKEN` authenticates this machine to that Worker. The
+legacy GitHub backend is available only when explicitly requested by
+maintainers.
 
 Keep this public repository code-only. Do not commit live `claims/`,
 `heartbeats/`, `batches/`, `events/`, `*.json.lock`, secrets, environment files,
@@ -45,11 +46,37 @@ bin/agent-coord --help
 bin/agent-coord bootstrap
 export PATH="$HOME/.local/bin:$PATH"
 agent-coord --help
+agent-coord status
+agent-coord demo
 ```
 
 The versioned pre-commit hook in `.githooks/pre-commit` runs RuboCop on staged
 Ruby files before each commit after `core.hooksPath` is configured. CI runs the
 full RuboCop check on every pull request.
+
+## Zero-config local first run
+
+Run `agent-coord status` without configuring a backend. The CLI uses
+`$XDG_STATE_HOME/agent-coordination` when `XDG_STATE_HOME` is an absolute path.
+Relative, empty, or unset values use `~/.local/state/agent-coordination`.
+Every command that selects this implicit default prints its path with a
+`local mode — single-machine only` notice. JSON commands keep machine-readable
+output on stdout; the notice goes to stderr.
+
+This default is for one machine only. Configure the HTTP backend before sharing
+coordination state across machines or operators.
+
+Run the deterministic walkthrough to see the claim and heartbeat model without
+configuring or changing any persistent backend:
+
+```bash
+agent-coord demo
+```
+
+The demo uses an isolated temporary local store, shows a live-holder claim
+refusal followed by stale and dead heartbeat states and a successful takeover,
+then removes its temporary state. It ignores configured HTTP and legacy GitHub
+backends, so it never writes demo data remotely.
 
 ## HTTP backend
 
@@ -138,7 +165,7 @@ Backend selection follows this rule:
 2. `--api-url` flag or `AGENT_COORD_API_URL` env -> `HttpStore`
 3. `AGENT_COORD_STATE_ROOT` env -> `LocalStore`
 4. `--backend` flag or `AGENT_COORD_BACKEND` env -> legacy `GitHubStore`
-5. otherwise -> operational setup error
+5. otherwise -> labeled local store at the zero-config path above
 
 When both `AGENT_COORD_API_URL` and `AGENT_COORD_STATE_ROOT` are set, the CLI
 uses the HTTP backend and warns once. Pass `--state-root` only for an explicit
@@ -157,17 +184,18 @@ export PATH="$HOME/.local/bin:$PATH"
 
 Run `agent-coord doctor` after setup. The default doctor is intentionally
 lightweight: it verifies backend access and the expected state layout without
-downloading and parsing every JSON record. Use `agent-coord doctor --deep` for a
-full audit that parses every claim, heartbeat, and batch file. If doctor reports
-that no backend is configured, set HTTP credentials or an explicit local state
-root before using coordination commands. If doctor fails for another operational
-reason, agents should report coordination state as `UNKNOWN` and use the public
-claim-comment fallback until the operator fixes backend access.
+downloading and parsing every JSON record. On an unconfigured first run it
+initializes and verifies the zero-config local root. Run
+`agent-coord doctor --deep` for a full audit that parses every claim, heartbeat,
+and batch file. If an explicitly configured backend fails, agents should report
+coordination state
+as `UNKNOWN` and use the public claim-comment fallback until the operator fixes
+backend access.
 For HTTP tokens scoped outside `claims`, pass a readable scope:
 `agent-coord doctor --doctor-prefix events/<batch-id>`.
 
-For local smoke checks, set `AGENT_COORD_STATE_ROOT` or pass `--state-root` to
-use a temporary filesystem state directory:
+To override the default for a local smoke check, set `AGENT_COORD_STATE_ROOT` or
+pass `--state-root` to use a temporary filesystem state directory:
 
 ```bash
 STATE_ROOT=$(mktemp -d)
@@ -196,7 +224,11 @@ bin/agent-coord version [--json]
 bin/agent-coord config [show] [--json]
 bin/agent-coord doctor [--json] [--deep] [--doctor-prefix PREFIX] [--state-root PATH]
 bin/agent-coord bootstrap [--install-dir PATH] [--profile PATH] [--no-profile]
+bin/agent-coord demo
 ```
+
+`demo` is a deterministic, isolated local walkthrough. It does not use backend
+environment variables, make remote requests, or preserve its temporary state.
 
 `claim` acquires or renews a lease. If an active claim exists for another agent,
 the holder's heartbeat is the normal liveness source: `live` or `stale`
