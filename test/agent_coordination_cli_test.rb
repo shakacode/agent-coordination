@@ -262,6 +262,37 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     end
   end
 
+  def test_unconfigured_claim_persists_only_to_labeled_xdg_local_store
+    Dir.mktmpdir("agent-coord-zero-config-claim") do |root|
+      state_home = File.join(root, "xdg-state")
+      home = File.join(root, "home")
+      state_root = File.join(state_home, "agent-coordination")
+      env = COMMAND_ENV.merge(
+        "XDG_STATE_HOME" => state_home,
+        "HOME" => home,
+        "TMPDIR" => File.join(root, "tmp"),
+        "PATH" => "/nonexistent"
+      )
+      result = run_command(
+        env, RbConfig.ruby, BIN, "claim",
+        "--agent-id", "zero-config-worker", "--repo", "demo/example", "--target", "1"
+      )
+
+      assert_equal 0, result.status.exitstatus, result.stderr
+      assert_includes result.stdout, "claimed demo/example#1 by zero-config-worker until "
+      assert_includes result.stderr, "local mode — single-machine only"
+      assert_includes result.stderr, "state root: #{state_root}"
+      claim_path = File.join(state_root, "claims", "demo", "example", "1.json")
+      claim = JSON.parse(File.read(claim_path))
+      assert_equal "zero-config-worker", claim.fetch("agent_id")
+      assert_equal "demo/example", claim.fetch("repo")
+      assert_equal "1", claim.fetch("target")
+      assert_equal "active", claim.fetch("status")
+      refute_path_exists File.join(home, ".local", "state", "agent-coordination")
+      assert_equal ["xdg-state"], Dir.children(root).sort
+    end
+  end
+
   def test_unconfigured_doctor_initializes_and_reports_xdg_local_store
     Dir.mktmpdir("agent-coord-xdg-state") do |state_home|
       state_root = File.join(state_home, "agent-coordination")
