@@ -2448,7 +2448,7 @@ module AgentCoord
   end
 end
 
-if $PROGRAM_NAME == __FILE__
+if File.basename($PROGRAM_NAME) == File.basename(__FILE__)
   begin
     exit AgentCoord::Runner.new(ARGV).run
   rescue AgentCoord::Error => e
