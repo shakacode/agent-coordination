@@ -280,6 +280,33 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     end
   end
 
+  def test_relative_xdg_state_home_uses_home_fallback_independent_of_cwd
+    Dir.mktmpdir("agent-coord-relative-xdg") do |root|
+      home = File.join(root, "home")
+      cwd_a = File.join(root, "cwd-a")
+      cwd_b = File.join(root, "cwd-b")
+      FileUtils.mkdir_p([cwd_a, cwd_b])
+      env = {
+        "XDG_STATE_HOME" => "relative-state",
+        "HOME" => home,
+        "TMPDIR" => File.join(root, "tmp")
+      }
+      status = Dir.chdir(cwd_a) { run_command(env, RbConfig.ruby, BIN, "status", "--json") }
+      doctor = Dir.chdir(cwd_b) { run_command(env, RbConfig.ruby, BIN, "doctor") }
+      expected_root = File.join(home, ".local", "state", "agent-coordination")
+
+      assert_equal 0, status.status.exitstatus, status.stderr
+      assert_equal "all", JSON.parse(status.stdout).dig("scope", "kind")
+      assert_equal 0, doctor.status.exitstatus, doctor.stderr
+      assert_includes status.stderr, "state root: #{expected_root}"
+      assert_includes doctor.stderr, "state root: #{expected_root}"
+      assert_includes doctor.stdout, "state_root: #{expected_root}"
+      assert_path_exists expected_root
+      refute_path_exists File.join(cwd_a, "relative-state", "agent-coordination")
+      refute_path_exists File.join(cwd_b, "relative-state", "agent-coordination")
+    end
+  end
+
   def test_token_only_http_env_rejects_implicit_source_state_for_status_and_doctor
     with_agent_coord_source_state do |bin, source_root|
       xdg_state_home = File.join(source_root, "xdg-state")

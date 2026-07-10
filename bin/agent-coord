@@ -9,6 +9,7 @@ require "net/http"
 require "openssl"
 require "open3"
 require "optparse"
+require "pathname"
 require "securerandom"
 require "shellwords"
 require "stringio"
@@ -1615,7 +1616,8 @@ module AgentCoord
 
     def default_local_state_root
       state_home = ENV.fetch("XDG_STATE_HOME", nil)
-      state_home = File.join(Dir.home, ".local", "state") if state_home.to_s.empty?
+      state_home = nil unless Pathname.new(state_home.to_s).absolute?
+      state_home ||= File.join(Dir.home, ".local", "state")
       File.join(File.expand_path(state_home), "agent-coordination")
     end
 
