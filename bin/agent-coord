@@ -108,11 +108,12 @@ module AgentCoord
   DemoResult = Struct.new(:code, :stdout, :stderr, keyword_init: true)
 
   class Runner # rubocop:disable Metrics/ClassLength
-    def initialize(argv, stdout: $stdout, stderr: $stderr, clock: Time)
+    def initialize(argv, stdout: $stdout, stderr: $stderr, clock: Time, backend_conflict_warnings: true)
       @argv = argv
       @stdout = stdout
       @stderr = stderr
       @clock = clock
+      @backend_conflict_warnings = backend_conflict_warnings
     end
 
     def run # rubocop:disable Metrics/CyclomaticComplexity
@@ -319,9 +320,11 @@ module AgentCoord
 
       if options[:state_root]
         if cli_api
-          @stderr.puts "warning: --api-url and --state-root are both set; using the local backend."
+          emit_backend_conflict_warning("warning: --api-url and --state-root are both set; using the local backend.")
         elsif env_api && !env_api.empty?
-          @stderr.puts "warning: AGENT_COORD_API_URL and --state-root are both set; using the local backend."
+          emit_backend_conflict_warning(
+            "warning: AGENT_COORD_API_URL and --state-root are both set; using the local backend."
+          )
         end
         return
       end
@@ -330,12 +333,18 @@ module AgentCoord
       if options[:api_url]
         if env_root
           api_source = cli_api ? "--api-url" : "AGENT_COORD_API_URL"
-          @stderr.puts "warning: #{api_source} and AGENT_COORD_STATE_ROOT are both set; " \
-                       "using the HTTP backend. Pass --state-root to force local."
+          emit_backend_conflict_warning(
+            "warning: #{api_source} and AGENT_COORD_STATE_ROOT are both set; " \
+            "using the HTTP backend. Pass --state-root to force local."
+          )
         end
         return
       end
       options[:state_root] = env_root if env_root
+    end
+
+    def emit_backend_conflict_warning(message)
+      @stderr.puts message if @backend_conflict_warnings
     end
 
     def resolve_default_local_backend(command, options)
@@ -741,7 +750,8 @@ module AgentCoord
           argv + ["--state-root", state_root],
           stdout: stdout,
           stderr: stderr,
-          clock: DemoClock.new(now)
+          clock: DemoClock.new(now),
+          backend_conflict_warnings: false
         ).run
       rescue Error => e
         stderr.puts e.message

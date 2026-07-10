@@ -132,25 +132,32 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
   end
 
   def test_demo_ignores_remote_backends_and_removes_isolated_state
+    expected_refusal = "CLAIM_REFUSED: active claim for demo/example#1 held by demo-alpha; heartbeat live"
     Dir.mktmpdir("agent-coord-demo-tmp") do |tmpdir|
       xdg_state_home = File.join(tmpdir, "xdg-state")
-      result = run_command(
-        {
-          "TMPDIR" => tmpdir,
-          "XDG_STATE_HOME" => xdg_state_home,
+      common_env = { "TMPDIR" => tmpdir, "XDG_STATE_HOME" => xdg_state_home }
+      clean = run_command(common_env, RbConfig.ruby, BIN, "demo")
+      configured = run_command(
+        common_env.merge(
           "AGENT_COORD_API_URL" => "http://127.0.0.1:1",
           "AGENT_COORD_API_TOKEN" => "demo-must-not-use-this-token",
-          "AGENT_COORD_BACKEND" => "demo/must-not-use-this-repo"
-        },
+          "AGENT_COORD_BACKEND" => "demo/must-not-use-this-repo",
+          "AGENT_COORD_STATE_ROOT" => File.join(tmpdir, "ambient-state"),
+          "AGENT_COORD_STATUS_STATE_ROOT" => File.join(tmpdir, "ambient-status-state")
+        ),
         RbConfig.ruby,
         BIN,
         "demo"
       )
 
-      assert_equal 0, result.status.exitstatus, result.stderr
-      assert_empty result.stderr
-      assert_empty Dir.children(tmpdir)
-      refute_path_exists File.join(xdg_state_home, "agent-coordination")
+      assert_equal 0, clean.status.exitstatus, clean.stderr
+      assert_equal 0, configured.status.exitstatus, configured.stderr
+      assert_equal clean.stdout, configured.stdout
+      assert_includes configured.stdout, expected_refusal
+      refute_includes configured.stdout, "warning:"
+      assert_empty clean.stderr
+      assert_empty configured.stderr
+      assert_demo_left_no_state(tmpdir, xdg_state_home)
     end
   end
 
@@ -3160,6 +3167,13 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
       %w[claims heartbeats batches].each { |prefix| FileUtils.mkdir_p(File.join(root, prefix)) }
       yield copied_bin, root
     end
+  end
+
+  def assert_demo_left_no_state(tmpdir, xdg_state_home)
+    assert_empty Dir.children(tmpdir)
+    refute_path_exists File.join(xdg_state_home, "agent-coordination")
+    refute_path_exists File.join(tmpdir, "ambient-state")
+    refute_path_exists File.join(tmpdir, "ambient-status-state")
   end
 
   def lane_metadata_args(overrides = {})
