@@ -273,6 +273,37 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     end
   end
 
+  def test_token_only_http_env_rejects_implicit_source_state_for_status_and_doctor
+    with_agent_coord_source_state do |bin, source_root|
+      xdg_state_home = File.join(source_root, "xdg-state")
+
+      [nil, ""].each do |api_url|
+        [["status", "--json"], ["doctor"]].each do |args|
+          result = run_command(
+            {
+              "AGENT_COORD_API_URL" => api_url,
+              "AGENT_COORD_API_TOKEN" => "token-without-url",
+              "XDG_STATE_HOME" => xdg_state_home,
+              "HOME" => File.join(source_root, "home"),
+              "TMPDIR" => File.join(source_root, "tmp")
+            },
+            RbConfig.ruby,
+            bin,
+            *args
+          )
+
+          assert_equal 2, result.status.exitstatus
+          assert_empty result.stdout
+          assert_includes result.stderr, "AGENT_COORD_API_TOKEN is set but AGENT_COORD_API_URL is missing or empty"
+          refute_includes result.stderr, "local mode — single-machine only"
+        end
+      end
+
+      refute_path_exists File.join(xdg_state_home, "agent-coordination")
+      assert_empty Dir.glob(File.join(source_root, "{claims,heartbeats,batches,events}", "**", "*.json"))
+    end
+  end
+
   def test_doctor_verifies_local_backend_without_github
     result = run_agent_coord("doctor")
 
@@ -3117,6 +3148,17 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
       copied_bin = File.join(bin_dir, "agent-coord")
       FileUtils.cp(BIN, copied_bin)
       yield copied_bin
+    end
+  end
+
+  def with_agent_coord_source_state
+    Dir.mktmpdir("agent-coord-source-state") do |root|
+      bin_dir = File.join(root, "bin")
+      FileUtils.mkdir_p(bin_dir)
+      copied_bin = File.join(bin_dir, "agent-coord")
+      FileUtils.cp(BIN, copied_bin)
+      %w[claims heartbeats batches].each { |prefix| FileUtils.mkdir_p(File.join(root, prefix)) }
+      yield copied_bin, root
     end
   end
 

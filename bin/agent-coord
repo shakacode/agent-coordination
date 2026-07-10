@@ -341,9 +341,10 @@ module AgentCoord
     def resolve_default_local_backend(command, options)
       return if options[:state_root] || options[:api_url] || !options[:backend].to_s.empty?
 
-      status_root = default_status_state_root if %w[status doctor].include?(command)
-      if status_root
-        options[:state_root] = status_root
+      status_command = %w[status doctor].include?(command)
+      configured_status_root = ENV.fetch(STATUS_STATE_ROOT_ENV, nil)
+      if status_command && !configured_status_root.to_s.empty?
+        options[:state_root] = configured_status_root
         return
       end
 
@@ -351,6 +352,12 @@ module AgentCoord
         raise OperationalError,
               "AGENT_COORD_API_TOKEN is set but AGENT_COORD_API_URL is missing or empty; " \
               "set AGENT_COORD_API_URL or unset AGENT_COORD_API_TOKEN"
+      end
+
+      status_root = default_status_state_root if status_command
+      if status_root
+        options[:state_root] = status_root
+        return
       end
 
       options[:state_root] = default_local_state_root
