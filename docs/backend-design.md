@@ -264,7 +264,12 @@ Machine tokens carry read/write path scopes:
 
 - `read_prefixes` gate `GET /v1/state/<path>` and `GET /v1/state?prefix=...`.
 - `write_prefixes` gate `PUT /v1/state/<path>`.
-- `""` grants all-state access for existing internal-machine migration.
+- `""` grants all-state access for existing internal-machine migration. New
+  tokens require at least one explicit read or write prefix; an omitted
+  dimension has no access. Write-only tokens fit append-only event producers,
+  while claim, release, heartbeat, and batch mutations also need matching read
+  prefixes. The provisioning command's explicit `--all-state` is the
+  unrestricted opt-out.
 - Directory scopes cover descendants, for example
   `claims/shakacode/react_on_rails` covers that repo's claim paths.
 - Valid record-path scopes cover exactly one flat record, for example
@@ -347,9 +352,9 @@ write's WHERE clause*:
 - Per-machine bearer tokens, hashed at rest in `machines`; revocation = set
   `revoked_at`. Tokens live in each machine's env (`AGENT_COORD_API_TOKEN`).
 - Machine tokens enforce JSON state read/write path scopes. Existing internal
-  all-state tokens use `[""]`; broader production traffic should use the
-  narrowest claim, heartbeat, batch, and event prefixes required by that
-  machine or service.
+  all-state tokens use `[""]`; provisioning another unrestricted token requires
+  explicit `--all-state`. New production traffic should use the narrowest claim,
+  heartbeat, batch, and event prefixes required by that machine or service.
 - Interim JSON state writes record `updated_by` from the authenticated machine,
   so operators can audit the last writer even before the relational endpoints
   replace the JSON store.

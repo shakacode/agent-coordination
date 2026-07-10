@@ -13,4 +13,9 @@ when releases begin.
 - An explicit Ruby support floor and CI coverage for it.
 - A placeholder-only `curl` walkthrough for the Worker state protocol.
 
+### Changed
+
+- Token provisioning now requires explicit read/write scopes, with `--all-state`
+  available only as an explicit opt-out for trusted single-operator deployments.
+
 No gem has been published and no release has been tagged.

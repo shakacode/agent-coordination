@@ -52,8 +52,8 @@ class ProvisionTokenTest < Minitest::Test
     FileUtils.rm_rf(@tmpdir)
   end
 
-  def test_local_mode_provisions_hash_and_prints_token
-    stdout, stderr, status = run_script("m5", "--local")
+  def test_all_state_explicitly_provisions_hash_and_prints_token_in_local_mode
+    stdout, stderr, status = run_script("m5", "--local", "--all-state")
 
     assert status.success?, stderr
     expected_hash = Digest::SHA256.hexdigest(TOKEN)
@@ -75,6 +75,14 @@ class ProvisionTokenTest < Minitest::Test
     assert_includes stdout, "token:    #{TOKEN}"
     assert_includes stdout, "export AGENT_COORD_API_TOKEN=#{TOKEN}"
     refute_includes stdout, expected_hash
+  end
+
+  def test_requires_explicit_scopes
+    _, stderr, status = run_script("m5", "--local")
+
+    refute status.success?
+    assert_includes stderr, "provide at least one --read-prefix or --write-prefix, or pass --all-state"
+    refute_path_exists @npx_args_file
   end
 
   def test_provisions_scoped_prefixes
@@ -109,22 +117,38 @@ class ProvisionTokenTest < Minitest::Test
     refute_includes stdout, expected_hash
   end
 
-  def test_warns_when_only_one_scope_dimension_is_customized
+  def test_omitted_write_scope_has_no_access
     stdout, stderr, status = run_script(
       "m5",
       "--local",
-      "--write-prefix",
+      "--read-prefix",
       "claims/shakacode/react_on_rails"
     )
 
     assert status.success?, stderr
-    assert_includes stderr, "warning: only one scope dimension was customized"
-    assert_includes stdout, "reads:    [\"\"]"
-    assert_includes stdout, "writes:   [\"claims/shakacode/react_on_rails\"]"
+    assert_includes stdout, "reads:    [\"claims/shakacode/react_on_rails\"]"
+    assert_includes stdout, "writes:   []"
+    sql = npx_args.fetch(npx_args.index("--command") + 1)
+    assert_includes sql, "'[\"claims/shakacode/react_on_rails\"]', '[]'"
+  end
+
+  def test_provisions_write_only_scope_for_event_appenders
+    stdout, stderr, status = run_script(
+      "m5",
+      "--local",
+      "--write-prefix",
+      "events/batch-1"
+    )
+
+    assert status.success?, stderr
+    assert_includes stdout, "reads:    []"
+    assert_includes stdout, "writes:   [\"events/batch-1\"]"
+    sql = npx_args.fetch(npx_args.index("--command") + 1)
+    assert_includes sql, "'[]', '[\"events/batch-1\"]'"
   end
 
   def test_remote_mode_uses_remote_flag
-    _, stderr, status = run_script("m1")
+    _, stderr, status = run_script("m1", "--all-state")
 
     assert status.success?, stderr
     assert_includes npx_args, "--remote"
@@ -156,6 +180,35 @@ class ProvisionTokenTest < Minitest::Test
     refute_path_exists @npx_args_file
   end
 
+  def test_rejects_empty_prefixes_as_an_all_state_bypass
+    _, stderr, status = run_script(
+      "m5",
+      "--read-prefix",
+      "",
+      "--write-prefix",
+      ""
+    )
+
+    refute status.success?
+    assert_includes stderr, "prefix cannot be empty; pass --all-state for all-state access"
+    refute_path_exists @npx_args_file
+  end
+
+  def test_rejects_all_state_combined_with_scoped_prefixes
+    _, stderr, status = run_script(
+      "m5",
+      "--all-state",
+      "--read-prefix",
+      "claims/shakacode/react_on_rails",
+      "--write-prefix",
+      "claims/shakacode/react_on_rails"
+    )
+
+    refute status.success?
+    assert_includes stderr, "--all-state cannot be combined with --read-prefix or --write-prefix"
+    refute_path_exists @npx_args_file
+  end
+
   def test_rejects_invalid_path_scope_before_generating_token
     _, stderr, status = run_script("m5", "--read-prefix", "claims/../secret")
 
@@ -165,7 +218,7 @@ class ProvisionTokenTest < Minitest::Test
   end
 
   def test_rejects_lone_scope_flag_as_machine_name
-    ["--local", "--remote"].each do |flag|
+    ["--local", "--remote", "--all-state"].each do |flag|
       _, stderr, status = run_script(flag)
 
       refute status.success?, "expected #{flag} to be rejected"
@@ -177,7 +230,8 @@ class ProvisionTokenTest < Minitest::Test
   def test_wrangler_auth_failure_reports_generic_failure_without_duplicate_hint_or_token
     stdout, stderr, status = run_script(
       { "NPX_EXIT" => "19", "NPX_STDERR" => "wrangler auth expired" },
-      "m5"
+      "m5",
+      "--all-state"
     )
 
     refute status.success?
@@ -190,7 +244,8 @@ class ProvisionTokenTest < Minitest::Test
   def test_wrangler_constraint_failure_reports_duplicate_hint_without_printing_token
     stdout, stderr, status = run_script(
       { "NPX_EXIT" => "19", "NPX_STDERR" => "D1_ERROR: UNIQUE constraint failed: machines.machine" },
-      "m5"
+      "m5",
+      "--all-state"
     )
 
     refute status.success?
