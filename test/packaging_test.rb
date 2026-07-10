@@ -93,6 +93,17 @@ class PackagingTest < Minitest::Test
            "base64 requirement must accept the version bundled with Ruby 3.2"
   end
 
+  def test_development_dependencies_keep_parallel_compatible_with_the_ruby_floor
+    gemfile = File.read(File.join(ROOT, "Gemfile"))
+    lockfile = File.read(File.join(ROOT, "Gemfile.lock"))
+
+    assert_match(/^gem "parallel", "< 2", require: false$/, gemfile)
+    locked_version = lockfile[/^    parallel \(([^)]+)\)$/, 1]
+    refute_nil locked_version
+    assert_operator Gem::Version.new(locked_version), :<, Gem::Version.new("2")
+    assert_match(/^  parallel \(< 2\)$/, lockfile)
+  end
+
   def test_built_gem_installs_agent_coord_executable
     Dir.mktmpdir("agent-coordination-package") do |tmpdir|
       gem_file = build_gem(tmpdir)
