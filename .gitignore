@@ -6,5 +6,6 @@
 *.json.lock
 
 # Local generated/runtime artifacts.
+*.gem
 /.wrangler/
 /node_modules/

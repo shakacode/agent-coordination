@@ -2448,7 +2448,8 @@ module AgentCoord
   end
 end
 
-if $PROGRAM_NAME == __FILE__
+# RubyGems-generated wrappers load the same-named executable, so basename equality is intentional.
+if File.basename($PROGRAM_NAME) == File.basename(__FILE__)
   begin
     exit AgentCoord::Runner.new(ARGV).run
   rescue AgentCoord::Error => e
