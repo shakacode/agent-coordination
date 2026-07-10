@@ -46,6 +46,7 @@ class PackagingTest < Minitest::Test
       "GEM_HOME" => gem_home,
       "GEM_PATH" => [gem_home, Gem.default_dir].join(File::PATH_SEPARATOR),
       "HOME" => File.join(tmpdir, "home"),
+      "PATH" => [File.dirname(RbConfig.ruby), ENV.fetch("PATH", "")].join(File::PATH_SEPARATOR),
       "XDG_CONFIG_HOME" => File.join(tmpdir, "xdg-config"),
       "RUBYGEMS_GEMDEPS" => nil
     )
@@ -180,6 +181,9 @@ class PackagingTest < Minitest::Test
     assert_includes readme, "Ruby 3.2 or newer"
     assert_includes readme, "gem build agent-coordination.gemspec"
     assert_includes readme, "gem install --local"
+    assert_includes readme, "agent-coordination-VERSION.gem"
+    assert_includes readme, "Replace `VERSION` with the version in the filename printed by `gem build`."
+    refute_includes readme, "agent-coordination-0.1.0.gem"
     assert_includes readme, "has not been published"
     assert_includes readme, "[Changelog](CHANGELOG.md)"
     assert_includes readme, "[Worker state protocol with `curl`](docs/protocol-curl.md)"

@@ -66,9 +66,14 @@ registry, tag, or release:
 
 ```bash
 gem build agent-coordination.gemspec
-gem install --local ./agent-coordination-0.1.0.gem
+```
+
+Replace `VERSION` with the version in the filename printed by `gem build`.
+
+```bash
+gem install --local ./agent-coordination-VERSION.gem
 agent-coord version --json
-rm ./agent-coordination-0.1.0.gem
+rm ./agent-coordination-VERSION.gem
 ```
 
 Generated `.gem` files are local artifacts and should not be committed. See the
