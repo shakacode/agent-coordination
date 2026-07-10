@@ -666,6 +666,8 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     assert_includes readme, "A zero-config first run uses a clearly labeled local store"
     assert_includes readme, "The team and multi-machine runtime path is the HTTP"
     assert_includes readme, "$XDG_STATE_HOME/agent-coordination"
+    assert_includes readme, "when `XDG_STATE_HOME` is an absolute path"
+    assert_includes readme, "Relative, empty, or unset values use"
     assert_includes readme, "~/.local/state/agent-coordination"
     assert_includes readme, "local mode — single-machine only"
     assert_includes readme, "agent-coord demo"

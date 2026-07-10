@@ -57,11 +57,11 @@ full RuboCop check on every pull request.
 ## Zero-config local first run
 
 Run `agent-coord status` without configuring a backend. The CLI uses
-`$XDG_STATE_HOME/agent-coordination` when `XDG_STATE_HOME` is nonempty and
-`~/.local/state/agent-coordination` otherwise. Every command that selects this
-implicit default prints its path with a `local mode — single-machine only`
-notice. JSON commands keep machine-readable output on stdout; the notice goes
-to stderr.
+`$XDG_STATE_HOME/agent-coordination` when `XDG_STATE_HOME` is an absolute path.
+Relative, empty, or unset values use `~/.local/state/agent-coordination`.
+Every command that selects this implicit default prints its path with a
+`local mode — single-machine only` notice. JSON commands keep machine-readable
+output on stdout; the notice goes to stderr.
 
 This default is for one machine only. Configure the HTTP backend before sharing
 coordination state across machines or operators.
