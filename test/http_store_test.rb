@@ -527,11 +527,24 @@ class HttpBackendSelectionTest < HttpEnvTestCase
     end
   end
 
-  def test_empty_api_url_is_operational_error
-    with_env("AGENT_COORD_API_URL" => "", "AGENT_COORD_API_TOKEN" => "tok") do
-      code, _, err = run_cli(["status"], {})
-      assert_equal 2, code
-      assert_includes err, "invalid HTTP backend URL"
+  def test_empty_api_url_env_uses_implicit_xdg_local_default
+    Dir.mktmpdir("agent-coord-empty-api") do |root|
+      state_home = File.join(root, "state")
+      with_env("AGENT_COORD_API_URL" => "",
+               "AGENT_COORD_API_TOKEN" => nil,
+               "AGENT_COORD_BACKEND" => nil,
+               "AGENT_COORD_STATE_ROOT" => nil,
+               "AGENT_COORD_STATUS_STATE_ROOT" => nil,
+               "XDG_STATE_HOME" => state_home,
+               "HOME" => File.join(root, "home"),
+               "TMPDIR" => File.join(root, "tmp")) do
+        code, out, err = run_cli(["status", "--json"], {})
+
+        assert_equal 0, code
+        assert_equal "all", JSON.parse(out).dig("scope", "kind")
+        assert_includes err, "local mode — single-machine only"
+        assert_includes err, File.join(state_home, "agent-coordination")
+      end
     end
   end
 

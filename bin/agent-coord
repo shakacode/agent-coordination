@@ -314,6 +314,7 @@ module AgentCoord
       cli_api = options[:api_url]
       env_api = ENV.fetch("AGENT_COORD_API_URL", nil)
       env_root = ENV.fetch("AGENT_COORD_STATE_ROOT", nil)
+      env_api = nil if env_api == ""
       env_root = nil if env_root == ""
 
       if options[:state_root]
