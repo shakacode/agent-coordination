@@ -609,27 +609,38 @@ class HttpBackendSelectionTest < HttpEnvTestCase
     end
   end
 
-  def test_empty_state_root_env_is_ignored
-    with_env("AGENT_COORD_API_TOKEN" => nil, "AGENT_COORD_API_URL" => nil, "AGENT_COORD_STATE_ROOT" => "") do
-      options = AgentCoord::Runner.new([], stdout: StringIO.new, stderr: StringIO.new)
-                                  .send(:parse_options, "status", [])
-      assert_nil options[:state_root]
-      assert_nil options[:api_url]
+  def test_empty_state_root_env_uses_implicit_xdg_local_default
+    Dir.mktmpdir("agent-coord-xdg-state") do |state_home|
+      with_env("AGENT_COORD_API_TOKEN" => nil,
+               "AGENT_COORD_API_URL" => nil,
+               "AGENT_COORD_STATE_ROOT" => "",
+               "XDG_STATE_HOME" => state_home) do
+        stderr = StringIO.new
+        options = AgentCoord::Runner.new([], stdout: StringIO.new, stderr: stderr)
+                                    .send(:parse_options, "status", [])
+
+        assert_equal File.join(state_home, "agent-coordination"), options[:state_root]
+        assert_nil options[:api_url]
+        assert_includes stderr.string, "local mode — single-machine only"
+      end
     end
   end
 
-  def test_missing_http_or_local_backend_does_not_fall_back_to_github
-    with_env("AGENT_COORD_API_TOKEN" => nil,
-             "AGENT_COORD_API_URL" => nil,
-             "AGENT_COORD_BACKEND" => nil,
-             "AGENT_COORD_STATE_ROOT" => nil,
-             "AGENT_COORD_STATUS_STATE_ROOT" => nil) do
-      runner = AgentCoord::Runner.new([], stdout: StringIO.new, stderr: StringIO.new)
-      options = runner.send(:parse_options, "status", [])
-      error = assert_raises(AgentCoord::OperationalError) { runner.send(:build_store, options) }
-      assert_includes error.message, "no coordination backend configured"
-      assert_includes error.message, "AGENT_COORD_API_URL"
-      assert_includes error.message, "AGENT_COORD_STATE_ROOT"
+  def test_missing_explicit_backend_defaults_to_labeled_xdg_local_store
+    Dir.mktmpdir("agent-coord-xdg-state") do |state_home|
+      with_env("AGENT_COORD_API_TOKEN" => nil,
+               "AGENT_COORD_API_URL" => nil,
+               "AGENT_COORD_BACKEND" => nil,
+               "AGENT_COORD_STATE_ROOT" => nil,
+               "AGENT_COORD_STATUS_STATE_ROOT" => nil,
+               "XDG_STATE_HOME" => state_home) do
+        code, out, err = run_cli(["status", "--json"], {})
+
+        assert_equal 0, code
+        assert_equal "all", JSON.parse(out).dig("scope", "kind")
+        assert_includes err, "local mode — single-machine only"
+        assert_includes err, File.join(state_home, "agent-coordination")
+      end
     end
   end
 

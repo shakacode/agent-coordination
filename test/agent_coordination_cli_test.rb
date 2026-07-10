@@ -111,6 +111,47 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     assert_includes result.stdout, "config"
     assert_includes result.stdout, "doctor"
     assert_includes result.stdout, "bootstrap"
+    assert_includes result.stdout, "demo"
+  end
+
+  def test_demo_walks_claim_liveness_and_takeover_deterministically
+    first = run_agent_coord("demo", state_root: nil)
+    second = run_agent_coord("demo", state_root: nil)
+
+    assert_equal 0, first.status.exitstatus, first.stderr
+    assert_equal 0, second.status.exitstatus, second.stderr
+    assert_equal first.stdout, second.stdout
+    assert_empty first.stderr
+    assert_includes first.stdout, "isolated local store — no remote writes"
+    assert_includes first.stdout, "CLAIM_REFUSED"
+    assert_includes first.stdout, "held by demo-alpha; heartbeat live"
+    assert_includes first.stdout, "demo-alpha heartbeat stale"
+    assert_includes first.stdout, "demo-alpha heartbeat dead"
+    assert_includes first.stdout, "takeover succeeded; holder is demo-beta"
+    assert_includes first.stdout, "temporary state removed"
+  end
+
+  def test_demo_ignores_remote_backends_and_removes_isolated_state
+    Dir.mktmpdir("agent-coord-demo-tmp") do |tmpdir|
+      xdg_state_home = File.join(tmpdir, "xdg-state")
+      result = run_command(
+        {
+          "TMPDIR" => tmpdir,
+          "XDG_STATE_HOME" => xdg_state_home,
+          "AGENT_COORD_API_URL" => "http://127.0.0.1:1",
+          "AGENT_COORD_API_TOKEN" => "demo-must-not-use-this-token",
+          "AGENT_COORD_BACKEND" => "demo/must-not-use-this-repo"
+        },
+        RbConfig.ruby,
+        BIN,
+        "demo"
+      )
+
+      assert_equal 0, result.status.exitstatus, result.stderr
+      assert_empty result.stderr
+      assert_empty Dir.children(tmpdir)
+      refute_path_exists File.join(xdg_state_home, "agent-coordination")
+    end
   end
 
   def test_global_help_omits_doctor_only_deep_option
@@ -195,6 +236,41 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
 
     assert_equal 0, result.status.exitstatus, result.stderr
     assert_includes result.stdout, "default_backend: none"
+  end
+
+  def test_unconfigured_status_defaults_to_labeled_xdg_local_store
+    Dir.mktmpdir("agent-coord-xdg-state") do |state_home|
+      result = run_command(
+        { "XDG_STATE_HOME" => state_home },
+        RbConfig.ruby,
+        BIN,
+        "status",
+        "--json"
+      )
+
+      assert_equal 0, result.status.exitstatus, result.stderr
+      assert_equal "all", JSON.parse(result.stdout).dig("scope", "kind")
+      assert_includes result.stderr, "local mode — single-machine only"
+      assert_includes result.stderr, File.join(state_home, "agent-coordination")
+    end
+  end
+
+  def test_unconfigured_doctor_initializes_and_reports_xdg_local_store
+    Dir.mktmpdir("agent-coord-xdg-state") do |state_home|
+      state_root = File.join(state_home, "agent-coordination")
+      result = run_command(
+        { "XDG_STATE_HOME" => state_home },
+        RbConfig.ruby,
+        BIN,
+        "doctor"
+      )
+
+      assert_equal 0, result.status.exitstatus, result.stderr
+      assert_includes result.stdout, "backend: local"
+      assert_includes result.stdout, "state_root: #{state_root}"
+      assert_includes result.stderr, "local mode — single-machine only"
+      assert_path_exists state_root
+    end
   end
 
   def test_doctor_verifies_local_backend_without_github
@@ -282,19 +358,28 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     end
   end
 
-  def test_doctor_reports_missing_backend_when_unconfigured
-    with_agent_coord_without_source_state do |bin|
-      result = run_command(
-        { "AGENT_COORD_STATE_ROOT" => nil, "AGENT_COORD_STATUS_STATE_ROOT" => nil },
-        RbConfig.ruby,
-        bin,
-        "doctor"
-      )
+  def test_unconfigured_doctor_defaults_to_home_local_store_when_xdg_state_home_is_empty
+    Dir.mktmpdir("agent-coord-home") do |home|
+      with_agent_coord_without_source_state do |bin|
+        state_root = File.join(home, ".local", "state", "agent-coordination")
+        result = run_command(
+          {
+            "AGENT_COORD_STATE_ROOT" => nil,
+            "AGENT_COORD_STATUS_STATE_ROOT" => nil,
+            "XDG_STATE_HOME" => "",
+            "HOME" => home
+          },
+          RbConfig.ruby,
+          bin,
+          "doctor"
+        )
 
-      assert_equal 2, result.status.exitstatus
-      assert_includes result.stderr, "no coordination backend configured"
-      assert_includes result.stderr, "AGENT_COORD_API_URL"
-      refute_includes result.stdout, "status: ok"
+        assert_equal 0, result.status.exitstatus, result.stderr
+        assert_includes result.stdout, "backend: local"
+        assert_includes result.stdout, "state_root: #{state_root}"
+        assert_includes result.stderr, "local mode — single-machine only"
+        assert_path_exists state_root
+      end
     end
   end
 
@@ -510,10 +595,16 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     refute_includes systemd_heartbeat, "AGENT_COORD_REF=state"
   end
 
-  def test_readme_documents_http_first_setup
+  def test_readme_documents_local_first_run_and_team_http_setup
     readme = File.read(File.join(ROOT, "README.md"))
 
-    assert_includes readme, "The team/client runtime path is the HTTP backend"
+    assert_includes readme, "A zero-config first run uses a clearly labeled local store"
+    assert_includes readme, "The team and multi-machine runtime path is the HTTP"
+    assert_includes readme, "$XDG_STATE_HOME/agent-coordination"
+    assert_includes readme, "~/.local/state/agent-coordination"
+    assert_includes readme, "local mode — single-machine only"
+    assert_includes readme, "agent-coord demo"
+    assert_includes readme, "never writes demo data remotely"
     assert_includes readme, "AGENT_COORD_API_URL"
     assert_includes readme, "AGENT_COORD_API_TOKEN"
     assert_includes readme, "AGENT_COORD_ENV_FILE"

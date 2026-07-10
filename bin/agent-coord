@@ -11,7 +11,9 @@ require "open3"
 require "optparse"
 require "securerandom"
 require "shellwords"
+require "stringio"
 require "time"
+require "tmpdir"
 require "uri"
 
 module AgentCoord
@@ -98,6 +100,12 @@ module AgentCoord
   end
 
   StoredJson = Struct.new(:path, :data, :sha, keyword_init: true)
+  DemoClock = Struct.new(:time) do
+    def now
+      time
+    end
+  end
+  DemoResult = Struct.new(:code, :stdout, :stderr, keyword_init: true)
 
   class Runner # rubocop:disable Metrics/ClassLength
     def initialize(argv, stdout: $stdout, stderr: $stderr, clock: Time)
@@ -107,7 +115,7 @@ module AgentCoord
       @clock = clock
     end
 
-    def run
+    def run # rubocop:disable Metrics/CyclomaticComplexity
       return print_help if @argv.empty? || help_request?(@argv.first)
 
       command = @argv.shift
@@ -133,6 +141,8 @@ module AgentCoord
         doctor(parse_options(command, @argv))
       when "bootstrap"
         bootstrap(parse_options(command, @argv))
+      when "demo"
+        demo(@argv)
       else
         raise Error, "unknown command: #{command}"
       end
@@ -159,6 +169,7 @@ module AgentCoord
           config     print runtime defaults and exit-code contract
           doctor     verify backend access and state layout
           bootstrap  install the agent-coord command
+          demo       run an isolated claim and takeover walkthrough
 
         Common options:
           --api-url URL              use the HTTP backend at URL
@@ -278,7 +289,10 @@ module AgentCoord
     end
 
     def finalize_options(command, options)
-      resolve_backend_env(options) if backend_command?(command)
+      if backend_command?(command)
+        resolve_backend_env(options)
+        resolve_default_local_backend(command, options)
+      end
       options
     end
 
@@ -321,6 +335,20 @@ module AgentCoord
         return
       end
       options[:state_root] = env_root if env_root
+    end
+
+    def resolve_default_local_backend(command, options)
+      return if options[:state_root] || options[:api_url] || !options[:backend].to_s.empty?
+
+      status_root = default_status_state_root if %w[status doctor].include?(command)
+      if status_root
+        options[:state_root] = status_root
+        return
+      end
+
+      options[:state_root] = default_local_state_root
+      options[:implicit_local] = true
+      @stderr.puts "notice: local mode — single-machine only; state root: #{options[:state_root]}"
     end
 
     def add_command_help(opts, command)
@@ -503,6 +531,7 @@ module AgentCoord
       backend_kind = doctor_backend_kind(doctor_options)
       section_notes = {}
       begin
+        FileUtils.mkdir_p(doctor_options.fetch(:state_root)) if doctor_options[:implicit_local]
         store = verify_doctor_store(doctor_options, backend_kind)
         store.verify_layout!(STATE_PREFIXES)
         section_notes = check_state_readable!(store) if options[:deep]
@@ -613,6 +642,104 @@ module AgentCoord
         @stdout.puts "profile update skipped"
       end
       0
+    end
+
+    def demo(argv)
+      raise Error, "unexpected arguments: #{argv.join(' ')}" unless argv.empty?
+
+      repo = "demo/example"
+      target = "1"
+      started_at = Time.utc(2026, 1, 1, 12, 0, 0)
+
+      @stdout.puts "agent-coord demo"
+      @stdout.puts "mode: isolated local store — no remote writes; temporary state is removed on exit"
+      Dir.mktmpdir("agent-coord-demo") do |state_root|
+        run_demo_claim_and_heartbeat(state_root, repo, target, started_at)
+        run_demo_refusal(state_root, repo, target, started_at + 30)
+        run_demo_liveness_step(state_root, repo, target, started_at + 120, "stale")
+        run_demo_liveness_step(state_root, repo, target, started_at + 300, "dead")
+        run_demo_takeover(state_root, repo, target, started_at + 300)
+      end
+      @stdout.puts
+      @stdout.puts "demo complete; temporary state removed"
+      0
+    end
+
+    def run_demo_claim_and_heartbeat(state_root, repo, target, now)
+      claim_args = ["claim", "--agent-id", "demo-alpha", "--repo", repo, "--target", target, "--ttl", "3600"]
+      heartbeat_args = [
+        "heartbeat", "--agent-id", "demo-alpha", "--repo", repo, "--target", target, "--ttl", "60"
+      ]
+      require_demo_success!(run_demo_command(claim_args, state_root, now), "initial claim")
+      require_demo_success!(run_demo_command(heartbeat_args, state_root, now), "initial heartbeat")
+
+      @stdout.puts
+      @stdout.puts "1. demo-alpha claims #{repo}##{target} and starts a 60-second heartbeat"
+      @stdout.puts "   $ agent-coord #{claim_args.join(' ')}"
+      @stdout.puts "   claimed #{repo}##{target} by demo-alpha"
+      @stdout.puts "   $ agent-coord #{heartbeat_args.join(' ')}"
+    end
+
+    def run_demo_refusal(state_root, repo, target, now)
+      args = ["claim", "--agent-id", "demo-beta", "--repo", repo, "--target", target]
+      result = run_demo_command(args, state_root, now)
+      unless result.code == EXIT_CLAIM_REFUSED && result.stderr.include?("held by demo-alpha; heartbeat live")
+        raise OperationalError, "demo competing claim did not produce the expected live-holder refusal"
+      end
+
+      @stdout.puts
+      @stdout.puts "2. demo-beta tries the same target while demo-alpha is live"
+      @stdout.puts "   $ agent-coord #{args.join(' ')}"
+      @stdout.puts "   #{result.stderr.strip}"
+    end
+
+    def run_demo_liveness_step(state_root, repo, target, now, expected_liveness)
+      args = ["status", "--repo", repo, "--target", target, "--json"]
+      result = run_demo_command(args, state_root, now)
+      require_demo_success!(result, "#{expected_liveness} status")
+      liveness = JSON.parse(result.stdout).fetch("heartbeats").first.fetch("liveness")
+      unless liveness == expected_liveness
+        raise OperationalError, "demo expected #{expected_liveness} heartbeat, got #{liveness}"
+      end
+
+      @stdout.puts
+      step = { "stale" => 3, "dead" => 4 }.fetch(expected_liveness)
+      @stdout.puts "#{step}. logical time advances; status reports the holder heartbeat"
+      @stdout.puts "   $ agent-coord #{args.join(' ')}"
+      @stdout.puts "   demo-alpha heartbeat #{liveness}"
+    end
+
+    def run_demo_takeover(state_root, repo, target, now)
+      args = ["claim", "--agent-id", "demo-beta", "--repo", repo, "--target", target]
+      require_demo_success!(run_demo_command(args, state_root, now), "dead-holder takeover")
+
+      @stdout.puts
+      @stdout.puts "5. demo-beta retries after the holder heartbeat is dead"
+      @stdout.puts "   $ agent-coord #{args.join(' ')}"
+      @stdout.puts "   takeover succeeded; holder is demo-beta"
+    end
+
+    def run_demo_command(argv, state_root, now)
+      stdout = StringIO.new
+      stderr = StringIO.new
+      code = begin
+        Runner.new(
+          argv + ["--state-root", state_root],
+          stdout: stdout,
+          stderr: stderr,
+          clock: DemoClock.new(now)
+        ).run
+      rescue Error => e
+        stderr.puts e.message
+        e.exit_code
+      end
+      DemoResult.new(code: code, stdout: stdout.string, stderr: stderr.string)
+    end
+
+    def require_demo_success!(result, step)
+      return if result.code.zero?
+
+      raise OperationalError, "demo #{step} failed: #{result.stderr.strip}"
     end
 
     def heartbeat(options)
@@ -1460,6 +1587,12 @@ module AgentCoord
 
       source_root = AgentCoord.source_root
       AgentCoord.state_root?(source_root) ? source_root : nil
+    end
+
+    def default_local_state_root
+      state_home = ENV.fetch("XDG_STATE_HOME", nil)
+      state_home = File.join(Dir.home, ".local", "state") if state_home.to_s.empty?
+      File.join(File.expand_path(state_home), "agent-coordination")
     end
 
     def write_with_cas(store, path, payload, existing, message)
