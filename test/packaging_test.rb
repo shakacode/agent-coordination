@@ -2,6 +2,7 @@
 
 require "minitest/autorun"
 require "open3"
+require "rbconfig"
 require "rubygems"
 require "rubygems/package"
 require "tmpdir"
@@ -18,12 +19,17 @@ class PackagingTest < Minitest::Test
     docs/protocol-curl.md
   ].freeze
 
+  def gem_command
+    executable = Gem.win_platform? ? "gem.cmd" : "gem"
+    File.join(File.dirname(RbConfig.ruby), executable)
+  end
+
   def build_gem(tmpdir)
     gem_file = File.join(tmpdir, "agent-coordination.gem")
     build_gem_home = File.join(tmpdir, "build-gem-home")
     stdout, stderr, status = Open3.capture3(
       isolated_gem_env(build_gem_home, tmpdir),
-      "gem", "build", "--norc", GEMSPEC, "--output", gem_file, chdir: ROOT
+      gem_command, "build", "--norc", GEMSPEC, "--output", gem_file, chdir: ROOT
     )
     assert status.success?, "gem build failed:\n#{stdout}\n#{stderr}"
     gem_file
@@ -50,7 +56,7 @@ class PackagingTest < Minitest::Test
     bin_dir = File.join(tmpdir, "bin")
     stdout, stderr, status = Open3.capture3(
       isolated_gem_env(gem_home, tmpdir),
-      "gem", "install", "--norc", "--local", gem_file, "--no-document",
+      gem_command, "install", "--norc", "--local", gem_file, "--no-document",
       "--env-shebang", "--bindir", bin_dir
     )
     assert status.success?, "gem install failed:\n#{stdout}\n#{stderr}"
@@ -66,6 +72,18 @@ class PackagingTest < Minitest::Test
     assert_equal "MIT", spec.license
     assert_equal Gem::Requirement.new(">= 3.2"), spec.required_ruby_version
     assert_equal ["base64"], spec.runtime_dependencies.map(&:name)
+  end
+
+  def test_gem_command_uses_the_selected_ruby_runtime
+    Dir.mktmpdir("agent-coordination-gem-runtime") do |tmpdir|
+      gem_home = File.join(tmpdir, "gem-home")
+      stdout, stderr, status = Open3.capture3(
+        isolated_gem_env(gem_home, tmpdir), gem_command, "environment"
+      )
+
+      assert status.success?, "gem environment failed:\n#{stdout}\n#{stderr}"
+      assert_match(/RUBY EXECUTABLE:\s+#{Regexp.escape(RbConfig.ruby)}/, stdout)
+    end
   end
 
   def test_base64_requirement_supports_the_ruby_3_2_default_gem
