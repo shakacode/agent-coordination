@@ -63,7 +63,8 @@ cd worker
 npm install
 npx wrangler login
 npx wrangler d1 create agent-coord
-# Copy the printed database_id into worker/wrangler.toml if this is a new D1 DB.
+# In wrangler.toml, replace the all-zero database_id with the ID printed above.
+# Keep that deployment-specific substitution out of commits.
 npx wrangler d1 migrations apply agent-coord --remote
 npx wrangler deploy
 export AGENT_COORD_API_URL=<worker-url>
