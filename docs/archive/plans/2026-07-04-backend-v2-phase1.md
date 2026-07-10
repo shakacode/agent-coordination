@@ -188,7 +188,8 @@ compatibility_date = "2026-06-01"
 [[d1_databases]]
 binding = "DB"
 database_name = "agent-coord"
-database_id = "REPLACE_AT_DEPLOY"   # [OPERATOR] fills after `wrangler d1 create agent-coord`
+# [OPERATOR] Replace the all-zero placeholder after `wrangler d1 create agent-coord`.
+database_id = "00000000-0000-0000-0000-000000000000"
 ```
 
 `worker/migrations/0001_state.sql`:
@@ -1359,8 +1360,8 @@ chmod +x worker/bin/provision-token
 
 ```bash
 cd worker
-npx wrangler login                       # justin@shakacode.com account
-npx wrangler d1 create agent-coord      # paste database_id into wrangler.toml
+npx wrangler login                       # authenticate with your Cloudflare account
+npx wrangler d1 create agent-coord      # replace the all-zero database_id in wrangler.toml
 npx wrangler d1 migrations apply agent-coord --remote
 npx wrangler deploy                      # note the workers.dev URL
 worker/bin/provision-token <machine-name>   # once per machine
@@ -1369,12 +1370,10 @@ curl -s <worker-url>/v1/health
 
 Expected: `{"status":"ok"}`
 
-Completed 2026-07-07 UTC: D1 database `agent-coord`
-(`0d75340b-8414-405a-9beb-97a857b80d2c`) is bound to Worker
-`agent-coord-api`, migrations were applied, and the deployed endpoint
-`https://agent-coord-api.justin-fed.workers.dev/v1/health` returned
-`{"status":"ok"}`. M5 was provisioned with a private token; no bearer tokens are
-committed.
+Completed 2026-07-07 UTC: D1 database `agent-coord` was bound to Worker
+`agent-coord-api`, migrations were applied, and the deployment health check
+returned `{"status":"ok"}`. M5 was provisioned with a private token; no bearer
+tokens are committed. Deployment-specific database IDs and URLs are omitted.
 
 - [x] **Step 3: Document**
 
