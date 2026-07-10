@@ -33,17 +33,6 @@ curl --fail-with-body --silent --show-error --get \
   "$AGENT_COORD_API_URL/v1/state"
 ```
 
-Read one exact record. A successful response contains `path`, `data`, and a
-numeric `version` used for compare-and-swap updates:
-
-```bash
-STATE_RESPONSE=$(curl --fail-with-body --silent --show-error \
-  --header "Authorization: Bearer $AGENT_COORD_API_TOKEN" \
-  "$AGENT_COORD_API_URL/v1/state/$STATE_PATH")
-printf '%s\n' "$STATE_RESPONSE"
-STATE_VERSION=$(printf '%s' "$STATE_RESPONSE" | ruby -rjson -e 'print JSON.parse($stdin.read).fetch("version")')
-```
-
 Create a record only when its path does not exist. Keep the `data` envelope;
 the Worker rejects writes without an explicit precondition:
 
@@ -56,8 +45,19 @@ curl --fail-with-body --silent --show-error --request PUT \
   "$AGENT_COORD_API_URL/v1/state/$STATE_PATH"
 ```
 
+Read one exact record after creating it. A successful response contains `path`,
+`data`, and a numeric `version` used for compare-and-swap updates:
+
+```bash
+STATE_RESPONSE=$(curl --fail-with-body --silent --show-error \
+  --header "Authorization: Bearer $AGENT_COORD_API_TOKEN" \
+  "$AGENT_COORD_API_URL/v1/state/$STATE_PATH")
+printf '%s\n' "$STATE_RESPONSE"
+STATE_VERSION=$(printf '%s' "$STATE_RESPONSE" | ruby -rjson -e 'print JSON.parse($stdin.read).fetch("version")')
+```
+
 Update an existing record only when its current numeric version still matches.
-First repeat the exact read above so `STATE_VERSION` is current:
+Use the `STATE_VERSION` returned by the exact read immediately above:
 
 ```bash
 curl --fail-with-body --silent --show-error --request PUT \

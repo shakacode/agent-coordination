@@ -30,5 +30,5 @@ Gem::Specification.new do |spec|
   spec.bindir = "bin"
   spec.executables = ["agent-coord"]
 
-  spec.add_dependency "base64", ">= 0.2.0", "< 1.0"
+  spec.add_dependency "base64", ">= 0.1.1", "< 1.0"
 end

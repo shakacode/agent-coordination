@@ -5,6 +5,7 @@ require "open3"
 require "rubygems"
 require "rubygems/package"
 require "tmpdir"
+require "yaml"
 
 class PackagingTest < Minitest::Test
   ROOT = File.expand_path("..", __dir__)
@@ -19,7 +20,11 @@ class PackagingTest < Minitest::Test
 
   def build_gem(tmpdir)
     gem_file = File.join(tmpdir, "agent-coordination.gem")
-    stdout, stderr, status = Open3.capture3("gem", "build", GEMSPEC, "--output", gem_file, chdir: ROOT)
+    build_gem_home = File.join(tmpdir, "build-gem-home")
+    stdout, stderr, status = Open3.capture3(
+      isolated_gem_env(build_gem_home, tmpdir),
+      "gem", "build", "--norc", GEMSPEC, "--output", gem_file, chdir: ROOT
+    )
     assert status.success?, "gem build failed:\n#{stdout}\n#{stderr}"
     gem_file
   end
@@ -30,12 +35,23 @@ class PackagingTest < Minitest::Test
     end.to_h
   end
 
+  def isolated_gem_env(gem_home, tmpdir)
+    unbundled_env.merge(
+      "GEM_HOME" => gem_home,
+      "GEM_PATH" => [gem_home, Gem.default_dir].join(File::PATH_SEPARATOR),
+      "HOME" => File.join(tmpdir, "home"),
+      "XDG_CONFIG_HOME" => File.join(tmpdir, "xdg-config"),
+      "RUBYGEMS_GEMDEPS" => nil
+    )
+  end
+
   def install_gem(gem_file, tmpdir)
     gem_home = File.join(tmpdir, "gem-home")
     bin_dir = File.join(tmpdir, "bin")
     stdout, stderr, status = Open3.capture3(
-      "gem", "install", "--local", gem_file, "--ignore-dependencies", "--no-document",
-      "--env-shebang", "--install-dir", gem_home, "--bindir", bin_dir
+      isolated_gem_env(gem_home, tmpdir),
+      "gem", "install", "--norc", "--local", gem_file, "--no-document",
+      "--env-shebang", "--bindir", bin_dir
     )
     assert status.success?, "gem install failed:\n#{stdout}\n#{stderr}"
     [gem_home, File.join(bin_dir, "agent-coord")]
@@ -52,17 +68,21 @@ class PackagingTest < Minitest::Test
     assert_equal ["base64"], spec.runtime_dependencies.map(&:name)
   end
 
+  def test_base64_requirement_supports_the_ruby_3_2_default_gem
+    dependency = Gem::Specification.load(GEMSPEC).runtime_dependencies.find { |candidate| candidate.name == "base64" }
+
+    assert dependency.requirement.satisfied_by?(Gem::Version.new("0.1.1")),
+           "base64 requirement must accept the version bundled with Ruby 3.2"
+  end
+
   def test_built_gem_installs_agent_coord_executable
     Dir.mktmpdir("agent-coordination-package") do |tmpdir|
       gem_file = build_gem(tmpdir)
       gem_home, executable = install_gem(gem_file, tmpdir)
       assert File.executable?(executable), "installed gem did not provide agent-coord"
 
-      gem_path = ([gem_home] + Gem.path).join(File::PATH_SEPARATOR)
       stdout, stderr, status = Open3.capture3(
-        unbundled_env.merge(
-          "GEM_HOME" => gem_home,
-          "GEM_PATH" => gem_path,
+        isolated_gem_env(gem_home, tmpdir).merge(
           "AGENT_COORD_API_URL" => nil,
           "AGENT_COORD_API_TOKEN" => nil,
           "AGENT_COORD_BACKEND" => nil,
@@ -100,6 +120,19 @@ class PackagingTest < Minitest::Test
     refute_match(%r{https://[A-Za-z0-9-]+\.[A-Za-z0-9.-]+}, docs)
   end
 
+  def test_protocol_curl_walkthrough_creates_before_reading_and_updating
+    docs = File.read(File.join(ROOT, "docs/protocol-curl.md"))
+    create_position = docs.index("Create a record only")
+    read_position = docs.index("Read one exact record")
+    update_position = docs.index("Update an existing record")
+
+    refute_nil create_position
+    refute_nil read_position
+    refute_nil update_position
+    assert_operator create_position, :<, read_position
+    assert_operator read_position, :<, update_position
+  end
+
   def test_built_gem_contains_only_the_public_cli_distribution
     Dir.mktmpdir("agent-coordination-archive") do |tmpdir|
       package = Gem::Package.new(build_gem(tmpdir))
@@ -123,12 +156,27 @@ class PackagingTest < Minitest::Test
     assert_includes readme, "[Worker state protocol with `curl`](docs/protocol-curl.md)"
   end
 
+  def test_generated_gem_archives_are_ignored
+    ignore_rules = File.readlines(File.join(ROOT, ".gitignore"), chomp: true)
+
+    assert_includes ignore_rules, "*.gem"
+  end
+
   def test_ruby_floor_is_enforced_by_lint_and_ci
     rubocop_config = File.read(File.join(ROOT, ".rubocop.yml"))
-    ci_workflow = File.read(File.join(ROOT, ".github/workflows/ci.yml"))
+    ci_jobs = YAML.safe_load_file(File.join(ROOT, ".github/workflows/ci.yml"), aliases: true).fetch("jobs")
+    canonical_job = ci_jobs.fetch("test")
 
     assert_match(/^  TargetRubyVersion: 3\.2$/, rubocop_config)
-    assert_includes ci_workflow, 'ruby-version: ["3.2", ".ruby-version"]'
-    assert_includes ci_workflow, 'ruby-version: ${{ matrix.ruby-version }}'
+    refute canonical_job.key?("strategy"), "the canonical test check must keep its original job identity"
+    canonical_setup = canonical_job.fetch("steps").find { |step| step.fetch("name", "") == "Set up Ruby" }
+    assert_equal ".ruby-version", canonical_setup.fetch("with").fetch("ruby-version")
+
+    floor_job = ci_jobs.fetch("test-ruby-floor")
+    floor_setup = floor_job.fetch("steps").find { |step| step.fetch("name", "") == "Set up Ruby" }
+    assert_equal "3.2", floor_setup.fetch("with").fetch("ruby-version")
+    canonical_tests = canonical_job.fetch("steps").find { |step| step.fetch("name", "") == "Run tests" }
+    floor_tests = floor_job.fetch("steps").find { |step| step.fetch("name", "") == "Run tests" }
+    assert_equal canonical_tests.fetch("run"), floor_tests.fetch("run")
   end
 end

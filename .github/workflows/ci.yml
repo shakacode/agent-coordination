@@ -35,10 +35,6 @@ jobs:
 
   test:
     runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        ruby-version: ["3.2", ".ruby-version"]
 
     steps:
       - name: Checkout repository
@@ -49,7 +45,36 @@ jobs:
       - name: Set up Ruby
         uses: ruby/setup-ruby@3fee6763234110473bd57dd4595c5199fce2c510 # v1.258.0
         with:
-          ruby-version: ${{ matrix.ruby-version }}
+          ruby-version: .ruby-version
+          bundler-cache: true
+
+      - name: Run tests
+        run: |
+          for test_file in test/*_test.rb; do
+            case "$test_file" in
+              test/http_backend_integration_test.rb) continue ;;
+            esac
+            bundle exec ruby -Itest "$test_file"
+          done
+          bundle exec ruby sim/test/scripted_worker_test.rb
+          bundle exec ruby sim/test/race_test.rb
+          bundle exec ruby sim/test/verify_batch_test.rb
+          bundle exec ruby sim/test/llm_worker_test.rb
+
+  test-ruby-floor:
+    name: Test (Ruby 3.2 floor)
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+
+      - name: Set up Ruby
+        uses: ruby/setup-ruby@3fee6763234110473bd57dd4595c5199fce2c510 # v1.258.0
+        with:
+          ruby-version: "3.2"
           bundler-cache: true
 
       - name: Run tests
