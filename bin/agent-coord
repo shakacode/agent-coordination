@@ -36,7 +36,7 @@ module AgentCoord
   )\z}x
   DEPENDENCY_DONE_STATUSES = %w[complete completed done merged ready].freeze
   STATUS_BATCH_METADATA_FIELDS = %w[
-    repo objective instructions operator dashboard_url status updated_at registered_at
+    repo objective instructions launch_prompt operator dashboard_url status updated_at registered_at
   ].freeze
   STATUS_LANE_METADATA_FIELDS = %w[
     thread_handle chat_handle host pr_url dashboard_url operator phase branch

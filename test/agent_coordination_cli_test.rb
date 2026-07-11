@@ -2082,6 +2082,7 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
       "batch_id" => "batch-b",
       "repo" => "shakacode/react_on_rails",
       "objective" => "Ship a low-risk batch",
+      "launch_prompt" => "Coordinate the batch, then report the result.",
       "operator" => "justin",
       "dashboard_url" => "https://coord.example.test/batches/batch-b",
       "lanes" => [
@@ -2108,6 +2109,7 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     assert_equal 1, stored.fetch("schema_version")
     assert_equal "batch-b", stored.fetch("batch_id")
     assert_equal "Ship a low-risk batch", stored.fetch("objective")
+    assert_equal "Coordinate the batch, then report the result.", stored.fetch("launch_prompt")
     assert_equal "justin", stored.fetch("operator")
     assert_match(/\A\d{4}-\d{2}-\d{2}T/, stored.fetch("updated_at"))
     assert_match(/\A\d{4}-\d{2}-\d{2}T/, stored.fetch("registered_at"))
@@ -2117,6 +2119,7 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     assert_equal 0, status.status.exitstatus, status.stderr
     batch = JSON.parse(status.stdout).fetch("batches").first
     assert_equal "shakacode/react_on_rails", batch.fetch("repo")
+    assert_equal "Coordinate the batch, then report the result.", batch.fetch("launch_prompt")
     assert_equal "https://coord.example.test/batches/batch-b", batch.fetch("dashboard_url")
     lane = batch.fetch("lanes").first
     assert_equal "thread-docs", lane.fetch("thread_handle")
