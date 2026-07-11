@@ -613,8 +613,8 @@ status and liveness. Lane names must not contain `:`; batch ids may contain `:`.
 `depends_on` is optional and accepts a string or array of lane refs in the form
 `<batch-id>:<lane-name>`, split at the last colon.
 
-Top-level batch metadata such as `repo`, `objective`, `instructions`, `operator`,
-`dashboard_url`, and lane metadata such as `thread_handle`, `chat_handle`,
+Top-level batch metadata such as `repo`, `objective`, `instructions`, `launch_prompt`,
+`operator`, `dashboard_url`, and lane metadata such as `thread_handle`, `chat_handle`,
 `host`, `pr_url`, `dashboard_url`, `operator`, and `phase` are preserved and
 included in JSON status output. A dependency is considered met when the
 referenced lane owner's heartbeat reports a terminal status such as `done`,

@@ -18,4 +18,8 @@ when releases begin.
 - Token provisioning now requires explicit read/write scopes, with `--all-state`
   available only as an explicit opt-out for trusted single-operator deployments.
 
+### Fixed
+
+- Batch status JSON now includes persisted launch prompts.
+
 No gem has been published and no release has been tagged.
