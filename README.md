@@ -134,11 +134,14 @@ token once and stores only its SHA-256 hash in D1, so run it in a private
 terminal:
 
 ```bash
-worker/bin/provision-token <machine-name>
+worker/bin/provision-token <machine-name> \
+  --read-prefix <read-prefix> \
+  --write-prefix <write-prefix>
 ```
 
-Tokens default to all-state access for migration compatibility. For broader
-traffic, provision scoped tokens with repeatable read/write path scopes:
+Token provisioning requires at least one read or write prefix. An omitted scope
+dimension receives no access (`[]`). Use repeatable flags when a machine needs
+multiple path scopes:
 
 ```bash
 worker/bin/provision-token m5 \
@@ -148,7 +151,16 @@ worker/bin/provision-token m5 \
   --write-prefix heartbeats/m5-codex.json
 ```
 
-An empty scope (`""`, the default) grants all state. A directory scope such as
+For a trusted single-operator deployment that intentionally needs unrestricted
+access, pass `--all-state` instead of prefix flags:
+
+```bash
+worker/bin/provision-token <machine-name> --all-state
+```
+
+The stored empty scope (`""`) grants all state, but the provisioning command
+does not accept an empty prefix as a shortcut; all-state access must use the
+explicit flag. A directory scope such as
 `claims/shakacode/react_on_rails` covers descendant paths. A valid record-path
 scope such as `heartbeats/m5-codex.json` covers exactly that flat record. The
 Worker enforces read scopes for `GET /v1/state/<path>` and
@@ -161,15 +173,19 @@ returns only covered descendants. Claims-scoped tokens can pass the default
 `agent-coord doctor` read probe; tokens scoped only to other prefixes should use
 `agent-coord doctor --doctor-prefix <read-prefix>`. Directory prefixes are
 checked with the list endpoint; exact record-path prefixes such as
-`heartbeats/m5-codex.json` are checked with a record read. When customizing
-token scopes, pass both read and write prefixes intentionally; the provisioning
-script warns if only one dimension is customized and the other remains
-all-state.
+`heartbeats/m5-codex.json` are checked with a record read. The provisioning
+script rejects a command with no scope flags and rejects combining prefix flags
+with `--all-state`. Read-only tokens support status and doctor workflows.
+Write-only tokens support append-only callers such as `record-event`; claim,
+release, heartbeat, and batch mutation commands read existing state before
+writing and therefore need matching read prefixes.
 
 For local Wrangler/D1 development, pass `--local`:
 
 ```bash
-worker/bin/provision-token <machine-name> --local
+worker/bin/provision-token dev --local \
+  --read-prefix claims \
+  --write-prefix claims
 ```
 
 Machine names may contain letters, numbers, dots, underscores, colons, and
