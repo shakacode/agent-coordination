@@ -1367,6 +1367,14 @@ module AgentCoord
       path = AgentCoord.claim_path(options.fetch(:repo), options.fetch(:target))
       store.write_json(path, payload, message: "Release #{options[:repo]}##{options[:target]}", sha: existing.sha)
       :changed
+    rescue Conflict
+      current = store.read_json(path)
+      if current && current.data["status"] == "released" &&
+         terminal_payload_semantics(current.data) == terminal_payload_semantics(payload)
+        return :unchanged
+      end
+
+      raise
     end
 
     def validate_terminal_release_batch_id!(payload)

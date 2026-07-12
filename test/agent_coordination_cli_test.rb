@@ -2568,6 +2568,36 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     assert_equal authoritative_batch, File.read(batch_path)
   end
 
+  def test_concurrent_identical_terminal_releases_converge_same_claim
+    write_batch("batch-same-claim", lanes: [{ "name" => "code", "owner" => "worker-a", "targets" => ["4013"] }])
+    claim = run_agent_coord("claim", "--agent-id", "worker-a", "--repo", "shakacode/react_on_rails",
+                            "--target", "4013", "--batch-id", "batch-same-claim", "--host", "codex")
+    assert_equal 0, claim.status.exitstatus, claim.stderr
+    store = ConcurrentClaimReleaseStore.new(@state_root, "shakacode/react_on_rails", "4013")
+    results = []
+    errors = []
+    threads = 2.times.map do
+      Thread.new do
+        runner = StoreInjectedRunner.new(
+          ["release", "--agent-id", "worker-a", "--repo", "shakacode/react_on_rails", "--target", "4013",
+           "--terminal", "done"], store: store
+        )
+        results << runner.run
+      rescue AgentCoord::Error => e
+        errors << e
+      end
+    end
+    threads.each(&:join)
+
+    assert_empty errors
+    assert_equal [0, 0], results.sort
+    assert_equal 1, Dir.glob(File.join(@state_root, "events", "batch-same-claim", "*.json")).length
+    claim_payload = JSON.parse(File.read(File.join(@state_root, "claims", "shakacode", "react_on_rails", "4013.json")))
+    assert_equal "released", claim_payload.fetch("status")
+    batch = JSON.parse(File.read(File.join(@state_root, "batches", "batch-same-claim.json")))
+    assert_equal "done", batch.fetch("lanes").fetch(0).fetch("terminal")
+  end
+
   def test_record_event_rejects_malformed_lane_names
     result = run_agent_coord(
       "record-event",
@@ -3390,6 +3420,30 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
         else
           @condition.wait(@mutex) until @waiting == 2
         end
+      end
+    end
+  end
+
+  class ConcurrentClaimReleaseStore < AgentCoord::LocalStore
+    def initialize(root, repo, target)
+      super(root)
+      @claim_path = AgentCoord.claim_path(repo, target)
+      @mutex = Mutex.new
+      @condition = ConditionVariable.new
+      @waiting = 0
+    end
+
+    def write_json(path, data, message:, sha: nil, create: false)
+      synchronize_release if path == @claim_path && data["status"] == "released"
+      super
+    end
+
+    private
+
+    def synchronize_release
+      @mutex.synchronize do
+        @waiting += 1
+        @waiting == 2 ? @condition.broadcast : @condition.wait(@mutex) { @waiting == 2 }
       end
     end
   end
