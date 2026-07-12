@@ -3,6 +3,7 @@
   "record_family": "compacted_events",
   "source_paths": [
     "events/batch-42/claimed.json",
+    "events/batch-42/claimed-renewal.json",
     "events/batch-42/lane_closed-terminal.json"
   ],
   "reason": "terminal_target_events",

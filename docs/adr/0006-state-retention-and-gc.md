@@ -28,14 +28,19 @@ cannot silently discard the only copy.
 Claims are eligible only when released or explicitly terminal. Heartbeats are
 eligible when terminal or after their protocol liveness reaches `dead`.
 Batches are eligible only when `status` is `completed`. Events are compacted per
-repository target only after a `lane_closed` event exists and passes the hot
-window. Protocol-declared terminal state therefore remains the eligibility
-source; GC does not infer completion from GitHub.
+repository target only after a schema-v2 `lane_closed` event declares `done`,
+`abandoned`, or `superseded`, and every current event for that target has passed
+its own hot window. The compacted envelope lists all consumed paths while its
+records retain first, last, and phase transitions and omit repeated renewals.
+Protocol-declared terminal state therefore remains the eligibility source; GC
+does not infer completion from GitHub.
 
 Normal status reads never scan `archive/`. Operators opt in with unscoped
 `status --include-archived`. The HTTP API accepts the mirrored archive path
 grammar and exposes compare-and-swap DELETE so local and HTTP execution share
-the same semantics.
+the same semantics. Both the CLI preflight and HTTP Worker cap serialized
+archive envelopes at 1 MiB; an oversized plan fails before GC writes anything,
+while active HTTP records keep their existing 256 KiB limit.
 
 ## Consequences
 

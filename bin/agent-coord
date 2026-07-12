@@ -32,6 +32,7 @@ module AgentCoord
   DEFAULT_HOT_DAYS = 7
   DEFAULT_ARCHIVE_DAYS = 30
   DEFAULT_SYNTHETIC_HOT_DAYS = 1
+  MAX_ARCHIVE_STATE_BYTES = 1024 * 1024
   STATUS_STATE_ROOT_ENV = "AGENT_COORD_STATUS_STATE_ROOT"
   JSON_PREFIXES = %w[claims heartbeats batches].freeze
   STATE_PREFIXES = (JSON_PREFIXES + %w[events archive]).freeze
@@ -590,6 +591,7 @@ module AgentCoord
       candidates = gc_archive_candidates(store, now, hot_days, synthetic_hot_days) +
                    gc_compaction_candidates(store, now, hot_days, synthetic_hot_days) +
                    gc_delete_candidates(store, now)
+      validate_gc_archive_sizes!(candidates, now, archive_days)
       if options[:execute]
         candidates.each do |candidate|
           case candidate.dig(:action, "action")
@@ -670,19 +672,26 @@ module AgentCoord
       groups.filter_map do |(batch_id, repo, target), entries|
         next if repo.to_s.empty? || target.to_s.empty?
 
-        terminal = entries.select { |entry| entry.data["type"] == "lane_closed" }
+        terminal = entries.select { |entry| gc_terminal_event?(entry.data) }
                           .max_by { |entry| gc_record_time(entry.data) }
         next unless terminal
 
         eligible_at = gc_record_time(terminal.data)
-        retention_days = entries.all? { |entry| entry.data["synthetic"] == true } ? synthetic_hot_days : hot_days
-        next if eligible_at > now - (retention_days * 86_400)
+        next unless gc_hot_window_elapsed?(terminal.data, now, hot_days, synthetic_hot_days)
 
-        source_paths = entries.map(&:path).sort
+        eligible_entries = entries.select do |entry|
+          gc_hot_window_elapsed?(entry.data, now, hot_days, synthetic_hot_days)
+        end
+        # A target has one deterministic compaction envelope. Defer the whole
+        # target until every current source event has independently aged out so
+        # a later pass never needs to append into or replace that envelope.
+        next unless eligible_entries.length == entries.length
+
+        source_paths = eligible_entries.map(&:path).sort
         digest = Digest::SHA256.hexdigest("#{repo}##{target}")[0, 16]
         archive_path = "archive/events/#{batch_id}/compact-#{digest}.json"
         {
-          entries: entries.sort_by(&:path),
+          entries: eligible_entries,
           action: {
             "action" => "compact",
             "source_paths" => source_paths,
@@ -694,25 +703,27 @@ module AgentCoord
       end
     end
 
+    def gc_hot_window_elapsed?(data, now, hot_days, synthetic_hot_days)
+      retention_days = data["synthetic"] == true ? synthetic_hot_days : hot_days
+      gc_record_time(data) <= now - (retention_days * 86_400)
+    end
+
+    def gc_terminal_event?(data)
+      data["schema_version"] == LANE_CLOSED_SCHEMA_VERSION &&
+        data["type"] == "lane_closed" && TERMINAL_STATES.include?(data["terminal"])
+    end
+
     def gc_compact_events(store, candidate, now, archive_days)
       entries = candidate.fetch(:entries)
+      retained_entries = gc_compacted_entries(entries)
       action = candidate.fetch(:action)
-      envelope = {
-        "schema_version" => SCHEMA_VERSION,
-        "record_family" => "compacted_events",
-        "source_paths" => action.fetch("source_paths"),
-        "reason" => action.fetch("reason"),
-        "synthetic" => entries.all? { |entry| entry.data["synthetic"] == true },
-        "archived_at" => timestamp(now),
-        "delete_after" => timestamp(now + (archive_days * 86_400)),
-        "records" => entries.map(&:data)
-      }
+      envelope = gc_compaction_envelope(entries, retained_entries, action, now, archive_days)
       archive_path = action.fetch("archive_path")
       begin
         store.write_json(archive_path, envelope, message: "Compact terminal events", create: true)
       rescue Conflict
         existing = store.read_json(archive_path)
-        unless existing && gc_compaction_contains?(existing.data, entries)
+        unless existing && gc_compaction_contains?(existing.data, entries, retained_entries)
           raise OperationalError, "event compaction destination conflict at #{archive_path}"
         end
       end
@@ -723,11 +734,46 @@ module AgentCoord
       end
     end
 
-    def gc_compaction_contains?(existing, entries)
+    def gc_compaction_envelope(entries, retained_entries, action, now, archive_days)
+      {
+        "schema_version" => SCHEMA_VERSION,
+        "record_family" => "compacted_events",
+        "source_paths" => action.fetch("source_paths"),
+        "reason" => action.fetch("reason"),
+        "synthetic" => entries.all? { |entry| entry.data["synthetic"] == true },
+        "archived_at" => timestamp(now),
+        "delete_after" => timestamp(now + (archive_days * 86_400)),
+        "records" => retained_entries.map(&:data)
+      }
+    end
+
+    def gc_compacted_entries(entries)
+      ordered = entries.sort_by do |entry|
+        [gc_record_time(entry.data), gc_terminal_event?(entry.data) ? 1 : 0, entry.path]
+      end
+      return ordered if ordered.length <= 2
+
+      keep = [ordered.first, ordered.last]
+      previous_phase = nil
+      ordered.each do |entry|
+        phase = entry.data["phase"]
+        next if phase.to_s.empty?
+
+        keep << entry if phase != previous_phase
+        previous_phase = phase
+      end
+      keep.uniq.sort_by do |entry|
+        [gc_record_time(entry.data), gc_terminal_event?(entry.data) ? 1 : 0, entry.path]
+      end
+    end
+
+    def gc_compaction_contains?(existing, entries, retained_entries)
       return false unless existing["record_family"] == "compacted_events"
 
-      existing_by_path = Array(existing["source_paths"]).zip(Array(existing["records"])).to_h
-      entries.all? { |entry| existing_by_path[entry.path] == entry.data }
+      source_paths = Array(existing["source_paths"])
+      records = Array(existing["records"])
+      entries.all? { |entry| source_paths.include?(entry.path) } &&
+        retained_entries.all? { |entry| records.include?(entry.data) }
     end
 
     def gc_archive_delete_after(entry)
@@ -752,16 +798,7 @@ module AgentCoord
       entry = candidate.fetch(:entry)
       action = candidate.fetch(:action)
       archive_path = action.fetch("archive_path")
-      envelope = {
-        "schema_version" => SCHEMA_VERSION,
-        "record_family" => "archived_record",
-        "source_path" => entry.path,
-        "reason" => action.fetch("reason"),
-        "synthetic" => entry.data["synthetic"] == true,
-        "archived_at" => timestamp(now),
-        "delete_after" => timestamp(now + (archive_days * 86_400)),
-        "data" => entry.data
-      }
+      envelope = gc_archive_envelope(entry, action, now, archive_days)
       begin
         store.write_json(archive_path, envelope, message: "Archive #{entry.path}", create: true)
       rescue Conflict
@@ -773,6 +810,37 @@ module AgentCoord
       store.delete_json(entry.path, message: "Archive #{entry.path}", sha: entry.sha)
     rescue Conflict => e
       raise OperationalError, "gc source changed at #{entry.path}; #{e.message}"
+    end
+
+    def gc_archive_envelope(entry, action, now, archive_days)
+      {
+        "schema_version" => SCHEMA_VERSION,
+        "record_family" => "archived_record",
+        "source_path" => entry.path,
+        "reason" => action.fetch("reason"),
+        "synthetic" => entry.data["synthetic"] == true,
+        "archived_at" => timestamp(now),
+        "delete_after" => timestamp(now + (archive_days * 86_400)),
+        "data" => entry.data
+      }
+    end
+
+    def validate_gc_archive_sizes!(candidates, now, archive_days)
+      candidates.each do |candidate|
+        action = candidate.fetch(:action)
+        envelope = case action.fetch("action")
+                   when "archive"
+                     gc_archive_envelope(candidate.fetch(:entry), action, now, archive_days)
+                   when "compact"
+                     entries = candidate.fetch(:entries)
+                     gc_compaction_envelope(entries, gc_compacted_entries(entries), action, now, archive_days)
+                   end
+        next unless envelope
+        next if JSON.generate(envelope).bytesize <= MAX_ARCHIVE_STATE_BYTES
+
+        raise OperationalError,
+              "gc archive envelope exceeds #{MAX_ARCHIVE_STATE_BYTES} bytes at #{action.fetch('archive_path')}"
+      end
     end
 
     def gc_same_archived_record?(existing, requested)
@@ -1688,7 +1756,9 @@ module AgentCoord
         terminal: terminal_payload_value(payload, "terminal"),
         pr_state: terminal_payload_value(payload, "pr_state"),
         evidence_url: terminal_payload_value(payload, "evidence_url"),
-        workspace: terminal_payload_value(payload, "workspace") || DEFAULT_WORKSPACE
+        workspace: terminal_payload_value(payload, "workspace") || DEFAULT_WORKSPACE,
+        synthetic: terminal_payload_value(payload, "synthetic"),
+        synthetic_kind: terminal_payload_value(payload, "synthetic_kind")
       }.compact
       options[:lane] = lane_name(terminal_batch_lane(store, options))
       options

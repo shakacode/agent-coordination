@@ -21,7 +21,11 @@ async function sha256Hex(value: string): Promise<string> {
 }
 
 const MAX_STATE_BYTES = 256 * 1024;
-const MAX_REQUEST_BYTES = MAX_STATE_BYTES + 4096;
+// Archive envelopes add retention metadata around otherwise valid active records and
+// compact several significant events. Keep active writes at the original bound while
+// allowing bounded GC output without granting broader scopes or bypassing auth.
+const MAX_ARCHIVE_STATE_BYTES = 1024 * 1024;
+const REQUEST_ENVELOPE_BYTES = 4096;
 const MAX_STATE_PATH_BYTES = 512;
 const MAX_LIST_LIMIT = 1000;
 const RECORD_PATH = "(?:claims/[A-Za-z0-9_.:-]+/[A-Za-z0-9_.:-]+/[A-Za-z0-9_.:-]+\\.json"
@@ -142,7 +146,10 @@ function canAccessPath(prefixes: string[], path: string): boolean {
   return prefixes.some((prefix) => scopeCoversPath(prefix, path));
 }
 
-async function readJsonBody(request: Request): Promise<{ body: unknown } | { response: Response }> {
+async function readJsonBody(
+  request: Request,
+  maxRequestBytes: number,
+): Promise<{ body: unknown } | { response: Response }> {
   if (!request.body) return { response: json(400, { error: "invalid_json" }) };
 
   const reader = request.body.getReader();
@@ -152,7 +159,7 @@ async function readJsonBody(request: Request): Promise<{ body: unknown } | { res
     const { done, value } = await reader.read();
     if (done) break;
     received += value.byteLength;
-    if (received > MAX_REQUEST_BYTES) {
+    if (received > maxRequestBytes) {
       await reader.cancel();
       return { response: json(413, { error: "payload_too_large" }) };
     }
@@ -187,16 +194,18 @@ async function getState(env: Env, path: string): Promise<Response> {
 }
 
 async function putState(request: Request, env: Env, path: string, machine: string): Promise<Response> {
+  const maxStateBytes = path.startsWith("archive/") ? MAX_ARCHIVE_STATE_BYTES : MAX_STATE_BYTES;
+  const maxRequestBytes = maxStateBytes + REQUEST_ENVELOPE_BYTES;
   // Best-effort pre-parse guard; the serialized-data cap below still handles absent lengths.
   const contentLength = request.headers.get("content-length");
   if (contentLength && /^\d+$/.test(contentLength)) {
     const requestBytes = Number.parseInt(contentLength, 10);
-    if (!Number.isSafeInteger(requestBytes) || requestBytes > MAX_REQUEST_BYTES) {
+    if (!Number.isSafeInteger(requestBytes) || requestBytes > maxRequestBytes) {
       return json(413, { error: "payload_too_large" });
     }
   }
 
-  const bodyResult = await readJsonBody(request);
+  const bodyResult = await readJsonBody(request, maxRequestBytes);
   if ("response" in bodyResult) return bodyResult.response;
   const body = bodyResult.body;
   if (body === null || typeof body !== "object" || Array.isArray(body)) {
@@ -205,7 +214,7 @@ async function putState(request: Request, env: Env, path: string, machine: strin
   const payload = body as { data?: unknown };
   if (payload.data === undefined) return json(400, { error: "missing_data" });
   const data = JSON.stringify(payload.data);
-  if (new TextEncoder().encode(data).byteLength > MAX_STATE_BYTES) {
+  if (new TextEncoder().encode(data).byteLength > maxStateBytes) {
     return json(413, { error: "payload_too_large" });
   }
   const now = new Date().toISOString();

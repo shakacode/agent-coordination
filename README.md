@@ -384,7 +384,11 @@ and batch dependency checks never turn into an all-archive scan.
 mode is required: `--dry-run` prints proposed actions without writing, while
 `--execute` copies eligible records into `archive/` with compare-and-swap
 protection and only then removes their hot source. Terminal target events are
-compacted into one archive envelope before their source events are removed.
+compacted into one archive envelope before their source events are removed. A
+target is deferred until every current source event has independently passed
+its hot window. The envelope lists every consumed source path but retains only
+the first event, last event, and actual phase transitions; repeated same-phase
+renewals are intentionally dropped.
 Expired archive envelopes are deleted with the same compare-and-swap guard.
 
 | Record state | Hot retention | Archive retention | Result |
@@ -615,11 +619,18 @@ Claims and heartbeats may carry `synthetic: true` and a `synthetic_kind` such as
 `simulation` or `smoke`. These markers are protocol metadata: they let `gc`
 apply the shorter synthetic hot-retention window without guessing from names.
 
+Archive envelopes have a shared 1 MiB serialized-data cap in the CLI and HTTP
+Worker. Execute mode preflights every planned archive/compaction envelope and
+performs no writes if any would exceed the cap; split or reduce the source
+history before retrying. Active HTTP records retain their separate 256 KiB cap.
+
 ## Archive Schema
 
 Archive paths mirror the hot record grammar below `archive/`. A single-record
 envelope retains `source_path` and the original `data`; terminal event
-compaction retains aligned `source_paths` and `records`. Both carry
+compaction uses `source_paths` as the complete set of consumed inputs and
+`records` as the compacted first/last/phase-transition history; the arrays are
+not positional and renewal paths may have no retained record. Both carry
 `archived_at`, `delete_after`, `reason`, and the synthetic marker. The published
 contract and fixture are
 [`contracts/archive-record-schema-v1.json`](contracts/archive-record-schema-v1.json)

@@ -125,6 +125,32 @@ class HttpBackendIntegrationTest < Minitest::Test
     assert_equal "not_found", body.fetch("error")
   end
 
+  def test_gc_can_archive_a_max_sized_active_record_over_http
+    token = ENV.fetch("AGENT_COORD_API_TOKEN")
+    target = "gc-large-#{Process.pid}"
+    source_path = "claims/shakacode/integration-#{Process.pid}/#{target}.json"
+    archive_path = "archive/#{source_path}"
+    data = {
+      "schema_version" => 1, "repo" => REPO, "target" => target, "agent_id" => "gc-worker",
+      "status" => "released", "terminal" => "done", "updated_at" => "2000-01-01T00:00:00Z",
+      "padding" => "x" * 261_930
+    }
+    assert_operator JSON.generate(data).bytesize, :<=, 256 * 1024
+    assert_operator JSON.generate({ "data" => data }).bytesize, :>, 262_125
+
+    code, body = http_json(
+      "PUT", state_path(source_path), token: token, headers: { "If-None-Match" => "*" }, body: { "data" => data }
+    )
+    assert_equal 201, code, body.inspect
+
+    cli_code, output, error = cli("gc", "--execute", "--json")
+    assert_equal 0, cli_code, error
+    assert(JSON.parse(output).fetch("actions").any? { |action| action["archive_path"] == archive_path })
+    code, body = http_json("GET", state_path(archive_path), token: token)
+    assert_equal 200, code
+    assert_equal data, body.fetch("data").fetch("data")
+  end
+
   def test_scoped_machine_token_enforces_path_prefix_and_records_writer
     scoped_token = ENV.fetch("SCOPED_AGENT_COORD_API_TOKEN")
     full_token = ENV.fetch("AGENT_COORD_API_TOKEN")

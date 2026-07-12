@@ -35,6 +35,8 @@ class StateContractTest < Minitest::Test
     assert_equal 1, schema_document.fetch("x-contract-version")
     assert_equal "archive", schema_document.fetch("x-record-family")
     fixtures.each { |fixture| assert_empty schema.validate(fixture).to_a }
+    compacted = fixtures.fetch(1)
+    assert_operator compacted.fetch("source_paths").length, :>, compacted.fetch("records").length
   end
 
   def test_lane_closed_contract_rejects_missing_workspace_and_invalid_terminal

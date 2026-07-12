@@ -242,6 +242,31 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     assert_equal "archive_expired", action.fetch("reason")
   end
 
+  def test_gc_rejects_an_oversized_archive_envelope_before_writing_any_candidate
+    now = Time.utc(2026, 7, 12, 12, 0, 0)
+    %w[small oversized].each do |target|
+      write_state_record(
+        "claims/shakacode/example/#{target}.json",
+        "schema_version" => 1, "repo" => "shakacode/example", "target" => target,
+        "agent_id" => "worker-#{target}", "status" => "released", "terminal" => "done",
+        "updated_at" => (now - (8 * 86_400)).iso8601,
+        "padding" => (target == "oversized" ? "x" * AgentCoord::MAX_ARCHIVE_STATE_BYTES : "")
+      )
+    end
+    runner = AgentCoord::Runner.new([], stdout: StringIO.new, clock: FixedClock.new(now))
+
+    errors = [[true, false], [false, true]].map do |dry_run, execute|
+      assert_raises(AgentCoord::OperationalError) do
+        runner.send(:gc, state_root: @state_root, dry_run: dry_run, execute: execute, json: true)
+      end
+    end
+
+    errors.each { |error| assert_includes error.message, "gc archive envelope exceeds 1048576 bytes" }
+    assert_path_exists File.join(@state_root, "claims/shakacode/example/small.json")
+    assert_path_exists File.join(@state_root, "claims/shakacode/example/oversized.json")
+    refute_path_exists File.join(@state_root, "archive")
+  end
+
   def test_gc_text_renders_delete_and_compaction_actions_without_assuming_archive_shape
     payload = {
       "mode" => "dry-run",
@@ -287,10 +312,34 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     end
   end
 
+  def test_terminal_release_preserves_synthetic_marker_on_canonical_lane_closed_event
+    write_batch(
+      "batch-synthetic-terminal",
+      lanes: [{ "name" => "simulation", "owner" => "sim-worker", "targets" => ["synthetic-terminal"] }]
+    )
+    claim = run_agent_coord(
+      "claim", "--agent-id", "sim-worker", "--repo", "shakacode/example", "--target", "synthetic-terminal",
+      "--batch-id", "batch-synthetic-terminal", "--synthetic", "--synthetic-kind", "simulation"
+    )
+    release = run_agent_coord(
+      "release", "--agent-id", "sim-worker", "--repo", "shakacode/example", "--target", "synthetic-terminal",
+      "--terminal", "done"
+    )
+
+    assert_equal 0, claim.status.exitstatus, claim.stderr
+    assert_equal 0, release.status.exitstatus, release.stderr
+    event_path = Dir.glob(File.join(@state_root, "events", "batch-synthetic-terminal", "*.json")).fetch(0)
+    event = JSON.parse(File.read(event_path))
+    assert_equal "lane_closed", event.fetch("type")
+    assert_equal true, event.fetch("synthetic")
+    assert_equal "simulation", event.fetch("synthetic_kind")
+  end
+
   def test_gc_compacts_events_per_target_after_terminal_closeout
     now = Time.utc(2026, 7, 12, 12, 0, 0)
     at = (now - (8 * 86_400)).iso8601
-    %w[claimed validating].each do |event_id|
+    { "claimed" => ["claimed", 0], "claimed-renewal" => ["claimed", 1],
+      "validating" => ["validating", 2] }.each do |event_id, (phase, offset)|
       write_state_record(
         "events/batch-1/#{event_id}.json",
         "schema_version" => 1,
@@ -299,7 +348,8 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
         "type" => "phase",
         "repo" => "shakacode/example",
         "target" => "42",
-        "at" => at
+        "phase" => phase,
+        "at" => (Time.iso8601(at) + offset).iso8601
       )
     end
     write_state_record(
@@ -311,7 +361,7 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
       "repo" => "shakacode/example",
       "target" => "42",
       "terminal" => "done",
-      "at" => at
+      "at" => (Time.iso8601(at) + 3).iso8601
     )
 
     stdout = StringIO.new
@@ -321,13 +371,86 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     assert_equal 0, result
     action = JSON.parse(stdout.string).fetch("actions").find { |row| row["action"] == "compact" }
     refute_nil action
-    assert_equal 3, action.fetch("source_paths").length
+    assert_equal 4, action.fetch("source_paths").length
     action.fetch("source_paths").each { |path| refute_path_exists File.join(@state_root, path) }
     compacted = JSON.parse(File.read(File.join(@state_root, action.fetch("archive_path"))))
     assert_equal "compacted_events", compacted.fetch("record_family")
-    assert_equal(%w[claimed lane_closed-deadbeef validating], compacted.fetch("records").map do |row|
+    assert_equal(%w[claimed validating lane_closed-deadbeef], compacted.fetch("records").map do |row|
       row.fetch("event_id")
     end)
+    refute_includes compacted.fetch("records").map { |row| row.fetch("event_id") }, "claimed-renewal"
+  end
+
+  def test_gc_compacts_only_events_whose_individual_hot_window_has_elapsed
+    now = Time.utc(2026, 7, 12, 12, 0, 0)
+    old_at = (now - (8 * 86_400)).iso8601
+    fresh_at = (now - 86_400).iso8601
+    write_state_record(
+      "events/batch-mixed/lane_closed-old.json",
+      "schema_version" => 2, "event_id" => "lane_closed-old", "batch_id" => "batch-mixed",
+      "type" => "lane_closed", "repo" => "shakacode/example", "target" => "mixed",
+      "terminal" => "done", "at" => old_at
+    )
+    write_state_record(
+      "events/batch-mixed/fresh.json",
+      "schema_version" => 1, "event_id" => "fresh", "batch_id" => "batch-mixed",
+      "type" => "phase", "repo" => "shakacode/example", "target" => "mixed",
+      "phase" => "qa", "at" => fresh_at
+    )
+
+    stdout = StringIO.new
+    runner = AgentCoord::Runner.new([], stdout: stdout, clock: FixedClock.new(now))
+    assert_equal 0, runner.send(:gc, state_root: @state_root, dry_run: false, execute: true, json: true)
+
+    assert_empty JSON.parse(stdout.string).fetch("actions")
+    assert_path_exists File.join(@state_root, "events/batch-mixed/lane_closed-old.json")
+    assert_path_exists File.join(@state_root, "events/batch-mixed/fresh.json")
+
+    later_stdout = StringIO.new
+    later_runner = AgentCoord::Runner.new([], stdout: later_stdout, clock: FixedClock.new(now + (7 * 86_400)))
+    assert_equal 0, later_runner.send(:gc, state_root: @state_root, dry_run: false, execute: true, json: true)
+    action = JSON.parse(later_stdout.string).fetch("actions").find { |row| row["action"] == "compact" }
+    assert_equal 2, action.fetch("source_paths").length
+    action.fetch("source_paths").each { |path| refute_path_exists File.join(@state_root, path) }
+  end
+
+  def test_gc_requires_a_valid_v2_lane_closed_terminal_marker_before_compacting_events
+    now = Time.utc(2026, 7, 12, 12, 0, 0)
+    at = (now - (8 * 86_400)).iso8601
+    [{ "schema_version" => 1, "terminal" => "done" },
+     { "schema_version" => 2, "terminal" => "unknown" },
+     { "schema_version" => 2, "terminal" => "done", "type" => "phase" }].each_with_index do |marker, index|
+      write_state_record(
+        "events/batch-invalid-#{index}/lane_closed-invalid.json",
+        { "event_id" => "lane_closed-invalid", "batch_id" => "batch-invalid-#{index}",
+          "type" => "lane_closed", "repo" => "shakacode/example", "target" => "invalid-#{index}",
+          "at" => at }.merge(marker)
+      )
+    end
+
+    stdout = StringIO.new
+    runner = AgentCoord::Runner.new([], stdout: stdout, clock: FixedClock.new(now))
+    assert_equal 0, runner.send(:gc, state_root: @state_root, dry_run: true, execute: false, json: true)
+    assert_empty JSON.parse(stdout.string).fetch("actions")
+  end
+
+  def test_gc_compaction_retry_accepts_consumed_renewal_paths_without_positional_records
+    at = "2026-07-01T00:00:00Z"
+    entries = [
+      AgentCoord::StoredJson.new(path: "events/b/first.json", data: { "event_id" => "first", "at" => at }),
+      AgentCoord::StoredJson.new(path: "events/b/renewal.json", data: { "event_id" => "renewal", "at" => at }),
+      AgentCoord::StoredJson.new(path: "events/b/last.json", data: { "event_id" => "last", "at" => at })
+    ]
+    retained = [entries.fetch(0), entries.fetch(2)]
+    existing = {
+      "record_family" => "compacted_events",
+      "source_paths" => entries.map(&:path),
+      "records" => retained.map(&:data)
+    }
+    runner = AgentCoord::Runner.new([])
+
+    assert runner.send(:gc_compaction_contains?, existing, entries, retained)
+    refute runner.send(:gc_compaction_contains?, existing, entries, [entries.fetch(1)])
   end
 
   def test_gc_uses_one_day_hot_window_for_synthetic_terminal_events
