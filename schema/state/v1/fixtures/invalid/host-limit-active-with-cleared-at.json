@@ -2,7 +2,7 @@
   "schema_version": 1,
   "workspace": "default",
   "machine": "build-mac-01",
-  "host": "codex",
+  "quota_host": "quota-host-a",
   "scope": "weekly",
   "status": "active",
   "observed_at": "2026-07-12T20:00:00Z",

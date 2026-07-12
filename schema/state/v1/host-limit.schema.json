@@ -2,12 +2,12 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://github.com/shakacode/agent-coordination/blob/main/schema/state/v1/host-limit.schema.json",
   "title": "Agent Coordination Host Limit Record v1",
-  "description": "Contract for a machine and quota-host scoped usage-limit observation. This schema defines state only; reporting, persistence, provider detection, and UI behavior are separate concerns.",
+  "description": "Contract for a machine and quota-host scoped usage-limit observation. quota_host is distinct from the existing lane host app/wrapper field. This schema defines state only; reporting, persistence, provider detection, and UI behavior are separate concerns.",
   "x-contract-version": 1,
   "x-record-family": "host_limit",
-  "x-logical-key": ["workspace", "machine", "host", "scope"],
+  "x-logical-key": ["workspace", "machine", "quota_host", "scope"],
   "x-storage-key": {
-    "template": "host_limits/{workspace}/{machine}/{host}/{scope}.json",
+    "template": "host_limits/{workspace}/{machine}/{quota_host}/{scope}.json",
     "workspace_machine_encoding": "UTF-8 bytes; leave ASCII alphanumeric, underscore, and hyphen; percent-encode every other byte with uppercase hexadecimal"
   },
   "$ref": "#/$defs/host_limit",
@@ -23,19 +23,19 @@
       "minLength": 1,
       "description": "Stable coordination-machine identifier."
     },
-    "canonical_host": {
+    "canonical_quota_host": {
       "type": "string",
       "minLength": 1,
       "maxLength": 128,
       "pattern": "^[a-z0-9](?:[a-z0-9._-]{0,126}[a-z0-9])?$",
-      "description": "Canonical quota-pool host identifier: trim and lowercase before writing; use ASCII letters, digits, dot, underscore, or hyphen; omit scheme, port, path, account, and credential data. Equality is exact after canonicalization. Provider alias mapping is intentionally outside v1."
+      "description": "Canonical quota-pool identifier: trim and lowercase before writing; use ASCII letters, digits, dot, underscore, or hyphen; omit scheme, port, path, account, and credential data. Equality is exact after canonicalization. This is not the existing lane host app/wrapper field. Provider-to-quota-host mapping is intentionally outside v1 and remains UNKNOWN."
     },
     "scope": {
       "type": "string",
       "minLength": 1,
       "maxLength": 128,
       "pattern": "^[a-z0-9](?:[a-z0-9._-]{0,126}[a-z0-9])?$",
-      "description": "Canonical provider-neutral quota window or limit class. Multiple scopes may coexist for one workspace, machine, and host."
+      "description": "Canonical provider-neutral quota window or limit class. Multiple scopes may coexist for one workspace, machine, and quota host."
     },
     "host_limit": {
       "type": "object",
@@ -44,7 +44,7 @@
         "schema_version",
         "workspace",
         "machine",
-        "host",
+        "quota_host",
         "scope",
         "status",
         "observed_at",
@@ -55,7 +55,7 @@
         "schema_version": { "const": 1 },
         "workspace": { "$ref": "#/$defs/workspace" },
         "machine": { "$ref": "#/$defs/machine" },
-        "host": { "$ref": "#/$defs/canonical_host" },
+        "quota_host": { "$ref": "#/$defs/canonical_quota_host" },
         "scope": { "$ref": "#/$defs/scope" },
         "status": { "enum": ["active", "cleared"] },
         "observed_at": {
@@ -85,13 +85,15 @@
     },
     "status_projection": {
       "type": "object",
-      "additionalProperties": false,
+      "additionalProperties": true,
       "required": ["host_limits"],
       "properties": {
         "host_limits": {
           "type": "array",
           "items": { "$ref": "#/$defs/host_limit" },
-          "description": "Optional status section. Each logical key appears at most once; consumers derive blocked-on-limit for lanes matching an effective record's workspace, machine, and host."
+          "x-unique-key": ["workspace", "machine", "quota_host", "scope"],
+          "x-unique-key-enforcement": "producer",
+          "description": "Optional additive status section. The composite x-unique-key is an unenforced producer invariant because JSON Schema cannot enforce uniqueness by a subset of object properties. Consumers derive blocked-on-limit for lanes matching an effective record's workspace, machine, and quota_host. Existing status properties remain valid beside this section."
         }
       }
     }

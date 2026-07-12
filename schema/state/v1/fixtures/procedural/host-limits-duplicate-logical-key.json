@@ -1,0 +1,27 @@
+{
+  "host_limits": [
+    {
+      "schema_version": 1,
+      "workspace": "default",
+      "machine": "build-mac-01",
+      "quota_host": "quota-host-a",
+      "scope": "weekly",
+      "status": "active",
+      "observed_at": "2026-07-12T20:00:00Z",
+      "resets_at": null,
+      "source": "manual"
+    },
+    {
+      "schema_version": 1,
+      "workspace": "default",
+      "machine": "build-mac-01",
+      "quota_host": "quota-host-a",
+      "scope": "weekly",
+      "status": "cleared",
+      "observed_at": "2026-07-12T20:00:00Z",
+      "resets_at": null,
+      "source": "manual",
+      "cleared_at": "2026-07-12T20:30:00Z"
+    }
+  ]
+}
