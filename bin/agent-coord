@@ -310,12 +310,21 @@ module AgentCoord
 
     def finalize_options(command, options)
       validate_closeout_option_usage!(command, options)
+      validate_register_batch_option_usage!(command, options)
+
       if backend_command?(command)
         resolve_backend_env(options)
         resolve_default_local_backend(command, options)
         warn_consumer_split_brain(command, options)
       end
       options
+    end
+
+    def validate_register_batch_option_usage!(command, options)
+      return unless options[:launch_prompt]
+      return if command == "register-batch"
+
+      raise Error, "--launch-prompt is only valid for register-batch"
     end
 
     def validate_closeout_option_usage!(command, options)
@@ -2236,9 +2245,11 @@ module AgentCoord
     end
 
     def load_launch_prompt(path)
-      return $stdin.read if path == "-"
+      prompt = path == "-" ? $stdin.read : File.binread(path)
+      prompt = prompt.dup.force_encoding(Encoding::UTF_8)
+      raise Error, "launch prompt must be valid UTF-8" unless prompt.valid_encoding?
 
-      File.read(path)
+      prompt
     rescue SystemCallError => e
       raise OperationalError, "launch prompt unreadable: #{e.message}"
     end

@@ -529,6 +529,20 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     assert_includes result.stderr, "--deep is only valid for doctor"
   end
 
+  def test_launch_prompt_option_is_register_batch_only
+    prompt_path = File.join(@state_root, "launch-prompt.txt")
+    File.write(prompt_path, "Do not attach this to a claim.\n")
+
+    result = run_agent_coord(
+      "claim", "--agent-id", "worker-a", "--repo", "shakacode/react_on_rails", "--target", "4151",
+      "--launch-prompt", prompt_path
+    )
+
+    assert_equal 1, result.status.exitstatus
+    assert_includes result.stderr, "--launch-prompt is only valid for register-batch"
+    refute_path_exists File.join(@state_root, "claims", "shakacode", "react_on_rails", "4151.json")
+  end
+
   def test_doctor_help_accepts_deep_option
     result = run_agent_coord("doctor", "--deep", "--help", state_root: nil)
 
@@ -2469,6 +2483,34 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     assert_equal 2, result.status.exitstatus
     assert_includes result.stderr, "launch prompt unreadable"
     refute_path_exists File.join(@state_root, "batches", "batch-missing-launch-prompt.json")
+  end
+
+  def test_register_batch_rejects_invalid_utf8_launch_prompts_before_writing
+    invalid_prompt = "\xFF".b
+    prompt_path = File.join(@state_root, "invalid-launch-prompt.txt")
+    File.binwrite(prompt_path, invalid_prompt)
+
+    { "path" => [prompt_path, nil], "stdin" => ["-", invalid_prompt] }.each do |source, (argument, stdin_data)|
+      batch_id = "batch-invalid-launch-prompt-#{source}"
+      manifest_path = File.join(@state_root, "#{batch_id}.json")
+      File.write(
+        manifest_path,
+        JSON.pretty_generate(
+          "batch_id" => batch_id,
+          "lanes" => [{ "name" => "docs", "owner" => "worker-docs", "targets" => ["3972"] }]
+        )
+      )
+
+      result = run_agent_coord(
+        "register-batch", "--file", manifest_path, "--launch-prompt", argument,
+        stdin_data: stdin_data
+      )
+
+      assert_equal 1, result.status.exitstatus, source
+      assert_includes result.stderr, "launch prompt must be valid UTF-8", source
+      refute_includes result.stderr, "JSON::GeneratorError", source
+      refute_path_exists File.join(@state_root, "batches", "#{batch_id}.json"), source
+    end
   end
 
   def test_record_event_writes_append_only_event_and_status_metadata
