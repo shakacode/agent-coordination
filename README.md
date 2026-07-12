@@ -276,7 +276,7 @@ rm -rf "$STATE_ROOT"
 
 ```text
 bin/agent-coord claim     --agent-id ID --repo OWNER/REPO --target ISSUE_OR_PR [--batch-id ID] [--branch BRANCH] [--metadata options] [--ttl SECONDS]
-bin/agent-coord release   --agent-id ID --repo OWNER/REPO --target ISSUE_OR_PR [--metadata options] [--handoff-to ID] [--handoff-note TEXT] [--terminal done|abandoned|superseded] [--pr-state STATE] [--evidence-url URL]
+bin/agent-coord release   --agent-id ID --repo OWNER/REPO --target ISSUE_OR_PR [--metadata options] [--handoff-to ID] [--handoff-note TEXT] [--terminal done|abandoned|superseded] [--pr-state STATE] [--evidence-url URL] [--workspace WORKSPACE]
 bin/agent-coord heartbeat --agent-id ID [--repo OWNER/REPO] [--target ISSUE_OR_PR] [--batch-id ID] [--branch BRANCH] [--metadata options] [--status STATUS]
 bin/agent-coord register-batch --file PATH
 bin/agent-coord record-event --batch-id ID --type TYPE [--lane NAME] [--agent-id ID] [--repo OWNER/REPO] [--target ISSUE_OR_PR] [--branch BRANCH] [--status STATUS] [--metadata options] [--message TEXT]
@@ -347,7 +347,8 @@ append a second terminal record for the lane.
 
 Hosts that separate event production from claim release can write the same
 terminal record with `record-event --type lane_closed --terminal STATE`, plus
-`--batch-id`, `--lane`, `--agent-id`, `--repo`, and `--target`. Terminal events
+`--batch-id`, `--agent-id`, `--repo`, and `--target`. `--lane` is optional when
+the target uniquely identifies one registered lane. Terminal events
 default `workspace` to `default` and identify the closer in `closed_by` using
 the agent id and `--host` machine value. The public producer/consumer contract
 is [`contracts/state-schema-v2.json`](contracts/state-schema-v2.json).

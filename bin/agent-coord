@@ -498,7 +498,8 @@ module AgentCoord
       value_options = %w[
         --backend --ref --state-root --api-url --agent-id --repo --target --batch-id --branch
         --thread-handle --chat-handle --host --pr-url --dashboard-url --operator --phase --generation --instance-id
-        --handoff-to --handoff-note --ttl --status --type --lane --message --file --install-dir
+        --handoff-to --handoff-note --terminal --pr-state --evidence-url --workspace
+        --ttl --status --type --lane --message --file --install-dir
         --status-state-root --profile
       ]
       skip_next = false
@@ -1299,7 +1300,7 @@ module AgentCoord
       return if value.nil?
 
       uri = URI.parse(value)
-      return if uri.absolute? && !value.match?(/\s/)
+      return if %w[http https].include?(uri.scheme) && !uri.host.to_s.empty? && !value.match?(/\s/)
 
       raise Error, "--#{field.tr('_', '-')} must be an absolute URI"
     rescue URI::InvalidURIError
@@ -1311,20 +1312,6 @@ module AgentCoord
         "agent_id" => options[:agent_id] || options.fetch("agent_id"),
         "machine" => options[:host] || options["host"] || "UNKNOWN"
       }
-    end
-
-    def terminal_event_data(options)
-      options.merge(
-        "batch_id" => options[:batch_id],
-        "lane" => options[:lane],
-        "repo" => options[:repo],
-        "target" => options[:target]&.to_s,
-        "terminal" => options[:terminal],
-        "pr_url" => options[:pr_url],
-        "pr_state" => options[:pr_state],
-        "evidence_url" => options[:evidence_url],
-        "closed_by" => closed_by_payload(options)
-      )
     end
 
     def canonical_terminal_event_options(store, payload)

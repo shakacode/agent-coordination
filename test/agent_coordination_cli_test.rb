@@ -526,9 +526,17 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
   end
 
   def test_non_doctor_deep_guard_ignores_deep_as_option_value
-    result = run_agent_coord("status", "--branch", "--deep", "--json")
-
-    assert_equal 0, result.status.exitstatus, result.stderr
+    commands = [
+      ["status", "--branch", "--deep", "--json"],
+      ["release", "--agent-id", "a", "--repo", "o/r", "--target", "1", "--terminal", "--deep"],
+      ["release", "--agent-id", "a", "--repo", "o/r", "--target", "1", "--pr-state", "--deep"],
+      ["release", "--agent-id", "a", "--repo", "o/r", "--target", "1", "--evidence-url", "--deep"],
+      ["release", "--agent-id", "a", "--repo", "o/r", "--target", "1", "--workspace", "--deep"]
+    ]
+    commands.each do |args|
+      result = run_agent_coord(*args)
+      refute_includes result.stderr, "--deep is only valid for doctor"
+    end
   end
 
   def test_bootstrap_installs_command_and_removes_generated_underscore_alias
@@ -2599,7 +2607,9 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     invalid_cases = [
       ["workspace", ["--workspace", ""]],
       ["pr-url", ["--pr-url", "not a uri"]],
-      ["evidence-url", ["--evidence-url", "://bad"]]
+      ["evidence-url", ["--evidence-url", "://bad"]],
+      ["pr-url", ["--pr-url", "javascript:alert(1)"]],
+      ["evidence-url", ["--evidence-url", "data:text/plain,bad"]]
     ]
     invalid_cases.each_with_index do |(field, invalid_args), index|
       batch_id = "batch-invalid-close-#{index}"

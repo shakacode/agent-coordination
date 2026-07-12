@@ -1,6 +1,6 @@
 {
   "schema_version": 2,
-  "event_id": "20260712T010700.000000Z-a1b2c3d4",
+  "event_id": "lane_closed-0f5a0caebfed6139",
   "batch_id": "ac-a-0712-0107",
   "lane": "ac-a-i51",
   "type": "lane_closed",

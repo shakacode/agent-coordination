@@ -3,6 +3,7 @@
 require "json"
 require "json_schemer"
 require "minitest/autorun"
+require "digest"
 
 class StateContractTest < Minitest::Test
   ROOT = File.expand_path("..", __dir__)
@@ -16,6 +17,10 @@ class StateContractTest < Minitest::Test
 
     assert_equal 2, schema_document.fetch("x-contract-version")
     assert_equal "default", schema_document.fetch("$defs").fetch("workspace").fetch("default")
+    assert_equal "lane_closed-0f5a0caebfed6139", fixture.fetch("event_id")
+    expected = "lane_closed-#{Digest::SHA256.hexdigest(fixture.fetch('lane'))[0, 16]}"
+    assert_equal expected, fixture.fetch("event_id")
+    assert_match(/\Alane_closed-[0-9a-f]{16}\z/, fixture.fetch("event_id"))
     assert_empty schema.validate(fixture).to_a
   end
 
