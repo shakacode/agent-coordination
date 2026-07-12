@@ -30,18 +30,23 @@ eligible when terminal or after their protocol liveness reaches `dead`.
 Batches are eligible only when `status` is `completed`. The synthetic marker
 selects the shorter window only after those family-specific conditions hold;
 it never makes active claims, live heartbeats, or incomplete batches eligible.
-Events are compacted per repository target after a schema-v2 `lane_closed`
-event declares `done`, `abandoned`, or `superseded` and every current event has
-passed its own hot window. A fully synthetic group without a valid terminal
-marker is also compacted once each event passes the synthetic window, preventing
-simulation orphans from leaking while leaving non-synthetic orphans untouched.
+Events are compacted per batch, lane, repository, and target after a schema-v2
+`lane_closed` event declares `done`, `abandoned`, or `superseded` and every
+current event in that lane group has passed its own hot window. Missing lane on
+legacy events is an explicit legacy group, preventing one lane's terminal event
+from sweeping sibling-lane history. A fully synthetic group without a valid
+terminal marker is also compacted once each event passes the synthetic window.
+Such orphan groups may lack repository and/or target metadata: batch, lane, and
+available provenance form a deterministic safe identity, preventing simulation
+orphans from leaking while leaving non-synthetic or unaged orphans untouched.
 The compacted envelope lists all consumed paths while its records retain first,
 last, and phase transitions and omit repeated renewals.
-Its path includes a deterministic digest of the complete source paths and
-recursively key-sorted JSON content: identical retries remain idempotent, while
-changed content at a stable source path or later valid terminal replays produce
-a separate immutable generation rather than conflicting with or mutating the
-first archive. GC recognizes a terminal marker only when all required
+Its path includes deterministic digests of lane/provenance identity plus the
+complete source paths and recursively key-sorted JSON content: identical retries
+remain idempotent, while changed content at a stable source path or later valid
+terminal replays produce a separate immutable generation rather than conflicting
+with or mutating the first archive. GC recognizes a terminal marker only when
+all required
 `lane_closed` v2 fields and their destructive-eligibility shapes conform,
 including `workspace`, `closed_by`, and `at`. Protocol-declared terminal state
 therefore remains the eligibility source; GC does not infer completion from

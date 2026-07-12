@@ -336,6 +336,7 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
 
     runner.send(:render_gc_text, payload)
 
+    assert_includes stdout.string, "synthetic_hot=1d"
     assert_includes stdout.string, "compact events/b/e1.json,events/b/e2.json -> archive/events/b/compact-a.json"
     assert_includes stdout.string, "delete archive/claims/o/r/1.json (archive_expired)"
   end
@@ -425,6 +426,39 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
       row.fetch("event_id")
     end)
     refute_includes compacted.fetch("records").map { |row| row.fetch("event_id") }, "claimed-renewal"
+  end
+
+  def test_gc_terminal_compaction_is_scoped_to_one_lane
+    now = Time.utc(2026, 7, 12, 12, 0, 0)
+    old = (now - (8 * 86_400)).iso8601
+    write_state_record(
+      "events/lane-scoped/lane-a-phase.json",
+      "schema_version" => 1, "event_id" => "lane-a-phase", "batch_id" => "lane-scoped",
+      "type" => "phase", "lane" => "lane-a", "repo" => "shakacode/example", "target" => "shared",
+      "phase" => "qa", "at" => old
+    )
+    write_state_record(
+      "events/lane-scoped/lane-a-closed.json",
+      valid_gc_lane_closed(
+        event_id: "lane-a-closed", batch_id: "lane-scoped", target: "shared", at: old,
+        extra: { "lane" => "lane-a" }
+      )
+    )
+    write_state_record(
+      "events/lane-scoped/lane-b-phase.json",
+      "schema_version" => 1, "event_id" => "lane-b-phase", "batch_id" => "lane-scoped",
+      "type" => "phase", "lane" => "lane-b", "repo" => "shakacode/example", "target" => "shared",
+      "phase" => "implementation", "at" => old
+    )
+
+    stdout = StringIO.new
+    runner = AgentCoord::Runner.new([], stdout: stdout, clock: FixedClock.new(now))
+    assert_equal 0, runner.send(:gc, state_root: @state_root, dry_run: false, execute: true, json: true)
+
+    action = JSON.parse(stdout.string).fetch("actions").find { |row| row["action"] == "compact" }
+    assert_equal %w[events/lane-scoped/lane-a-closed.json events/lane-scoped/lane-a-phase.json],
+                 action.fetch("source_paths")
+    assert_path_exists File.join(@state_root, "events/lane-scoped/lane-b-phase.json")
   end
 
   def test_gc_compacts_only_events_whose_individual_hot_window_has_elapsed
@@ -579,6 +613,49 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     later = AgentCoord::Runner.new([], stdout: later_stdout, clock: FixedClock.new(now + (2 * 86_400)))
     assert_equal 0, later.send(:gc, state_root: @state_root, dry_run: true, execute: false, json: true)
     assert_equal 1, JSON.parse(later_stdout.string).fetch("actions").length
+  end
+
+  def test_gc_compacts_metadata_less_synthetic_orphans_per_lane_and_available_provenance
+    now = Time.utc(2026, 7, 12, 12, 0, 0)
+    old = (now - (2 * 86_400)).iso8601
+    synthetic_events = {
+      "legacy" => {},
+      "lane-a" => { "lane" => "lane-a" },
+      "repo-only" => { "lane" => "repo-only", "repo" => "shakacode/example" },
+      "target-only" => { "lane" => "target-only", "target" => "known-target" }
+    }
+    synthetic_events.each do |event_id, provenance|
+      write_state_record(
+        "events/orphan-meta/#{event_id}.json",
+        { "schema_version" => 1, "event_id" => event_id, "batch_id" => "orphan-meta",
+          "type" => "phase", "phase" => "simulation", "synthetic" => true, "at" => old }.merge(provenance)
+      )
+    end
+    write_state_record(
+      "events/orphan-meta/fresh.json",
+      "schema_version" => 1, "event_id" => "fresh", "batch_id" => "orphan-meta", "type" => "phase",
+      "lane" => "fresh", "synthetic" => true, "at" => (now - 3600).iso8601
+    )
+    write_state_record(
+      "events/orphan-meta/normal.json",
+      "schema_version" => 1, "event_id" => "normal", "batch_id" => "orphan-meta", "type" => "phase",
+      "lane" => "normal", "at" => (now - (30 * 86_400)).iso8601
+    )
+
+    stdout = StringIO.new
+    runner = AgentCoord::Runner.new([], stdout: stdout, clock: FixedClock.new(now))
+    assert_equal 0, runner.send(:gc, state_root: @state_root, dry_run: false, execute: true, json: true)
+
+    actions = JSON.parse(stdout.string).fetch("actions").select { |row| row["action"] == "compact" }
+    assert_equal 4, actions.length
+    assert(actions.all? { |action| action["reason"] == "synthetic_orphan_events" })
+    archive_pattern = %r{\Aarchive/events/orphan-meta/compact-[0-9a-f]{16}-[0-9a-f]{16}\.json\z}
+    assert(actions.all? { |action| action["archive_path"].match?(archive_pattern) })
+    source_paths = actions.flat_map { |action| action.fetch("source_paths") }
+    source_names = source_paths.map { |path| File.basename(path, ".json") }.sort
+    assert_equal synthetic_events.keys.sort, source_names
+    assert_path_exists File.join(@state_root, "events/orphan-meta/fresh.json")
+    assert_path_exists File.join(@state_root, "events/orphan-meta/normal.json")
   end
 
   def test_gc_creates_an_immutable_generation_when_terminal_history_reappears
@@ -4036,7 +4113,7 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     event_entry = AgentCoord::StoredJson.new(path: event_source, data: event_data)
     planner = AgentCoord::Runner.new([])
     compact_archive = planner.send(
-      :gc_compaction_archive_path, "reused", "shakacode/example", "event-reused", [event_entry]
+      :gc_compaction_archive_path, "reused", nil, "shakacode/example", "event-reused", [event_entry]
     )
     write_state_record(event_source, event_data)
     write_state_record(

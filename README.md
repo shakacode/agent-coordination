@@ -383,13 +383,16 @@ and batch dependency checks never turn into an all-archive scan.
 `gc` applies one retention plan to local, GitHub, and HTTP stores. Exactly one
 mode is required: `--dry-run` prints proposed actions without writing, while
 `--execute` copies eligible records into `archive/` with compare-and-swap
-protection and only then removes their hot source. Terminal target events are
+protection and only then removes their hot source. Terminal lane/target events are
 compacted into an immutable archive envelope before their source events are
-removed. A target is deferred until every current source event has
-independently passed its hot window. Each envelope path includes a deterministic
-digest of source paths plus recursively key-sorted JSON content, so an identical
-retry reuses the same destination while changed content at a stable path creates
-a new generation without rewriting the first. The envelope lists every consumed
+removed. Events are grouped by batch, lane, repository, and target; absent-lane
+legacy events form an explicit legacy group, so one lane's terminal marker
+cannot sweep a sibling lane. A generation is deferred until every current
+source event has independently passed its hot window. Each envelope path
+includes a deterministic digest of lane/provenance identity, source paths, and
+recursively key-sorted JSON content, so an identical retry reuses the same
+destination while changed content at a stable path creates a new generation
+without rewriting the first. The envelope lists every consumed
 source path but retains only the first
 event, last event, and actual phase transitions; repeated same-phase renewals
 are intentionally dropped.
@@ -413,7 +416,10 @@ eligibility: active claims, live heartbeats, and incomplete batches remain hot.
 This protects scripted workers that claim once and refresh only their heartbeat.
 Synthetic events without a valid terminal marker compact as an orphan
 generation only after every event independently passes the synthetic window;
-non-synthetic orphan events remain untouched. Run `ruby sim/bin/graveyard` for a deterministic dry-run,
+missing repository or target metadata uses the batch/lane/available-provenance
+identity rather than blocking cleanup. Metadata-less legacy events remain in
+their own absent-lane group, and non-synthetic orphan events remain untouched.
+Run `ruby sim/bin/graveyard` for a deterministic dry-run,
 execute, compaction, and idempotent replay check.
 Scoped HTTP tokens used for GC need read and write coverage for each selected
 hot prefix and `archive`; use `--all-state` only for a trusted operator machine.
@@ -646,10 +652,10 @@ contract and fixture are
 [`contracts/archive-record-schema-v1.json`](contracts/archive-record-schema-v1.json)
 and
 [`contracts/fixtures/v1/`](contracts/fixtures/v1/).
-Compaction archive filenames include both a target digest and a canonical
-path-plus-content source-generation digest. Multiple immutable envelopes for
-one target are valid successive generations, not a conflict or an in-place
-append protocol.
+Compaction archive filenames include both a canonical lane/provenance identity
+digest and a path-plus-content source-generation digest. Multiple immutable
+envelopes for one identity are valid successive generations, not a conflict or
+an in-place append protocol.
 
 ## Event Schema
 

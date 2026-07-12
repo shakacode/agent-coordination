@@ -677,7 +677,8 @@ module AgentCoord
     def gc_compaction_candidates(store, now, hot_days, synthetic_hot_days)
       groups = store.list_json("events").group_by do |entry|
         data = entry.data
-        [data["batch_id"] || AgentCoord.event_batch_from_path(entry.path), data["repo"], data["target"]&.to_s]
+        [data["batch_id"] || AgentCoord.event_batch_from_path(entry.path), data["lane"],
+         data["repo"], data["target"]&.to_s]
       end
       groups.filter_map do |group, entries|
         gc_compaction_candidate(group, entries, now, hot_days, synthetic_hot_days)
@@ -685,8 +686,7 @@ module AgentCoord
     end
 
     def gc_compaction_candidate(group, entries, now, hot_days, synthetic_hot_days)
-      batch_id, repo, target = group
-      return if repo.to_s.empty? || target.to_s.empty?
+      batch_id, lane, repo, target = group
 
       terminal = entries.select { |entry| gc_terminal_event?(entry.data) }
                         .max_by { |entry| gc_record_time(entry.data) }
@@ -702,7 +702,7 @@ module AgentCoord
         action: {
           "action" => "compact",
           "source_paths" => source_paths,
-          "archive_path" => gc_compaction_archive_path(batch_id, repo, target, entries),
+          "archive_path" => gc_compaction_archive_path(batch_id, lane, repo, target, entries),
           "reason" => reason,
           "eligible_at" => timestamp(eligible_at)
         }
@@ -719,8 +719,9 @@ module AgentCoord
       end
     end
 
-    def gc_compaction_archive_path(batch_id, repo, target, entries)
-      target_digest = Digest::SHA256.hexdigest("#{repo}##{target}")[0, 16]
+    def gc_compaction_archive_path(batch_id, lane, repo, target, entries)
+      identity = { "lane" => lane, "repo" => repo, "target" => target }
+      target_digest = Digest::SHA256.hexdigest(gc_canonical_json(identity))[0, 16]
       source_identities = entries.sort_by(&:path).map { |entry| { "path" => entry.path, "data" => entry.data } }
       source_digest = Digest::SHA256.hexdigest(gc_canonical_json(source_identities))[0, 16]
       "archive/events/#{batch_id}/compact-#{target_digest}-#{source_digest}.json"
@@ -977,7 +978,8 @@ module AgentCoord
 
     def render_gc_text(payload)
       @stdout.puts "gc #{payload.fetch('mode')} hot=#{payload.dig('policy', 'hot_days')}d " \
-                   "archive=#{payload.dig('policy', 'archive_days')}d"
+                   "archive=#{payload.dig('policy', 'archive_days')}d " \
+                   "synthetic_hot=#{payload.dig('policy', 'synthetic_hot_days')}d"
       if payload.fetch("actions").empty?
         @stdout.puts "- no actions"
       else
