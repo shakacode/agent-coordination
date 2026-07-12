@@ -5,8 +5,10 @@ immediately and report the holder -- do not work the issue.
 Repo: {{REPO}}   Issue: #{{ISSUE_NUMBER}}   Issue key: {{ISSUE_KEY}}   Agent id: {{AGENT_ID}}   Batch: {{BATCH_ID}}
 
 1. Claim before any code: run
-   `agent-coord claim --agent-id {{AGENT_ID}} --repo {{REPO}} --target {{ISSUE_KEY}} --batch-id {{BATCH_ID}} --branch {{BRANCH}}`
+   `agent-coord claim --agent-id {{AGENT_ID}} --repo {{REPO}} --target {{ISSUE_KEY}} --batch-id {{BATCH_ID}} --branch {{BRANCH}} --synthetic --synthetic-kind simulation`
    Exit 3 -> stop and report. Then heartbeat status claimed.
+   Every heartbeat in this simulation must also pass
+   `--synthetic --synthetic-kind simulation`.
 2. Clone {{REPO}}, create branch `{{BRANCH}}`.
 3. Read issue #{{ISSUE_NUMBER}}. Fix ONLY the file it names. Heartbeat status
    implementing.

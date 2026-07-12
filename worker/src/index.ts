@@ -21,21 +21,38 @@ async function sha256Hex(value: string): Promise<string> {
 }
 
 const MAX_STATE_BYTES = 256 * 1024;
-const MAX_REQUEST_BYTES = MAX_STATE_BYTES + 4096;
-const MAX_STATE_PATH_BYTES = 512;
+// Archive envelopes add retention metadata around otherwise valid active records and
+// compact several significant events. Keep active writes at the original bound while
+// allowing bounded GC output without granting broader scopes or bypassing auth.
+const MAX_ARCHIVE_STATE_BYTES = 1024 * 1024;
+const REQUEST_ENVELOPE_BYTES = 4096;
+const MAX_ACTIVE_STATE_PATH_BYTES = 512;
+const MAX_ARCHIVE_STATE_PATH_BYTES = MAX_ACTIVE_STATE_PATH_BYTES + "archive/".length;
 const MAX_LIST_LIMIT = 1000;
-const STATE_PATH = /^(?:claims\/[A-Za-z0-9_.:-]+\/[A-Za-z0-9_.:-]+\/[A-Za-z0-9_.:-]+\.json|heartbeats\/[A-Za-z0-9_.:-]+\.json|batches\/[A-Za-z0-9_.:-]+\.json|events\/[A-Za-z0-9_.:-]+\/[A-Za-z0-9_.:-]+\.json)$/;
-const STATE_PREFIX = /^(?:claims(?:\/[A-Za-z0-9_.:-]+(?:\/[A-Za-z0-9_.:-]+)?)?|heartbeats|batches|events(?:\/[A-Za-z0-9_.:-]+)?)$/;
+const RECORD_PATH = "(?:claims/[A-Za-z0-9_.:-]+/[A-Za-z0-9_.:-]+/[A-Za-z0-9_.:-]+\\.json"
+  + "|heartbeats/[A-Za-z0-9_.:-]+\\.json"
+  + "|batches/[A-Za-z0-9_.:-]+\\.json"
+  + "|events/[A-Za-z0-9_.:-]+/[A-Za-z0-9_.:-]+\\.json)";
+const STATE_PATH = new RegExp(`^(?:${RECORD_PATH}|archive/${RECORD_PATH})$`);
+const ACTIVE_PREFIX = "(?:claims(?:/[A-Za-z0-9_.:-]+(?:/[A-Za-z0-9_.:-]+)?)?"
+  + "|heartbeats|batches|events(?:/[A-Za-z0-9_.:-]+)?)";
+const ARCHIVE_PREFIX = `archive(?:/${ACTIVE_PREFIX})?`;
+const STATE_PREFIX = new RegExp(`^(?:${ACTIVE_PREFIX}|${ARCHIVE_PREFIX})$`);
 
 function validPath(path: string): boolean {
-  return new TextEncoder().encode(path).byteLength <= MAX_STATE_PATH_BYTES
+  const encoder = new TextEncoder();
+  const archive = path.startsWith("archive/");
+  const activePath = archive ? path.slice("archive/".length) : path;
+  const maxPathBytes = archive ? MAX_ARCHIVE_STATE_PATH_BYTES : MAX_ACTIVE_STATE_PATH_BYTES;
+  return encoder.encode(path).byteLength <= maxPathBytes
+    && encoder.encode(activePath).byteLength <= MAX_ACTIVE_STATE_PATH_BYTES
     && STATE_PATH.test(path)
     && !path.includes("..")
     && !path.includes("//");
 }
 
 function validPrefix(prefix: string): boolean {
-  return new TextEncoder().encode(prefix).byteLength <= MAX_STATE_PATH_BYTES
+  return new TextEncoder().encode(prefix).byteLength <= MAX_ACTIVE_STATE_PATH_BYTES
     && STATE_PREFIX.test(prefix)
     && !prefix.includes("..")
     && !prefix.includes("//");
@@ -53,6 +70,7 @@ function exactStatePathScope(scope: string): boolean {
   if (!validPath(scope)) return false;
   // Keep these explicit record shapes in sync with STATE_PATH if the state grammar expands.
   const parts = scope.split("/");
+  if (parts[0] === "archive") return true;
   switch (parts[0]) {
     case "claims":
       return parts.length === 4;
@@ -134,7 +152,15 @@ function canAccessPath(prefixes: string[], path: string): boolean {
   return prefixes.some((prefix) => scopeCoversPath(prefix, path));
 }
 
-async function readJsonBody(request: Request): Promise<{ body: unknown } | { response: Response }> {
+function canDeletePath(prefixes: string[], path: string): boolean {
+  if (path.startsWith("archive/")) return canAccessPath(prefixes, path);
+  return canAccessPath(prefixes, path) && canAccessPath(prefixes, `archive/${path}`);
+}
+
+async function readJsonBody(
+  request: Request,
+  maxRequestBytes: number,
+): Promise<{ body: unknown } | { response: Response }> {
   if (!request.body) return { response: json(400, { error: "invalid_json" }) };
 
   const reader = request.body.getReader();
@@ -144,7 +170,7 @@ async function readJsonBody(request: Request): Promise<{ body: unknown } | { res
     const { done, value } = await reader.read();
     if (done) break;
     received += value.byteLength;
-    if (received > MAX_REQUEST_BYTES) {
+    if (received > maxRequestBytes) {
       await reader.cancel();
       return { response: json(413, { error: "payload_too_large" }) };
     }
@@ -179,16 +205,18 @@ async function getState(env: Env, path: string): Promise<Response> {
 }
 
 async function putState(request: Request, env: Env, path: string, machine: string): Promise<Response> {
+  const maxStateBytes = path.startsWith("archive/") ? MAX_ARCHIVE_STATE_BYTES : MAX_STATE_BYTES;
+  const maxRequestBytes = maxStateBytes + REQUEST_ENVELOPE_BYTES;
   // Best-effort pre-parse guard; the serialized-data cap below still handles absent lengths.
   const contentLength = request.headers.get("content-length");
   if (contentLength && /^\d+$/.test(contentLength)) {
     const requestBytes = Number.parseInt(contentLength, 10);
-    if (!Number.isSafeInteger(requestBytes) || requestBytes > MAX_REQUEST_BYTES) {
+    if (!Number.isSafeInteger(requestBytes) || requestBytes > maxRequestBytes) {
       return json(413, { error: "payload_too_large" });
     }
   }
 
-  const bodyResult = await readJsonBody(request);
+  const bodyResult = await readJsonBody(request, maxRequestBytes);
   if ("response" in bodyResult) return bodyResult.response;
   const body = bodyResult.body;
   if (body === null || typeof body !== "object" || Array.isArray(body)) {
@@ -197,7 +225,7 @@ async function putState(request: Request, env: Env, path: string, machine: strin
   const payload = body as { data?: unknown };
   if (payload.data === undefined) return json(400, { error: "missing_data" });
   const data = JSON.stringify(payload.data);
-  if (new TextEncoder().encode(data).byteLength > MAX_STATE_BYTES) {
+  if (new TextEncoder().encode(data).byteLength > maxStateBytes) {
     return json(413, { error: "payload_too_large" });
   }
   const now = new Date().toISOString();
@@ -223,6 +251,18 @@ async function putState(request: Request, env: Env, path: string, machine: strin
     return json(200, { path, version: version + 1, updated_by: machine });
   }
   return json(400, { error: "precondition_required" });
+}
+
+async function deleteState(request: Request, env: Env, path: string, machine: string): Promise<Response> {
+  const ifMatch = request.headers.get("if-match");
+  if (!ifMatch || !/^\d+$/.test(ifMatch)) return json(400, { error: "precondition_required" });
+  const version = Number.parseInt(ifMatch, 10);
+  if (!Number.isSafeInteger(version)) return json(400, { error: "invalid_if_match" });
+  const result = await env.DB.prepare(
+    "DELETE FROM state WHERE path = ? AND version = ?",
+  ).bind(path, version).run();
+  if (result.meta.changes === 0) return json(409, { error: "version_conflict" });
+  return json(200, { path, deleted: true, updated_by: machine });
 }
 
 async function listState(
@@ -336,6 +376,10 @@ export default {
       if (request.method === "PUT") {
         if (!canAccessPath(auth.writePrefixes, path)) return json(403, { error: "forbidden" });
         return putState(request, env, path, auth.machine);
+      }
+      if (request.method === "DELETE") {
+        if (!canDeletePath(auth.writePrefixes, path)) return json(403, { error: "forbidden" });
+        return deleteState(request, env, path, auth.machine);
       }
       return json(405, { error: "method_not_allowed" });
     }

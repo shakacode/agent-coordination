@@ -181,9 +181,16 @@ explicit flag. A directory scope such as
 scope such as `heartbeats/m5-codex.json` covers exactly that flat record. The
 Worker enforces read scopes for `GET /v1/state/<path>` and
 `GET /v1/state?prefix=...`, write scopes for `PUT /v1/state/<path>`, and records
-the authenticated machine as `updated_by` on each state write. Claim takeover
+the authenticated machine as `updated_by` on each state write. Active-path
+`DELETE` requires write coverage for both the active path and its
+`archive/<path>` mirror; archive-path `DELETE` requires archive write coverage.
+Ordinary active-only writer tokens therefore cannot delete, while GC tokens use
+explicit active-plus-archive mirrors or the trusted all-state scope. Claim takeover
 checks may need read access to the current holder's heartbeat; use an exact
 heartbeat write scope only when the machine's agent id is stable.
+Active state paths are limited to 512 UTF-8 bytes. Mirrored archive paths allow
+520 bytes total for the `archive/` prefix plus that same at-most-512-byte active
+suffix; an archive path cannot carry a longer original suffix.
 When listing a parent prefix above a scoped token's read scope, the Worker
 returns only covered descendants. Claims-scoped tokens can pass the default
 `agent-coord doctor` read probe; tokens scoped only to other prefixes should use
@@ -280,12 +287,13 @@ bin/agent-coord release   --agent-id ID --repo OWNER/REPO --target ISSUE_OR_PR [
 bin/agent-coord heartbeat --agent-id ID [--repo OWNER/REPO] [--target ISSUE_OR_PR] [--batch-id ID] [--branch BRANCH] [--metadata options] [--status STATUS]
 bin/agent-coord register-batch --file PATH [--launch-prompt PATH|-]
 bin/agent-coord record-event --batch-id ID --type TYPE [--lane NAME] [--agent-id ID] [--repo OWNER/REPO] [--target ISSUE_OR_PR] [--branch BRANCH] [--status STATUS] [--metadata options] [--message TEXT]
-bin/agent-coord status [--json]
+bin/agent-coord status [--json] [--include-archived]
 bin/agent-coord status --repo OWNER/REPO --target ISSUE_OR_PR [--json]
 bin/agent-coord status --batch-id ID [--json]
 bin/agent-coord version [--json]
 bin/agent-coord config [show] [--json]
 bin/agent-coord doctor [--json] [--deep] [--doctor-prefix PREFIX] [--state-root PATH]
+bin/agent-coord gc (--dry-run|--execute) [--json] [--hot-days DAYS] [--archive-days DAYS] [--synthetic-hot-days DAYS]
 bin/agent-coord bootstrap [--install-dir PATH] [--profile PATH] [--no-profile]
 bin/agent-coord demo
 ```
@@ -303,7 +311,8 @@ instead of silently overwriting each other.
 
 Metadata options available on `claim`, `heartbeat`, and `release` are
 `--thread-handle`, `--chat-handle`, `--host`, `--pr-url`, `--dashboard-url`,
-`--operator`, `--phase`, `--generation`, and `--instance-id`. These fields are
+`--operator`, `--phase`, `--generation`, `--instance-id`, `--synthetic`, and
+`--synthetic-kind`. These fields are
 additive, optional, and included in JSON status output when present. Workers use
 them to connect a lane, chat, host app, branch, PR, operator, and dashboard deep
 link without parsing handoff prose.
@@ -330,6 +339,9 @@ from stdin; the explicit option overrides any `launch_prompt` already present in
 the manifest. Registration stamps `schema_version`, `registered_at`, and
 `updated_at`, preserves optional operator/dashboard/thread metadata, and rejects
 malformed lane names or owner/target fields before workers claim lanes.
+`--synthetic --synthetic-kind KIND` stamps batch-level simulation provenance;
+re-registration preserves those fields when a later manifest and command omit
+them, so completed synthetic batches retain the one-day GC window.
 
 `record-event` appends immutable batch or lane events under
 `events/<batch-id>/<event-id>.json`. Use it for phase changes and noteworthy
@@ -374,6 +386,66 @@ coordination backend result is `UNKNOWN` for that command. Text status renders t
 same degraded notes as a footer when rows are present. In large backends, prefer
 target or batch scoped status for React on Rails batch lanes and treat a timed
 out full coordination read as degraded/`UNKNOWN` rather than guessing.
+Unscoped `status` excludes `archive/` by default. Pass `--include-archived` for
+an explicit archive inventory; scoped status remains hot-state-only so target
+and batch dependency checks never turn into an all-archive scan.
+
+`gc` applies one retention plan to local, GitHub, and HTTP stores. Exactly one
+mode is required: `--dry-run` prints proposed actions without writing, while
+`--execute` copies eligible records into `archive/` with compare-and-swap
+protection and only then removes their hot source. Terminal lane/target events are
+compacted into an immutable archive envelope before their source events are
+removed. Events are grouped by batch, lane, repository, and target. A lane-less
+event joins the sole valid terminal lane for the same batch/repository/target;
+when zero or multiple terminal lanes exist it remains in the explicit legacy
+group, so one lane's marker cannot sweep a sibling lane. A generation is deferred until every current
+source event has independently passed its hot window. Each envelope path
+includes a deterministic digest of lane/provenance identity, source paths, and
+recursively key-sorted JSON content, so an identical retry reuses the same
+destination while changed content at a stable path creates a new generation
+without rewriting the first. The envelope lists every consumed
+source path but retains only the first
+event, last event, every valid terminal event, and actual phase transitions;
+repeated same-phase renewals are intentionally dropped.
+If a multi-source delete stops after some hot events are removed, retry can
+leave the immutable archive envelope as a safe expiring duplicate;
+copy-before-delete still guarantees retained history is not lost.
+Likewise, ordinary source mutation after the archive write but before the CAS
+delete can leave a stale expiring envelope, but CAS prevents deletion of the
+new live payload.
+Expired archive envelopes are deleted with the same compare-and-swap guard.
+
+| Record state | Hot retention | Archive retention | Result |
+| --- | ---: | ---: | --- |
+| Released/terminal claim | 7 days | 30 days | Archive, then delete |
+| Dead or terminal heartbeat | 7 days | 30 days | Archive, then delete |
+| Completed batch | 7 days | 30 days | Archive, then delete |
+| Events for a terminal target | 7 days | 30 days | Compact, then delete |
+| Eligible claim/heartbeat/batch with `synthetic: true` | 1 day | 30 days | Aggressive archive, then delete |
+| Fully synthetic orphan event generation | 1 day per event | 30 days | Compact, then delete |
+
+`--hot-days`, `--archive-days`, and `--synthetic-hot-days` override those
+defaults. Archive retention starts at `archived_at`, so the default lifecycle
+is 7 hot days followed by 30 archive days. Producers mark non-production state
+with `--synthetic --synthetic-kind simulation|smoke`; batch manifests may carry
+the same fields. The marker shortens retention only after normal family
+eligibility: active claims, live heartbeats, and incomplete batches remain hot.
+This protects scripted workers that claim once and refresh only their heartbeat.
+Synthetic events without a valid terminal marker compact as an orphan
+generation only after every event independently passes the synthetic window;
+missing repository or target metadata uses the batch/lane/available-provenance
+identity rather than blocking cleanup. Metadata-less legacy events remain in
+their own absent-lane group, and non-synthetic orphan events remain untouched.
+Run `ruby sim/bin/graveyard` for a deterministic dry-run,
+execute, compaction, and idempotent replay check.
+Repeat `--prefix claims|heartbeats|batches|events` to restrict hot-family scans;
+without it GC scans all four families. Archive expiry is always scanned. For
+example, `agent-coord gc --execute --prefix claims` works with a
+least-privileged token that can read the selected claims subtree plus its
+archive mirror and can write/delete both. Forbidden selected prefixes remain an
+operational error; GC never silently widens or skips requested scope.
+Scoped HTTP tokens used for GC need read and write coverage for each selected
+hot prefix and `archive`; use `--all-state` only for a trusted operator machine.
 `release` marks a claim released while preserving the record for auditability.
 Only the recorded holder can release or restamp metadata on an existing claim;
 another agent should claim the target after release instead of re-releasing the
@@ -499,6 +571,10 @@ claims/<owner>/<repo>/<issue-or-pr>.json
 heartbeats/<agent-id>.json
 batches/<batch-id>.json
 events/<batch-id>/<event-id>.json
+archive/claims/<owner>/<repo>/<issue-or-pr>.json
+archive/heartbeats/<agent-id>.json
+archive/batches/<batch-id>.json
+archive/events/<batch-id>/<event-or-compaction-id>.json
 ```
 
 The checked-in `.gitkeep` files only preserve the directories. Schema examples
@@ -577,6 +653,37 @@ Optional lane metadata fields on heartbeats are `thread_handle`, `chat_handle`,
 `host`, `pr_url`, `dashboard_url`, `operator`, `phase`, `generation`, and
 `instance_id`. Status readers should treat missing metadata as `UNKNOWN` rather
 than inferring it from branch names or handoff text.
+
+Claims and heartbeats may carry `synthetic: true` and a `synthetic_kind` such as
+`simulation` or `smoke`. These markers are protocol metadata: they let `gc`
+apply the shorter synthetic hot-retention window without guessing from names.
+
+Archive envelopes have a shared 1 MiB serialized-data cap in the CLI and HTTP
+Worker. Dry-run and execute identically preflight every planned
+archive/compaction envelope; execute performs no writes if any would exceed the
+cap. Split or reduce the source history before retrying. A malformed or
+forward-incompatible record encountered while evaluating an otherwise eligible
+retention action intentionally fails the whole plan with a path-specific
+operational error; unknown or non-eligible records remain untouched. Repair the
+record or upgrade the consumer, then retry. Active HTTP records retain their
+separate 256 KiB cap.
+
+## Archive Schema
+
+Archive paths mirror the hot record grammar below `archive/`. A single-record
+envelope retains `source_path` and the original `data`; terminal event
+compaction uses `source_paths` as the complete set of consumed inputs and
+`records` as the compacted first/last/phase-transition history; the arrays are
+not positional and renewal paths may have no retained record. Both carry
+`archived_at`, `delete_after`, `reason`, and the synthetic marker. The published
+contract and fixture are
+[`contracts/archive-record-schema-v1.json`](contracts/archive-record-schema-v1.json)
+and
+[`contracts/fixtures/v1/`](contracts/fixtures/v1/).
+Compaction archive filenames include both a canonical lane/provenance identity
+digest and a path-plus-content source-generation digest. Multiple immutable
+envelopes for one identity are valid successive generations, not a conflict or
+an in-place append protocol.
 
 ## Event Schema
 

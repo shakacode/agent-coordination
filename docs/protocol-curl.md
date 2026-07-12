@@ -72,10 +72,16 @@ Relevant responses are:
 
 - `401` for a missing or invalid token.
 - `403` when the token scope does not cover the requested path.
+- Active-path `DELETE` requires write scope for both the active path and its
+  `archive/<path>` mirror; archive-path `DELETE` requires archive write scope.
 - `404` when an exact read has no record.
 - `400` for an invalid or overlong path/prefix, malformed body, or missing precondition.
 - `409` when create finds an existing record or an update uses a stale version.
 - `413` when the request or serialized state exceeds protocol size limits.
+
+Active state paths are at most 512 UTF-8 bytes. Archive state paths are at most
+520 bytes total, and the suffix after `archive/` must independently satisfy the
+512-byte active-path limit.
 
 Treat a `409` as contention: read again and reconsider the coordination action
 instead of retrying the old write blindly. Prefer `agent-coord` for claims and

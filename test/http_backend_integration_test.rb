@@ -80,6 +80,77 @@ class HttpBackendIntegrationTest < Minitest::Test
     assert_equal([batch], events.map { |event| event.fetch("batch_id") })
   end
 
+  def test_gc_has_local_equivalent_archive_and_purge_semantics_over_http
+    token = ENV.fetch("AGENT_COORD_API_TOKEN")
+    target = "gc-#{Process.pid}"
+    source_path = "claims/shakacode/integration-#{Process.pid}/#{target}.json"
+    archive_path = "archive/#{source_path}"
+    code, body = http_json(
+      "PUT", state_path(source_path), token: token, headers: { "If-None-Match" => "*" },
+                                      body: {
+                                        "data" => {
+                                          "schema_version" => 1,
+                                          "repo" => REPO,
+                                          "target" => target,
+                                          "agent_id" => "gc-worker",
+                                          "status" => "released",
+                                          "terminal" => "done",
+                                          "updated_at" => "2000-01-01T00:00:00Z"
+                                        }
+                                      }
+    )
+    assert_equal 201, code, body.inspect
+
+    cli_code, output, error = cli("gc", "--execute", "--json")
+    assert_equal 0, cli_code, error
+    assert(JSON.parse(output).fetch("actions").any? { |action| action["archive_path"] == archive_path })
+    code, body = http_json("GET", state_path(source_path), token: token)
+    assert_equal 404, code
+    assert_equal "not_found", body.fetch("error")
+    code, body = http_json("GET", state_path(archive_path), token: token)
+    assert_equal 200, code
+    archived = body.fetch("data")
+    assert_equal "archived_record", archived.fetch("record_family")
+
+    archived["delete_after"] = "2000-01-02T00:00:00Z"
+    code, = http_json(
+      "PUT", state_path(archive_path), token: token, headers: { "If-Match" => body.fetch("version").to_s },
+                                       body: { "data" => archived }
+    )
+    assert_equal 200, code
+    cli_code, = cli("gc", "--execute", "--json")
+    assert_equal 0, cli_code
+    code, body = http_json("GET", state_path(archive_path), token: token)
+    assert_equal 404, code
+    assert_equal "not_found", body.fetch("error")
+  end
+
+  def test_gc_can_archive_a_max_sized_active_record_over_http
+    token = ENV.fetch("AGENT_COORD_API_TOKEN")
+    target = "gc-large-#{Process.pid}"
+    source_path = "claims/shakacode/integration-#{Process.pid}/#{target}.json"
+    archive_path = "archive/#{source_path}"
+    data = {
+      "schema_version" => 1, "repo" => REPO, "target" => target, "agent_id" => "gc-worker",
+      "status" => "released", "terminal" => "done", "updated_at" => "2000-01-01T00:00:00Z",
+      "padding" => "x" * 261_930
+    }
+    assert_operator JSON.generate(data).bytesize, :<=, 256 * 1024
+    assert_operator JSON.generate({ "data" => data }).bytesize, :>, 262_125
+
+    code, body = http_json(
+      "PUT", state_path(source_path), token: token, headers: { "If-None-Match" => "*" }, body: { "data" => data }
+    )
+    assert_equal 201, code, body.inspect
+
+    cli_code, output, error = cli("gc", "--execute", "--json")
+    assert_equal 0, cli_code, error
+    assert(JSON.parse(output).fetch("actions").any? { |action| action["archive_path"] == archive_path })
+    code, body = http_json("GET", state_path(archive_path), token: token)
+    assert_equal 200, code
+    assert_equal data, body.fetch("data").fetch("data")
+  end
+
   def test_scoped_machine_token_enforces_path_prefix_and_records_writer
     scoped_token = ENV.fetch("SCOPED_AGENT_COORD_API_TOKEN")
     full_token = ENV.fetch("AGENT_COORD_API_TOKEN")
@@ -131,6 +202,99 @@ class HttpBackendIntegrationTest < Minitest::Test
     assert_equal "forbidden", body.fetch("error")
   end
 
+  def test_delete_requires_archive_coverage_for_active_paths
+    full_token = ENV.fetch("AGENT_COORD_API_TOKEN")
+    active_token = ENV.fetch("SCOPED_AGENT_COORD_API_TOKEN")
+    archive_token = ENV.fetch("ARCHIVE_AGENT_COORD_API_TOKEN")
+    mirrored_token = ENV.fetch("MIRRORED_AGENT_COORD_API_TOKEN")
+    active_path = "#{ENV.fetch('SCOPED_CLAIM_PREFIX')}/delete-active-only.json"
+    archive_path = "archive/claims/shakacode/archive-only/delete.json"
+    archive_denied_active_path = "claims/shakacode/archive-only/delete.json"
+    mirrored_path = "#{ENV.fetch('MIRRORED_CLAIM_PREFIX')}/delete.json"
+
+    assert_http_create(active_token, active_path)
+    code, body = http_json(
+      "DELETE", state_path(active_path), token: active_token, headers: { "If-Match" => "1" }
+    )
+    assert_equal 403, code
+    assert_equal "forbidden", body.fetch("error")
+
+    assert_http_create(full_token, archive_path)
+    assert_http_create(full_token, archive_denied_active_path)
+    code, = http_json(
+      "DELETE", state_path(archive_denied_active_path), token: archive_token, headers: { "If-Match" => "1" }
+    )
+    assert_equal 403, code
+    code, body = http_json(
+      "DELETE", state_path(archive_path), token: archive_token, headers: { "If-Match" => "1" }
+    )
+    assert_equal 200, code
+    assert_equal true, body.fetch("deleted")
+
+    assert_http_create(mirrored_token, mirrored_path)
+    code, body = http_json(
+      "DELETE", state_path(mirrored_path), token: mirrored_token, headers: { "If-Match" => "1" }
+    )
+    assert_equal 200, code
+    assert_equal true, body.fetch("deleted")
+
+    assert_http_delete(full_token, active_path)
+    assert_http_delete(full_token, archive_denied_active_path)
+  end
+
+  def test_maximum_active_path_has_a_valid_archive_mirror
+    token = ENV.fetch("AGENT_COORD_API_TOKEN")
+    active_path = "claims/o/r/#{'x' * 496}.json"
+    archive_path = "archive/#{active_path}"
+    too_long_active = "claims/o/r/#{'x' * 497}.json"
+    too_long_archive = "archive/#{too_long_active}"
+    assert_equal 512, active_path.bytesize
+    assert_equal 520, archive_path.bytesize
+
+    assert_http_create(token, active_path)
+    assert_http_create(token, archive_path)
+    [too_long_active, too_long_archive].each do |path|
+      code, body = http_json(
+        "PUT", state_path(path), token: token, headers: { "If-None-Match" => "*" },
+                                 body: { "data" => { "schema_version" => 1 } }
+      )
+      assert_equal 400, code
+      assert_equal "invalid_path", body.fetch("error")
+    end
+
+    assert_http_delete(token, active_path)
+    assert_http_delete(token, archive_path)
+  end
+
+  def test_scoped_gc_prefix_processes_claims_without_other_hot_family_reads
+    token = ENV.fetch("MIRRORED_AGENT_COORD_API_TOKEN")
+    source_path = "#{ENV.fetch('MIRRORED_CLAIM_PREFIX')}/gc-prefix.json"
+    archive_path = "archive/#{source_path}"
+    data = {
+      "schema_version" => 1, "repo" => "shakacode/mirrored-delete", "target" => "gc-prefix",
+      "agent_id" => "gc-prefix", "status" => "released", "updated_at" => "2000-01-01T00:00:00Z"
+    }
+    code, body = http_json(
+      "PUT",
+      state_path(source_path),
+      token: token,
+      headers: { "If-None-Match" => "*" },
+      body: { "data" => data }
+    )
+    assert_equal 201, code, body.inspect
+
+    stdout, stderr, status = Open3.capture3(
+      { "AGENT_COORD_API_TOKEN" => token }, "ruby", CLI, "gc", "--prefix", "claims", "--execute", "--json"
+    )
+    assert status.success?, stderr
+    assert_equal ["claims"], JSON.parse(stdout).fetch("prefixes")
+    code, = http_json("GET", state_path(source_path), token: token)
+    assert_equal 404, code
+    code, body = http_json("GET", state_path(archive_path), token: token)
+    assert_equal 200, code
+    assert_equal source_path, body.fetch("data").fetch("source_path")
+  end
+
   def test_unknown_token_returns_machine_safe_auth_hint
     code, body = http_json("GET", "/v1/state?prefix=claims", token: "stale-token")
 
@@ -146,6 +310,22 @@ class HttpBackendIntegrationTest < Minitest::Test
   end
 
   private
+
+  def assert_http_create(token, path)
+    code, body = http_json(
+      "PUT", state_path(path), token: token, headers: { "If-None-Match" => "*" },
+                               body: { "data" => { "schema_version" => 1, "agent_id" => "delete-test" } }
+    )
+    assert_equal 201, code, body.inspect
+  end
+
+  def assert_http_delete(token, path)
+    code, body = http_json(
+      "DELETE", state_path(path), token: token, headers: { "If-Match" => "1" }
+    )
+    assert_equal 200, code, body.inspect
+    assert_equal true, body.fetch("deleted")
+  end
 
   def assert_scoped_write(scoped_token, allowed_path)
     code, body = http_json(
@@ -214,7 +394,8 @@ class HttpBackendIntegrationTest < Minitest::Test
     uri = URI("#{ENV.fetch('AGENT_COORD_API_URL')}#{path}")
     request_class = {
       "GET" => Net::HTTP::Get,
-      "PUT" => Net::HTTP::Put
+      "PUT" => Net::HTTP::Put,
+      "DELETE" => Net::HTTP::Delete
     }.fetch(method)
     request = request_class.new(uri)
     request["Authorization"] = "Bearer #{token}"

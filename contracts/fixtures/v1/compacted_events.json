@@ -1,0 +1,39 @@
+{
+  "schema_version": 1,
+  "record_family": "compacted_events",
+  "source_paths": [
+    "events/batch-42/claimed.json",
+    "events/batch-42/claimed-renewal.json",
+    "events/batch-42/lane_closed-terminal.json"
+  ],
+  "reason": "terminal_target_events",
+  "synthetic": false,
+  "archived_at": "2026-07-12T00:00:00Z",
+  "delete_after": "2026-08-11T00:00:00Z",
+  "records": [
+    {
+      "schema_version": 1,
+      "event_id": "claimed",
+      "batch_id": "batch-42",
+      "type": "phase",
+      "repo": "shakacode/example",
+      "target": "42",
+      "at": "2026-07-01T00:00:00Z"
+    },
+    {
+      "schema_version": 2,
+      "event_id": "lane_closed-terminal",
+      "batch_id": "batch-42",
+      "type": "lane_closed",
+      "repo": "shakacode/example",
+      "target": "42",
+      "terminal": "done",
+      "workspace": "default",
+      "closed_by": {
+        "agent_id": "worker-42",
+        "machine": "fixture"
+      },
+      "at": "2026-07-01T01:00:00Z"
+    }
+  ]
+}
