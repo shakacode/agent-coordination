@@ -1,0 +1,91 @@
+{
+  "as_of": "2026-07-12T20:15:00Z",
+  "lanes": [
+    {
+      "lane": "implementation",
+      "workspace": "default",
+      "machine": "build-mac-01",
+      "host": "claude-code/conductor",
+      "quota_host": "quota-host-a"
+    },
+    {
+      "lane": "qa",
+      "workspace": "default",
+      "machine": "build-mac-01",
+      "host": "claude-code/conductor",
+      "quota_host": "quota-host-a"
+    }
+  ],
+  "status": {
+    "claims": [
+      {
+        "schema_version": 1,
+        "repo": "shakacode/agent-coordination",
+        "target": "8",
+        "agent_id": "worker-a",
+        "host": "claude-code/conductor",
+        "status": "active",
+        "claimed_at": "2026-07-12T20:00:00Z",
+        "updated_at": "2026-07-12T20:10:00Z",
+        "expires_at": "2026-07-12T21:10:00Z"
+      }
+    ],
+    "heartbeats": [
+      {
+        "schema_version": 1,
+        "agent_id": "worker-a",
+        "host": "claude-code/conductor",
+        "status": "in_progress",
+        "updated_at": "2026-07-12T20:10:00Z",
+        "expires_at": "2026-07-12T20:25:00Z"
+      }
+    ],
+    "batches": [
+      {
+        "schema_version": 1,
+        "batch_id": "batch-host-limit-replay",
+        "lanes": [
+          {
+            "name": "implementation",
+            "owner": "worker-a",
+            "targets": ["8"],
+            "host": "claude-code/conductor"
+          }
+        ],
+        "registered_at": "2026-07-12T20:00:00Z",
+        "updated_at": "2026-07-12T20:10:00Z"
+      }
+    ],
+    "events": [
+      {
+        "schema_version": 1,
+        "event_id": "20260712T201000.000000Z-replay",
+        "batch_id": "batch-host-limit-replay",
+        "type": "phase",
+        "lane": "implementation",
+        "host": "claude-code/conductor",
+        "at": "2026-07-12T20:10:00Z"
+      }
+    ],
+    "host_limits": [
+      {
+        "schema_version": 1,
+        "workspace": "default",
+        "machine": "build-mac-01",
+        "quota_host": "quota-host-a",
+        "scope": "five-hour",
+        "status": "active",
+        "observed_at": "2026-07-12T20:00:00Z",
+        "resets_at": null,
+        "source": "hook"
+      }
+    ]
+  },
+  "expected": {
+    "effective_record_count": 1,
+    "lane_statuses": {
+      "implementation": "blocked-on-limit",
+      "qa": "blocked-on-limit"
+    }
+  }
+}

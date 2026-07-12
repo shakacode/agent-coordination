@@ -1,0 +1,11 @@
+{
+  "schema_version": 1,
+  "workspace": "default",
+  "machine": "build-mac-01",
+  "quota_host": "quota-host-a",
+  "scope": "five-hour",
+  "status": "active",
+  "observed_at": "not-a-date-time",
+  "resets_at": null,
+  "source": "manual"
+}

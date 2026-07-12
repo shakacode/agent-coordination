@@ -4,6 +4,7 @@ require "json"
 require "json_schemer"
 require "minitest/autorun"
 require "digest"
+require "time"
 
 class StateContractTest < Minitest::Test
   ROOT = File.expand_path("..", __dir__)
@@ -12,6 +13,8 @@ class StateContractTest < Minitest::Test
   ARCHIVE_SCHEMA_PATH = File.join(ROOT, "contracts", "archive-record-schema-v1.json")
   ARCHIVE_FIXTURE_PATH = File.join(ROOT, "contracts", "fixtures", "v1", "archive_record.json")
   COMPACTED_EVENTS_FIXTURE_PATH = File.join(ROOT, "contracts", "fixtures", "v1", "compacted_events.json")
+  HOST_LIMIT_SCHEMA_PATH = File.join(ROOT, "schema", "state", "v1", "host-limit.schema.json")
+  HOST_LIMIT_FIXTURES_PATH = File.join(ROOT, "schema", "state", "v1", "fixtures")
 
   def test_lane_closed_fixture_conforms_to_published_v2_contract
     schema_document = JSON.parse(File.read(SCHEMA_PATH))
@@ -54,5 +57,165 @@ class StateContractTest < Minitest::Test
     error_pointers = errors.map { |error| error.fetch("data_pointer") }
     assert_includes error_pointers, ""
     assert_includes error_pointers, "/terminal"
+  end
+
+  def test_host_limit_positive_and_negative_fixtures_conform_to_v1_contract
+    schema_document = JSON.parse(File.read(HOST_LIMIT_SCHEMA_PATH))
+    schema = JSONSchemer.schema(schema_document)
+
+    assert JSONSchemer.valid_schema?(schema_document)
+    assert_equal 1, schema_document.fetch("x-contract-version")
+    assert_equal "host_limit", schema_document.fetch("x-record-family")
+    assert_equal %w[workspace machine quota_host scope], schema_document.fetch("x-logical-key")
+    assert_equal "host_limits/{workspace}/{machine}/{quota_host}/{scope}.json",
+                 schema_document.dig("x-storage-key", "template")
+    assert_equal %w[workspace machine quota_host scope],
+                 schema_document.dig("$defs", "status_projection", "properties", "host_limits", "x-unique-key")
+    assert_equal "producer",
+                 schema_document.dig(
+                   "$defs", "status_projection", "properties", "host_limits", "x-unique-key-enforcement"
+                 )
+    assert_equal "default", schema_document.dig("$defs", "workspace", "default")
+
+    fixture_files("valid").each do |path|
+      assert_empty schema.validate(read_fixture(path)).to_a, "expected valid fixture #{path} to conform"
+    end
+    fixture_files("invalid").each do |path|
+      refute_empty schema.validate(read_fixture(path)).to_a, "expected invalid fixture #{path} to be rejected"
+    end
+  end
+
+  def test_host_limit_contract_rejects_invalid_key_and_state_variants
+    schema = JSONSchemer.schema(JSON.parse(File.read(HOST_LIMIT_SCHEMA_PATH)))
+    fixture = read_fixture(fixture_files("valid").first)
+
+    variants = [
+      fixture.except("workspace"),
+      fixture.except("quota_host").merge("host" => "claude-code/conductor"),
+      fixture.merge("schema_version" => 2),
+      fixture.merge("status" => "expired"),
+      fixture.merge("source" => "private-api"),
+      fixture.merge("scope" => "Five Hour"),
+      fixture.merge("unexpected" => true)
+    ]
+
+    variants.each { |variant| refute_empty schema.validate(variant).to_a }
+  end
+
+  def test_host_limit_source_vocabulary_and_canonical_quota_host_rules
+    schema = JSONSchemer.schema(JSON.parse(File.read(HOST_LIMIT_SCHEMA_PATH)))
+    fixture = read_fixture(File.join(HOST_LIMIT_FIXTURES_PATH, "valid", "host-limit-active.json"))
+
+    %w[manual host-message hook probe].each do |source|
+      assert_empty schema.validate(fixture.merge("source" => source)).to_a
+    end
+    ["Quota-Host-A", " quota-host-a", "quota host a", "https://quota-host-a", "quota-host-a:443"].each do |host|
+      refute_empty schema.validate(fixture.merge("quota_host" => host)).to_a
+    end
+  end
+
+  def test_host_limit_date_time_formats_are_asserted
+    schema = JSONSchemer.schema(JSON.parse(File.read(HOST_LIMIT_SCHEMA_PATH)))
+    active = read_fixture(File.join(HOST_LIMIT_FIXTURES_PATH, "valid", "host-limit-active.json"))
+    cleared = read_fixture(File.join(HOST_LIMIT_FIXTURES_PATH, "valid", "host-limit-cleared.json"))
+    variants = [
+      [active.merge("observed_at" => "not-a-date-time"), "/observed_at"],
+      [active.merge("resets_at" => "not-a-date-time"), "/resets_at"],
+      [cleared.merge("cleared_at" => "not-a-date-time"), "/cleared_at"]
+    ]
+
+    variants.each do |record, pointer|
+      errors = schema.validate(record).to_a
+      assert(errors.any? { |error| error["type"] == "format" && error["data_pointer"] == pointer },
+             "expected an explicit date-time format error at #{pointer}")
+    end
+  end
+
+  def test_two_lanes_replay_one_effective_host_limit_record
+    schema_document = JSON.parse(File.read(HOST_LIMIT_SCHEMA_PATH))
+    projection_schema = JSONSchemer.schema(schema_document.merge("$ref" => "#/$defs/status_projection"))
+    replay = read_fixture(File.join(HOST_LIMIT_FIXTURES_PATH, "replay", "two-lanes-one-host-limit.json"))
+    records = replay.dig("status", "host_limits")
+
+    assert_empty projection_schema.validate(replay.fetch("status")).to_a
+    assert_equal %w[batches claims events heartbeats host_limits], replay.fetch("status").keys.sort
+    assert(replay.fetch("lanes").all? { |lane| lane.fetch("host") != lane.fetch("quota_host") })
+    assert_equal records.length, records.map { |record| logical_key(record) }.uniq.length
+
+    effective = effective_host_limits(records, replay.fetch("as_of"))
+    lane_statuses = replay.fetch("lanes").to_h do |lane|
+      blocked = effective.any? do |record|
+        %w[workspace machine quota_host].all? { |key| lane.fetch(key) == record.fetch(key) }
+      end
+      [lane.fetch("lane"), blocked ? "blocked-on-limit" : "available"]
+    end
+
+    assert_equal replay.dig("expected", "effective_record_count"), effective.length
+    assert_equal replay.dig("expected", "lane_statuses"), lane_statuses
+  end
+
+  def test_status_projection_allows_omitted_or_empty_host_limits
+    schema_document = JSON.parse(File.read(HOST_LIMIT_SCHEMA_PATH))
+    projection_schema = JSONSchemer.schema(schema_document.merge("$ref" => "#/$defs/status_projection"))
+    replay = read_fixture(File.join(HOST_LIMIT_FIXTURES_PATH, "replay", "two-lanes-one-host-limit.json"))
+    existing_status = replay.fetch("status").except("host_limits")
+
+    assert_empty projection_schema.validate(existing_status).to_a
+    assert_empty projection_schema.validate(existing_status.merge("host_limits" => [])).to_a
+    refute_empty projection_schema.validate(existing_status.merge("host_limits" => nil)).to_a
+  end
+
+  def test_status_projection_excludes_cleared_and_elapsed_reset_records
+    active = read_fixture(File.join(HOST_LIMIT_FIXTURES_PATH, "valid", "host-limit-active.json"))
+    cleared = read_fixture(File.join(HOST_LIMIT_FIXTURES_PATH, "valid", "host-limit-cleared.json"))
+    elapsed_reset = active.merge("scope" => "daily", "resets_at" => "2026-07-13T00:59:59Z")
+    unknown_reset = active.merge("scope" => "weekly", "resets_at" => nil)
+
+    assert_equal [unknown_reset], effective_host_limits(
+      [active, elapsed_reset, cleared, unknown_reset],
+      "2026-07-13T01:00:00Z"
+    )
+  end
+
+  def test_status_projection_procedurally_rejects_duplicate_logical_keys
+    schema_document = JSON.parse(File.read(HOST_LIMIT_SCHEMA_PATH))
+    projection_schema = JSONSchemer.schema(schema_document.merge("$ref" => "#/$defs/status_projection"))
+    fixture = read_fixture(
+      File.join(HOST_LIMIT_FIXTURES_PATH, "procedural", "host-limits-duplicate-logical-key.json")
+    )
+
+    assert_empty projection_schema.validate(fixture).to_a,
+                 "JSON Schema validates the records but cannot enforce composite-key uniqueness"
+    assert_equal(%w[active cleared], fixture.fetch("host_limits").map { |record| record.fetch("status") })
+    assert_raises(ArgumentError) { enforce_unique_logical_keys!(fixture.fetch("host_limits")) }
+  end
+
+  private
+
+  def fixture_files(kind)
+    Dir[File.join(HOST_LIMIT_FIXTURES_PATH, kind, "*.json")]
+  end
+
+  def read_fixture(path)
+    JSON.parse(File.read(path))
+  end
+
+  def logical_key(record)
+    %w[workspace machine quota_host scope].map { |field| record.fetch(field) }
+  end
+
+  def enforce_unique_logical_keys!(records)
+    duplicates = records.group_by { |record| logical_key(record) }.select { |_, matches| matches.length > 1 }
+    raise ArgumentError, "duplicate host-limit logical key" unless duplicates.empty?
+  end
+
+  def effective_host_limits(records, as_of)
+    projection_time = Time.iso8601(as_of)
+    records.select do |record|
+      next false unless record.fetch("status") == "active"
+
+      resets_at = record.fetch("resets_at")
+      resets_at.nil? || Time.iso8601(resets_at) > projection_time
+    end
   end
 end

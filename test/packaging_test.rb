@@ -17,7 +17,17 @@ class PackagingTest < Minitest::Test
     README.md
     bin/agent-coord
     contracts/state-schema-v2.json
+    docs/adr/0007-host-limit-state-contract.md
     docs/protocol-curl.md
+    schema/state/v1/fixtures/invalid/host-limit-active-with-cleared-at.json
+    schema/state/v1/fixtures/invalid/host-limit-cleared-without-cleared-at.json
+    schema/state/v1/fixtures/invalid/host-limit-malformed-observed-at.json
+    schema/state/v1/fixtures/invalid/host-limit-noncanonical-host.json
+    schema/state/v1/fixtures/procedural/host-limits-duplicate-logical-key.json
+    schema/state/v1/fixtures/replay/two-lanes-one-host-limit.json
+    schema/state/v1/fixtures/valid/host-limit-active.json
+    schema/state/v1/fixtures/valid/host-limit-cleared.json
+    schema/state/v1/host-limit.schema.json
   ].freeze
 
   def gem_command
