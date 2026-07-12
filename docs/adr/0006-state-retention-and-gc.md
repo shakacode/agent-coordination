@@ -63,9 +63,10 @@ coverage. This derives GC authority from existing prefix lists without a token
 schema migration. Dry-run and execute run the same CLI size preflight, and the
 HTTP Worker enforces the same 1 MiB archive-envelope cap; an oversized plan
 fails before GC writes anything, while active HTTP records keep their existing
-256 KiB limit. Malformed or forward-incompatible records deliberately fail the
-whole plan with their source path; operators repair the record or upgrade the
-consumer before retrying.
+256 KiB limit. A malformed or forward-incompatible record encountered while
+evaluating an otherwise eligible retention action deliberately fails the whole
+plan with its source path; unknown or non-eligible records remain untouched.
+Operators repair the record or upgrade the consumer before retrying.
 Active state paths remain capped at 512 UTF-8 bytes. Archive paths permit 520
 bytes only for the `archive/` prefix over a suffix that independently passes the
 512-byte active-path bound.

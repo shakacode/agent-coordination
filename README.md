@@ -655,10 +655,12 @@ apply the shorter synthetic hot-retention window without guessing from names.
 Archive envelopes have a shared 1 MiB serialized-data cap in the CLI and HTTP
 Worker. Dry-run and execute identically preflight every planned
 archive/compaction envelope; execute performs no writes if any would exceed the
-cap. Split or reduce the source history before retrying. Malformed or
-forward-incompatible records intentionally fail the whole plan with a
-path-specific operational error; repair the record or upgrade the consumer,
-then retry. Active HTTP records retain their separate 256 KiB cap.
+cap. Split or reduce the source history before retrying. A malformed or
+forward-incompatible record encountered while evaluating an otherwise eligible
+retention action intentionally fails the whole plan with a path-specific
+operational error; unknown or non-eligible records remain untouched. Repair the
+record or upgrade the consumer, then retry. Active HTTP records retain their
+separate 256 KiB cap.
 
 ## Archive Schema
 
