@@ -140,10 +140,11 @@ class StateContractTest < Minitest::Test
   def test_status_projection_excludes_cleared_and_elapsed_reset_records
     active = read_fixture(File.join(HOST_LIMIT_FIXTURES_PATH, "valid", "host-limit-active.json"))
     cleared = read_fixture(File.join(HOST_LIMIT_FIXTURES_PATH, "valid", "host-limit-cleared.json"))
+    elapsed_reset = active.merge("scope" => "daily", "resets_at" => "2026-07-13T00:59:59Z")
     unknown_reset = active.merge("scope" => "weekly", "resets_at" => nil)
 
     assert_equal [unknown_reset], effective_host_limits(
-      [active, cleared, unknown_reset],
+      [active, elapsed_reset, cleared, unknown_reset],
       "2026-07-13T01:00:00Z"
     )
   end

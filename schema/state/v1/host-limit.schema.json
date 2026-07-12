@@ -77,7 +77,7 @@
       },
       "allOf": [
         {
-          "if": { "properties": { "status": { "const": "cleared" } }, "required": ["status"] },
+          "if": { "properties": { "status": { "const": "cleared" } } },
           "then": { "required": ["cleared_at"] },
           "else": { "not": { "required": ["cleared_at"] } }
         }
