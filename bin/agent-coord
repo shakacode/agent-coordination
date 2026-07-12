@@ -338,6 +338,9 @@ module AgentCoord
               "days synthetic state remains hot (default: #{DEFAULT_SYNTHETIC_HOT_DAYS})") do |value|
         options[:synthetic_hot_days] = value
       end
+      opts.on("--prefix PREFIX", "hot family to scan: claims, heartbeats, batches, or events (repeatable)") do |value|
+        (options[:prefixes] ||= []) << value
+      end
     end
 
     def add_status_options(opts, options, command)
@@ -573,6 +576,7 @@ module AgentCoord
       opts.separator "    --hot-days DAYS      hot retention (default: #{DEFAULT_HOT_DAYS})"
       opts.separator "    --archive-days DAYS  archive retention (default: #{DEFAULT_ARCHIVE_DAYS})"
       opts.separator "    --synthetic-hot-days DAYS  synthetic hot retention (default: #{DEFAULT_SYNTHETIC_HOT_DAYS})"
+      opts.separator "    --prefix PREFIX  scan one hot family; repeat for claims, heartbeats, batches, events"
       opts.separator "Exactly one mode is required."
       opts.separator ""
     end
@@ -586,19 +590,12 @@ module AgentCoord
         options[:synthetic_hot_days] || DEFAULT_SYNTHETIC_HOT_DAYS,
         "--synthetic-hot-days"
       )
+      prefixes = gc_prefixes(options[:prefixes])
       now = now_utc
       store = build_store(options)
-      candidates = gc_candidates(store, now, hot_days, synthetic_hot_days)
+      candidates = gc_candidates(store, now, hot_days, synthetic_hot_days, prefixes)
       validate_gc_archive_sizes!(candidates, now, archive_days)
-      if options[:execute]
-        candidates.each do |candidate|
-          case candidate.dig(:action, "action")
-          when "archive" then gc_archive_record(store, candidate, now, archive_days)
-          when "compact" then gc_compact_events(store, candidate, now, archive_days)
-          when "delete" then gc_delete_archive(store, candidate)
-          end
-        end
-      end
+      candidates.each { |candidate| execute_gc_candidate(store, candidate, now, archive_days) } if options[:execute]
       candidates.sort_by! do |candidate|
         action = candidate.fetch(:action)
         action["source_path"] || Array(action["source_paths"]).first || action.fetch("archive_path", "")
@@ -610,7 +607,7 @@ module AgentCoord
           "hot_days" => hot_days,
           "archive_days" => archive_days,
           "synthetic_hot_days" => synthetic_hot_days
-        },
+        }, "prefixes" => prefixes,
         "actions" => actions
       }
       options[:json] ? @stdout.puts(JSON.pretty_generate(payload)) : render_gc_text(payload)
@@ -625,9 +622,21 @@ module AgentCoord
       value
     end
 
-    def gc_candidates(store, now, hot_days, synthetic_hot_days)
-      archive_candidates = gc_archive_candidates(store, now, hot_days, synthetic_hot_days)
-      compaction_candidates = gc_compaction_candidates(store, now, hot_days, synthetic_hot_days)
+    def gc_prefixes(values)
+      prefixes = values || (JSON_PREFIXES + ["events"])
+      invalid = prefixes.reject { |value| (JSON_PREFIXES + ["events"]).include?(value) }
+      raise Error, "--prefix must be one of: claims, heartbeats, batches, events" unless invalid.empty?
+
+      prefixes.uniq
+    end
+
+    def gc_candidates(store, now, hot_days, synthetic_hot_days, prefixes)
+      archive_candidates = gc_archive_candidates(store, now, hot_days, synthetic_hot_days, prefixes & JSON_PREFIXES)
+      compaction_candidates = if prefixes.include?("events")
+                                gc_compaction_candidates(store, now, hot_days, synthetic_hot_days)
+                              else
+                                []
+                              end
       protected_destinations = (archive_candidates + compaction_candidates).to_h do |candidate|
         [candidate.dig(:action, "archive_path"), true]
       end
@@ -637,8 +646,17 @@ module AgentCoord
       archive_candidates + compaction_candidates + delete_candidates
     end
 
-    def gc_archive_candidates(store, now, hot_days, synthetic_hot_days)
-      candidates = JSON_PREFIXES.flat_map do |prefix|
+    def execute_gc_candidate(store, candidate, now, archive_days)
+      case candidate.dig(:action, "action")
+      when "archive" then gc_archive_record(store, candidate, now, archive_days)
+      when "replace_archive" then gc_replace_archive_record(store, candidate, now, archive_days)
+      when "compact" then gc_compact_events(store, candidate, now, archive_days)
+      when "delete" then gc_delete_archive(store, candidate)
+      end
+    end
+
+    def gc_archive_candidates(store, now, hot_days, synthetic_hot_days, prefixes = JSON_PREFIXES)
+      candidates = prefixes.flat_map do |prefix|
         store.list_json(prefix).filter_map do |entry|
           reason, eligible_at = gc_archive_eligibility(entry, prefix, now)
           retention_days = entry.data["synthetic"] == true ? synthetic_hot_days : hot_days
@@ -651,7 +669,14 @@ module AgentCoord
             "reason" => reason,
             "eligible_at" => timestamp(eligible_at)
           }
-          { entry: entry, action: action }
+          existing = store.read_json(action.fetch("archive_path"))
+          if existing && !gc_same_archived_record?(existing.data, { "source_path" => entry.path, "data" => entry.data })
+            next if gc_archive_delete_after(existing) > now
+
+            action["action"] = "replace_archive"
+            action["reason"] = "expired_archive_replacement"
+          end
+          { entry: entry, existing_archive: existing, action: action }
         end
       end
       candidates.sort_by { |candidate| candidate.dig(:action, "source_path") }
@@ -924,6 +949,19 @@ module AgentCoord
       raise OperationalError, "gc source changed at #{entry.path}; #{e.message}"
     end
 
+    def gc_replace_archive_record(store, candidate, now, archive_days)
+      entry = candidate.fetch(:entry)
+      existing = candidate.fetch(:existing_archive)
+      action = candidate.fetch(:action)
+      archive_path = action.fetch("archive_path")
+      store.delete_json(archive_path, message: "Replace expired archive #{archive_path}", sha: existing.sha)
+      envelope = gc_archive_envelope(entry, action, now, archive_days)
+      store.write_json(archive_path, envelope, message: "Replace archive #{entry.path}", create: true)
+      store.delete_json(entry.path, message: "Archive #{entry.path}", sha: entry.sha)
+    rescue Conflict => e
+      raise OperationalError, "gc archive replacement changed at #{archive_path}; #{e.message}"
+    end
+
     def gc_archive_envelope(entry, action, now, archive_days)
       {
         "schema_version" => SCHEMA_VERSION,
@@ -941,7 +979,7 @@ module AgentCoord
       candidates.each do |candidate|
         action = candidate.fetch(:action)
         envelope = case action.fetch("action")
-                   when "archive"
+                   when "archive", "replace_archive"
                      gc_archive_envelope(candidate.fetch(:entry), action, now, archive_days)
                    when "compact"
                      entries = candidate.fetch(:entries)

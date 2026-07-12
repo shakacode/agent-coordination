@@ -438,6 +438,12 @@ identity rather than blocking cleanup. Metadata-less legacy events remain in
 their own absent-lane group, and non-synthetic orphan events remain untouched.
 Run `ruby sim/bin/graveyard` for a deterministic dry-run,
 execute, compaction, and idempotent replay check.
+Repeat `--prefix claims|heartbeats|batches|events` to restrict hot-family scans;
+without it GC scans all four families. Archive expiry is always scanned. For
+example, `agent-coord gc --execute --prefix claims` works with a
+least-privileged token that can read the selected claims subtree plus its
+archive mirror and can write/delete both. Forbidden selected prefixes remain an
+operational error; GC never silently widens or skips requested scope.
 Scoped HTTP tokens used for GC need read and write coverage for each selected
 hot prefix and `archive`; use `--all-state` only for a trusted operator machine.
 `release` marks a claim released while preserving the record for auditability.

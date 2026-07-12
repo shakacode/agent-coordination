@@ -266,6 +266,35 @@ class HttpBackendIntegrationTest < Minitest::Test
     assert_http_delete(token, archive_path)
   end
 
+  def test_scoped_gc_prefix_processes_claims_without_other_hot_family_reads
+    token = ENV.fetch("MIRRORED_AGENT_COORD_API_TOKEN")
+    source_path = "#{ENV.fetch('MIRRORED_CLAIM_PREFIX')}/gc-prefix.json"
+    archive_path = "archive/#{source_path}"
+    data = {
+      "schema_version" => 1, "repo" => "shakacode/mirrored-delete", "target" => "gc-prefix",
+      "agent_id" => "gc-prefix", "status" => "released", "updated_at" => "2000-01-01T00:00:00Z"
+    }
+    code, body = http_json(
+      "PUT",
+      state_path(source_path),
+      token: token,
+      headers: { "If-None-Match" => "*" },
+      body: { "data" => data }
+    )
+    assert_equal 201, code, body.inspect
+
+    stdout, stderr, status = Open3.capture3(
+      { "AGENT_COORD_API_TOKEN" => token }, "ruby", CLI, "gc", "--prefix", "claims", "--execute", "--json"
+    )
+    assert status.success?, stderr
+    assert_equal ["claims"], JSON.parse(stdout).fetch("prefixes")
+    code, = http_json("GET", state_path(source_path), token: token)
+    assert_equal 404, code
+    code, body = http_json("GET", state_path(archive_path), token: token)
+    assert_equal 200, code
+    assert_equal source_path, body.fetch("data").fetch("source_path")
+  end
+
   def test_unknown_token_returns_machine_safe_auth_hint
     code, body = http_json("GET", "/v1/state?prefix=claims", token: "stale-token")
 
