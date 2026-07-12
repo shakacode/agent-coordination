@@ -276,7 +276,7 @@ rm -rf "$STATE_ROOT"
 
 ```text
 bin/agent-coord claim     --agent-id ID --repo OWNER/REPO --target ISSUE_OR_PR [--batch-id ID] [--branch BRANCH] [--metadata options] [--ttl SECONDS]
-bin/agent-coord release   --agent-id ID --repo OWNER/REPO --target ISSUE_OR_PR [--metadata options] [--handoff-to ID] [--handoff-note TEXT]
+bin/agent-coord release   --agent-id ID --repo OWNER/REPO --target ISSUE_OR_PR [--metadata options] [--handoff-to ID] [--handoff-note TEXT] [--terminal done|abandoned|superseded] [--pr-state STATE] [--evidence-url URL]
 bin/agent-coord heartbeat --agent-id ID [--repo OWNER/REPO] [--target ISSUE_OR_PR] [--batch-id ID] [--branch BRANCH] [--metadata options] [--status STATUS]
 bin/agent-coord register-batch --file PATH
 bin/agent-coord record-event --batch-id ID --type TYPE [--lane NAME] [--agent-id ID] [--repo OWNER/REPO] [--target ISSUE_OR_PR] [--branch BRANCH] [--status STATUS] [--metadata options] [--message TEXT]
@@ -316,6 +316,13 @@ target-scoped record. When the claim has a `batch_id`, release also appends a
 `handoff` event to `events/<batch-id>/`; the event is best-effort because the
 released claim itself is the durable handoff source.
 
+`release --terminal done|abandoned|superseded` records a version-2
+`lane_closed` event before releasing the held claim, then stamps the matching
+registered lane. The last terminal lane changes its batch manifest to
+`status: "completed"`. Terminal release is mutually exclusive with handoff and
+requires a claim with `batch_id`. `--pr-state` records the final pull-request
+state; `--evidence-url` can point at replayable closeout evidence.
+
 `register-batch --file PATH` validates and writes a JSON batch manifest to
 `batches/<batch-id>.json` using the active store. It stamps `schema_version`,
 `registered_at`, and `updated_at`, preserves optional operator/dashboard/thread
@@ -330,6 +337,13 @@ fields as claims and heartbeats, plus `--type`, `--lane`, and `--message`.
 `release --handoff-*` creates `handoff` events automatically when a batch id is
 available; use direct `record-event --type handoff` only for non-release
 breadcrumbs.
+
+Hosts that separate event production from claim release can write the same
+terminal record with `record-event --type lane_closed --terminal STATE`, plus
+`--batch-id`, `--lane`, `--agent-id`, `--repo`, and `--target`. Terminal events
+default `workspace` to `default` and identify the closer in `closed_by` using
+the agent id and `--host` machine value. The public producer/consumer contract
+is [`contracts/state-schema-v2.json`](contracts/state-schema-v2.json).
 
 `heartbeat` upserts `heartbeats/<agent-id>.json`. `status` renders coordination
 state in text or JSON. Full `status` renders compact claims, heartbeats, batch
@@ -485,7 +499,7 @@ does not show fake work.
 
 ```json
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "repo": "shakacode/react_on_rails",
   "target": "3969",
   "agent_id": "worker-3969",
@@ -507,7 +521,10 @@ does not show fake work.
 Required fields: `schema_version`, `repo`, `target`, `agent_id`, `status`,
 `claimed_at`, `updated_at`, `expires_at`.
 
-Allowed `status` values for the initial lifecycle are `active` and `released`.
+Allowed claim `status` values are `active` and `released`. A released claim may
+also carry terminal `done`, `abandoned`, or `superseded` semantics. For lane
+status, protocol-declared terminal state wins over heartbeat or GitHub-derived
+state; consumers derive from GitHub only when terminal protocol state is absent.
 Coordinators should treat a claim holder with a `dead` heartbeat as recoverable
 even if the claim `expires_at` timestamp is still in the future. `expires_at`
 remains useful for audit and as the fallback when the heartbeat is missing or
@@ -523,7 +540,7 @@ final `pr_url` or `phase`.
 
 ```json
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "agent_id": "worker-3969",
   "repo": "shakacode/react_on_rails",
   "target": "3969",
@@ -555,7 +572,7 @@ than inferring it from branch names or handoff text.
 
 ```json
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "event_id": "20260708T235500.123456Z-deadbeef",
   "batch_id": "batch-2026-06-13",
   "type": "phase",
@@ -594,7 +611,7 @@ prefix snapshots become expensive.
 
 ```json
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "batch_id": "batch-2026-06-13",
   "repo": "shakacode/react_on_rails",
   "objective": "Ship backend and docs updates",

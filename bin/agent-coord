@@ -19,7 +19,9 @@ require "uri"
 
 module AgentCoord
   VERSION = "0.1.0"
-  SCHEMA_VERSION = 1
+  SCHEMA_VERSION = 2
+  DEFAULT_WORKSPACE = "default"
+  TERMINAL_STATES = %w[done abandoned superseded].freeze
   DEFAULT_BACKEND = nil
   DEFAULT_REF = "state"
   DEFAULT_CLAIM_TTL = 4 * 60 * 60
@@ -36,21 +38,23 @@ module AgentCoord
   )\z}x
   DEPENDENCY_DONE_STATUSES = %w[complete completed done merged ready].freeze
   STATUS_BATCH_METADATA_FIELDS = %w[
-    repo objective instructions launch_prompt operator dashboard_url status updated_at registered_at
+    repo objective instructions launch_prompt operator dashboard_url status updated_at registered_at completed_at
   ].freeze
   STATUS_LANE_METADATA_FIELDS = %w[
-    thread_handle chat_handle host pr_url dashboard_url operator phase branch
+    thread_handle chat_handle host pr_url dashboard_url operator phase branch terminal closed_at closed_by
+    pr_state evidence_url
   ].freeze
   STATUS_CLAIM_METADATA_FIELDS = %w[
     batch_id thread_handle chat_handle host pr_url dashboard_url operator phase generation instance_id
-    release_mode handoff_to handoff_note
+    release_mode handoff_to handoff_note terminal pr_state evidence_url workspace closed_by
   ].freeze
   STATUS_HEARTBEAT_METADATA_FIELDS = %w[
     batch_id branch thread_handle chat_handle host pr_url dashboard_url operator phase generation instance_id
   ].freeze
   STATUS_EVENT_METADATA_FIELDS = %w[
     event_id lane agent_id repo target branch status message thread_handle chat_handle host pr_url dashboard_url
-    operator phase generation instance_id release_mode handoff_to handoff_note
+    operator phase generation instance_id release_mode handoff_to handoff_note terminal pr_state evidence_url
+    workspace closed_by
   ].freeze
   HEARTBEAT_TARGET_FIELDS = %w[repo target].freeze
   METADATA_OPTION_FIELDS = %w[
@@ -241,6 +245,16 @@ module AgentCoord
       opts.on("--status STATUS", "heartbeat or event status") do |value|
         options[:status] = value
         options[:status_given] = true
+      end
+      opts.on("--terminal TERMINAL", "terminal closeout: done, abandoned, or superseded") do |value|
+        options[:terminal] = value
+      end
+      opts.on("--pr-state STATE", "final pull request state for terminal closeout") do |value|
+        options[:pr_state] = value
+      end
+      opts.on("--evidence-url URL", "replayable closeout evidence pointer") { |value| options[:evidence_url] = value }
+      opts.on("--workspace WORKSPACE", "coordination workspace (default: #{DEFAULT_WORKSPACE})") do |value|
+        options[:workspace] = value
       end
     end
 
@@ -451,6 +465,8 @@ module AgentCoord
         opts.separator "Handoff release:"
         opts.separator "    --handoff-to ID             intended next agent, host, or operator"
         opts.separator "    --handoff-note TEXT         resume note for the next claimant"
+        opts.separator "    --terminal STATE            close as done, abandoned, or superseded"
+        opts.separator "    --pr-state STATE            final pull request state"
         opts.separator ""
       end
     end
@@ -524,6 +540,7 @@ module AgentCoord
 
     def release(options)
       require_options(options, :agent_id, :repo, :target)
+      validate_terminal_options!(options)
       now = now_utc
       path = AgentCoord.claim_path(options.fetch(:repo), options.fetch(:target))
       store = build_store(options)
@@ -547,8 +564,11 @@ module AgentCoord
       payload = without_handoff_payload(payload)
       payload = payload.merge(handoff_payload(options)) if handoff_release?(options)
       payload["branch"] = options[:branch] if options[:branch]
+      payload = terminal_release_payload(payload, options)
 
+      record_terminal_event(store, payload, now) if options[:terminal]
       store.write_json(path, payload, message: "Release #{options[:repo]}##{options[:target]}", sha: existing.sha)
+      complete_terminal_batch(store, payload, now) if options[:terminal]
       record_handoff_event(store, payload, now) if handoff_release?(options)
       @stdout.puts "released #{options[:repo]}##{options[:target]} by #{options[:agent_id]}"
       0
@@ -1080,6 +1100,8 @@ module AgentCoord
       store = build_store(options)
       now = now_utc
       write_event_record(store, options, now, output: true)
+      complete_terminal_batch(store, terminal_event_data(options), now) if options[:type] == "lane_closed"
+      0
     ensure
       close_store(store)
     end
@@ -1132,6 +1154,7 @@ module AgentCoord
     def validate_record_event_options!(options)
       AgentCoord.batch_path(options.fetch(:batch_id))
       AgentCoord.validate_segment!(options.fetch(:type), "event type")
+      validate_terminal_options!(options, event: true) if options[:type] == "lane_closed"
       return unless options.key?(:lane)
 
       lane = options[:lane].to_s
@@ -1151,12 +1174,128 @@ module AgentCoord
         "target" => options[:target]&.to_s,
         "branch" => options[:branch],
         "message" => options[:message],
+        "terminal" => options[:terminal],
+        "pr_state" => options[:pr_state],
+        "evidence_url" => options[:evidence_url],
+        "workspace" => terminal_event?(options) ? options.fetch(:workspace, DEFAULT_WORKSPACE) : options[:workspace],
+        "closed_by" => terminal_event?(options) ? closed_by_payload(options) : nil,
         "at" => timestamp(now)
       }
       payload["status"] = options[:status] if options[:status_given]
       payload.merge(metadata_payload(options))
              .merge(handoff_payload(options))
              .compact
+    end
+
+    def terminal_event?(options)
+      options[:type] == "lane_closed"
+    end
+
+    def terminal_release_payload(payload, options)
+      return payload unless options[:terminal]
+
+      payload.merge(
+        "terminal" => options[:terminal],
+        "pr_state" => options[:pr_state],
+        "evidence_url" => options[:evidence_url],
+        "workspace" => options[:workspace]
+      ).compact
+    end
+
+    def validate_terminal_options!(options, event: false)
+      terminal = options[:terminal]
+      if terminal && !TERMINAL_STATES.include?(terminal)
+        raise Error, "--terminal must be one of: #{TERMINAL_STATES.join(', ')}"
+      end
+
+      if event
+        require_options(options, :terminal, :agent_id, :repo, :target)
+      elsif terminal && handoff_release?(options)
+        raise Error, "--terminal cannot be combined with --handoff-to or --handoff-note"
+      end
+    end
+
+    def closed_by_payload(options)
+      {
+        "agent_id" => options[:agent_id] || options.fetch("agent_id"),
+        "machine" => options[:host] || options["host"] || "UNKNOWN"
+      }
+    end
+
+    def terminal_event_data(options)
+      options.merge(
+        "batch_id" => options[:batch_id],
+        "lane" => options[:lane],
+        "repo" => options[:repo],
+        "target" => options[:target]&.to_s,
+        "terminal" => options[:terminal],
+        "pr_url" => options[:pr_url],
+        "pr_state" => options[:pr_state],
+        "evidence_url" => options[:evidence_url],
+        "closed_by" => closed_by_payload(options)
+      )
+    end
+
+    def record_terminal_event(store, release_payload, now)
+      batch_id = release_payload["batch_id"]
+      raise Error, "terminal release requires a claim with batch_id" if batch_id.to_s.empty?
+
+      options = {
+        batch_id: batch_id,
+        type: "lane_closed",
+        agent_id: release_payload.fetch("agent_id"),
+        repo: release_payload.fetch("repo"),
+        target: release_payload.fetch("target"),
+        branch: release_payload["branch"],
+        host: release_payload["host"],
+        pr_url: release_payload["pr_url"],
+        terminal: release_payload.fetch("terminal"),
+        pr_state: release_payload["pr_state"],
+        evidence_url: release_payload["evidence_url"],
+        workspace: release_payload["workspace"] || DEFAULT_WORKSPACE
+      }.compact
+      options[:lane] = terminal_batch_lane(store, options).fetch("name")
+      write_event_record(store, options, now, output: false)
+    end
+
+    def complete_terminal_batch(store, payload, now)
+      batch_id = payload["batch_id"] || payload[:batch_id]
+      batch_path = AgentCoord.batch_path(batch_id)
+      existing = store.read_json(batch_path)
+      raise Error, "batch #{batch_id} not found for terminal closeout" unless existing
+
+      updated = JSON.parse(JSON.generate(existing.data))
+      lane = terminal_batch_lane(store, payload, batch: updated)
+      lane["status"] = payload["terminal"] || payload[:terminal]
+      lane["terminal"] = lane.fetch("status")
+      lane["closed_at"] = timestamp(now)
+      lane["closed_by"] = payload["closed_by"] || closed_by_payload(payload)
+      %w[pr_url pr_state evidence_url].each do |field|
+        value = payload[field] || payload[field.to_sym]
+        lane[field] = value unless value.nil?
+      end
+      lanes = Array(updated["lanes"])
+      updated["status"] = "completed" if lanes.all? { |item| TERMINAL_STATES.include?(item["terminal"]) }
+      updated["completed_at"] = timestamp(now) if updated["status"] == "completed"
+      updated["schema_version"] = SCHEMA_VERSION
+      updated["updated_at"] = timestamp(now)
+      store.write_json(batch_path, updated, message: "Close lane in batch #{batch_id}", sha: existing.sha)
+    end
+
+    def terminal_batch_lane(store, payload, batch: nil)
+      batch_id = payload["batch_id"] || payload[:batch_id]
+      batch ||= store.read_json(AgentCoord.batch_path(batch_id))&.data
+      raise Error, "batch #{batch_id} not found for terminal closeout" unless batch
+
+      requested_lane = payload["lane"] || payload[:lane]
+      target = (payload["target"] || payload[:target]).to_s
+      matches = Array(batch["lanes"]).select do |lane|
+        lane_targets = Array(lane["targets"] || lane["target"]).map(&:to_s)
+        requested_lane ? lane_name(lane) == requested_lane : lane_targets.include?(target)
+      end
+      raise Error, "terminal closeout does not match exactly one lane in batch #{batch_id}" unless matches.one?
+
+      matches.first
     end
 
     def build_event_id(now)
@@ -1713,7 +1852,7 @@ module AgentCoord
     end
 
     def lane_status(lane, heartbeat)
-      heartbeat&.fetch("status", nil) || lane["status"] || "unknown"
+      lane["terminal"] || heartbeat&.fetch("status", nil) || lane["status"] || "unknown"
     end
 
     def lane_dependencies(lane)

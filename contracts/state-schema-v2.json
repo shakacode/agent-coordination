@@ -1,0 +1,59 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/shakacode/agent-coordination/blob/main/contracts/state-schema-v2.json",
+  "title": "Agent Coordination State Contract v2",
+  "description": "Published protocol contract for coordination state records. Consumers treat declared terminal state as authoritative and may derive state from GitHub only when it is absent.",
+  "x-contract-version": 2,
+  "oneOf": [
+    { "$ref": "#/$defs/lane_closed" }
+  ],
+  "$defs": {
+    "workspace": {
+      "type": "string",
+      "minLength": 1,
+      "default": "default",
+      "description": "Tenant/workspace dimension reserved by ADR 0004; self-hosted producers use default."
+    },
+    "closed_by": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["agent_id", "machine"],
+      "properties": {
+        "agent_id": { "type": "string", "minLength": 1 },
+        "machine": { "type": "string", "minLength": 1 }
+      }
+    },
+    "lane_closed": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": [
+        "schema_version",
+        "event_id",
+        "type",
+        "repo",
+        "target",
+        "terminal",
+        "workspace",
+        "closed_by",
+        "at"
+      ],
+      "properties": {
+        "schema_version": { "const": 2 },
+        "event_id": { "type": "string", "minLength": 1 },
+        "batch_id": { "type": "string", "minLength": 1 },
+        "lane": { "type": "string", "minLength": 1 },
+        "type": { "const": "lane_closed" },
+        "repo": { "type": "string", "pattern": "^[^/]+/[^/]+$" },
+        "target": { "type": "string", "minLength": 1 },
+        "branch": { "type": "string", "minLength": 1 },
+        "terminal": { "enum": ["done", "abandoned", "superseded"] },
+        "pr_url": { "type": "string", "format": "uri" },
+        "pr_state": { "type": "string", "minLength": 1 },
+        "evidence_url": { "type": "string", "format": "uri" },
+        "workspace": { "$ref": "#/$defs/workspace" },
+        "closed_by": { "$ref": "#/$defs/closed_by" },
+        "at": { "type": "string", "format": "date-time" }
+      }
+    }
+  }
+}

@@ -212,7 +212,7 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
 
     payload = JSON.parse(result.stdout)
     assert_match(/\A\d+\.\d+\.\d+\z/, payload.fetch("version"))
-    assert_equal 1, payload.fetch("schema_version")
+    assert_equal 2, payload.fetch("schema_version")
     assert_nil payload.fetch("default_backend")
     assert_equal "state", payload.fetch("default_ref")
   end
@@ -888,7 +888,7 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     assert_equal 0, result.status.exitstatus, result.stderr
 
     heartbeat = JSON.parse(File.read(File.join(@state_root, "heartbeats", "worker-3969.json")))
-    assert_equal 1, heartbeat.fetch("schema_version")
+    assert_equal 2, heartbeat.fetch("schema_version")
     assert_equal "worker-3969", heartbeat.fetch("agent_id")
     assert_equal "shakacode/react_on_rails", heartbeat.fetch("repo")
     assert_equal "3969", heartbeat.fetch("target")
@@ -1123,6 +1123,87 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     assert_equal "released", released_payload.fetch("status")
     assert_equal "https://github.com/shakacode/react_on_rails/pull/3973", released_payload.fetch("pr_url")
     assert_equal "merged", released_payload.fetch("phase")
+  end
+
+  def test_terminal_release_closes_lane_and_completes_single_lane_batch
+    write_batch(
+      "batch-terminal",
+      lanes: [{ "name" => "code", "owner" => "worker-a", "targets" => ["3980"] }]
+    )
+    claim = run_agent_coord(
+      "claim",
+      "--agent-id", "worker-a",
+      "--repo", "shakacode/react_on_rails",
+      "--target", "3980",
+      "--batch-id", "batch-terminal",
+      "--branch", "jg-codex/terminal",
+      "--host", "codex"
+    )
+    assert_equal 0, claim.status.exitstatus, claim.stderr
+    heartbeat = run_agent_coord(
+      "heartbeat", "--agent-id", "worker-a", "--repo", "shakacode/react_on_rails",
+      "--target", "3980", "--batch-id", "batch-terminal", "--status", "in_progress"
+    )
+    assert_equal 0, heartbeat.status.exitstatus, heartbeat.stderr
+
+    release = run_agent_coord(
+      "release",
+      "--agent-id", "worker-a",
+      "--repo", "shakacode/react_on_rails",
+      "--target", "3980",
+      "--terminal", "done",
+      "--pr-url", "https://github.com/shakacode/react_on_rails/pull/3980",
+      "--pr-state", "merged"
+    )
+
+    assert_equal 0, release.status.exitstatus, release.stderr
+    assert_terminal_release_state
+  end
+
+  def assert_terminal_release_state
+    claim_payload = JSON.parse(
+      File.read(File.join(@state_root, "claims", "shakacode", "react_on_rails", "3980.json"))
+    )
+    assert_equal "released", claim_payload.fetch("status")
+    assert_equal "done", claim_payload.fetch("terminal")
+
+    event_path = Dir.glob(File.join(@state_root, "events", "batch-terminal", "*.json")).fetch(0)
+    event = JSON.parse(File.read(event_path))
+    assert_equal 2, event.fetch("schema_version")
+    assert_equal "lane_closed", event.fetch("type")
+    assert_equal "code", event.fetch("lane")
+    assert_equal "done", event.fetch("terminal")
+    assert_equal "default", event.fetch("workspace")
+    assert_equal({ "agent_id" => "worker-a", "machine" => "codex" }, event.fetch("closed_by"))
+    assert_equal "merged", event.fetch("pr_state")
+
+    batch = JSON.parse(File.read(File.join(@state_root, "batches", "batch-terminal.json")))
+    assert_equal "completed", batch.fetch("status")
+    assert_equal "done", batch.fetch("lanes").fetch(0).fetch("terminal")
+
+    status = run_agent_coord("status", "--batch-id", "batch-terminal", "--json")
+    assert_equal 0, status.status.exitstatus, status.stderr
+    status_lane = JSON.parse(status.stdout).fetch("batches").fetch(0).fetch("lanes").fetch(0)
+    assert_equal "done", status_lane.fetch("status"), "declared terminal state must beat stale heartbeat state"
+    assert_equal "done", status_lane.fetch("terminal")
+  end
+
+  def test_terminal_release_without_registered_batch_does_not_release_claim
+    claim = run_agent_coord(
+      "claim", "--agent-id", "worker-a", "--repo", "shakacode/react_on_rails", "--target", "3983"
+    )
+    assert_equal 0, claim.status.exitstatus, claim.stderr
+
+    release = run_agent_coord(
+      "release", "--agent-id", "worker-a", "--repo", "shakacode/react_on_rails",
+      "--target", "3983", "--terminal", "done"
+    )
+
+    assert_equal 1, release.status.exitstatus
+    assert_includes release.stderr, "terminal release requires a claim with batch_id"
+    claim_path = File.join(@state_root, "claims", "shakacode", "react_on_rails", "3983.json")
+    assert_equal "active", JSON.parse(File.read(claim_path)).fetch("status")
+    refute_path_exists File.join(@state_root, "events")
   end
 
   def test_release_handoff_preserves_resume_metadata_and_records_event
@@ -2106,7 +2187,7 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     assert_equal 0, result.status.exitstatus, result.stderr
     assert_includes result.stdout, "registered batch batch-b"
     stored = JSON.parse(File.read(File.join(@state_root, "batches", "batch-b.json")))
-    assert_equal 1, stored.fetch("schema_version")
+    assert_equal 2, stored.fetch("schema_version")
     assert_equal "batch-b", stored.fetch("batch_id")
     assert_equal "Ship a low-risk batch", stored.fetch("objective")
     assert_equal "Coordinate the batch, then report the result.", stored.fetch("launch_prompt")
@@ -2160,7 +2241,7 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     assert_equal 1, event_files.length
 
     event = JSON.parse(File.read(event_files.first))
-    assert_equal 1, event.fetch("schema_version")
+    assert_equal 2, event.fetch("schema_version")
     assert_equal "batch-b", event.fetch("batch_id")
     assert_equal "phase", event.fetch("type")
     assert_equal "docs", event.fetch("lane")
@@ -2179,6 +2260,38 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     assert_equal "phase", status_event.fetch("type")
     assert_equal "validating", status_event.fetch("phase")
     assert_equal "running tests", status_event.fetch("message")
+  end
+
+  def test_lane_closed_events_complete_batch_only_after_every_lane_is_terminal
+    write_batch(
+      "batch-close-events",
+      lanes: [
+        { "name" => "code", "owner" => "worker-a", "targets" => ["3981"] },
+        { "name" => "docs", "owner" => "worker-b", "targets" => ["3982"] }
+      ]
+    )
+
+    first = run_agent_coord(
+      "record-event", "--batch-id", "batch-close-events", "--type", "lane_closed",
+      "--lane", "code", "--agent-id", "worker-a", "--repo", "shakacode/react_on_rails",
+      "--target", "3981", "--host", "codex", "--terminal", "done"
+    )
+    assert_equal 0, first.status.exitstatus, first.stderr
+    batch_path = File.join(@state_root, "batches", "batch-close-events.json")
+    first_batch = JSON.parse(File.read(batch_path))
+    refute first_batch.key?("status")
+    assert_equal "done", first_batch.fetch("lanes").fetch(0).fetch("terminal")
+
+    second = run_agent_coord(
+      "record-event", "--batch-id", "batch-close-events", "--type", "lane_closed",
+      "--lane", "docs", "--agent-id", "worker-b", "--repo", "shakacode/react_on_rails",
+      "--target", "3982", "--host", "claude-code", "--terminal", "abandoned"
+    )
+    assert_equal 0, second.status.exitstatus, second.stderr
+    completed = JSON.parse(File.read(batch_path))
+    assert_equal "completed", completed.fetch("status")
+    terminal_states = completed.fetch("lanes").map { |lane| lane.fetch("terminal") }
+    assert_equal %w[done abandoned], terminal_states
   end
 
   def test_record_event_rejects_malformed_lane_names

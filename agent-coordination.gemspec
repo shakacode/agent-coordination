@@ -25,6 +25,7 @@ Gem::Specification.new do |spec|
     LICENSE
     README.md
     bin/agent-coord
+    contracts/state-schema-v2.json
     docs/protocol-curl.md
   ]
   spec.bindir = "bin"
