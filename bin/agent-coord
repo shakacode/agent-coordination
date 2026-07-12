@@ -682,26 +682,30 @@ module AgentCoord
         eligible_entries = entries.select do |entry|
           gc_hot_window_elapsed?(entry.data, now, hot_days, synthetic_hot_days)
         end
-        # A target has one deterministic compaction envelope. Defer the whole
-        # target until every current source event has independently aged out so
-        # a later pass never needs to append into or replace that envelope.
+        # Each source generation has one deterministic compaction envelope.
+        # Defer the generation until every current source event has independently
+        # aged out; later generations use their own immutable destinations.
         next unless eligible_entries.length == entries.length
 
         source_paths = eligible_entries.map(&:path).sort
-        target_digest = Digest::SHA256.hexdigest("#{repo}##{target}")[0, 16]
-        source_set_digest = Digest::SHA256.hexdigest(source_paths.join("\0"))[0, 16]
-        archive_path = "archive/events/#{batch_id}/compact-#{target_digest}-#{source_set_digest}.json"
         {
           entries: eligible_entries,
           action: {
             "action" => "compact",
             "source_paths" => source_paths,
-            "archive_path" => archive_path,
+            "archive_path" => gc_compaction_archive_path(batch_id, repo, target, eligible_entries),
             "reason" => "terminal_target_events",
             "eligible_at" => timestamp(eligible_at)
           }
         }
       end
+    end
+
+    def gc_compaction_archive_path(batch_id, repo, target, entries)
+      target_digest = Digest::SHA256.hexdigest("#{repo}##{target}")[0, 16]
+      source_identities = entries.sort_by(&:path).map { |entry| { "path" => entry.path, "data" => entry.data } }
+      source_digest = Digest::SHA256.hexdigest(gc_canonical_json(source_identities))[0, 16]
+      "archive/events/#{batch_id}/compact-#{target_digest}-#{source_digest}.json"
     end
 
     def gc_hot_window_elapsed?(data, now, hot_days, synthetic_hot_days)
@@ -744,11 +748,28 @@ module AgentCoord
 
     def gc_valid_datetime?(value)
       return false unless gc_nonempty_string?(value)
+      return false unless value.match?(
+        /\A\d{4}-\d{2}-\d{2}[Tt]\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:[Zz]|[+-]\d{2}:\d{2})\z/
+      )
 
       Time.iso8601(value)
       true
     rescue ArgumentError
       false
+    end
+
+    def gc_canonical_json(value)
+      case value
+      when Hash
+        pairs = value.keys.sort.map do |key|
+          "#{JSON.generate(key)}:#{gc_canonical_json(value.fetch(key))}"
+        end
+        "{#{pairs.join(',')}}"
+      when Array
+        "[#{value.map { |item| gc_canonical_json(item) }.join(',')}]"
+      else
+        JSON.generate(value)
+      end
     end
 
     def gc_valid_http_uri?(value)

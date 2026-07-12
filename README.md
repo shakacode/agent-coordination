@@ -387,9 +387,10 @@ protection and only then removes their hot source. Terminal target events are
 compacted into an immutable archive envelope before their source events are
 removed. A target is deferred until every current source event has
 independently passed its hot window. Each envelope path includes a deterministic
-source-set digest, so an identical retry reuses the same destination while
-later replayed terminal history creates a new generation without rewriting the
-first. The envelope lists every consumed source path but retains only the first
+digest of source paths plus recursively key-sorted JSON content, so an identical
+retry reuses the same destination while changed content at a stable path creates
+a new generation without rewriting the first. The envelope lists every consumed
+source path but retains only the first
 event, last event, and actual phase transitions; repeated same-phase renewals
 are intentionally dropped.
 Expired archive envelopes are deleted with the same compare-and-swap guard.
@@ -639,9 +640,10 @@ contract and fixture are
 [`contracts/archive-record-schema-v1.json`](contracts/archive-record-schema-v1.json)
 and
 [`contracts/fixtures/v1/`](contracts/fixtures/v1/).
-Compaction archive filenames include both a target digest and a source-set
-digest. Multiple immutable envelopes for one target are valid successive
-generations, not a conflict or an in-place append protocol.
+Compaction archive filenames include both a target digest and a canonical
+path-plus-content source-generation digest. Multiple immutable envelopes for
+one target are valid successive generations, not a conflict or an in-place
+append protocol.
 
 ## Event Schema
 

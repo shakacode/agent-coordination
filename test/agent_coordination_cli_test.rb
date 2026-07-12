@@ -519,6 +519,51 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     refute_equal first_path.delete_prefix("#{@state_root}/"), action.fetch("archive_path")
   end
 
+  def test_gc_generation_identity_includes_canonical_source_content
+    now = Time.utc(2026, 7, 20, 12, 0, 0)
+    old_at = (now - (8 * 86_400)).iso8601
+    source_path = "events/batch-content/lane_closed-stable.json"
+    original = valid_gc_lane_closed(
+      event_id: "lane_closed-stable", batch_id: "batch-content", target: "content", at: old_at
+    )
+    write_state_record(source_path, original)
+    runner = AgentCoord::Runner.new([], stdout: StringIO.new, clock: FixedClock.new(now))
+    assert_equal 0, runner.send(:gc, state_root: @state_root, dry_run: false, execute: true, json: true)
+    first_path = Dir.glob(File.join(@state_root, "archive/events/batch-content/*.json")).fetch(0)
+    first_bytes = File.binread(first_path)
+
+    write_state_record(source_path, original.to_a.reverse.to_h)
+    assert_equal 0, runner.send(:gc, state_root: @state_root, dry_run: false, execute: true, json: true)
+    assert_equal [first_path], Dir.glob(File.join(@state_root, "archive/events/batch-content/*.json"))
+    assert_equal first_bytes, File.binread(first_path)
+
+    changed = original.merge("terminal" => "superseded", "at" => (Time.iso8601(old_at) + 1).iso8601)
+    write_state_record(source_path, changed)
+    assert_equal 0, runner.send(:gc, state_root: @state_root, dry_run: false, execute: true, json: true)
+    archive_paths = Dir.glob(File.join(@state_root, "archive/events/batch-content/*.json"))
+    assert_equal 2, archive_paths.length
+    assert_includes archive_paths, first_path
+    assert_equal first_bytes, File.binread(first_path)
+  end
+
+  def test_gc_datetime_validation_matches_published_rfc3339_timezone_requirement
+    schema = JSONSchemer.schema(JSON.parse(File.read(File.join(ROOT, "contracts/state-schema-v2.json"))))
+    fixture = JSON.parse(File.read(File.join(ROOT, "contracts/fixtures/v2/lane_closed.json")))
+    runner = AgentCoord::Runner.new([])
+    cases = {
+      "2026-07-12T01:07:00" => false,
+      "2026-07-12T01:07:00Z" => true,
+      "2026-07-12T01:07:00+10:30" => true,
+      "2026-07-12t01:07:00z" => true
+    }
+
+    cases.each do |value, expected|
+      schema_valid = schema.validate(fixture.merge("at" => value)).to_a.empty?
+      assert_equal expected, schema_valid, "schema comparison for #{value}"
+      assert_equal schema_valid, runner.send(:gc_valid_datetime?, value), "runtime comparison for #{value}"
+    end
+  end
+
   def test_status_excludes_archive_by_default_and_includes_it_only_when_requested
     write_state_record(
       "archive/claims/shakacode/example/old.json",
