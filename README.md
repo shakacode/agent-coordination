@@ -401,13 +401,19 @@ Expired archive envelopes are deleted with the same compare-and-swap guard.
 | Dead or terminal heartbeat | 7 days | 30 days | Archive, then delete |
 | Completed batch | 7 days | 30 days | Archive, then delete |
 | Events for a terminal target | 7 days | 30 days | Compact, then delete |
-| `synthetic: true` smoke/simulation state | 1 day | 30 days | Aggressive archive, then delete |
+| Eligible claim/heartbeat/batch with `synthetic: true` | 1 day | 30 days | Aggressive archive, then delete |
+| Fully synthetic orphan event generation | 1 day per event | 30 days | Compact, then delete |
 
 `--hot-days`, `--archive-days`, and `--synthetic-hot-days` override those
 defaults. Archive retention starts at `archived_at`, so the default lifecycle
 is 7 hot days followed by 30 archive days. Producers mark non-production state
 with `--synthetic --synthetic-kind simulation|smoke`; batch manifests may carry
-the same fields. Run `ruby sim/bin/graveyard` for a deterministic dry-run,
+the same fields. The marker shortens retention only after normal family
+eligibility: active claims, live heartbeats, and incomplete batches remain hot.
+This protects scripted workers that claim once and refresh only their heartbeat.
+Synthetic events without a valid terminal marker compact as an orphan
+generation only after every event independently passes the synthetic window;
+non-synthetic orphan events remain untouched. Run `ruby sim/bin/graveyard` for a deterministic dry-run,
 execute, compaction, and idempotent replay check.
 Scoped HTTP tokens used for GC need read and write coverage for each selected
 hot prefix and `archive`; use `--all-state` only for a trusted operator machine.

@@ -669,35 +669,43 @@ module AgentCoord
         data = entry.data
         [data["batch_id"] || AgentCoord.event_batch_from_path(entry.path), data["repo"], data["target"]&.to_s]
       end
-      groups.filter_map do |(batch_id, repo, target), entries|
-        next if repo.to_s.empty? || target.to_s.empty?
+      groups.filter_map do |group, entries|
+        gc_compaction_candidate(group, entries, now, hot_days, synthetic_hot_days)
+      end
+    end
 
-        terminal = entries.select { |entry| gc_terminal_event?(entry.data) }
-                          .max_by { |entry| gc_record_time(entry.data) }
-        next unless terminal
+    def gc_compaction_candidate(group, entries, now, hot_days, synthetic_hot_days)
+      batch_id, repo, target = group
+      return if repo.to_s.empty? || target.to_s.empty?
 
-        eligible_at = gc_record_time(terminal.data)
-        next unless gc_hot_window_elapsed?(terminal.data, now, hot_days, synthetic_hot_days)
+      terminal = entries.select { |entry| gc_terminal_event?(entry.data) }
+                        .max_by { |entry| gc_record_time(entry.data) }
+      eligibility = gc_event_compaction_eligibility(entries, terminal, now, hot_days, synthetic_hot_days)
+      return unless eligibility
+      # Each fully aged source generation gets its own immutable envelope.
+      return unless entries.all? { |entry| gc_hot_window_elapsed?(entry.data, now, hot_days, synthetic_hot_days) }
 
-        eligible_entries = entries.select do |entry|
-          gc_hot_window_elapsed?(entry.data, now, hot_days, synthetic_hot_days)
-        end
-        # Each source generation has one deterministic compaction envelope.
-        # Defer the generation until every current source event has independently
-        # aged out; later generations use their own immutable destinations.
-        next unless eligible_entries.length == entries.length
-
-        source_paths = eligible_entries.map(&:path).sort
-        {
-          entries: eligible_entries,
-          action: {
-            "action" => "compact",
-            "source_paths" => source_paths,
-            "archive_path" => gc_compaction_archive_path(batch_id, repo, target, eligible_entries),
-            "reason" => "terminal_target_events",
-            "eligible_at" => timestamp(eligible_at)
-          }
+      reason, eligible_at = eligibility
+      source_paths = entries.map(&:path).sort
+      {
+        entries: entries,
+        action: {
+          "action" => "compact",
+          "source_paths" => source_paths,
+          "archive_path" => gc_compaction_archive_path(batch_id, repo, target, entries),
+          "reason" => reason,
+          "eligible_at" => timestamp(eligible_at)
         }
+      }
+    end
+
+    def gc_event_compaction_eligibility(entries, terminal, now, hot_days, synthetic_hot_days)
+      if terminal
+        return unless gc_hot_window_elapsed?(terminal.data, now, hot_days, synthetic_hot_days)
+
+        ["terminal_target_events", gc_record_time(terminal.data)]
+      elsif entries.all? { |entry| entry.data["synthetic"] == true }
+        ["synthetic_orphan_events", entries.map { |entry| gc_record_time(entry.data) }.max]
       end
     end
 
@@ -919,7 +927,6 @@ module AgentCoord
 
     def gc_archive_eligibility(entry, prefix, now)
       data = entry.data
-      return ["synthetic", gc_record_time(data)] if data["synthetic"] == true
 
       case prefix
       when "claims"

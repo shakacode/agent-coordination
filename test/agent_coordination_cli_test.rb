@@ -182,6 +182,32 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     assert_empty Dir.glob(File.join(@state_root, "archive", "**", "*.json"))
   end
 
+  def test_gc_applies_synthetic_window_only_after_family_specific_eligibility
+    now = Time.utc(2026, 7, 12, 12, 0, 0)
+    synthetic_family_policy_records(now).each { |path, data| write_state_record(path, data) }
+
+    stdout = StringIO.new
+    runner = AgentCoord::Runner.new([], stdout: stdout, clock: FixedClock.new(now))
+    assert_equal 0, runner.send(:gc, state_root: @state_root, dry_run: true, execute: false, json: true)
+
+    sources = JSON.parse(stdout.string).fetch("actions").map { |action| action["source_path"] }.compact.sort
+    assert_equal(
+      %w[batches/completed-synthetic.json claims/shakacode/example/released.json heartbeats/dead-synthetic.json],
+      sources
+    )
+    execute_runner = AgentCoord::Runner.new([], stdout: StringIO.new, clock: FixedClock.new(now))
+    assert_equal 0, execute_runner.send(
+      :gc, state_root: @state_root, dry_run: false, execute: true, json: true
+    )
+    assert_path_exists File.join(@state_root, "claims/shakacode/example/scripted-active.json")
+    assert_path_exists File.join(@state_root, "heartbeats/scripted-worker.json")
+    assert_path_exists File.join(@state_root, "batches/incomplete-synthetic.json")
+    sources.each do |source|
+      refute_path_exists File.join(@state_root, source)
+      assert_path_exists File.join(@state_root, "archive", source)
+    end
+  end
+
   def test_gc_execute_archives_terminal_record_with_a_30_day_delete_deadline
     now = Time.utc(2026, 7, 12, 12, 0, 0)
     source_path = "claims/shakacode/example/old.json"
@@ -477,6 +503,58 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     action = JSON.parse(stdout.string).fetch("actions").find { |row| row["action"] == "compact" }
     refute_nil action
     assert_equal ["events/synthetic/lane_closed-synthetic.json"], action.fetch("source_paths")
+  end
+
+  def test_gc_compacts_aged_synthetic_orphan_events_without_terminal_marker
+    now = Time.utc(2026, 7, 12, 12, 0, 0)
+    old = now - (2 * 86_400)
+    { "first" => ["claimed", 0], "renewal" => ["claimed", 1],
+      "transition" => ["qa", 2], "last" => ["qa", 3] }.each do |event_id, (phase, offset)|
+      write_state_record(
+        "events/orphan-synthetic/#{event_id}.json",
+        "schema_version" => 1, "event_id" => event_id, "batch_id" => "orphan-synthetic",
+        "type" => "phase", "repo" => "shakacode/example", "target" => "orphan",
+        "phase" => phase, "synthetic" => true, "at" => (old + offset).iso8601
+      )
+    end
+    write_state_record(
+      "events/orphan-normal/old.json",
+      "schema_version" => 1, "event_id" => "old", "batch_id" => "orphan-normal",
+      "type" => "phase", "repo" => "shakacode/example", "target" => "normal-orphan",
+      "phase" => "claimed", "at" => (now - (30 * 86_400)).iso8601
+    )
+
+    stdout = StringIO.new
+    runner = AgentCoord::Runner.new([], stdout: stdout, clock: FixedClock.new(now))
+    assert_equal 0, runner.send(:gc, state_root: @state_root, dry_run: false, execute: true, json: true)
+
+    action = JSON.parse(stdout.string).fetch("actions").find { |row| row["action"] == "compact" }
+    assert_equal "synthetic_orphan_events", action.fetch("reason")
+    assert_equal 4, action.fetch("source_paths").length
+    envelope = JSON.parse(File.read(File.join(@state_root, action.fetch("archive_path"))))
+    assert_equal(%w[first transition last], envelope.fetch("records").map { |record| record.fetch("event_id") })
+    assert_path_exists File.join(@state_root, "events/orphan-normal/old.json")
+  end
+
+  def test_gc_defers_synthetic_orphan_group_until_every_event_ages
+    now = Time.utc(2026, 7, 12, 12, 0, 0)
+    { "old" => now - (2 * 86_400), "fresh" => now - 3600 }.each do |event_id, at|
+      write_state_record(
+        "events/orphan-mixed-age/#{event_id}.json",
+        "schema_version" => 1, "event_id" => event_id, "batch_id" => "orphan-mixed-age",
+        "type" => "phase", "repo" => "shakacode/example", "target" => "orphan-mixed-age",
+        "phase" => event_id, "synthetic" => true, "at" => at.iso8601
+      )
+    end
+    stdout = StringIO.new
+    runner = AgentCoord::Runner.new([], stdout: stdout, clock: FixedClock.new(now))
+    assert_equal 0, runner.send(:gc, state_root: @state_root, dry_run: true, execute: false, json: true)
+    assert_empty JSON.parse(stdout.string).fetch("actions")
+
+    later_stdout = StringIO.new
+    later = AgentCoord::Runner.new([], stdout: later_stdout, clock: FixedClock.new(now + (2 * 86_400)))
+    assert_equal 0, later.send(:gc, state_root: @state_root, dry_run: true, execute: false, json: true)
+    assert_equal 1, JSON.parse(later_stdout.string).fetch("actions").length
   end
 
   def test_gc_creates_an_immutable_generation_when_terminal_history_reappears
@@ -3876,6 +3954,38 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
       "closed_by" => { "agent_id" => "gc-worker", "machine" => "test" },
       "at" => at
     }.merge(extra)
+  end
+
+  def synthetic_family_policy_records(now)
+    old = (now - (2 * 86_400)).iso8601
+    {
+      "claims/shakacode/example/scripted-active.json" => {
+        "schema_version" => 1, "repo" => "shakacode/example", "target" => "scripted-active",
+        "agent_id" => "scripted-worker", "status" => "active", "updated_at" => old,
+        "expires_at" => (now + 86_400).iso8601, "synthetic" => true
+      },
+      "claims/shakacode/example/released.json" => {
+        "schema_version" => 1, "repo" => "shakacode/example", "target" => "released",
+        "agent_id" => "released-worker", "status" => "released", "updated_at" => old, "synthetic" => true
+      },
+      "heartbeats/scripted-worker.json" => {
+        "schema_version" => 1, "agent_id" => "scripted-worker", "status" => "in_progress",
+        "repo" => "shakacode/example", "target" => "scripted-active", "updated_at" => now.iso8601,
+        "expires_at" => (now + 900).iso8601, "synthetic" => true
+      },
+      "heartbeats/dead-synthetic.json" => {
+        "schema_version" => 1, "agent_id" => "dead-synthetic", "status" => "in_progress",
+        "updated_at" => old, "expires_at" => (Time.iso8601(old) + 900).iso8601, "synthetic" => true
+      },
+      "batches/incomplete-synthetic.json" => {
+        "schema_version" => 1, "batch_id" => "incomplete-synthetic", "status" => "active",
+        "updated_at" => old, "synthetic" => true, "lanes" => []
+      },
+      "batches/completed-synthetic.json" => {
+        "schema_version" => 1, "batch_id" => "completed-synthetic", "status" => "completed",
+        "updated_at" => old, "completed_at" => old, "synthetic" => true, "lanes" => []
+      }
+    }
   end
 
   CommandResult = Struct.new(:stdout, :stderr, :status, keyword_init: true)

@@ -27,11 +27,16 @@ cannot silently discard the only copy.
 
 Claims are eligible only when released or explicitly terminal. Heartbeats are
 eligible when terminal or after their protocol liveness reaches `dead`.
-Batches are eligible only when `status` is `completed`. Events are compacted per
-repository target only after a schema-v2 `lane_closed` event declares `done`,
-`abandoned`, or `superseded`, and every current event for that target has passed
-its own hot window. The compacted envelope lists all consumed paths while its
-records retain first, last, and phase transitions and omit repeated renewals.
+Batches are eligible only when `status` is `completed`. The synthetic marker
+selects the shorter window only after those family-specific conditions hold;
+it never makes active claims, live heartbeats, or incomplete batches eligible.
+Events are compacted per repository target after a schema-v2 `lane_closed`
+event declares `done`, `abandoned`, or `superseded` and every current event has
+passed its own hot window. A fully synthetic group without a valid terminal
+marker is also compacted once each event passes the synthetic window, preventing
+simulation orphans from leaking while leaving non-synthetic orphans untouched.
+The compacted envelope lists all consumed paths while its records retain first,
+last, and phase transitions and omit repeated renewals.
 Its path includes a deterministic digest of the complete source paths and
 recursively key-sorted JSON content: identical retries remain idempotent, while
 changed content at a stable source path or later valid terminal replays produce
