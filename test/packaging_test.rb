@@ -136,6 +136,15 @@ class PackagingTest < Minitest::Test
     assert_equal ["Unreleased"], release_headings
   end
 
+  def test_unreleased_changelog_documents_zero_config_local_mode_and_demo
+    changelog = File.read(File.join(ROOT, "CHANGELOG.md")).gsub(/\s+/, " ")
+
+    assert_match(/zero-config local-store default.*single-machine/i, changelog)
+    assert_match(/shared or multi-machine coordination.*explicit HTTP configuration/i, changelog)
+    assert_match(/deterministic `agent-coord demo` walkthrough/i, changelog)
+    assert_match(/demo.*does not write remote state/i, changelog)
+  end
+
   def test_protocol_curl_walkthrough_uses_placeholders_and_worker_preconditions
     docs_path = File.join(ROOT, "docs/protocol-curl.md")
     flunk "docs/protocol-curl.md is missing" unless File.file?(docs_path)

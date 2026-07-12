@@ -9,6 +9,11 @@ when releases begin.
 
 ### Added
 
+- A clearly labeled zero-config local-store default for single-machine
+  coordination; shared or multi-machine coordination still requires explicit
+  HTTP configuration.
+- A deterministic `agent-coord demo` walkthrough that uses isolated temporary
+  state and does not write remote state.
 - Reviewable RubyGem packaging for the `agent-coord` CLI.
 - An explicit Ruby support floor and CI coverage for it.
 - A placeholder-only `curl` walkthrough for the Worker state protocol.
