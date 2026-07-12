@@ -317,6 +317,33 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     refute_path_exists File.join(@state_root, "archive")
   end
 
+  def test_gc_fail_closed_timestamp_errors_identify_claim_and_event_paths
+    now = Time.utc(2026, 7, 12, 12, 0, 0)
+    claim_path = "claims/shakacode/example/malformed-time.json"
+    write_state_record(
+      claim_path,
+      "schema_version" => 1, "repo" => "shakacode/example", "target" => "malformed-time",
+      "agent_id" => "worker", "status" => "released"
+    )
+    runner = AgentCoord::Runner.new([], stdout: StringIO.new, clock: FixedClock.new(now))
+    claim_error = assert_raises(AgentCoord::OperationalError) do
+      runner.send(:gc, state_root: @state_root, dry_run: true, execute: false, json: true)
+    end
+    assert_includes claim_error.message, claim_path
+    FileUtils.rm(File.join(@state_root, claim_path))
+
+    event_path = "events/malformed-time/no-time.json"
+    write_state_record(
+      event_path,
+      "schema_version" => 1, "event_id" => "no-time", "batch_id" => "malformed-time",
+      "type" => "phase", "lane" => "simulation", "synthetic" => true
+    )
+    event_error = assert_raises(AgentCoord::OperationalError) do
+      runner.send(:gc, state_root: @state_root, dry_run: true, execute: false, json: true)
+    end
+    assert_includes event_error.message, event_path
+  end
+
   def test_gc_text_renders_delete_and_compaction_actions_without_assuming_archive_shape
     payload = {
       "mode" => "dry-run",
