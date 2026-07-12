@@ -588,9 +588,7 @@ module AgentCoord
       )
       now = now_utc
       store = build_store(options)
-      candidates = gc_archive_candidates(store, now, hot_days, synthetic_hot_days) +
-                   gc_compaction_candidates(store, now, hot_days, synthetic_hot_days) +
-                   gc_delete_candidates(store, now)
+      candidates = gc_candidates(store, now, hot_days, synthetic_hot_days)
       validate_gc_archive_sizes!(candidates, now, archive_days)
       if options[:execute]
         candidates.each do |candidate|
@@ -625,6 +623,18 @@ module AgentCoord
       raise Error, "#{option} must be zero or greater" if value.negative?
 
       value
+    end
+
+    def gc_candidates(store, now, hot_days, synthetic_hot_days)
+      archive_candidates = gc_archive_candidates(store, now, hot_days, synthetic_hot_days)
+      compaction_candidates = gc_compaction_candidates(store, now, hot_days, synthetic_hot_days)
+      protected_destinations = (archive_candidates + compaction_candidates).to_h do |candidate|
+        [candidate.dig(:action, "archive_path"), true]
+      end
+      delete_candidates = gc_delete_candidates(store, now).reject do |candidate|
+        protected_destinations[candidate.dig(:action, "source_path")]
+      end
+      archive_candidates + compaction_candidates + delete_candidates
     end
 
     def gc_archive_candidates(store, now, hot_days, synthetic_hot_days)

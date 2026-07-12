@@ -268,6 +268,30 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     assert_equal "archive_expired", action.fetch("reason")
   end
 
+  def test_gc_protects_reused_archive_and_compaction_destinations_until_a_later_run
+    now = Time.utc(2026, 7, 12, 12, 0, 0)
+    sources, destinations = write_expired_reuse_candidates(now)
+
+    dry_stdout = StringIO.new
+    dry_runner = AgentCoord::Runner.new([], stdout: dry_stdout, clock: FixedClock.new(now))
+    assert_equal 0, dry_runner.send(:gc, state_root: @state_root, dry_run: true, execute: false, json: true)
+    dry_actions = JSON.parse(dry_stdout.string).fetch("actions")
+    assert_equal %w[archive compact], dry_actions.map { |action| action.fetch("action") }.sort
+    refute(dry_actions.any? { |action| destinations.include?(action["source_path"]) })
+
+    execute_runner = AgentCoord::Runner.new([], stdout: StringIO.new, clock: FixedClock.new(now))
+    assert_equal 0, execute_runner.send(:gc, state_root: @state_root, dry_run: false, execute: true, json: true)
+    sources.each { |path| refute_path_exists File.join(@state_root, path) }
+    destinations.each { |path| assert_path_exists File.join(@state_root, path) }
+
+    later_stdout = StringIO.new
+    later_runner = AgentCoord::Runner.new([], stdout: later_stdout, clock: FixedClock.new(now + 1))
+    assert_equal 0, later_runner.send(:gc, state_root: @state_root, dry_run: false, execute: true, json: true)
+    later_actions = JSON.parse(later_stdout.string).fetch("actions")
+    assert_equal(%w[delete delete], later_actions.map { |action| action["action"] })
+    destinations.each { |path| refute_path_exists File.join(@state_root, path) }
+  end
+
   def test_gc_rejects_an_oversized_archive_envelope_before_writing_any_candidate
     now = Time.utc(2026, 7, 12, 12, 0, 0)
     %w[small oversized].each do |target|
@@ -3986,6 +4010,42 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
         "updated_at" => old, "completed_at" => old, "synthetic" => true, "lanes" => []
       }
     }
+  end
+
+  def write_expired_reuse_candidates(now)
+    old = (now - (8 * 86_400)).iso8601
+    expired = (now - 86_400).iso8601
+    claim_source = "claims/shakacode/example/reused.json"
+    claim_archive = "archive/#{claim_source}"
+    claim_data = {
+      "schema_version" => 1, "repo" => "shakacode/example", "target" => "reused",
+      "agent_id" => "worker-reused", "status" => "released", "updated_at" => old
+    }
+    write_state_record(claim_source, claim_data)
+    write_state_record(
+      claim_archive,
+      "schema_version" => 1, "record_family" => "archived_record", "source_path" => claim_source,
+      "reason" => "terminal_claim", "synthetic" => false, "archived_at" => old,
+      "delete_after" => expired, "data" => claim_data
+    )
+
+    event_source = "events/reused/lane_closed-stable.json"
+    event_data = valid_gc_lane_closed(
+      event_id: "lane_closed-stable", batch_id: "reused", target: "event-reused", at: old
+    )
+    event_entry = AgentCoord::StoredJson.new(path: event_source, data: event_data)
+    planner = AgentCoord::Runner.new([])
+    compact_archive = planner.send(
+      :gc_compaction_archive_path, "reused", "shakacode/example", "event-reused", [event_entry]
+    )
+    write_state_record(event_source, event_data)
+    write_state_record(
+      compact_archive,
+      "schema_version" => 1, "record_family" => "compacted_events", "source_paths" => [event_source],
+      "reason" => "terminal_target_events", "synthetic" => false, "archived_at" => old,
+      "delete_after" => expired, "records" => [event_data]
+    )
+    [[claim_source, event_source], [claim_archive, compact_archive]]
   end
 
   CommandResult = Struct.new(:stdout, :stderr, :status, keyword_init: true)
