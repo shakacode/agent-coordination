@@ -183,6 +183,14 @@ class ProvisionTokenTest < Minitest::Test
     refute_path_exists @npx_args_file
   end
 
+  def test_rejects_leading_dash_database_name_before_generating_token
+    _, stderr, status = run_script("m5", "--database", "--verbose", "--all-state")
+
+    refute status.success?
+    assert_includes stderr, "database name cannot start with a hyphen"
+    refute_path_exists @npx_args_file
+  end
+
   def test_rejects_unsafe_machine_names_before_generating_token
     _, stderr, status = run_script("m5';DROP")
 

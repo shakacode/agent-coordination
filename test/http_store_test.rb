@@ -691,6 +691,26 @@ class HttpBackendSelectionTest < HttpEnvTestCase
     end
   end
 
+  def test_status_ignores_consumer_env_file_with_invalid_encoding
+    Dir.mktmpdir("agent-coord-xdg-config") do |config_home|
+      env_file = File.join(config_home, "agent-coord", "env")
+      FileUtils.mkdir_p(File.dirname(env_file))
+      File.binwrite(env_file, "\xFFAGENT_COORD_API_URL=https://agent-coord.example\n".b)
+
+      with_env("AGENT_COORD_API_URL" => nil,
+               "AGENT_COORD_API_TOKEN" => nil,
+               "AGENT_COORD_BACKEND" => nil,
+               "AGENT_COORD_STATE_ROOT" => nil,
+               "AGENT_COORD_STATUS_STATE_ROOT" => nil,
+               "XDG_CONFIG_HOME" => config_home) do
+        code, _, err = run_cli(["status", "--json"], {})
+
+        assert_equal 0, code
+        refute_includes err, "split-brain"
+      end
+    end
+  end
+
   def test_missing_explicit_backend_defaults_to_labeled_xdg_local_store
     Dir.mktmpdir("agent-coord-xdg-state") do |state_home|
       with_env("AGENT_COORD_API_TOKEN" => nil,

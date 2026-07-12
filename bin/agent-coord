@@ -386,7 +386,7 @@ module AgentCoord
 
         !match[1].to_s.delete_prefix('"').delete_suffix('"').delete_prefix("'").delete_suffix("'").empty?
       end
-    rescue SystemCallError
+    rescue SystemCallError, ArgumentError
       false
     end
 
@@ -775,7 +775,7 @@ module AgentCoord
 
     def local_http_url?(url)
       host = URI(url.to_s).host
-      ["localhost", "127.0.0.1", "::1"].include?(host)
+      HttpStore::LOOPBACK_HOSTS.include?(host)
     rescue URI::InvalidURIError
       false
     end

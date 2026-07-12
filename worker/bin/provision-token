@@ -86,6 +86,13 @@ while [ "$#" -gt 0 ]; do
   esac
 done
 
+case "$DATABASE" in
+  -*)
+    echo "database name cannot start with a hyphen" >&2
+    exit 1
+    ;;
+esac
+
 if [[ ! "$DATABASE" =~ ^[A-Za-z0-9._-]+$ ]]; then
   echo "database name may contain only letters, numbers, dots, underscores, and hyphens" >&2
   exit 1
