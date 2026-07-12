@@ -529,6 +529,20 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     assert_includes result.stderr, "--deep is only valid for doctor"
   end
 
+  def test_launch_prompt_option_is_register_batch_only
+    prompt_path = File.join(@state_root, "launch-prompt.txt")
+    File.write(prompt_path, "Do not attach this to a claim.\n")
+
+    result = run_agent_coord(
+      "claim", "--agent-id", "worker-a", "--repo", "shakacode/react_on_rails", "--target", "4151",
+      "--launch-prompt", prompt_path
+    )
+
+    assert_equal 1, result.status.exitstatus
+    assert_includes result.stderr, "--launch-prompt is only valid for register-batch"
+    refute_path_exists File.join(@state_root, "claims", "shakacode", "react_on_rails", "4151.json")
+  end
+
   def test_doctor_help_accepts_deep_option
     result = run_agent_coord("doctor", "--deep", "--help", state_root: nil)
 
@@ -2411,6 +2425,94 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     assert_equal "https://coord.example.test/batches/batch-b/docs", lane.fetch("dashboard_url")
   end
 
+  def test_register_batch_reads_launch_prompt_from_path_and_overrides_manifest
+    manifest_path = File.join(@state_root, "batch-manifest.json")
+    prompt_path = File.join(@state_root, "launch-prompt.txt")
+    File.write(
+      manifest_path,
+      JSON.pretty_generate(
+        "batch_id" => "batch-launch-prompt-path",
+        "launch_prompt" => "stale manifest prompt",
+        "lanes" => [{ "name" => "docs", "owner" => "worker-docs", "targets" => ["3972"] }]
+      )
+    )
+    File.write(prompt_path, "Coordinate this exact batch.\n")
+
+    result = run_agent_coord("register-batch", "--file", manifest_path, "--launch-prompt", prompt_path)
+
+    assert_equal 0, result.status.exitstatus, result.stderr
+    stored = JSON.parse(File.read(File.join(@state_root, "batches", "batch-launch-prompt-path.json")))
+    assert_equal "Coordinate this exact batch.\n", stored.fetch("launch_prompt")
+  end
+
+  def test_register_batch_reads_launch_prompt_from_stdin
+    manifest_path = File.join(@state_root, "batch-manifest.json")
+    File.write(
+      manifest_path,
+      JSON.pretty_generate(
+        "batch_id" => "batch-launch-prompt-stdin",
+        "lanes" => [{ "name" => "docs", "owner" => "worker-docs", "targets" => ["3972"] }]
+      )
+    )
+
+    result = run_agent_coord(
+      "register-batch", "--file", manifest_path, "--launch-prompt", "-",
+      stdin_data: "Coordinate the batch from stdin.\n"
+    )
+
+    assert_equal 0, result.status.exitstatus, result.stderr
+    stored = JSON.parse(File.read(File.join(@state_root, "batches", "batch-launch-prompt-stdin.json")))
+    assert_equal "Coordinate the batch from stdin.\n", stored.fetch("launch_prompt")
+  end
+
+  def test_register_batch_reports_unreadable_launch_prompt_without_writing_batch
+    manifest_path = File.join(@state_root, "batch-manifest.json")
+    File.write(
+      manifest_path,
+      JSON.pretty_generate(
+        "batch_id" => "batch-missing-launch-prompt",
+        "lanes" => [{ "name" => "docs", "owner" => "worker-docs", "targets" => ["3972"] }]
+      )
+    )
+
+    result = run_agent_coord(
+      "register-batch", "--file", manifest_path,
+      "--launch-prompt", File.join(@state_root, "missing-prompt.txt")
+    )
+
+    assert_equal 2, result.status.exitstatus
+    assert_includes result.stderr, "launch prompt unreadable"
+    refute_path_exists File.join(@state_root, "batches", "batch-missing-launch-prompt.json")
+  end
+
+  def test_register_batch_rejects_invalid_utf8_launch_prompts_before_writing
+    invalid_prompt = "\xFF".b
+    prompt_path = File.join(@state_root, "invalid-launch-prompt.txt")
+    File.binwrite(prompt_path, invalid_prompt)
+
+    { "path" => [prompt_path, nil], "stdin" => ["-", invalid_prompt] }.each do |source, (argument, stdin_data)|
+      batch_id = "batch-invalid-launch-prompt-#{source}"
+      manifest_path = File.join(@state_root, "#{batch_id}.json")
+      File.write(
+        manifest_path,
+        JSON.pretty_generate(
+          "batch_id" => batch_id,
+          "lanes" => [{ "name" => "docs", "owner" => "worker-docs", "targets" => ["3972"] }]
+        )
+      )
+
+      result = run_agent_coord(
+        "register-batch", "--file", manifest_path, "--launch-prompt", argument,
+        stdin_data: stdin_data
+      )
+
+      assert_equal 1, result.status.exitstatus, source
+      assert_includes result.stderr, "launch prompt must be valid UTF-8", source
+      refute_includes result.stderr, "JSON::GeneratorError", source
+      refute_path_exists File.join(@state_root, "batches", "#{batch_id}.json"), source
+    end
+  end
+
   def test_record_event_writes_append_only_event_and_status_metadata
     write_batch(
       "batch-b",
@@ -3933,15 +4035,15 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     )
   end
 
-  def run_agent_coord(*, state_root: @state_root)
+  def run_agent_coord(*, state_root: @state_root, stdin_data: nil)
     env = {}
     env["AGENT_COORD_STATE_ROOT"] = state_root if state_root
-    run_command(env, "ruby", BIN, *)
+    run_command(env, "ruby", BIN, *, stdin_data: stdin_data)
   end
 
-  def run_command(*args)
+  def run_command(*args, stdin_data: nil)
     env = args.first.is_a?(Hash) ? args.shift : {}
-    stdout, stderr, status = Open3.capture3(COMMAND_ENV.merge(env), *args)
+    stdout, stderr, status = Open3.capture3(COMMAND_ENV.merge(env), *args, stdin_data: stdin_data)
     CommandResult.new(stdout: stdout, stderr: stderr, status: status)
   end
 
