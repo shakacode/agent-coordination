@@ -45,6 +45,9 @@ uppercase hexadecimal. Thus `default` remains `default`, `/` becomes `%2F`, and
 This reversible encoding prevents separators or traversal components from
 changing key identity and encodes each logical key component exactly once. This
 ADR does not add that path to the CLI or Worker.
+Runtime storage-key builders MUST apply this encoding to UTF-8 bytes, not
+language characters, because the schema accepts arbitrary nonempty workspace and
+machine strings and cannot make an unencoded or per-character path safe.
 
 Records have `status: active | cleared`, an immutable observation time in
 `observed_at`, a nullable `resets_at`, and

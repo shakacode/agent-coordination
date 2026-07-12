@@ -21,6 +21,7 @@ class PackagingTest < Minitest::Test
     docs/protocol-curl.md
     schema/state/v1/fixtures/invalid/host-limit-active-with-cleared-at.json
     schema/state/v1/fixtures/invalid/host-limit-cleared-without-cleared-at.json
+    schema/state/v1/fixtures/invalid/host-limit-malformed-observed-at.json
     schema/state/v1/fixtures/invalid/host-limit-noncanonical-host.json
     schema/state/v1/fixtures/procedural/host-limits-duplicate-logical-key.json
     schema/state/v1/fixtures/replay/two-lanes-one-host-limit.json

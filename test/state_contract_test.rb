@@ -114,6 +114,23 @@ class StateContractTest < Minitest::Test
     end
   end
 
+  def test_host_limit_date_time_formats_are_asserted
+    schema = JSONSchemer.schema(JSON.parse(File.read(HOST_LIMIT_SCHEMA_PATH)))
+    active = read_fixture(File.join(HOST_LIMIT_FIXTURES_PATH, "valid", "host-limit-active.json"))
+    cleared = read_fixture(File.join(HOST_LIMIT_FIXTURES_PATH, "valid", "host-limit-cleared.json"))
+    variants = [
+      [active.merge("observed_at" => "not-a-date-time"), "/observed_at"],
+      [active.merge("resets_at" => "not-a-date-time"), "/resets_at"],
+      [cleared.merge("cleared_at" => "not-a-date-time"), "/cleared_at"]
+    ]
+
+    variants.each do |record, pointer|
+      errors = schema.validate(record).to_a
+      assert(errors.any? { |error| error["type"] == "format" && error["data_pointer"] == pointer },
+             "expected an explicit date-time format error at #{pointer}")
+    end
+  end
+
   def test_two_lanes_replay_one_effective_host_limit_record
     schema_document = JSON.parse(File.read(HOST_LIMIT_SCHEMA_PATH))
     projection_schema = JSONSchemer.schema(schema_document.merge("$ref" => "#/$defs/status_projection"))
