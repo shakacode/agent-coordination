@@ -33,6 +33,13 @@ the batch `completed` when every lane is terminal. The explicit two-step
 hosts that manage release separately. Terminal closeout and handoff are distinct
 and cannot be combined.
 
+Ordinary events retain timestamp-plus-random append-only IDs. A `lane_closed`
+event instead reserves one deterministic ID and path per batch/lane. The first
+create wins; an identical retry reuses that authoritative event, while a
+semantically different retry is rejected. Claim and batch terminal fields are
+reconcilable projections of the reserved event, so partial-progress retries do
+not create contradictory terminal history.
+
 Consumers use this precedence rule:
 
 1. Protocol-declared lane terminal state.
@@ -49,6 +56,9 @@ the dashboard and does not create a release process.
   event and released claim record.
 - Batch completion is a write-time protocol fact, so consumers do not need to
   derive it independently.
+- Consumers cannot treat every event ID as chronological. They order mixed
+  event families by `at` with path as a stable tie-breaker, and deduplicate
+  `lane_closed` by the deterministic batch/lane reservation path.
 - The lane-close contract v2 is intentionally incompatible with producers that
   claim v2 while omitting terminal closeout fields. The checked-in conformance
   fixture gives Ruby and external TypeScript consumers the same example without

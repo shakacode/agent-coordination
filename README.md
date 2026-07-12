@@ -338,6 +338,13 @@ fields as claims and heartbeats, plus `--type`, `--lane`, and `--message`.
 available; use direct `record-event --type handoff` only for non-release
 breadcrumbs.
 
+Ordinary phase, handoff, and milestone events use timestamp-plus-random IDs and
+remain append-only. `lane_closed` is the deliberate exception: its event ID is
+a deterministic reservation derived from the lane name, stable within the
+batch. A create-only write to that path makes concurrent or retried closeout
+idempotent; the first event is authoritative and a conflicting closeout cannot
+append a second terminal record for the lane.
+
 Hosts that separate event production from claim release can write the same
 terminal record with `record-event --type lane_closed --terminal STATE`, plus
 `--batch-id`, `--lane`, `--agent-id`, `--repo`, and `--target`. Terminal events
@@ -598,7 +605,12 @@ Ordinary events retain schema version 1. The explicitly versioned
 Lane events should include `lane` and `agent_id` when available. Lane names
 follow the same rules as registered batch lanes: non-empty and no `:`
 characters, because dependency refs split on the last colon. Event ids are
-time-sortable and unique per write.
+time-sortable and unique per write for ordinary append-only events. A
+`lane_closed` ID is instead stable per batch/lane and begins with
+`lane_closed-`; it is not a chronology key. Consumers should order mixed event
+families by `at` (using path only as a deterministic tie-breaker), and deduplicate
+terminal closeout by its batch/lane reservation path rather than by arrival
+order.
 
 The current HTTP backend stores events in the same JSON state API as claims,
 heartbeats, and batches, so `events/<batch-id>` is intended for low-volume phase
