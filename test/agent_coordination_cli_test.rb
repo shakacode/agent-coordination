@@ -354,14 +354,10 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     end
     write_state_record(
       "events/batch-1/lane_closed-deadbeef.json",
-      "schema_version" => 2,
-      "event_id" => "lane_closed-deadbeef",
-      "batch_id" => "batch-1",
-      "type" => "lane_closed",
-      "repo" => "shakacode/example",
-      "target" => "42",
-      "terminal" => "done",
-      "at" => (Time.iso8601(at) + 3).iso8601
+      valid_gc_lane_closed(
+        event_id: "lane_closed-deadbeef", batch_id: "batch-1", target: "42",
+        at: (Time.iso8601(at) + 3).iso8601
+      )
     )
 
     stdout = StringIO.new
@@ -387,9 +383,7 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     fresh_at = (now - 86_400).iso8601
     write_state_record(
       "events/batch-mixed/lane_closed-old.json",
-      "schema_version" => 2, "event_id" => "lane_closed-old", "batch_id" => "batch-mixed",
-      "type" => "lane_closed", "repo" => "shakacode/example", "target" => "mixed",
-      "terminal" => "done", "at" => old_at
+      valid_gc_lane_closed(event_id: "lane_closed-old", batch_id: "batch-mixed", target: "mixed", at: old_at)
     )
     write_state_record(
       "events/batch-mixed/fresh.json",
@@ -417,14 +411,25 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
   def test_gc_requires_a_valid_v2_lane_closed_terminal_marker_before_compacting_events
     now = Time.utc(2026, 7, 12, 12, 0, 0)
     at = (now - (8 * 86_400)).iso8601
-    [{ "schema_version" => 1, "terminal" => "done" },
-     { "schema_version" => 2, "terminal" => "unknown" },
-     { "schema_version" => 2, "terminal" => "done", "type" => "phase" }].each_with_index do |marker, index|
+    valid = valid_gc_lane_closed(event_id: "lane_closed-invalid", batch_id: "batch-invalid", target: "invalid", at: at)
+    invalid_markers = [
+      valid.merge("schema_version" => 1),
+      valid.merge("terminal" => "unknown"),
+      valid.merge("type" => "phase"),
+      valid.except("workspace"),
+      valid.except("closed_by"),
+      valid.merge("closed_by" => { "agent_id" => "gc-worker", "machine" => "" }),
+      valid.merge("closed_by" => { "agent_id" => "gc-worker", "machine" => "test", "extra" => "no" }),
+      valid.merge("event_id" => ""),
+      valid.merge("target" => ""),
+      valid.merge("repo" => "not-a-repo"),
+      valid.merge("at" => "not-a-time"),
+      valid.merge("pr_url" => "file:///tmp/not-http")
+    ]
+    invalid_markers.each_with_index do |marker, index|
       write_state_record(
         "events/batch-invalid-#{index}/lane_closed-invalid.json",
-        { "event_id" => "lane_closed-invalid", "batch_id" => "batch-invalid-#{index}",
-          "type" => "lane_closed", "repo" => "shakacode/example", "target" => "invalid-#{index}",
-          "at" => at }.merge(marker)
+        marker.merge("batch_id" => "batch-invalid-#{index}")
       )
     end
 
@@ -458,15 +463,10 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     at = (now - (2 * 86_400)).iso8601
     write_state_record(
       "events/synthetic/lane_closed-synthetic.json",
-      "schema_version" => 2,
-      "event_id" => "lane_closed-synthetic",
-      "batch_id" => "synthetic",
-      "type" => "lane_closed",
-      "repo" => "shakacode/example",
-      "target" => "synthetic",
-      "terminal" => "done",
-      "synthetic" => true,
-      "at" => at
+      valid_gc_lane_closed(
+        event_id: "lane_closed-synthetic", batch_id: "synthetic", target: "synthetic", at: at,
+        extra: { "synthetic" => true }
+      )
     )
 
     stdout = StringIO.new
@@ -477,6 +477,46 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     action = JSON.parse(stdout.string).fetch("actions").find { |row| row["action"] == "compact" }
     refute_nil action
     assert_equal ["events/synthetic/lane_closed-synthetic.json"], action.fetch("source_paths")
+  end
+
+  def test_gc_creates_an_immutable_generation_when_terminal_history_reappears
+    now = Time.utc(2026, 7, 20, 12, 0, 0)
+    old_at = (now - (8 * 86_400)).iso8601
+    write_state_record(
+      "events/batch-replay/phase-first.json",
+      "schema_version" => 1, "event_id" => "phase-first", "batch_id" => "batch-replay",
+      "type" => "phase", "repo" => "shakacode/example", "target" => "replay", "phase" => "claimed", "at" => old_at
+    )
+    write_state_record(
+      "events/batch-replay/lane_closed-first.json",
+      valid_gc_lane_closed(event_id: "lane_closed-first", batch_id: "batch-replay", target: "replay", at: old_at)
+    )
+    runner = AgentCoord::Runner.new([], stdout: StringIO.new, clock: FixedClock.new(now))
+    assert_equal 0, runner.send(:gc, state_root: @state_root, dry_run: false, execute: true, json: true)
+    first_path = Dir.glob(File.join(@state_root, "archive/events/batch-replay/*.json")).fetch(0)
+    first_bytes = File.binread(first_path)
+
+    write_state_record(
+      "events/batch-replay/phase-replayed.json",
+      "schema_version" => 1, "event_id" => "phase-replayed", "batch_id" => "batch-replay",
+      "type" => "phase", "repo" => "shakacode/example", "target" => "replay", "phase" => "qa", "at" => old_at
+    )
+    write_state_record(
+      "events/batch-replay/lane_closed-first.json",
+      valid_gc_lane_closed(
+        event_id: "lane_closed-first", batch_id: "batch-replay", target: "replay", at: old_at
+      )
+    )
+    replay_stdout = StringIO.new
+    replay_runner = AgentCoord::Runner.new([], stdout: replay_stdout, clock: FixedClock.new(now))
+
+    assert_equal 0, replay_runner.send(:gc, state_root: @state_root, dry_run: false, execute: true, json: true)
+    archive_paths = Dir.glob(File.join(@state_root, "archive/events/batch-replay/*.json"))
+    assert_equal 2, archive_paths.length
+    assert_includes archive_paths, first_path
+    assert_equal first_bytes, File.binread(first_path)
+    action = JSON.parse(replay_stdout.string).fetch("actions").find { |row| row["action"] == "compact" }
+    refute_equal first_path.delete_prefix("#{@state_root}/"), action.fetch("archive_path")
   end
 
   def test_status_excludes_archive_by_default_and_includes_it_only_when_requested
@@ -3776,6 +3816,21 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     assert_equal 0, status.status.exitstatus, status.stderr
     assert_includes status.stdout, "lane docs owner worker-docs targets 3972 status blocked live"
     assert_includes status.stdout, "deps batch-a:backend blocked_on batch-a:backend"
+  end
+
+  def valid_gc_lane_closed(event_id:, batch_id:, target:, at:, extra: {})
+    {
+      "schema_version" => 2,
+      "event_id" => event_id,
+      "batch_id" => batch_id,
+      "type" => "lane_closed",
+      "repo" => "shakacode/example",
+      "target" => target,
+      "terminal" => "done",
+      "workspace" => "default",
+      "closed_by" => { "agent_id" => "gc-worker", "machine" => "test" },
+      "at" => at
+    }.merge(extra)
   end
 
   CommandResult = Struct.new(:stdout, :stderr, :status, keyword_init: true)

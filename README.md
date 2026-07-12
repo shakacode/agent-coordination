@@ -384,11 +384,14 @@ and batch dependency checks never turn into an all-archive scan.
 mode is required: `--dry-run` prints proposed actions without writing, while
 `--execute` copies eligible records into `archive/` with compare-and-swap
 protection and only then removes their hot source. Terminal target events are
-compacted into one archive envelope before their source events are removed. A
-target is deferred until every current source event has independently passed
-its hot window. The envelope lists every consumed source path but retains only
-the first event, last event, and actual phase transitions; repeated same-phase
-renewals are intentionally dropped.
+compacted into an immutable archive envelope before their source events are
+removed. A target is deferred until every current source event has
+independently passed its hot window. Each envelope path includes a deterministic
+source-set digest, so an identical retry reuses the same destination while
+later replayed terminal history creates a new generation without rewriting the
+first. The envelope lists every consumed source path but retains only the first
+event, last event, and actual phase transitions; repeated same-phase renewals
+are intentionally dropped.
 Expired archive envelopes are deleted with the same compare-and-swap guard.
 
 | Record state | Hot retention | Archive retention | Result |
@@ -636,6 +639,9 @@ contract and fixture are
 [`contracts/archive-record-schema-v1.json`](contracts/archive-record-schema-v1.json)
 and
 [`contracts/fixtures/v1/`](contracts/fixtures/v1/).
+Compaction archive filenames include both a target digest and a source-set
+digest. Multiple immutable envelopes for one target are valid successive
+generations, not a conflict or an in-place append protocol.
 
 ## Event Schema
 

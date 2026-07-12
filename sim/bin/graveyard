@@ -74,7 +74,8 @@ begin
     "events/graveyard/lane_closed-terminal.json",
     "schema_version" => 2, "event_id" => "lane_closed-terminal", "batch_id" => "graveyard",
     "type" => "lane_closed", "repo" => "shakacode/graveyard", "target" => "terminal",
-    "terminal" => "done", "at" => old
+    "terminal" => "done", "workspace" => "default",
+    "closed_by" => { "agent_id" => "graveyard-sim", "machine" => "simulation" }, "at" => old
   )
 
   planned = run_gc(state_root, "--dry-run")

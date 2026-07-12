@@ -688,8 +688,9 @@ module AgentCoord
         next unless eligible_entries.length == entries.length
 
         source_paths = eligible_entries.map(&:path).sort
-        digest = Digest::SHA256.hexdigest("#{repo}##{target}")[0, 16]
-        archive_path = "archive/events/#{batch_id}/compact-#{digest}.json"
+        target_digest = Digest::SHA256.hexdigest("#{repo}##{target}")[0, 16]
+        source_set_digest = Digest::SHA256.hexdigest(source_paths.join("\0"))[0, 16]
+        archive_path = "archive/events/#{batch_id}/compact-#{target_digest}-#{source_set_digest}.json"
         {
           entries: eligible_entries,
           action: {
@@ -709,8 +710,54 @@ module AgentCoord
     end
 
     def gc_terminal_event?(data)
-      data["schema_version"] == LANE_CLOSED_SCHEMA_VERSION &&
-        data["type"] == "lane_closed" && TERMINAL_STATES.include?(data["terminal"])
+      gc_terminal_identity_valid?(data) && gc_terminal_context_valid?(data)
+    end
+
+    def gc_terminal_identity_valid?(data)
+      return false unless data["schema_version"] == LANE_CLOSED_SCHEMA_VERSION
+      return false unless data["type"] == "lane_closed" && TERMINAL_STATES.include?(data["terminal"])
+      return false unless gc_nonempty_string?(data["event_id"])
+      return false unless gc_nonempty_string?(data["target"])
+
+      data["repo"].is_a?(String) && data["repo"].match?(%r{\A[^/]+/[^/]+\z})
+    end
+
+    def gc_terminal_context_valid?(data)
+      return false unless gc_nonempty_string?(data["workspace"])
+      return false unless gc_valid_closed_by?(data["closed_by"]) && gc_valid_datetime?(data["at"])
+      return false unless %w[batch_id lane branch pr_state].all? do |field|
+        !data.key?(field) || gc_nonempty_string?(data[field])
+      end
+
+      %w[pr_url evidence_url].all? { |field| !data.key?(field) || gc_valid_http_uri?(data[field]) }
+    end
+
+    def gc_nonempty_string?(value)
+      value.is_a?(String) && !value.empty?
+    end
+
+    def gc_valid_closed_by?(value)
+      return false unless value.is_a?(Hash) && value.keys.sort == %w[agent_id machine]
+
+      %w[agent_id machine].all? { |field| gc_nonempty_string?(value[field]) }
+    end
+
+    def gc_valid_datetime?(value)
+      return false unless gc_nonempty_string?(value)
+
+      Time.iso8601(value)
+      true
+    rescue ArgumentError
+      false
+    end
+
+    def gc_valid_http_uri?(value)
+      return false unless gc_nonempty_string?(value) && !value.match?(/\s/)
+
+      uri = URI.parse(value)
+      %w[http https].include?(uri.scheme&.downcase) && !uri.host.to_s.empty?
+    rescue URI::InvalidURIError
+      false
     end
 
     def gc_compact_events(store, candidate, now, archive_days)

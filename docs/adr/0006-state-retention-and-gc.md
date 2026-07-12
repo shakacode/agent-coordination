@@ -32,8 +32,14 @@ repository target only after a schema-v2 `lane_closed` event declares `done`,
 `abandoned`, or `superseded`, and every current event for that target has passed
 its own hot window. The compacted envelope lists all consumed paths while its
 records retain first, last, and phase transitions and omit repeated renewals.
-Protocol-declared terminal state therefore remains the eligibility source; GC
-does not infer completion from GitHub.
+Its path includes a deterministic digest of the complete source-path set:
+identical retries remain idempotent, while later valid terminal replays produce
+a separate immutable generation rather than conflicting with or mutating the
+first archive. GC recognizes a terminal marker only when all required
+`lane_closed` v2 fields and their destructive-eligibility shapes conform,
+including `workspace`, `closed_by`, and `at`. Protocol-declared terminal state
+therefore remains the eligibility source; GC does not infer completion from
+GitHub.
 
 Normal status reads never scan `archive/`. Operators opt in with unscoped
 `status --include-archived`. The HTTP API accepts the mirrored archive path
