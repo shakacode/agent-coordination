@@ -344,6 +344,24 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     assert_includes event_error.message, event_path
   end
 
+  def test_gc_typed_claim_timestamps_exit_operational_with_path_and_no_backtrace
+    { "integer" => 12_345, "object" => { "unexpected" => "timestamp" } }.each do |name, value|
+      claim_path = "claims/shakacode/example/typed-#{name}.json"
+      write_state_record(
+        claim_path,
+        "schema_version" => 1, "repo" => "shakacode/example", "target" => "typed-#{name}",
+        "agent_id" => "worker", "status" => "released", "updated_at" => value
+      )
+
+      result = run_agent_coord("gc", "--dry-run", "--json")
+
+      assert_equal 2, result.status.exitstatus
+      assert_includes result.stderr, "gc record has invalid retention timestamp at #{claim_path}"
+      refute_includes result.stderr, "bin/agent-coord:"
+      FileUtils.rm(File.join(@state_root, claim_path))
+    end
+  end
+
   def test_gc_text_renders_delete_and_compaction_actions_without_assuming_archive_shape
     payload = {
       "mode" => "dry-run",

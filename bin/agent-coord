@@ -989,7 +989,7 @@ module AgentCoord
       raise OperationalError, "gc record is missing a retention timestamp#{location}" unless value
 
       Time.iso8601(value).utc
-    rescue ArgumentError
+    rescue ArgumentError, TypeError
       raise OperationalError, "gc record has invalid retention timestamp#{location}: #{value}"
     end
 
