@@ -2,6 +2,7 @@
 
 require "fileutils"
 require "json"
+require "json_schemer"
 require "minitest/autorun"
 require "open3"
 require "rbconfig"
@@ -1177,6 +1178,8 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     assert_equal "default", event.fetch("workspace")
     assert_equal({ "agent_id" => "worker-a", "machine" => "codex" }, event.fetch("closed_by"))
     assert_equal "merged", event.fetch("pr_state")
+    contract = JSONSchemer.schema(JSON.parse(File.read(File.join(ROOT, "contracts", "state-schema-v2.json"))))
+    assert_empty contract.validate(event).to_a
 
     batch = JSON.parse(File.read(File.join(@state_root, "batches", "batch-terminal.json")))
     assert_equal "completed", batch.fetch("status")
@@ -2384,6 +2387,90 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     refute persisted.fetch("lanes").fetch(0).key?("terminal")
   end
 
+  def test_lane_closed_event_replay_is_idempotent_and_conflicts_are_sticky
+    write_batch(
+      "batch-sticky-event",
+      lanes: [{ "name" => "code", "owner" => "worker-a", "targets" => ["3989"] }]
+    )
+    args = [
+      "record-event", "--batch-id", "batch-sticky-event", "--type", "lane_closed",
+      "--lane", "code", "--agent-id", "worker-a", "--repo", "shakacode/react_on_rails",
+      "--target", "3989", "--host", "codex", "--terminal", "done",
+      "--workspace", "team-a", "--pr-url", "https://github.com/shakacode/react_on_rails/pull/3989",
+      "--pr-state", "merged", "--evidence-url", "https://example.test/evidence/3989"
+    ]
+    first = run_agent_coord(*args)
+    assert_equal 0, first.status.exitstatus, first.stderr
+    event_glob = File.join(@state_root, "events", "batch-sticky-event", "*.json")
+    batch_path = File.join(@state_root, "batches", "batch-sticky-event.json")
+    original_batch = File.read(batch_path)
+
+    replay = run_agent_coord(*args)
+
+    assert_equal 0, replay.status.exitstatus, replay.stderr
+    assert_includes replay.stdout, "already closed"
+    assert_equal 1, Dir.glob(event_glob).length
+    assert_equal original_batch, File.read(batch_path)
+
+    conflicts = {
+      "--terminal" => "abandoned",
+      "--workspace" => "team-b",
+      "--host" => "claude-code",
+      "--pr-url" => "https://github.com/shakacode/react_on_rails/pull/3990",
+      "--pr-state" => "closed",
+      "--evidence-url" => "https://example.test/evidence/different"
+    }
+    conflicts.each do |flag, value|
+      conflicting = args.dup
+      conflicting[conflicting.index(flag) + 1] = value
+      conflict = run_agent_coord(*conflicting)
+      assert_equal 1, conflict.status.exitstatus
+      assert_includes conflict.stderr, "conflicting terminal closeout"
+      assert_equal 1, Dir.glob(event_glob).length
+      assert_equal original_batch, File.read(batch_path)
+    end
+  end
+
+  def test_terminal_release_replay_is_idempotent_and_keeps_first_closeout
+    write_batch(
+      "batch-sticky-release",
+      lanes: [{ "name" => "code", "owner" => "worker-a", "targets" => ["3991"] }]
+    )
+    claim = run_agent_coord(
+      "claim", "--agent-id", "worker-a", "--repo", "shakacode/react_on_rails",
+      "--target", "3991", "--batch-id", "batch-sticky-release", "--host", "codex"
+    )
+    assert_equal 0, claim.status.exitstatus, claim.stderr
+    args = [
+      "release", "--agent-id", "worker-a", "--repo", "shakacode/react_on_rails",
+      "--target", "3991", "--terminal", "done", "--workspace", "team-a",
+      "--pr-url", "https://github.com/shakacode/react_on_rails/pull/3991",
+      "--pr-state", "merged", "--evidence-url", "https://example.test/evidence/3991"
+    ]
+    first = run_agent_coord(*args)
+    assert_equal 0, first.status.exitstatus, first.stderr
+    event_glob = File.join(@state_root, "events", "batch-sticky-release", "*.json")
+    claim_path = File.join(@state_root, "claims", "shakacode", "react_on_rails", "3991.json")
+    batch_path = File.join(@state_root, "batches", "batch-sticky-release.json")
+    originals = [File.read(claim_path), File.read(batch_path)]
+
+    replay = run_agent_coord(*args)
+
+    assert_equal 0, replay.status.exitstatus, replay.stderr
+    assert_includes replay.stdout, "already closed"
+    assert_equal 1, Dir.glob(event_glob).length
+    assert_equal originals, [File.read(claim_path), File.read(batch_path)]
+
+    conflicting = args.dup
+    conflicting[conflicting.index("--evidence-url") + 1] = "https://example.test/evidence/replaced"
+    conflict = run_agent_coord(*conflicting)
+
+    assert_equal 1, conflict.status.exitstatus
+    assert_includes conflict.stderr, "conflicting terminal closeout"
+    assert_equal 1, Dir.glob(event_glob).length
+    assert_equal originals, [File.read(claim_path), File.read(batch_path)]
+  end
+
   def test_record_event_rejects_malformed_lane_names
     result = run_agent_coord(
       "record-event",
@@ -2417,6 +2504,34 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     )
     assert_equal 1, normal_release.status.exitstatus
     assert_includes normal_release.stderr, "--pr-state requires --terminal"
+  end
+
+  def test_lane_closed_rejects_schema_invalid_fields_before_writing
+    invalid_cases = [
+      ["workspace", ["--workspace", ""]],
+      ["pr-url", ["--pr-url", "not a uri"]],
+      ["evidence-url", ["--evidence-url", "://bad"]]
+    ]
+    invalid_cases.each_with_index do |(field, invalid_args), index|
+      batch_id = "batch-invalid-close-#{index}"
+      target = (4000 + index).to_s
+      write_batch(
+        batch_id,
+        lanes: [{ "name" => "code", "owner" => "worker-a", "targets" => [target] }]
+      )
+      batch_path = File.join(@state_root, "batches", "#{batch_id}.json")
+      original_batch = File.read(batch_path)
+      result = run_agent_coord(
+        "record-event", "--batch-id", batch_id, "--type", "lane_closed",
+        "--lane", "code", "--agent-id", "worker-a", "--repo", "shakacode/react_on_rails",
+        "--target", target, "--host", "codex", "--terminal", "done", *invalid_args
+      )
+
+      assert_equal 1, result.status.exitstatus
+      assert_includes result.stderr, "--#{field}"
+      refute_path_exists File.join(@state_root, "events", batch_id)
+      assert_equal original_batch, File.read(batch_path)
+    end
   end
 
   def test_record_event_accepts_registered_lane_name_characters
