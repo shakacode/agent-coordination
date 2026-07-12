@@ -237,6 +237,9 @@ class HttpBackendIntegrationTest < Minitest::Test
     )
     assert_equal 200, code
     assert_equal true, body.fetch("deleted")
+
+    assert_http_delete(full_token, active_path)
+    assert_http_delete(full_token, archive_denied_active_path)
   end
 
   def test_unknown_token_returns_machine_safe_auth_hint
@@ -261,6 +264,14 @@ class HttpBackendIntegrationTest < Minitest::Test
                                body: { "data" => { "schema_version" => 1, "agent_id" => "delete-test" } }
     )
     assert_equal 201, code, body.inspect
+  end
+
+  def assert_http_delete(token, path)
+    code, body = http_json(
+      "DELETE", state_path(path), token: token, headers: { "If-Match" => "1" }
+    )
+    assert_equal 200, code, body.inspect
+    assert_equal true, body.fetch("deleted")
   end
 
   def assert_scoped_write(scoped_token, allowed_path)

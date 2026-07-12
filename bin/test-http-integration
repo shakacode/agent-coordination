@@ -128,5 +128,5 @@ AGENT_COORD_API_URL=http://127.0.0.1:8787 \
   MIRRORED_CLAIM_PREFIX="$MIRRORED_CLAIM_PREFIX" \
   SCOPED_CLAIM_PREFIX="$SCOPED_CLAIM_PREFIX" \
   SCOPED_SECONDARY_CLAIM_PREFIX="$SCOPED_SECONDARY_CLAIM_PREFIX" \
-  bundle exec ruby test/http_backend_integration_test.rb
+  bundle exec ruby test/http_backend_integration_test.rb "$@"
 echo INTEGRATION_OK
