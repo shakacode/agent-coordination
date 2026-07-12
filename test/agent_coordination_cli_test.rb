@@ -2568,6 +2568,35 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     assert_equal authoritative_batch, File.read(batch_path)
   end
 
+  def test_lane_closed_retry_reports_batch_reconciliation_from_seeded_event
+    write_batch("batch-seeded-event", lanes: [{ "name" => "code", "owner" => "worker-a", "targets" => ["4014"] }])
+    event_id = "lane_closed-#{Digest::SHA256.hexdigest('code')[0, 16]}"
+    event_dir = File.join(@state_root, "events", "batch-seeded-event")
+    FileUtils.mkdir_p(event_dir)
+    event = {
+      "schema_version" => 2, "event_id" => event_id, "batch_id" => "batch-seeded-event",
+      "type" => "lane_closed", "lane" => "code", "agent_id" => "worker-a",
+      "repo" => "shakacode/react_on_rails", "target" => "4014", "terminal" => "done",
+      "workspace" => "default", "closed_by" => { "agent_id" => "worker-a", "machine" => "codex" },
+      "at" => Time.now.utc.iso8601
+    }
+    File.write(File.join(event_dir, "#{event_id}.json"), JSON.pretty_generate(event))
+
+    result = run_agent_coord(
+      "record-event", "--batch-id", "batch-seeded-event", "--type", "lane_closed", "--lane", "code",
+      "--agent-id", "worker-a", "--repo", "shakacode/react_on_rails", "--target", "4014",
+      "--host", "codex", "--terminal", "done"
+    )
+
+    assert_equal 0, result.status.exitstatus, result.stderr
+    assert_includes result.stdout, "reconciled terminal closeout"
+    refute_includes result.stdout, "already closed"
+    assert_equal 1, Dir.glob(File.join(event_dir, "*.json")).length
+    batch = JSON.parse(File.read(File.join(@state_root, "batches", "batch-seeded-event.json")))
+    assert_equal "completed", batch.fetch("status")
+    assert_equal "done", batch.fetch("lanes").fetch(0).fetch("terminal")
+  end
+
   def test_concurrent_identical_terminal_releases_converge_same_claim
     write_batch("batch-same-claim", lanes: [{ "name" => "code", "owner" => "worker-a", "targets" => ["4013"] }])
     claim = run_agent_coord("claim", "--agent-id", "worker-a", "--repo", "shakacode/react_on_rails",

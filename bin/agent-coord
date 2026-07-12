@@ -1159,6 +1159,8 @@ module AgentCoord
       batch_changed = complete_terminal_batch(store, authoritative, now)
       if created
         @stdout.puts "recorded event #{event_options[:batch_id]} #{authoritative.fetch('event_id')}" if output
+      elsif batch_changed && output
+        @stdout.puts "reconciled terminal closeout for #{event_options[:repo]}##{event_options[:target]}"
       elsif output
         @stdout.puts "lane already closed for #{event_options[:repo]}##{event_options[:target]}"
       end
