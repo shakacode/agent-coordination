@@ -865,6 +865,7 @@ module AgentCoord
       return ordered if ordered.length <= 2
 
       keep = [ordered.first, ordered.last]
+      keep.concat(ordered.select { |entry| gc_terminal_event?(entry.data) })
       previous_phase = nil
       ordered.each do |entry|
         phase = entry.data["phase"]

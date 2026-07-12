@@ -41,7 +41,8 @@ Such orphan groups may lack repository and/or target metadata: batch, lane, and
 available provenance form a deterministic safe identity, preventing simulation
 orphans from leaking while leaving non-synthetic or unaged orphans untouched.
 The compacted envelope lists all consumed paths while its records retain first,
-last, and phase transitions and omit repeated renewals.
+last, every valid terminal event, and phase transitions and omit repeated
+renewals.
 Its path includes deterministic digests of lane/provenance identity plus the
 complete source paths and recursively key-sorted JSON content: identical retries
 remain idempotent, while changed content at a stable source path or later valid
@@ -59,9 +60,12 @@ grammar and exposes compare-and-swap DELETE so local and HTTP execution share
 the same semantics. Active deletion requires write coverage for both the active
 path and its archive mirror, while archive deletion requires archive write
 coverage. This derives GC authority from existing prefix lists without a token
-schema migration. Both the CLI preflight and HTTP Worker cap serialized
-archive envelopes at 1 MiB; an oversized plan fails before GC writes anything,
-while active HTTP records keep their existing 256 KiB limit.
+schema migration. Dry-run and execute run the same CLI size preflight, and the
+HTTP Worker enforces the same 1 MiB archive-envelope cap; an oversized plan
+fails before GC writes anything, while active HTTP records keep their existing
+256 KiB limit. Malformed or forward-incompatible records deliberately fail the
+whole plan with their source path; operators repair the record or upgrade the
+consumer before retrying.
 Active state paths remain capped at 512 UTF-8 bytes. Archive paths permit 520
 bytes only for the `archive/` prefix over a suffix that independently passes the
 512-byte active-path bound.
@@ -73,6 +77,8 @@ bytes only for the `archive/` prefix over a suffix that independently passes the
 - Event history remains replayable as a compacted archive envelope.
 - Interrupted multi-source deletion can leave a safe expiring duplicate
   envelope; retry remains copy-before-delete and fail-fast.
+- Source mutation after archive creation can similarly leave a stale expiring
+  envelope, while source CAS prevents deletion of the changed live record.
 - Synthetic simulation records are identifiable without name heuristics.
 - Archive readers must consume the published archive envelope v1 contract.
 - Scheduled Worker triggers remain a separate operational follow-up; this ADR

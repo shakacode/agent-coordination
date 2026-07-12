@@ -405,11 +405,14 @@ recursively key-sorted JSON content, so an identical retry reuses the same
 destination while changed content at a stable path creates a new generation
 without rewriting the first. The envelope lists every consumed
 source path but retains only the first
-event, last event, and actual phase transitions; repeated same-phase renewals
-are intentionally dropped.
+event, last event, every valid terminal event, and actual phase transitions;
+repeated same-phase renewals are intentionally dropped.
 If a multi-source delete stops after some hot events are removed, retry can
 leave the immutable archive envelope as a safe expiring duplicate;
 copy-before-delete still guarantees retained history is not lost.
+Likewise, ordinary source mutation after the archive write but before the CAS
+delete can leave a stale expiring envelope, but CAS prevents deletion of the
+new live payload.
 Expired archive envelopes are deleted with the same compare-and-swap guard.
 
 | Record state | Hot retention | Archive retention | Result |
@@ -650,9 +653,12 @@ Claims and heartbeats may carry `synthetic: true` and a `synthetic_kind` such as
 apply the shorter synthetic hot-retention window without guessing from names.
 
 Archive envelopes have a shared 1 MiB serialized-data cap in the CLI and HTTP
-Worker. Execute mode preflights every planned archive/compaction envelope and
-performs no writes if any would exceed the cap; split or reduce the source
-history before retrying. Active HTTP records retain their separate 256 KiB cap.
+Worker. Dry-run and execute identically preflight every planned
+archive/compaction envelope; execute performs no writes if any would exceed the
+cap. Split or reduce the source history before retrying. Malformed or
+forward-incompatible records intentionally fail the whole plan with a
+path-specific operational error; repair the record or upgrade the consumer,
+then retry. Active HTTP records retain their separate 256 KiB cap.
 
 ## Archive Schema
 

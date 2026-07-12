@@ -506,6 +506,39 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     assert_path_exists File.join(@state_root, "events/lane-scoped/lane-b-phase.json")
   end
 
+  def test_gc_compaction_retains_interior_terminal_before_later_nonterminal_event
+    now = Time.utc(2026, 7, 12, 12, 0, 0)
+    old = now - (8 * 86_400)
+    records = {
+      "first" => {
+        "schema_version" => 1, "event_id" => "first", "batch_id" => "interior-terminal",
+        "type" => "phase", "lane" => "code", "repo" => "shakacode/example", "target" => "interior",
+        "phase" => "implementation", "at" => old.iso8601
+      },
+      "lane_closed" => valid_gc_lane_closed(
+        event_id: "lane_closed", batch_id: "interior-terminal", target: "interior", at: (old + 1).iso8601,
+        extra: { "lane" => "code", "evidence_url" => "https://example.test/evidence" }
+      ),
+      "later" => {
+        "schema_version" => 1, "event_id" => "later", "batch_id" => "interior-terminal",
+        "type" => "milestone", "lane" => "code", "repo" => "shakacode/example", "target" => "interior",
+        "message" => "late delivery", "at" => (old + 2).iso8601
+      }
+    }
+    records.each { |event_id, data| write_state_record("events/interior-terminal/#{event_id}.json", data) }
+
+    stdout = StringIO.new
+    runner = AgentCoord::Runner.new([], stdout: stdout, clock: FixedClock.new(now))
+    assert_equal 0, runner.send(:gc, state_root: @state_root, dry_run: false, execute: true, json: true)
+
+    action = JSON.parse(stdout.string).fetch("actions").find { |row| row["action"] == "compact" }
+    compacted = JSON.parse(File.read(File.join(@state_root, action.fetch("archive_path"))))
+    assert_equal(%w[first lane_closed later], compacted.fetch("records").map { |record| record["event_id"] })
+    terminal = compacted.fetch("records").find { |record| record["type"] == "lane_closed" }
+    assert_equal "https://example.test/evidence", terminal.fetch("evidence_url")
+    action.fetch("source_paths").each { |path| refute_path_exists File.join(@state_root, path) }
+  end
+
   def test_gc_joins_lane_less_handoff_to_the_only_terminal_lane
     write_batch(
       "batch-handoff-gc",
