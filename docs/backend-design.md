@@ -375,6 +375,11 @@ The current user-facing path is the Worker/D1 HTTP state API:
    <read-prefix>` for HTTP tokens scoped outside `claims`.
 5. Keep all active work for a repo on the same backend; do not dual-write claims.
 
+For a database replacement, follow the complete
+[backend rotation runbook](runbooks/rotate-backend.md). It includes migration,
+Worker rebinding, per-machine token rotation, consumer restart, and
+`doctor --deep` verification.
+
 `LocalStore` remains the deterministic test and smoke-check backend.
 `GitHubStore` remains available as a legacy/debug fallback, but new team/client
 setup should not start there.
