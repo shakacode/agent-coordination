@@ -2,14 +2,27 @@
 
 require "fileutils"
 require "json"
+require "json_schemer"
 require "minitest/autorun"
 require "open3"
 require "rbconfig"
 require "shellwords"
 require "stringio"
 require "tmpdir"
+require "timeout"
 
 class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
+  THREAD_TIMEOUT = 5
+
+  def self.wait_for_condition!(condition, mutex, label)
+    deadline = Process.clock_gettime(Process::CLOCK_MONOTONIC) + THREAD_TIMEOUT
+    until yield
+      remaining = deadline - Process.clock_gettime(Process::CLOCK_MONOTONIC)
+      raise Timeout::Error, "timed out waiting for #{label}" unless remaining.positive?
+
+      condition.wait(mutex, remaining)
+    end
+  end
   ROOT = File.expand_path("..", __dir__)
   BIN = File.join(ROOT, "bin", "agent-coord")
   HTTP_INTEGRATION_BIN = File.join(ROOT, "bin", "test-http-integration")
@@ -213,6 +226,7 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     payload = JSON.parse(result.stdout)
     assert_match(/\A\d+\.\d+\.\d+\z/, payload.fetch("version"))
     assert_equal 1, payload.fetch("schema_version")
+    assert_equal 2, payload.fetch("lane_closed_schema_version")
     assert_nil payload.fetch("default_backend")
     assert_equal "state", payload.fetch("default_ref")
   end
@@ -524,9 +538,17 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
   end
 
   def test_non_doctor_deep_guard_ignores_deep_as_option_value
-    result = run_agent_coord("status", "--branch", "--deep", "--json")
-
-    assert_equal 0, result.status.exitstatus, result.stderr
+    commands = [
+      ["status", "--branch", "--deep", "--json"],
+      ["release", "--agent-id", "a", "--repo", "o/r", "--target", "1", "--terminal", "--deep"],
+      ["release", "--agent-id", "a", "--repo", "o/r", "--target", "1", "--pr-state", "--deep"],
+      ["release", "--agent-id", "a", "--repo", "o/r", "--target", "1", "--evidence-url", "--deep"],
+      ["release", "--agent-id", "a", "--repo", "o/r", "--target", "1", "--workspace", "--deep"]
+    ]
+    commands.each do |args|
+      result = run_agent_coord(*args)
+      refute_includes result.stderr, "--deep is only valid for doctor"
+    end
   end
 
   def test_bootstrap_installs_command_and_removes_generated_underscore_alias
@@ -715,6 +737,66 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     assert_includes readme, "Keep this public repository code-only"
     refute_includes readme, "agent_coord --help"
     refute_includes readme, "git clone --branch state --single-branch"
+  end
+
+  def test_local_store_concurrent_readers_never_observe_partial_json
+    store = AgentCoord::LocalStore.new(@state_root)
+    path = "batches/atomic.json"
+    store.write_json(path, { "sequence" => 0, "payload" => "x" * 100_000 }, message: "seed", create: true)
+    ready = Queue.new
+    start = Queue.new
+    observed = Queue.new
+    acknowledged = Queue.new
+    writer = Thread.new do
+      4.times { ready.pop }
+      4.times { start << true }
+      4.times { acknowledged.pop }
+      50.times do |sequence|
+        current = store.read_json(path)
+        store.write_json(path, { "sequence" => sequence, "payload" => "x" * 100_000 },
+                         message: "update", sha: current.sha)
+      end
+    end
+    readers = 4.times.map do
+      Thread.new do
+        ready << true
+        start.pop
+        initial = store.read_json(path).data.fetch("sequence")
+        observed << initial
+        acknowledged << true
+        199.times { store.read_json(path) }
+      end
+    end
+    thread_values!([writer] + readers, "atomic LocalStore readers/writer")
+
+    final = store.read_json(path).data
+    assert_equal [0, 0, 0, 0], 4.times.map { observed.pop }.sort
+    assert_equal 49, final.fetch("sequence")
+    assert_equal 100_000, final.fetch("payload").length
+  end
+
+  def test_local_store_fsyncs_leaf_directory_after_atomic_rename
+    store = ObservedDirectoryFsyncLocalStore.new(@state_root)
+    store.write_json("batches/durable.json", { "ok" => true }, message: "durable", create: true)
+
+    assert store.target_existed_during_fsync
+    assert_equal [File.join(@state_root, "batches")], store.fsynced_directories
+  end
+
+  def test_local_store_tolerates_known_unsupported_directory_fsync
+    store = UnsupportedDirectoryFsyncLocalStore.new(@state_root)
+
+    store.write_json("batches/unsupported.json", { "ok" => true }, message: "durable", create: true)
+
+    assert store.read_json("batches/unsupported.json").data.fetch("ok")
+  end
+
+  def test_local_store_propagates_unexpected_directory_fsync_errors
+    store = FailingDirectoryFsyncLocalStore.new(@state_root)
+
+    assert_raises(Errno::EACCES) do
+      store.write_json("batches/failing.json", { "ok" => true }, message: "durable", create: true)
+    end
   end
 
   def test_operational_holder_heartbeat_read_failure_is_not_treated_as_missing
@@ -1123,6 +1205,207 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     assert_equal "released", released_payload.fetch("status")
     assert_equal "https://github.com/shakacode/react_on_rails/pull/3973", released_payload.fetch("pr_url")
     assert_equal "merged", released_payload.fetch("phase")
+  end
+
+  def test_terminal_release_closes_lane_and_completes_single_lane_batch
+    write_batch(
+      "batch-terminal",
+      lanes: [{ "name" => "code", "owner" => "worker-a", "targets" => ["3980"] }]
+    )
+    claim = run_agent_coord(
+      "claim",
+      "--agent-id", "worker-a",
+      "--repo", "shakacode/react_on_rails",
+      "--target", "3980",
+      "--batch-id", "batch-terminal",
+      "--branch", "jg-codex/terminal",
+      "--host", "codex"
+    )
+    assert_equal 0, claim.status.exitstatus, claim.stderr
+    heartbeat = run_agent_coord(
+      "heartbeat", "--agent-id", "worker-a", "--repo", "shakacode/react_on_rails",
+      "--target", "3980", "--batch-id", "batch-terminal", "--status", "in_progress"
+    )
+    assert_equal 0, heartbeat.status.exitstatus, heartbeat.stderr
+
+    release = run_agent_coord(
+      "release",
+      "--agent-id", "worker-a",
+      "--repo", "shakacode/react_on_rails",
+      "--target", "3980",
+      "--terminal", "done",
+      "--pr-url", "HTTPS://github.com/shakacode/react_on_rails/pull/3980",
+      "--pr-state", "merged", "--evidence-url", "HtTpS://example.test/evidence/3980"
+    )
+
+    assert_equal 0, release.status.exitstatus, release.stderr
+    assert_terminal_release_state
+  end
+
+  def assert_terminal_release_state
+    claim_payload = JSON.parse(
+      File.read(File.join(@state_root, "claims", "shakacode", "react_on_rails", "3980.json"))
+    )
+    assert_equal "released", claim_payload.fetch("status")
+    assert_equal "done", claim_payload.fetch("terminal")
+
+    event_path = Dir.glob(File.join(@state_root, "events", "batch-terminal", "*.json")).fetch(0)
+    event = JSON.parse(File.read(event_path))
+    assert_equal 2, event.fetch("schema_version")
+    assert_equal "lane_closed", event.fetch("type")
+    assert_equal "code", event.fetch("lane")
+    assert_equal "done", event.fetch("terminal")
+    assert_equal "default", event.fetch("workspace")
+    assert_equal({ "agent_id" => "worker-a", "machine" => "codex" }, event.fetch("closed_by"))
+    assert_equal "merged", event.fetch("pr_state")
+    assert_mixed_case_terminal_urls(event)
+    contract = JSONSchemer.schema(JSON.parse(File.read(File.join(ROOT, "contracts", "state-schema-v2.json"))))
+    assert_empty contract.validate(event).to_a
+
+    batch = JSON.parse(File.read(File.join(@state_root, "batches", "batch-terminal.json")))
+    assert_equal "completed", batch.fetch("status")
+    assert_equal "done", batch.fetch("lanes").fetch(0).fetch("terminal")
+
+    status = run_agent_coord("status", "--batch-id", "batch-terminal", "--json")
+    assert_equal 0, status.status.exitstatus, status.stderr
+    status_lane = JSON.parse(status.stdout).fetch("batches").fetch(0).fetch("lanes").fetch(0)
+    assert_equal "done", status_lane.fetch("status"), "declared terminal state must beat stale heartbeat state"
+    assert_equal "done", status_lane.fetch("terminal")
+  end
+
+  def assert_mixed_case_terminal_urls(event)
+    assert_equal "HTTPS://github.com/shakacode/react_on_rails/pull/3980", event.fetch("pr_url")
+    assert_equal "HtTpS://example.test/evidence/3980", event.fetch("evidence_url")
+  end
+
+  def test_terminal_release_without_registered_batch_does_not_release_claim
+    claim = run_agent_coord(
+      "claim", "--agent-id", "worker-a", "--repo", "shakacode/react_on_rails", "--target", "3983"
+    )
+    assert_equal 0, claim.status.exitstatus, claim.stderr
+
+    release = run_agent_coord(
+      "release", "--agent-id", "worker-a", "--repo", "shakacode/react_on_rails",
+      "--target", "3983", "--terminal", "done"
+    )
+
+    assert_equal 1, release.status.exitstatus
+    assert_includes release.stderr, "terminal release requires a claim with batch_id"
+    claim_path = File.join(@state_root, "claims", "shakacode", "react_on_rails", "3983.json")
+    assert_equal "active", JSON.parse(File.read(claim_path)).fetch("status")
+    refute_path_exists File.join(@state_root, "events")
+  end
+
+  def test_terminal_release_closes_legacy_id_only_lane
+    write_batch(
+      "batch-legacy-id",
+      lanes: [{ "id" => "legacy", "owner" => "worker-a", "targets" => ["3985"] }]
+    )
+    claim = run_agent_coord(
+      "claim", "--agent-id", "worker-a", "--repo", "shakacode/react_on_rails",
+      "--target", "3985", "--batch-id", "batch-legacy-id"
+    )
+    assert_equal 0, claim.status.exitstatus, claim.stderr
+
+    release = run_agent_coord(
+      "release", "--agent-id", "worker-a", "--repo", "shakacode/react_on_rails",
+      "--target", "3985", "--terminal", "done"
+    )
+
+    assert_equal 0, release.status.exitstatus, release.stderr
+    event_path = Dir.glob(File.join(@state_root, "events", "batch-legacy-id", "*.json")).fetch(0)
+    assert_equal "legacy", JSON.parse(File.read(event_path)).fetch("lane")
+  end
+
+  def test_concurrent_terminal_releases_reconcile_both_batch_lanes
+    write_batch(
+      "batch-concurrent-close",
+      lanes: [
+        { "name" => "one", "owner" => "worker-a", "targets" => ["3987"] },
+        { "name" => "two", "owner" => "worker-b", "targets" => ["3988"] }
+      ]
+    )
+    %w[worker-a worker-b].zip(%w[3987 3988]).each do |agent_id, target|
+      claim = run_agent_coord(
+        "claim", "--agent-id", agent_id, "--repo", "shakacode/react_on_rails",
+        "--target", target, "--batch-id", "batch-concurrent-close"
+      )
+      assert_equal 0, claim.status.exitstatus, claim.stderr
+    end
+
+    store = ConcurrentBatchStore.new(@state_root, "batch-concurrent-close")
+    errors = []
+    threads = %w[worker-a worker-b].zip(%w[3987 3988]).map do |agent_id, target|
+      Thread.new do
+        runner = StoreInjectedRunner.new(
+          ["release", "--agent-id", agent_id, "--repo", "shakacode/react_on_rails",
+           "--target", target, "--terminal", "done"],
+          store: store
+        )
+        runner.run
+      rescue AgentCoord::Error => e
+        errors << e
+      end
+    end
+    thread_values!(threads, "concurrent batch terminal releases")
+
+    assert_empty errors
+    batch = JSON.parse(File.read(File.join(@state_root, "batches", "batch-concurrent-close.json")))
+    assert_equal "completed", batch.fetch("status")
+    terminal_states = batch.fetch("lanes").map { |lane| lane.fetch("terminal") }
+    assert_equal %w[done done], terminal_states
+  end
+
+  def test_concurrent_identical_lane_closed_events_share_one_atomic_reservation
+    results, errors, event, batch = run_concurrent_terminal_events(%w[done done], "identical")
+
+    assert_empty errors
+    assert_equal [0, 0], results.sort
+    expected_event_id = "lane_closed-#{Digest::SHA256.hexdigest('code')[0, 16]}"
+    assert_equal expected_event_id, event.fetch("event_id")
+    assert_equal "done", event.fetch("terminal")
+    assert_equal "done", batch.fetch("lanes").fetch(0).fetch("terminal")
+  end
+
+  def test_concurrent_conflicting_lane_closed_events_keep_only_the_winner
+    results, errors, event, batch = run_concurrent_terminal_events(%w[done abandoned], "conflicting")
+
+    assert_equal [0], results
+    assert_equal 1, errors.length
+    assert_includes errors.fetch(0).message, "conflicting terminal closeout"
+    assert_equal event.fetch("terminal"), batch.fetch("lanes").fetch(0).fetch("terminal")
+  end
+
+  def run_concurrent_terminal_events(terminals, suffix)
+    batch_id = "batch-concurrent-same-lane-#{suffix}"
+    target = suffix == "identical" ? "4010" : "4011"
+    write_batch(
+      batch_id,
+      lanes: [{ "name" => "code", "owner" => "worker-a", "targets" => [target] }]
+    )
+    store = ConcurrentTerminalEventStore.new(@state_root, batch_id)
+    results = []
+    errors = []
+    threads = terminals.map do |terminal|
+      Thread.new do
+        runner = StoreInjectedRunner.new(
+          ["record-event", "--batch-id", batch_id, "--type", "lane_closed", "--lane", "code",
+           "--agent-id", "worker-a", "--repo", "shakacode/react_on_rails", "--target", target,
+           "--host", "codex", "--terminal", terminal],
+          store: store
+        )
+        results << runner.run
+      rescue AgentCoord::Error => e
+        errors << e
+      end
+    end
+    thread_values!(threads, "concurrent lane_closed events")
+    event_paths = Dir.glob(File.join(@state_root, "events", batch_id, "*.json"))
+    assert_equal 1, event_paths.length
+    event = JSON.parse(File.read(event_paths.fetch(0)))
+    assert_equal event.fetch("event_id"), File.basename(event_paths.fetch(0), ".json")
+    batch = JSON.parse(File.read(File.join(@state_root, "batches", "#{batch_id}.json")))
+    [results, errors, event, batch]
   end
 
   def test_release_handoff_preserves_resume_metadata_and_records_event
@@ -2181,6 +2464,247 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     assert_equal "running tests", status_event.fetch("message")
   end
 
+  def test_lane_closed_events_complete_batch_only_after_every_lane_is_terminal
+    write_batch(
+      "batch-close-events",
+      lanes: [
+        { "name" => "code", "owner" => "worker-a", "targets" => ["3981"] },
+        { "name" => "docs", "owner" => "worker-b", "targets" => ["3982"] }
+      ]
+    )
+
+    first = run_agent_coord(
+      "record-event", "--batch-id", "batch-close-events", "--type", "lane_closed",
+      "--lane", "code", "--agent-id", "worker-a", "--repo", "shakacode/react_on_rails",
+      "--target", "3981", "--host", "codex", "--terminal", "done"
+    )
+    assert_equal 0, first.status.exitstatus, first.stderr
+    batch_path = File.join(@state_root, "batches", "batch-close-events.json")
+    first_batch = JSON.parse(File.read(batch_path))
+    refute first_batch.key?("status")
+    assert_equal "done", first_batch.fetch("lanes").fetch(0).fetch("terminal")
+
+    second = run_agent_coord(
+      "record-event", "--batch-id", "batch-close-events", "--type", "lane_closed",
+      "--lane", "docs", "--agent-id", "worker-b", "--repo", "shakacode/react_on_rails",
+      "--target", "3982", "--host", "claude-code", "--terminal", "abandoned"
+    )
+    assert_equal 0, second.status.exitstatus, second.stderr
+    completed = JSON.parse(File.read(batch_path))
+    assert_equal "completed", completed.fetch("status")
+    terminal_states = completed.fetch("lanes").map { |lane| lane.fetch("terminal") }
+    assert_equal %w[done abandoned], terminal_states
+  end
+
+  def test_lane_closed_event_rejects_identity_that_does_not_match_registered_lane
+    write_batch(
+      "batch-identity",
+      lanes: [{ "name" => "code", "owner" => "worker-a", "targets" => ["3984"] }]
+    )
+    batch_path = File.join(@state_root, "batches", "batch-identity.json")
+    batch = JSON.parse(File.read(batch_path)).merge("repo" => "shakacode/react_on_rails")
+    File.write(batch_path, JSON.pretty_generate(batch))
+
+    mismatches = [
+      ["worker-a", "other/repo", "3984", "repo does not match"],
+      ["worker-a", "shakacode/react_on_rails", "unrelated", "target does not match"],
+      ["intruder", "shakacode/react_on_rails", "3984", "agent does not match"]
+    ]
+    mismatches.each do |agent_id, repo, target, message|
+      result = run_agent_coord(
+        "record-event", "--batch-id", "batch-identity", "--type", "lane_closed",
+        "--lane", "code", "--agent-id", agent_id, "--repo", repo,
+        "--target", target, "--terminal", "done"
+      )
+      assert_equal 1, result.status.exitstatus
+      assert_includes result.stderr, message
+    end
+
+    refute_path_exists File.join(@state_root, "events", "batch-identity")
+    persisted = JSON.parse(File.read(batch_path))
+    refute persisted.fetch("lanes").fetch(0).key?("terminal")
+  end
+
+  def test_lane_closed_event_replay_is_idempotent_and_conflicts_are_sticky
+    write_batch(
+      "batch-sticky-event",
+      lanes: [{ "name" => "code", "owner" => "worker-a", "targets" => ["3989"] }]
+    )
+    args = [
+      "record-event", "--batch-id", "batch-sticky-event", "--type", "lane_closed",
+      "--lane", "code", "--agent-id", "worker-a", "--repo", "shakacode/react_on_rails",
+      "--target", "3989", "--host", "codex", "--terminal", "done",
+      "--workspace", "team-a", "--pr-url", "https://github.com/shakacode/react_on_rails/pull/3989",
+      "--pr-state", "merged", "--evidence-url", "https://example.test/evidence/3989"
+    ]
+    first = run_agent_coord(*args)
+    assert_equal 0, first.status.exitstatus, first.stderr
+    event_glob = File.join(@state_root, "events", "batch-sticky-event", "*.json")
+    batch_path = File.join(@state_root, "batches", "batch-sticky-event.json")
+    original_batch = File.read(batch_path)
+
+    replay = run_agent_coord(*args)
+
+    assert_equal 0, replay.status.exitstatus, replay.stderr
+    assert_includes replay.stdout, "already closed"
+    assert_equal 1, Dir.glob(event_glob).length
+    assert_equal original_batch, File.read(batch_path)
+
+    conflicts = {
+      "--terminal" => "abandoned",
+      "--workspace" => "team-b",
+      "--host" => "claude-code",
+      "--pr-url" => "https://github.com/shakacode/react_on_rails/pull/3990",
+      "--pr-state" => "closed",
+      "--evidence-url" => "https://example.test/evidence/different"
+    }
+    conflicts.each do |flag, value|
+      conflicting = args.dup
+      conflicting[conflicting.index(flag) + 1] = value
+      conflict = run_agent_coord(*conflicting)
+      assert_equal 1, conflict.status.exitstatus
+      assert_includes conflict.stderr, "conflicting terminal closeout"
+      assert_equal 1, Dir.glob(event_glob).length
+      assert_equal original_batch, File.read(batch_path)
+    end
+  end
+
+  def test_terminal_release_replay_is_idempotent_and_keeps_first_closeout
+    write_batch(
+      "batch-sticky-release",
+      lanes: [{ "name" => "code", "owner" => "worker-a", "targets" => ["3991"] }]
+    )
+    claim = run_agent_coord(
+      "claim", "--agent-id", "worker-a", "--repo", "shakacode/react_on_rails",
+      "--target", "3991", "--batch-id", "batch-sticky-release", "--host", "codex"
+    )
+    assert_equal 0, claim.status.exitstatus, claim.stderr
+    args = [
+      "release", "--agent-id", "worker-a", "--repo", "shakacode/react_on_rails",
+      "--target", "3991", "--terminal", "done", "--workspace", "team-a",
+      "--pr-url", "https://github.com/shakacode/react_on_rails/pull/3991",
+      "--pr-state", "merged", "--evidence-url", "https://example.test/evidence/3991"
+    ]
+    first = run_agent_coord(*args)
+    assert_equal 0, first.status.exitstatus, first.stderr
+    event_glob = File.join(@state_root, "events", "batch-sticky-release", "*.json")
+    claim_path = File.join(@state_root, "claims", "shakacode", "react_on_rails", "3991.json")
+    batch_path = File.join(@state_root, "batches", "batch-sticky-release.json")
+    originals = [File.read(claim_path), File.read(batch_path)]
+
+    replay = run_agent_coord(*args)
+
+    assert_equal 0, replay.status.exitstatus, replay.stderr
+    assert_includes replay.stdout, "already closed"
+    assert_equal 1, Dir.glob(event_glob).length
+    assert_equal originals, [File.read(claim_path), File.read(batch_path)]
+
+    conflicting = args.dup
+    conflicting[conflicting.index("--evidence-url") + 1] = "https://example.test/evidence/replaced"
+    conflict = run_agent_coord(*conflicting)
+
+    assert_equal 1, conflict.status.exitstatus
+    assert_includes conflict.stderr, "conflicting terminal closeout"
+    assert_equal 1, Dir.glob(event_glob).length
+    assert_equal originals, [File.read(claim_path), File.read(batch_path)]
+  end
+
+  def test_terminal_release_reconciles_claim_from_existing_authoritative_event
+    write_batch(
+      "batch-partial-release",
+      lanes: [{ "name" => "code", "owner" => "worker-a", "targets" => ["4012"] }]
+    )
+    claim = run_agent_coord(
+      "claim", "--agent-id", "worker-a", "--repo", "shakacode/react_on_rails",
+      "--target", "4012", "--batch-id", "batch-partial-release", "--host", "codex"
+    )
+    assert_equal 0, claim.status.exitstatus, claim.stderr
+    close = run_agent_coord(
+      "record-event", "--batch-id", "batch-partial-release", "--type", "lane_closed",
+      "--lane", "code", "--agent-id", "worker-a", "--repo", "shakacode/react_on_rails",
+      "--target", "4012", "--host", "codex", "--terminal", "done",
+      "--pr-url", "https://github.com/shakacode/react_on_rails/pull/4012", "--pr-state", "merged"
+    )
+    assert_equal 0, close.status.exitstatus, close.stderr
+    batch_path = File.join(@state_root, "batches", "batch-partial-release.json")
+    authoritative_batch = File.read(batch_path)
+
+    release = run_agent_coord(
+      "release", "--agent-id", "worker-a", "--repo", "shakacode/react_on_rails",
+      "--target", "4012", "--terminal", "done",
+      "--pr-url", "https://github.com/shakacode/react_on_rails/pull/4012", "--pr-state", "merged"
+    )
+
+    assert_equal 0, release.status.exitstatus, release.stderr
+    claim_path = File.join(@state_root, "claims", "shakacode", "react_on_rails", "4012.json")
+    claim_payload = JSON.parse(File.read(claim_path))
+    assert_equal "released", claim_payload.fetch("status")
+    assert_equal "done", claim_payload.fetch("terminal")
+    assert_equal "default", claim_payload.fetch("workspace")
+    assert_equal({ "agent_id" => "worker-a", "machine" => "codex" }, claim_payload.fetch("closed_by"))
+    assert_equal 1, Dir.glob(File.join(@state_root, "events", "batch-partial-release", "*.json")).length
+    assert_equal authoritative_batch, File.read(batch_path)
+  end
+
+  def test_lane_closed_retry_reports_batch_reconciliation_from_seeded_event
+    write_batch("batch-seeded-event", lanes: [{ "name" => "code", "owner" => "worker-a", "targets" => ["4014"] }])
+    event_id = "lane_closed-#{Digest::SHA256.hexdigest('code')[0, 16]}"
+    event_dir = File.join(@state_root, "events", "batch-seeded-event")
+    FileUtils.mkdir_p(event_dir)
+    event = {
+      "schema_version" => 2, "event_id" => event_id, "batch_id" => "batch-seeded-event",
+      "type" => "lane_closed", "lane" => "code", "agent_id" => "worker-a",
+      "repo" => "shakacode/react_on_rails", "target" => "4014", "terminal" => "done",
+      "workspace" => "default", "closed_by" => { "agent_id" => "worker-a", "machine" => "codex" },
+      "at" => Time.now.utc.iso8601
+    }
+    File.write(File.join(event_dir, "#{event_id}.json"), JSON.pretty_generate(event))
+
+    result = run_agent_coord(
+      "record-event", "--batch-id", "batch-seeded-event", "--type", "lane_closed", "--lane", "code",
+      "--agent-id", "worker-a", "--repo", "shakacode/react_on_rails", "--target", "4014",
+      "--host", "codex", "--terminal", "done"
+    )
+
+    assert_equal 0, result.status.exitstatus, result.stderr
+    assert_includes result.stdout, "reconciled terminal closeout"
+    refute_includes result.stdout, "already closed"
+    assert_equal 1, Dir.glob(File.join(event_dir, "*.json")).length
+    batch = JSON.parse(File.read(File.join(@state_root, "batches", "batch-seeded-event.json")))
+    assert_equal "completed", batch.fetch("status")
+    assert_equal "done", batch.fetch("lanes").fetch(0).fetch("terminal")
+  end
+
+  def test_concurrent_identical_terminal_releases_converge_same_claim
+    write_batch("batch-same-claim", lanes: [{ "name" => "code", "owner" => "worker-a", "targets" => ["4013"] }])
+    claim = run_agent_coord("claim", "--agent-id", "worker-a", "--repo", "shakacode/react_on_rails",
+                            "--target", "4013", "--batch-id", "batch-same-claim", "--host", "codex")
+    assert_equal 0, claim.status.exitstatus, claim.stderr
+    store = ConcurrentClaimReleaseStore.new(@state_root, "shakacode/react_on_rails", "4013")
+    results = []
+    errors = []
+    threads = 2.times.map do
+      Thread.new do
+        runner = StoreInjectedRunner.new(
+          ["release", "--agent-id", "worker-a", "--repo", "shakacode/react_on_rails", "--target", "4013",
+           "--terminal", "done"], store: store
+        )
+        results << runner.run
+      rescue AgentCoord::Error => e
+        errors << e
+      end
+    end
+    thread_values!(threads, "concurrent same-claim releases")
+
+    assert_empty errors
+    assert_equal [0, 0], results.sort
+    assert_equal 1, Dir.glob(File.join(@state_root, "events", "batch-same-claim", "*.json")).length
+    claim_payload = JSON.parse(File.read(File.join(@state_root, "claims", "shakacode", "react_on_rails", "4013.json")))
+    assert_equal "released", claim_payload.fetch("status")
+    batch = JSON.parse(File.read(File.join(@state_root, "batches", "batch-same-claim.json")))
+    assert_equal "done", batch.fetch("lanes").fetch(0).fetch("terminal")
+  end
+
   def test_record_event_rejects_malformed_lane_names
     result = run_agent_coord(
       "record-event",
@@ -2192,6 +2716,59 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     assert_equal 1, result.status.exitstatus
     assert_includes result.stderr, "event lane docs:copy cannot contain ':'"
     refute_path_exists File.join(@state_root, "events", "batch-b")
+  end
+
+  def test_terminal_only_flags_are_rejected_outside_terminal_closeout
+    claim = run_agent_coord(
+      "claim", "--agent-id", "worker-a", "--repo", "shakacode/react_on_rails",
+      "--target", "3986", "--terminal", "done"
+    )
+    assert_equal 1, claim.status.exitstatus
+    assert_includes claim.stderr, "--terminal is only valid"
+
+    event = run_agent_coord(
+      "record-event", "--batch-id", "batch-b", "--type", "phase", "--terminal", "done"
+    )
+    assert_equal 1, event.status.exitstatus
+    assert_includes event.stderr, "terminal-only options require --type lane_closed"
+
+    normal_release = run_agent_coord(
+      "release", "--agent-id", "worker-a", "--repo", "shakacode/react_on_rails",
+      "--target", "3986", "--pr-state", "merged"
+    )
+    assert_equal 1, normal_release.status.exitstatus
+    assert_includes normal_release.stderr, "--pr-state requires --terminal"
+  end
+
+  def test_lane_closed_rejects_schema_invalid_fields_before_writing
+    invalid_cases = [
+      ["workspace", ["--workspace", ""]],
+      ["pr-url", ["--pr-url", "not a uri"]],
+      ["evidence-url", ["--evidence-url", "://bad"]],
+      ["pr-url", ["--pr-url", "javascript:alert(1)"]],
+      ["evidence-url", ["--evidence-url", "data:text/plain,bad"]]
+    ]
+    invalid_cases.each_with_index do |(field, invalid_args), index|
+      batch_id = "batch-invalid-close-#{index}"
+      target = (4000 + index).to_s
+      write_batch(
+        batch_id,
+        lanes: [{ "name" => "code", "owner" => "worker-a", "targets" => [target] }]
+      )
+      batch_path = File.join(@state_root, "batches", "#{batch_id}.json")
+      original_batch = File.read(batch_path)
+      result = run_agent_coord(
+        "record-event", "--batch-id", batch_id, "--type", "lane_closed",
+        "--lane", "code", "--agent-id", "worker-a", "--repo", "shakacode/react_on_rails",
+        "--target", target, "--host", "codex", "--terminal", "done", *invalid_args
+      )
+
+      assert_equal 1, result.status.exitstatus
+      assert_includes result.stderr, "--#{field}"
+      assert_includes result.stderr, "must be an HTTP(S) URL with a host" unless field == "workspace"
+      refute_path_exists File.join(@state_root, "events", batch_id)
+      assert_equal original_batch, File.read(batch_path)
+    end
   end
 
   def test_record_event_accepts_registered_lane_name_characters
@@ -2877,6 +3454,154 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     end
   end
 
+  class ObservedDirectoryFsyncLocalStore < AgentCoord::LocalStore
+    attr_reader :fsynced_directories, :target_existed_during_fsync
+
+    def initialize(root)
+      super
+      @fsynced_directories = []
+    end
+
+    private
+
+    def fsync_parent_directory(file)
+      @target_existed_during_fsync = File.exist?(file)
+      super
+    end
+
+    def fsync_directory(directory)
+      @fsynced_directories << directory
+      super
+    end
+  end
+
+  class UnsupportedDirectoryFsyncLocalStore < AgentCoord::LocalStore
+    private
+
+    def fsync_directory(_directory)
+      raise Errno::EINVAL
+    end
+  end
+
+  class FailingDirectoryFsyncLocalStore < AgentCoord::LocalStore
+    private
+
+    def fsync_directory(_directory)
+      raise Errno::EACCES
+    end
+  end
+
+  class StoreInjectedRunner < AgentCoord::Runner
+    def initialize(argv, store:)
+      @injected_store = store
+      super(argv, stdout: StringIO.new, stderr: StringIO.new)
+    end
+
+    private
+
+    def build_store(_options)
+      @injected_store
+    end
+
+    def close_store(_store); end
+  end
+
+  class ConcurrentBatchStore < AgentCoord::LocalStore
+    def initialize(root, batch_id)
+      super(root)
+      @batch_path = AgentCoord.batch_path(batch_id)
+      @mutex = Mutex.new
+      @condition = ConditionVariable.new
+      @batch_reads = Hash.new(0)
+      @waiting = 0
+    end
+
+    def read_json(path)
+      entry = super
+      synchronize_second_batch_read if path == @batch_path
+      entry
+    end
+
+    private
+
+    def synchronize_second_batch_read
+      thread_id = Thread.current.object_id
+      @mutex.synchronize do
+        @batch_reads[thread_id] += 1
+        return unless @batch_reads[thread_id] == 2
+
+        @waiting += 1
+        if @waiting == 2
+          @condition.broadcast
+        else
+          AgentCoordTest.wait_for_condition!(@condition, @mutex, "batch closeout participants") do
+            @waiting == 2
+          end
+        end
+      end
+    end
+  end
+
+  class ConcurrentTerminalEventStore < AgentCoord::LocalStore
+    def initialize(root, batch_id)
+      super(root)
+      @event_prefix = "#{AgentCoord.event_batch_prefix(batch_id)}/"
+      @mutex = Mutex.new
+      @condition = ConditionVariable.new
+      @waiting = 0
+    end
+
+    def write_json(path, data, message:, sha: nil, create: false)
+      synchronize_terminal_create if create && path.start_with?(@event_prefix)
+      super
+    end
+
+    private
+
+    def synchronize_terminal_create
+      @mutex.synchronize do
+        @waiting += 1
+        if @waiting == 2
+          @condition.broadcast
+        else
+          AgentCoordTest.wait_for_condition!(@condition, @mutex, "event reservation participants") do
+            @waiting == 2
+          end
+        end
+      end
+    end
+  end
+
+  class ConcurrentClaimReleaseStore < AgentCoord::LocalStore
+    def initialize(root, repo, target)
+      super(root)
+      @claim_path = AgentCoord.claim_path(repo, target)
+      @mutex = Mutex.new
+      @condition = ConditionVariable.new
+      @waiting = 0
+    end
+
+    def write_json(path, data, message:, sha: nil, create: false)
+      synchronize_release if path == @claim_path && data["status"] == "released"
+      super
+    end
+
+    private
+
+    def synchronize_release
+      @mutex.synchronize do
+        @waiting += 1
+        if @waiting == 2
+          @condition.broadcast
+        else
+          AgentCoordTest.wait_for_condition!(@condition, @mutex, "claim release participants") do
+            @waiting == 2
+          end
+        end
+      end
+    end
+  end
+
   class ConflictCachingGitHubStore < AgentCoord::GitHubStore
     def initialize
       super(backend: "shakacode/agent-coordination-state", ref: "state")
@@ -3151,6 +3876,15 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
   end
 
   private
+
+  def thread_values!(threads, label)
+    Timeout.timeout(THREAD_TIMEOUT) { threads.map(&:value) }
+  rescue Timeout::Error
+    threads.each(&:kill)
+    flunk "timed out waiting for #{label}"
+  ensure
+    threads.each { |thread| thread.join(0.1) }
+  end
 
   def write_heartbeat(agent_id, updated_at:, expires_at:, status: "in_progress")
     FileUtils.mkdir_p(File.join(@state_root, "heartbeats"))

@@ -16,6 +16,7 @@ class PackagingTest < Minitest::Test
     LICENSE
     README.md
     bin/agent-coord
+    contracts/state-schema-v2.json
     docs/protocol-curl.md
   ].freeze
 

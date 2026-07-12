@@ -56,8 +56,15 @@ class ScriptedWorkerTest < Minitest::Test
 
     claim = JSON.parse(File.read(File.join(@state, "claims", "sim", "local", "task_one.json")))
     assert_equal "released", claim.fetch("status")
+    assert_equal "done", claim.fetch("terminal")
     heartbeat = JSON.parse(File.read(File.join(@state, "heartbeats", "host:worker.json")))
     assert_equal "done", heartbeat.fetch("status")
+    event_path = Dir.glob(File.join(@state, "events", "sim-task_one", "*.json")).fetch(0)
+    event = JSON.parse(File.read(event_path))
+    assert_equal "lane_closed", event.fetch("type")
+    assert_equal "done", event.fetch("terminal")
+    batch = JSON.parse(File.read(File.join(@state, "batches", "sim-task_one.json")))
+    assert_equal "completed", batch.fetch("status")
 
     branches = `git --git-dir=#{@origin} branch --list`.lines.map(&:strip)
     assert_includes branches, "sim/task_one-host-worker"

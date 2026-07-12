@@ -1,0 +1,20 @@
+{
+  "schema_version": 2,
+  "event_id": "lane_closed-0f5a0caebfed6139",
+  "batch_id": "ac-a-0712-0107",
+  "lane": "ac-a-i51",
+  "type": "lane_closed",
+  "repo": "shakacode/agent-coordination",
+  "target": "51",
+  "branch": "codex/ac-a-i51-terminal-lifecycle",
+  "terminal": "done",
+  "pr_url": "https://github.com/shakacode/agent-coordination/pull/52",
+  "pr_state": "merged",
+  "evidence_url": "https://github.com/shakacode/agent-coordination/pull/52#issuecomment-1",
+  "workspace": "default",
+  "closed_by": {
+    "agent_id": "ac-a-0712-0107-i51",
+    "machine": "codex"
+  },
+  "at": "2026-07-12T01:07:00Z"
+}

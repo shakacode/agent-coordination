@@ -30,6 +30,7 @@ done
 CLI="$(cd "$(dirname "$0")/../.." && pwd)/bin/agent-coord"
 BRANCH_AGENT_ID="$(printf "%s" "$AGENT_ID" | LC_ALL=C tr -c "A-Za-z0-9._-" "-")"
 BRANCH="sim/${ISSUE_KEY}-${BRANCH_AGENT_ID}"
+BATCH_ID="sim-${ISSUE_KEY}"
 CLAIM_ACQUIRED=0
 WORK_PUSHED=0
 DONE_RECORDED=0
@@ -95,10 +96,27 @@ beat() {
 }
 
 release_claim() {
-  "$CLI" release --agent-id="$AGENT_ID" --repo="$REPO_SLUG" --target="$ISSUE_KEY"
+  local terminal="${1:-}"
+  local args=(release --agent-id="$AGENT_ID" --repo="$REPO_SLUG" --target="$ISSUE_KEY")
+  [ -z "$terminal" ] || args+=(--terminal="$terminal")
+  "$CLI" "${args[@]}"
   local rc=$?
   [ "$rc" -eq 0 ] && CLAIM_ACQUIRED=0
   return "$rc"
+}
+
+register_batch() {
+  local manifest
+  manifest="$(mktemp)"
+  ruby -rjson -e '
+    File.write(ARGV.fetch(0), JSON.generate(
+      "batch_id" => ARGV.fetch(1),
+      "repo" => ARGV.fetch(2),
+      "lanes" => [{ "name" => "worker", "owner" => ARGV.fetch(3), "targets" => [ARGV.fetch(4)] }]
+    ))
+  ' "$manifest" "$BATCH_ID" "$REPO_SLUG" "$AGENT_ID" "$ISSUE_KEY"
+  "$CLI" register-batch --file="$manifest" >/dev/null
+  rm -f "$manifest"
 }
 
 cleanup_claim() {
@@ -115,7 +133,7 @@ cleanup_claim() {
           exit 2
         fi
       fi
-      if release_claim >/dev/null; then
+      if release_claim done >/dev/null; then
         echo "WORKER_DONE ${BRANCH}"
         exit 0
       fi
@@ -131,7 +149,8 @@ cleanup_claim() {
 trap cleanup_claim EXIT
 
 set +e
-"$CLI" claim --agent-id="$AGENT_ID" --repo="$REPO_SLUG" --target="$ISSUE_KEY" --branch="$BRANCH" >/dev/null
+"$CLI" claim --agent-id="$AGENT_ID" --repo="$REPO_SLUG" --target="$ISSUE_KEY" \
+  --batch-id="$BATCH_ID" --branch="$BRANCH" --host="scripted-sim" >/dev/null
 CODE=$?
 set -e
 if [ "$CODE" -eq 3 ]; then
@@ -140,6 +159,7 @@ if [ "$CODE" -eq 3 ]; then
 fi
 [ "$CODE" -eq 0 ] || exit 2
 CLAIM_ACQUIRED=1
+register_batch
 beat claimed >/dev/null
 
 mkdir -p "$WORKDIR"
@@ -164,5 +184,5 @@ WORK_PUSHED=1
 
 beat done >/dev/null
 DONE_RECORDED=1
-release_claim >/dev/null
+release_claim done >/dev/null
 echo "WORKER_DONE ${BRANCH}"
