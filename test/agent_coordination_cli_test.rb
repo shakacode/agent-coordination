@@ -1270,6 +1270,58 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     assert_equal %w[done done], terminal_states
   end
 
+  def test_concurrent_identical_lane_closed_events_share_one_atomic_reservation
+    results, errors, event, batch = run_concurrent_terminal_events(%w[done done], "identical")
+
+    assert_empty errors
+    assert_equal [0, 0], results.sort
+    expected_event_id = "lane_closed-#{Digest::SHA256.hexdigest('code')[0, 16]}"
+    assert_equal expected_event_id, event.fetch("event_id")
+    assert_equal "done", event.fetch("terminal")
+    assert_equal "done", batch.fetch("lanes").fetch(0).fetch("terminal")
+  end
+
+  def test_concurrent_conflicting_lane_closed_events_keep_only_the_winner
+    results, errors, event, batch = run_concurrent_terminal_events(%w[done abandoned], "conflicting")
+
+    assert_equal [0], results
+    assert_equal 1, errors.length
+    assert_includes errors.fetch(0).message, "conflicting terminal closeout"
+    assert_equal event.fetch("terminal"), batch.fetch("lanes").fetch(0).fetch("terminal")
+  end
+
+  def run_concurrent_terminal_events(terminals, suffix)
+    batch_id = "batch-concurrent-same-lane-#{suffix}"
+    target = suffix == "identical" ? "4010" : "4011"
+    write_batch(
+      batch_id,
+      lanes: [{ "name" => "code", "owner" => "worker-a", "targets" => [target] }]
+    )
+    store = ConcurrentTerminalEventStore.new(@state_root, batch_id)
+    results = []
+    errors = []
+    threads = terminals.map do |terminal|
+      Thread.new do
+        runner = StoreInjectedRunner.new(
+          ["record-event", "--batch-id", batch_id, "--type", "lane_closed", "--lane", "code",
+           "--agent-id", "worker-a", "--repo", "shakacode/react_on_rails", "--target", target,
+           "--host", "codex", "--terminal", terminal],
+          store: store
+        )
+        results << runner.run
+      rescue AgentCoord::Error => e
+        errors << e
+      end
+    end
+    threads.each(&:join)
+    event_paths = Dir.glob(File.join(@state_root, "events", batch_id, "*.json"))
+    assert_equal 1, event_paths.length
+    event = JSON.parse(File.read(event_paths.fetch(0)))
+    assert_equal event.fetch("event_id"), File.basename(event_paths.fetch(0), ".json")
+    batch = JSON.parse(File.read(File.join(@state_root, "batches", "#{batch_id}.json")))
+    [results, errors, event, batch]
+  end
+
   def test_release_handoff_preserves_resume_metadata_and_records_event
     write_batch(
       "batch-handoff",
@@ -2471,6 +2523,43 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     assert_equal originals, [File.read(claim_path), File.read(batch_path)]
   end
 
+  def test_terminal_release_reconciles_claim_from_existing_authoritative_event
+    write_batch(
+      "batch-partial-release",
+      lanes: [{ "name" => "code", "owner" => "worker-a", "targets" => ["4012"] }]
+    )
+    claim = run_agent_coord(
+      "claim", "--agent-id", "worker-a", "--repo", "shakacode/react_on_rails",
+      "--target", "4012", "--batch-id", "batch-partial-release", "--host", "codex"
+    )
+    assert_equal 0, claim.status.exitstatus, claim.stderr
+    close = run_agent_coord(
+      "record-event", "--batch-id", "batch-partial-release", "--type", "lane_closed",
+      "--lane", "code", "--agent-id", "worker-a", "--repo", "shakacode/react_on_rails",
+      "--target", "4012", "--host", "codex", "--terminal", "done",
+      "--pr-url", "https://github.com/shakacode/react_on_rails/pull/4012", "--pr-state", "merged"
+    )
+    assert_equal 0, close.status.exitstatus, close.stderr
+    batch_path = File.join(@state_root, "batches", "batch-partial-release.json")
+    authoritative_batch = File.read(batch_path)
+
+    release = run_agent_coord(
+      "release", "--agent-id", "worker-a", "--repo", "shakacode/react_on_rails",
+      "--target", "4012", "--terminal", "done",
+      "--pr-url", "https://github.com/shakacode/react_on_rails/pull/4012", "--pr-state", "merged"
+    )
+
+    assert_equal 0, release.status.exitstatus, release.stderr
+    claim_path = File.join(@state_root, "claims", "shakacode", "react_on_rails", "4012.json")
+    claim_payload = JSON.parse(File.read(claim_path))
+    assert_equal "released", claim_payload.fetch("status")
+    assert_equal "done", claim_payload.fetch("terminal")
+    assert_equal "default", claim_payload.fetch("workspace")
+    assert_equal({ "agent_id" => "worker-a", "machine" => "codex" }, claim_payload.fetch("closed_by"))
+    assert_equal 1, Dir.glob(File.join(@state_root, "events", "batch-partial-release", "*.json")).length
+    assert_equal authoritative_batch, File.read(batch_path)
+  end
+
   def test_record_event_rejects_malformed_lane_names
     result = run_agent_coord(
       "record-event",
@@ -3256,6 +3345,34 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
         @batch_reads[thread_id] += 1
         return unless @batch_reads[thread_id] == 2
 
+        @waiting += 1
+        if @waiting == 2
+          @condition.broadcast
+        else
+          @condition.wait(@mutex) until @waiting == 2
+        end
+      end
+    end
+  end
+
+  class ConcurrentTerminalEventStore < AgentCoord::LocalStore
+    def initialize(root, batch_id)
+      super(root)
+      @event_prefix = "#{AgentCoord.event_batch_prefix(batch_id)}/"
+      @mutex = Mutex.new
+      @condition = ConditionVariable.new
+      @waiting = 0
+    end
+
+    def write_json(path, data, message:, sha: nil, create: false)
+      synchronize_terminal_create if create && path.start_with?(@event_prefix)
+      super
+    end
+
+    private
+
+    def synchronize_terminal_create
+      @mutex.synchronize do
         @waiting += 1
         if @waiting == 2
           @condition.broadcast

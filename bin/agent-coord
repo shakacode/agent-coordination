@@ -589,14 +589,11 @@ module AgentCoord
       payload = terminal_release_payload(payload, options)
       validate_terminal_contract_payload!(payload) if options[:terminal]
 
-      validate_terminal_release_batch_id!(payload) if options[:terminal]
-      if options[:terminal] && terminal_closeout_replay?(store, payload)
-        @stdout.puts "lane already closed for #{options[:repo]}##{options[:target]}"
+      if options[:terminal]
+        close_terminal_release(store, existing, payload, now, options)
         return 0
       end
-      record_terminal_event(store, payload, now) if options[:terminal]
       store.write_json(path, payload, message: "Release #{options[:repo]}##{options[:target]}", sha: existing.sha)
-      complete_terminal_batch(store, payload, now) if options[:terminal]
       record_handoff_event(store, payload, now) if handoff_release?(options)
       @stdout.puts "released #{options[:repo]}##{options[:target]} by #{options[:agent_id]}"
       0
@@ -1129,13 +1126,11 @@ module AgentCoord
 
       store = build_store(options)
       now = now_utc
-      if options[:type] == "lane_closed" && terminal_closeout_replay?(store, options)
-        @stdout.puts "lane already closed for #{options[:repo]}##{options[:target]}"
+      if options[:type] == "lane_closed"
+        close_terminal_event(store, options, now, output: true)
         return 0
       end
-      terminal_batch_lane(store, options) if options[:type] == "lane_closed"
       write_event_record(store, options, now, output: true)
-      complete_terminal_batch(store, terminal_event_data(options), now) if options[:type] == "lane_closed"
       0
     ensure
       close_store(store)
@@ -1155,6 +1150,38 @@ module AgentCoord
         end
       end
       raise OperationalError, "event id collision while recording event for #{options[:batch_id]}"
+    end
+
+    def close_terminal_event(store, options, now, output:)
+      event_options = canonical_terminal_event_options(store, options)
+      authoritative, created = reserve_terminal_event(store, event_options, now)
+      batch_changed = complete_terminal_batch(store, authoritative, now)
+      if created
+        @stdout.puts "recorded event #{event_options[:batch_id]} #{authoritative.fetch('event_id')}" if output
+      elsif output
+        @stdout.puts "lane already closed for #{event_options[:repo]}##{event_options[:target]}"
+      end
+      created || batch_changed
+    end
+
+    def reserve_terminal_event(store, options, now)
+      event_id = stable_terminal_event_id(options.fetch(:lane))
+      path = AgentCoord.event_path(options.fetch(:batch_id), event_id)
+      requested = event_payload(options, event_id, now)
+      store.write_json(path, requested, message: "Close lane #{options[:batch_id]} #{options[:lane]}", create: true)
+      [requested, true]
+    rescue Conflict
+      existing = store.read_json(path)
+      raise OperationalError, "terminal closeout reservation disappeared at #{path}" unless existing
+      unless terminal_payload_semantics(existing.data) == terminal_payload_semantics(requested)
+        raise Error, "conflicting terminal closeout for lane #{options[:lane]}; first closeout is authoritative"
+      end
+
+      [existing.data, false]
+    end
+
+    def stable_terminal_event_id(lane)
+      "lane_closed-#{Digest::SHA256.hexdigest(lane)[0, 16]}"
     end
 
     def record_handoff_event(store, release_payload, now)
@@ -1300,26 +1327,59 @@ module AgentCoord
       )
     end
 
-    def record_terminal_event(store, release_payload, now)
-      batch_id = release_payload["batch_id"]
-      validate_terminal_release_batch_id!(release_payload)
-
+    def canonical_terminal_event_options(store, payload)
+      batch_id = terminal_payload_value(payload, "batch_id")
       options = {
         batch_id: batch_id,
         type: "lane_closed",
-        agent_id: release_payload.fetch("agent_id"),
-        repo: release_payload.fetch("repo"),
-        target: release_payload.fetch("target"),
-        branch: release_payload["branch"],
-        host: release_payload["host"],
-        pr_url: release_payload["pr_url"],
-        terminal: release_payload.fetch("terminal"),
-        pr_state: release_payload["pr_state"],
-        evidence_url: release_payload["evidence_url"],
-        workspace: release_payload["workspace"] || DEFAULT_WORKSPACE
+        lane: terminal_payload_value(payload, "lane"),
+        agent_id: terminal_payload_value(payload, "agent_id"),
+        repo: terminal_payload_value(payload, "repo"),
+        target: terminal_payload_value(payload, "target"),
+        branch: terminal_payload_value(payload, "branch"),
+        host: terminal_payload_value(payload, "host"),
+        pr_url: terminal_payload_value(payload, "pr_url"),
+        terminal: terminal_payload_value(payload, "terminal"),
+        pr_state: terminal_payload_value(payload, "pr_state"),
+        evidence_url: terminal_payload_value(payload, "evidence_url"),
+        workspace: terminal_payload_value(payload, "workspace") || DEFAULT_WORKSPACE
       }.compact
       options[:lane] = lane_name(terminal_batch_lane(store, options))
-      write_event_record(store, options, now, output: false)
+      options
+    end
+
+    def close_terminal_release(store, existing, payload, now, options)
+      validate_terminal_release_batch_id!(payload)
+      event_options = canonical_terminal_event_options(store, payload)
+      authoritative, created = reserve_terminal_event(store, event_options, now)
+      reconciled_payload = authoritative_terminal_claim_payload(payload, authoritative)
+      claim_changed = reconcile_terminal_claim(store, existing, reconciled_payload, options) == :changed
+      batch_changed = complete_terminal_batch(store, authoritative, now)
+      if created || claim_changed || batch_changed
+        @stdout.puts "released #{options[:repo]}##{options[:target]} by #{options[:agent_id]}"
+      else
+        @stdout.puts "lane already closed for #{options[:repo]}##{options[:target]}"
+      end
+    end
+
+    def authoritative_terminal_claim_payload(payload, event)
+      result = payload.dup
+      %w[terminal workspace closed_by pr_url pr_state evidence_url].each do |field|
+        value = event[field]
+        value.nil? ? result.delete(field) : result[field] = value
+      end
+      result
+    end
+
+    def reconcile_terminal_claim(store, existing, payload, options)
+      if existing.data["status"] == "released" &&
+         terminal_payload_semantics(existing.data) == terminal_payload_semantics(payload)
+        return :unchanged
+      end
+
+      path = AgentCoord.claim_path(options.fetch(:repo), options.fetch(:target))
+      store.write_json(path, payload, message: "Release #{options[:repo]}##{options[:target]}", sha: existing.sha)
+      :changed
     end
 
     def validate_terminal_release_batch_id!(payload)
@@ -1335,10 +1395,13 @@ module AgentCoord
         existing = store.read_json(batch_path)
         raise Error, "batch #{batch_id} not found for terminal closeout" unless existing
 
+        lane = terminal_batch_lane(store, payload, batch: existing.data)
+        return false if terminal_lane_replay?(lane, payload)
+
         updated = terminal_batch_payload(store, existing.data, payload, now)
         begin
           store.write_json(batch_path, updated, message: "Close lane in batch #{batch_id}", sha: existing.sha)
-          return
+          return true
         rescue Conflict
           next
         end
@@ -1350,8 +1413,6 @@ module AgentCoord
     def terminal_batch_payload(store, batch, payload, now)
       updated = JSON.parse(JSON.generate(batch))
       lane = terminal_batch_lane(store, payload, batch: updated)
-      return updated if terminal_lane_replay?(lane, payload)
-
       terminal = payload["terminal"] || payload[:terminal]
       lane["status"] = terminal
       lane["terminal"] = terminal
@@ -1367,11 +1428,6 @@ module AgentCoord
       updated["completed_at"] ||= timestamp(now) if updated["status"] == "completed"
       updated["updated_at"] = timestamp(now)
       updated
-    end
-
-    def terminal_closeout_replay?(store, payload)
-      lane = terminal_batch_lane(store, payload)
-      terminal_lane_replay?(lane, payload)
     end
 
     def terminal_lane_replay?(lane, payload)
