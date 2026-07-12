@@ -9,8 +9,20 @@ require "rbconfig"
 require "shellwords"
 require "stringio"
 require "tmpdir"
+require "timeout"
 
 class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
+  THREAD_TIMEOUT = 5
+
+  def self.wait_for_condition!(condition, mutex, label)
+    deadline = Process.clock_gettime(Process::CLOCK_MONOTONIC) + THREAD_TIMEOUT
+    until yield
+      remaining = deadline - Process.clock_gettime(Process::CLOCK_MONOTONIC)
+      raise Timeout::Error, "timed out waiting for #{label}" unless remaining.positive?
+
+      condition.wait(mutex, remaining)
+    end
+  end
   ROOT = File.expand_path("..", __dir__)
   BIN = File.join(ROOT, "bin", "agent-coord")
   HTTP_INTEGRATION_BIN = File.join(ROOT, "bin", "test-http-integration")
@@ -731,8 +743,11 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     store = AgentCoord::LocalStore.new(@state_root)
     path = "batches/atomic.json"
     store.write_json(path, { "sequence" => 0, "payload" => "x" * 100_000 }, message: "seed", create: true)
-    errors = []
+    ready = Queue.new
+    start = Queue.new
     writer = Thread.new do
+      4.times { ready.pop }
+      4.times { start << true }
       50.times do |sequence|
         current = store.read_json(path)
         store.write_json(path, { "sequence" => sequence, "payload" => "x" * 100_000 },
@@ -741,15 +756,16 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     end
     readers = 4.times.map do
       Thread.new do
+        ready << true
+        start.pop
         200.times { store.read_json(path) }
-      rescue JSON::ParserError => e
-        errors << e
       end
     end
-    ([writer] + readers).each(&:join)
+    thread_values!([writer] + readers, "atomic LocalStore readers/writer")
 
-    assert_empty errors
-    assert_equal 100_000, store.read_json(path).data.fetch("payload").length
+    final = store.read_json(path).data
+    assert_equal 49, final.fetch("sequence")
+    assert_equal 100_000, final.fetch("payload").length
   end
 
   def test_local_store_fsyncs_leaf_directory_after_atomic_rename
@@ -1235,6 +1251,7 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     assert_equal "default", event.fetch("workspace")
     assert_equal({ "agent_id" => "worker-a", "machine" => "codex" }, event.fetch("closed_by"))
     assert_equal "merged", event.fetch("pr_state")
+    assert_mixed_case_terminal_urls(event)
     contract = JSONSchemer.schema(JSON.parse(File.read(File.join(ROOT, "contracts", "state-schema-v2.json"))))
     assert_empty contract.validate(event).to_a
 
@@ -1247,6 +1264,11 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     status_lane = JSON.parse(status.stdout).fetch("batches").fetch(0).fetch("lanes").fetch(0)
     assert_equal "done", status_lane.fetch("status"), "declared terminal state must beat stale heartbeat state"
     assert_equal "done", status_lane.fetch("terminal")
+  end
+
+  def assert_mixed_case_terminal_urls(event)
+    assert_equal "HTTPS://github.com/shakacode/react_on_rails/pull/3980", event.fetch("pr_url")
+    assert_equal "HtTpS://example.test/evidence/3980", event.fetch("evidence_url")
   end
 
   def test_terminal_release_without_registered_batch_does_not_release_claim
@@ -1318,7 +1340,7 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
         errors << e
       end
     end
-    threads.each(&:join)
+    thread_values!(threads, "concurrent batch terminal releases")
 
     assert_empty errors
     batch = JSON.parse(File.read(File.join(@state_root, "batches", "batch-concurrent-close.json")))
@@ -1370,7 +1392,7 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
         errors << e
       end
     end
-    threads.each(&:join)
+    thread_values!(threads, "concurrent lane_closed events")
     event_paths = Dir.glob(File.join(@state_root, "events", batch_id, "*.json"))
     assert_equal 1, event_paths.length
     event = JSON.parse(File.read(event_paths.fetch(0)))
@@ -2665,7 +2687,7 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
         errors << e
       end
     end
-    threads.each(&:join)
+    thread_values!(threads, "concurrent same-claim releases")
 
     assert_empty errors
     assert_equal [0, 0], results.sort
@@ -3505,7 +3527,9 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
         if @waiting == 2
           @condition.broadcast
         else
-          @condition.wait(@mutex) until @waiting == 2
+          AgentCoordTest.wait_for_condition!(@condition, @mutex, "batch closeout participants") do
+            @waiting == 2
+          end
         end
       end
     end
@@ -3533,7 +3557,9 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
         if @waiting == 2
           @condition.broadcast
         else
-          @condition.wait(@mutex) until @waiting == 2
+          AgentCoordTest.wait_for_condition!(@condition, @mutex, "event reservation participants") do
+            @waiting == 2
+          end
         end
       end
     end
@@ -3558,7 +3584,13 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     def synchronize_release
       @mutex.synchronize do
         @waiting += 1
-        @waiting == 2 ? @condition.broadcast : @condition.wait(@mutex) { @waiting == 2 }
+        if @waiting == 2
+          @condition.broadcast
+        else
+          AgentCoordTest.wait_for_condition!(@condition, @mutex, "claim release participants") do
+            @waiting == 2
+          end
+        end
       end
     end
   end
@@ -3837,6 +3869,15 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
   end
 
   private
+
+  def thread_values!(threads, label)
+    Timeout.timeout(THREAD_TIMEOUT) { threads.map(&:value) }
+  rescue Timeout::Error
+    threads.each(&:kill)
+    flunk "timed out waiting for #{label}"
+  ensure
+    threads.each { |thread| thread.join(0.1) }
+  end
 
   def write_heartbeat(agent_id, updated_at:, expires_at:, status: "in_progress")
     FileUtils.mkdir_p(File.join(@state_root, "heartbeats"))
