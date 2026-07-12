@@ -156,6 +156,41 @@ class ProvisionTokenTest < Minitest::Test
     refute_includes npx_args, "--local"
   end
 
+  def test_rotate_upserts_token_and_scopes_in_named_database
+    _, stderr, status = run_script(
+      "m5",
+      "--database",
+      "agent-coord-rotated-20260710",
+      "--rotate",
+      "--all-state"
+    )
+
+    assert status.success?, stderr
+    assert_equal "agent-coord-rotated-20260710", npx_args.fetch(npx_args.index("execute") + 1)
+    sql = npx_args.fetch(npx_args.index("--command") + 1)
+    assert_includes sql, "ON CONFLICT(machine) DO UPDATE SET"
+    assert_includes sql, "token_hash=excluded.token_hash"
+    assert_includes sql, "read_prefixes=excluded.read_prefixes"
+    assert_includes sql, "write_prefixes=excluded.write_prefixes"
+    assert_includes sql, "revoked_at=NULL"
+  end
+
+  def test_rejects_unsafe_database_name_before_generating_token
+    _, stderr, status = run_script("m5", "--database", "agent-coord;DROP", "--all-state")
+
+    refute status.success?
+    assert_includes stderr, "database name may contain"
+    refute_path_exists @npx_args_file
+  end
+
+  def test_rejects_leading_dash_database_name_before_generating_token
+    _, stderr, status = run_script("m5", "--database", "--verbose", "--all-state")
+
+    refute status.success?
+    assert_includes stderr, "database name cannot start with a hyphen"
+    refute_path_exists @npx_args_file
+  end
+
   def test_rejects_unsafe_machine_names_before_generating_token
     _, stderr, status = run_script("m5';DROP")
 

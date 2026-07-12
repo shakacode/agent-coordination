@@ -77,11 +77,13 @@ function parsePrefixList(value: string): string[] | null {
   }
 }
 
-async function authenticate(request: Request, env: Env): Promise<MachineAuth | null> {
-  const header = request.headers.get("authorization") ?? "";
-  const match = header.match(/^Bearer (.+)$/i);
-  if (!match) return null;
-  const hash = await sha256Hex(match[1]);
+function bearerToken(request: Request): string | null {
+  const match = (request.headers.get("authorization") ?? "").match(/^Bearer (.+)$/i);
+  return match?.[1] ?? null;
+}
+
+async function authenticate(token: string, env: Env): Promise<MachineAuth | null> {
+  const hash = await sha256Hex(token);
   const row = await env.DB.prepare(
     "SELECT machine, read_prefixes, write_prefixes FROM machines WHERE token_hash = ? AND revoked_at IS NULL",
   ).bind(hash).first<{ machine: string; read_prefixes: string; write_prefixes: string }>();
@@ -297,9 +299,21 @@ export default {
     if (url.pathname === "/v1/health") {
       return json(200, { status: "ok" });
     }
-    const auth = await authenticate(request, env);
-    if (!auth) {
+    const token = bearerToken(request);
+    if (!token) {
       return json(401, { error: "unauthorized" });
+    }
+    const auth = await authenticate(token, env);
+    if (!auth) {
+      return json(401, { error: "unknown_token" });
+    }
+    if (url.pathname === "/v1/whoami") {
+      if (request.method !== "GET") return json(405, { error: "method_not_allowed" });
+      return json(200, {
+        machine: auth.machine,
+        read_prefixes: auth.readPrefixes,
+        write_prefixes: auth.writePrefixes,
+      });
     }
     if (url.pathname === "/v1/state") {
       if (request.method === "GET") {

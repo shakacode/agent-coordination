@@ -18,6 +18,9 @@ expect create   "$(curl -s -o /dev/null -w %{http_code} -X PUT "$BASE/v1/state/$
 expect recreate "$(curl -s -o /dev/null -w %{http_code} -X PUT "$BASE/v1/state/$P" -H "$AUTH" -H 'If-None-Match: *' -d '{"data":{}}')" 409
 expect get      "$(curl -s "$BASE/v1/state/$P" -H "$AUTH" | python3 -c 'import json,sys; print(json.load(sys.stdin)["version"])')" 1
 expect lowerauth "$(curl -s -o /dev/null -w %{http_code} "$BASE/v1/state/$P" -H "$LOWER_AUTH")" 200
+expect whoami   "$(curl -s "$BASE/v1/whoami" -H "$AUTH" | python3 -c 'import json,sys; print(json.load(sys.stdin)["machine"])')" dev
+expect stalecode "$(curl -s -o /dev/null -w %{http_code} "$BASE/v1/whoami" -H 'Authorization: Bearer stale')" 401
+expect stalehint "$(curl -s "$BASE/v1/whoami" -H 'Authorization: Bearer stale' | python3 -c 'import json,sys; print(json.load(sys.stdin)["error"])')" unknown_token
 expect badnone  "$(curl -s -o /dev/null -w %{http_code} -X PUT "$BASE/v1/state/$P" -H "$AUTH" -H 'If-None-Match: 1' -d '{"data":{}}')" 400
 expect casok    "$(curl -s -o /dev/null -w %{http_code} -X PUT "$BASE/v1/state/$P" -H "$AUTH" -H 'If-Match: 1' -d '{"data":{"agent_id":"a2"}}')" 200
 expect casstale "$(curl -s -o /dev/null -w %{http_code} -X PUT "$BASE/v1/state/$P" -H "$AUTH" -H 'If-Match: 1' -d '{"data":{"agent_id":"a3"}}')" 409

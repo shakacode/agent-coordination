@@ -158,6 +158,22 @@ access, pass `--all-state` instead of prefix flags:
 worker/bin/provision-token <machine-name> --all-state
 ```
 
+After a D1 rotation, target the replacement database explicitly and use
+`--rotate` so an existing machine row is updated or a missing row is inserted:
+
+```bash
+worker/bin/provision-token <machine-name> \
+  --database <database-name> \
+  --rotate \
+  --all-state
+```
+
+Use explicit `--read-prefix` and `--write-prefix` flags instead of
+`--all-state` when the consumer needs narrower access. The token is printed
+once; persist it immediately in the consumer's private environment file. See
+[the backend rotation runbook](docs/runbooks/rotate-backend.md) for the complete
+database, token, restart, and verification sequence.
+
 The stored empty scope (`""`) grants all state, but the provisioning command
 does not accept an empty prefix as a shortcut; all-state access must use the
 explicit flag. A directory scope such as
@@ -189,9 +205,9 @@ worker/bin/provision-token dev --local \
 ```
 
 Machine names may contain letters, numbers, dots, underscores, colons, and
-hyphens. If `wrangler d1 execute` fails, the script preserves Wrangler's output
-and, when the failure looks like a duplicate-machine or token constraint, adds a
-hint to delete or update the existing D1 `machines` row before re-provisioning.
+hyphens. Database names may contain letters, numbers, dots, underscores, and
+hyphens. If `wrangler d1 execute` fails, the script preserves Wrangler's output.
+Use `--rotate` when re-keying an existing machine.
 
 After the Worker is deployed and this machine has a token, set both HTTP backend
 env vars and verify the backend:
@@ -229,8 +245,12 @@ Run `agent-coord doctor` after setup. The default doctor is intentionally
 lightweight: it verifies backend access and the expected state layout without
 downloading and parsing every JSON record. On an unconfigured first run it
 initializes and verifies the zero-config local root. Run
-`agent-coord doctor --deep` for a full audit that parses every claim, heartbeat,
-and batch file. If an explicitly configured backend fails, agents should report
+`agent-coord doctor --deep` for a full audit. On the HTTP backend it reports a
+separate result for claims, heartbeats, batches, and events plus the authenticated
+machine and its scopes. A stale or unknown token names the failing resource and
+prints the token-rotation command. If a consumer env file configures an API URL
+while `status` or `doctor` resolves to local storage, the CLI emits a split-brain
+warning. If an explicitly configured backend fails, agents should report
 coordination state
 as `UNKNOWN` and use the public claim-comment fallback until the operator fixes
 backend access.

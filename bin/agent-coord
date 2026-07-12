@@ -294,6 +294,7 @@ module AgentCoord
       if backend_command?(command)
         resolve_backend_env(options)
         resolve_default_local_backend(command, options)
+        warn_consumer_split_brain(command, options)
       end
       options
     end
@@ -346,6 +347,47 @@ module AgentCoord
 
     def emit_backend_conflict_warning(message)
       @stderr.puts message if @backend_conflict_warnings
+    end
+
+    def warn_consumer_split_brain(command, options)
+      return unless %w[status doctor].include?(command)
+      return unless options[:state_root] && !options[:api_url]
+      return unless ENV.fetch("AGENT_COORD_API_URL", "").empty?
+
+      env_file = consumer_env_files.find { |path| consumer_api_url_configured?(path) }
+      return unless env_file
+
+      @stderr.puts(
+        "warning: split-brain configuration: #{env_file} configures AGENT_COORD_API_URL, " \
+        "but this CLI is using the local backend. Load that env file for fleet reads or remove it if local mode " \
+        "is intended."
+      )
+    end
+
+    def consumer_env_files
+      configured = ENV.fetch("AGENT_COORD_ENV_FILE", "")
+      config_home = ENV.fetch("XDG_CONFIG_HOME", "")
+      if config_home.empty?
+        home = ENV.fetch("HOME", "")
+        config_home = File.join(home, ".config") unless home.empty?
+      end
+      conventional = if config_home.empty?
+                       []
+                     else
+                       %w[env http-env.sh].map { |name| File.join(config_home, "agent-coord", name) }
+                     end
+      ([configured] + conventional).reject(&:empty?).uniq
+    end
+
+    def consumer_api_url_configured?(path)
+      File.foreach(path).any? do |line|
+        match = line.match(/^\s*(?:export\s+)?AGENT_COORD_API_URL\s*=\s*(.*?)\s*$/)
+        next false unless match
+
+        !match[1].to_s.delete_prefix('"').delete_suffix('"').delete_prefix("'").delete_suffix("'").empty?
+      end
+    rescue SystemCallError, ArgumentError
+      false
     end
 
     def resolve_default_local_backend(command, options)
@@ -553,48 +595,83 @@ module AgentCoord
       doctor_options = options.dup
       doctor_options[:state_root] ||= default_status_state_root unless doctor_options[:api_url]
       backend_kind = doctor_backend_kind(doctor_options)
-      section_notes = {}
       begin
         FileUtils.mkdir_p(doctor_options.fetch(:state_root)) if doctor_options[:implicit_local]
-        store = verify_doctor_store(doctor_options, backend_kind)
+        store = verify_doctor_store(doctor_options, backend_kind, deep: options[:deep])
         store.verify_layout!(STATE_PREFIXES)
-        section_notes = check_state_readable!(store) if options[:deep]
+        section_notes, resource_checks, identity = doctor_deep_results(store, backend_kind, options)
       rescue JSON::ParserError, SystemCallError => e
         raise OperationalError, "state unreadable: #{e.message}"
       end
 
-      payload = {
-        "version" => VERSION,
-        "backend" => backend_kind,
-        "backend_repo" => doctor_options.fetch(:backend),
-        "backend_url" => active_backend_url(doctor_options, backend_kind),
-        "state_root" => doctor_options[:state_root],
-        "deep" => !options[:deep].nil?,
-        "status" => "ok"
-      }
-      payload["doctor_prefix"] = doctor_read_prefix(doctor_options) if backend_kind == "http"
+      payload = doctor_payload(doctor_options, backend_kind, options[:deep])
+      payload["resource_checks"] = resource_checks if resource_checks
+      payload["identity"] = identity if identity
       unless section_notes.empty?
         payload["degraded"] = section_notes.values.uniq
         payload["section_notes"] = section_notes
       end
       emit_payload(payload, options) do
-        @stdout.puts "agent-coord doctor"
-        @stdout.puts "version: #{VERSION}"
-        @stdout.puts "backend: #{backend_kind}"
-        @stdout.puts "backend_repo: #{doctor_options.fetch(:backend)}"
-        @stdout.puts "backend_url: #{doctor_options[:api_url]}" if backend_kind == "http"
-        @stdout.puts "doctor_prefix: #{doctor_read_prefix(doctor_options)}" if backend_kind == "http"
-        @stdout.puts "state_root: #{doctor_options[:state_root] || '-'}"
-        @stdout.puts "mode: #{options[:deep] ? 'deep' : 'lightweight'}"
-        @stdout.puts "status: ok"
-        unless section_notes.empty?
-          @stdout.puts "degraded"
-          section_notes.values.uniq.each { |note| @stdout.puts "- #{note}" }
-        end
+        render_doctor_text(payload, doctor_options, section_notes)
       end
       0
     ensure
       close_store(store)
+    end
+
+    def doctor_payload(options, backend_kind, deep)
+      payload = {
+        "version" => VERSION,
+        "backend" => backend_kind,
+        "backend_repo" => options.fetch(:backend),
+        "backend_url" => active_backend_url(options, backend_kind),
+        "state_root" => options[:state_root],
+        "deep" => !deep.nil?,
+        "status" => "ok"
+      }
+      payload["doctor_prefix"] = doctor_read_prefix(options) if backend_kind == "http"
+      payload
+    end
+
+    def doctor_deep_results(store, backend_kind, options)
+      return [{}, nil, nil] unless options[:deep]
+      return [check_state_readable!(store), nil, nil] unless backend_kind == "http"
+
+      if options[:doctor_prefix]
+        prefix = doctor_read_prefix(options)
+        section_notes, resource_checks = check_http_custom_resource!(store, prefix, api_url: options[:api_url])
+        return [section_notes, resource_checks, store.whoami]
+      end
+      section_notes, resource_checks = check_http_resources!(store, api_url: options[:api_url])
+      [section_notes, resource_checks, store.whoami]
+    end
+
+    def render_doctor_text(payload, options, section_notes)
+      @stdout.puts "agent-coord doctor"
+      %w[version backend backend_repo].each { |key| @stdout.puts "#{key}: #{payload.fetch(key)}" }
+      @stdout.puts "backend_url: #{options[:api_url]}" if payload.fetch("backend") == "http"
+      @stdout.puts "doctor_prefix: #{payload.fetch('doctor_prefix')}" if payload["doctor_prefix"]
+      @stdout.puts "state_root: #{options[:state_root] || '-'}"
+      @stdout.puts "mode: #{payload.fetch('deep') ? 'deep' : 'lightweight'}"
+      @stdout.puts "status: ok"
+      render_doctor_http_details(payload)
+      return if section_notes.empty?
+
+      @stdout.puts "degraded"
+      section_notes.values.uniq.each { |note| @stdout.puts "- #{note}" }
+    end
+
+    def render_doctor_http_details(payload)
+      if payload["resource_checks"]
+        @stdout.puts "resource_checks"
+        payload.fetch("resource_checks").each { |prefix, status| @stdout.puts "- #{prefix}: #{status}" }
+      end
+      return unless payload["identity"]
+
+      identity = payload.fetch("identity")
+      @stdout.puts "machine: #{identity.fetch('machine')}"
+      @stdout.puts "read_prefixes: #{format_scope_list(identity.fetch('read_prefixes'))}"
+      @stdout.puts "write_prefixes: #{format_scope_list(identity.fetch('write_prefixes'))}"
     end
 
     def doctor_backend_kind(options)
@@ -605,12 +682,12 @@ module AgentCoord
       "unconfigured"
     end
 
-    def verify_doctor_store(options, backend_kind)
+    def verify_doctor_store(options, backend_kind, deep: false)
       store = nil
       case backend_kind
       when "http"
         store = build_store(options)
-        store.verify_readable!(doctor_read_prefix(options))
+        store.verify_readable!(doctor_read_prefix(options)) unless deep
       when "local"
         store = LocalStore.new(options.fetch(:state_root))
         store.verify_root!
@@ -630,6 +707,77 @@ module AgentCoord
 
     def doctor_read_prefix(options)
       options[:doctor_prefix] || JSON_PREFIXES.first
+    end
+
+    def check_http_resources!(store, api_url: nil)
+      section_notes = {}
+      checks = {}
+      STATE_PREFIXES.each do |prefix|
+        store.list_json(prefix)
+        if filtered_status_list?(store, prefix)
+          checks[prefix] = "filtered"
+          section_notes[prefix] = "#{prefix} filtered by scoped token"
+        else
+          checks[prefix] = "ok"
+        end
+      rescue OperationalError => e
+        if prefix == "events" && unsupported_event_listing?(e)
+          checks[prefix] = "unsupported"
+          section_notes[prefix] = "event state not supported by backend"
+          next
+        end
+        if scoped_http_forbidden_listing?(e, prefix)
+          checks[prefix] = "forbidden"
+          section_notes[prefix] = "#{prefix} not readable by scoped token"
+          next
+        end
+        raise doctor_auth_recovery_error(prefix, e, api_url:) if e.message.match?(/ failed: 401 /)
+
+        raise
+      end
+      [section_notes, checks]
+    end
+
+    def check_http_custom_resource!(store, prefix, api_url: nil)
+      if AgentCoord.state_record_path?(prefix)
+        entry = store.read_json(prefix)
+        return [{ prefix => "#{prefix} does not exist" }, { prefix => "missing" }] unless entry
+
+        return [{}, { prefix => "ok" }]
+      end
+
+      store.list_json(prefix)
+      return [{}, { prefix => "ok" }] unless filtered_status_list?(store, prefix)
+
+      [{ prefix => "#{prefix} filtered by scoped token" }, { prefix => "filtered" }]
+    rescue OperationalError => e
+      raise doctor_auth_recovery_error(prefix, e, api_url:) if e.message.match?(/ failed: 401 /)
+      if e.message.match?(/ failed: 403 forbidden\z/)
+        return [{ prefix => "#{prefix} not readable by scoped token" }, { prefix => "forbidden" }]
+      end
+      if prefix.match?(%r{\Aevents(?:/|\z)}) && unsupported_event_listing?(e)
+        return [{ prefix => "event state not supported by backend" }, { prefix => "unsupported" }]
+      end
+
+      raise
+    end
+
+    def doctor_auth_recovery_error(prefix, error, api_url: nil)
+      local_flag = local_http_url?(api_url) ? "--local " : ""
+      OperationalError.new(
+        "doctor resource #{prefix} failed authentication (#{error.message}). Re-provision the machine token with: " \
+        "worker/bin/provision-token <machine-name> #{local_flag}--database <database-name> --rotate " \
+        "<original-scope-flags>; use the machine's recorded read/write scopes and do not infer them from the " \
+        "resource that returned 401, " \
+        "then update AGENT_COORD_API_TOKEN, restart consumers, and follow docs/runbooks/rotate-backend.md"
+      )
+    end
+
+    def local_http_url?(url)
+      host = URI(url.to_s).host
+      HttpStore::LOOPBACK_HOSTS.include?(host)
+    rescue URI::InvalidURIError
+      false
     end
 
     def active_backend_url(options, backend_kind)
@@ -1581,6 +1729,10 @@ module AgentCoord
       compact_values.empty? ? "-" : compact_values.join(",")
     end
 
+    def format_scope_list(values)
+      values.include?("") ? "all-state" : format_list(values)
+    end
+
     def build_store(options)
       return LocalStore.new(options.fetch(:state_root)) if options[:state_root]
 
@@ -2212,6 +2364,20 @@ module AgentCoord
     def verify_layout!(_prefixes)
       response = request(Net::HTTP::Get, "/v1/health")
       raise OperationalError, http_error("health", response) unless response.code == "200"
+    end
+
+    def whoami
+      response = request(Net::HTTP::Get, "/v1/whoami")
+      return nil if response.code == "404"
+
+      raise OperationalError, http_error("whoami", response) unless response.code == "200"
+
+      body = parsed_json_object(response, "whoami")
+      {
+        "machine" => fetch_field(body, "machine", "whoami").to_s,
+        "read_prefixes" => Array(fetch_field(body, "read_prefixes", "whoami")),
+        "write_prefixes" => Array(fetch_field(body, "write_prefixes", "whoami"))
+      }
     end
 
     def close

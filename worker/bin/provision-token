@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
-# Usage: worker/bin/provision-token <machine-name> [--local] (--all-state | scoped prefix flags)
+# Usage: worker/bin/provision-token <machine-name> [--local] [--database NAME] [--rotate] scopes
 # Prints a fresh token once; stores only its SHA-256 hash in D1.
 set -euo pipefail
 
 usage() {
-  echo "usage: worker/bin/provision-token <machine-name> [--local] --all-state" >&2
-  echo "   or: worker/bin/provision-token <machine-name> [--local] [--read-prefix PREFIX] [--write-prefix PREFIX]" >&2
+  echo "usage: worker/bin/provision-token <machine-name> [--local] [--database NAME] [--rotate] --all-state" >&2
+  echo "   or: worker/bin/provision-token <machine-name> [--local] [--database NAME] [--rotate] [--read-prefix PREFIX] [--write-prefix PREFIX]" >&2
   echo "       at least one prefix is required; prefix flags are repeatable" >&2
   exit 1
 }
@@ -19,6 +19,8 @@ case "$MACHINE" in
 esac
 
 SCOPE="--remote"
+DATABASE="agent-coord"
+ROTATE=0
 READ_PREFIXES=()
 WRITE_PREFIXES=()
 READ_PREFIXES_GIVEN=0
@@ -53,6 +55,15 @@ while [ "$#" -gt 0 ]; do
       ALL_STATE=1
       shift
       ;;
+    --database)
+      [ "$#" -ge 2 ] || usage
+      DATABASE="$2"
+      shift 2
+      ;;
+    --rotate)
+      ROTATE=1
+      shift
+      ;;
     --read-prefix)
       [ "$#" -ge 2 ] || usage
       [ -n "$2" ] || { echo "prefix cannot be empty; pass --all-state for all-state access" >&2; exit 1; }
@@ -74,6 +85,18 @@ while [ "$#" -gt 0 ]; do
       ;;
   esac
 done
+
+case "$DATABASE" in
+  -*)
+    echo "database name cannot start with a hyphen" >&2
+    exit 1
+    ;;
+esac
+
+if [[ ! "$DATABASE" =~ ^[A-Za-z0-9._-]+$ ]]; then
+  echo "database name may contain only letters, numbers, dots, underscores, and hyphens" >&2
+  exit 1
+fi
 
 if [ "$ALL_STATE" -eq 1 ] && { [ "$READ_PREFIXES_GIVEN" -eq 1 ] || [ "$WRITE_PREFIXES_GIVEN" -eq 1 ]; }; then
   echo "--all-state cannot be combined with --read-prefix or --write-prefix" >&2
@@ -116,9 +139,12 @@ else
   WRITE_PREFIX_JSON=$(json_array "${WRITE_PREFIXES[@]}")
 fi
 SQL="INSERT INTO machines (machine, token_hash, read_prefixes, write_prefixes, created_at) VALUES ('${MACHINE}', '${HASH}', '${READ_PREFIX_JSON}', '${WRITE_PREFIX_JSON}', strftime('%Y-%m-%dT%H:%M:%SZ','now'))"
+if [ "$ROTATE" -eq 1 ]; then
+  SQL+=" ON CONFLICT(machine) DO UPDATE SET token_hash=excluded.token_hash, read_prefixes=excluded.read_prefixes, write_prefixes=excluded.write_prefixes, created_at=excluded.created_at, revoked_at=NULL"
+fi
 
 cd "$(dirname "$0")/.."
-COMMAND=("$NPX_BIN" wrangler d1 execute agent-coord)
+COMMAND=("$NPX_BIN" wrangler d1 execute "$DATABASE")
 COMMAND+=("$SCOPE")
 if [ "$SCOPE" = "--remote" ]; then
   COMMAND+=(--yes)
@@ -145,3 +171,4 @@ echo "token:    ${TOKEN}"
 echo "Set on that machine:"
 echo "  export AGENT_COORD_API_URL=<worker-url>"
 echo "  export AGENT_COORD_API_TOKEN=${TOKEN}"
+echo "Persist those values in \${AGENT_COORD_ENV_FILE:-~/.config/agent-coord/env} with mode 600, then restart consumers."

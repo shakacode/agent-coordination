@@ -669,6 +669,48 @@ class HttpBackendSelectionTest < HttpEnvTestCase
     end
   end
 
+  def test_status_warns_when_consumer_env_file_points_remote_but_cli_uses_local
+    Dir.mktmpdir("agent-coord-xdg-config") do |config_home|
+      env_file = File.join(config_home, "agent-coord", "env")
+      FileUtils.mkdir_p(File.dirname(env_file))
+      File.write(env_file, "AGENT_COORD_API_URL=https://agent-coord.example\nAGENT_COORD_API_TOKEN=secret\n")
+
+      with_env("AGENT_COORD_API_URL" => nil,
+               "AGENT_COORD_API_TOKEN" => nil,
+               "AGENT_COORD_BACKEND" => nil,
+               "AGENT_COORD_STATE_ROOT" => nil,
+               "AGENT_COORD_STATUS_STATE_ROOT" => nil,
+               "XDG_CONFIG_HOME" => config_home) do
+        code, _, err = run_cli(["status", "--json"], {})
+
+        assert_equal 0, code
+        assert_includes err, "split-brain"
+        assert_includes err, env_file
+        assert_includes err, "CLI is using the local backend"
+      end
+    end
+  end
+
+  def test_status_ignores_consumer_env_file_with_invalid_encoding
+    Dir.mktmpdir("agent-coord-xdg-config") do |config_home|
+      env_file = File.join(config_home, "agent-coord", "env")
+      FileUtils.mkdir_p(File.dirname(env_file))
+      File.binwrite(env_file, "\xFFAGENT_COORD_API_URL=https://agent-coord.example\n".b)
+
+      with_env("AGENT_COORD_API_URL" => nil,
+               "AGENT_COORD_API_TOKEN" => nil,
+               "AGENT_COORD_BACKEND" => nil,
+               "AGENT_COORD_STATE_ROOT" => nil,
+               "AGENT_COORD_STATUS_STATE_ROOT" => nil,
+               "XDG_CONFIG_HOME" => config_home) do
+        code, _, err = run_cli(["status", "--json"], {})
+
+        assert_equal 0, code
+        refute_includes err, "split-brain"
+      end
+    end
+  end
+
   def test_missing_explicit_backend_defaults_to_labeled_xdg_local_store
     Dir.mktmpdir("agent-coord-xdg-state") do |state_home|
       with_env("AGENT_COORD_API_TOKEN" => nil,
@@ -839,12 +881,54 @@ class HttpDoctorTest < HttpEnvTestCase
 
   def test_doctor_deep_skips_forbidden_unscoped_http_prefixes
     responses = [
-      [200, { "entries" => [] }],
       [200, { "status" => "ok" }],
       [200, { "entries" => [], "filtered" => true }],
       [403, { "error" => "forbidden" }],
       [403, { "error" => "forbidden" }],
-      [403, { "error" => "forbidden" }]
+      [403, { "error" => "forbidden" }],
+      [200, { "machine" => "scoped", "read_prefixes" => ["claims/x/y"], "write_prefixes" => [] }]
+    ]
+    stub = HttpStoreStub.new(responses)
+    with_env("AGENT_COORD_API_URL" => stub.base_url, "AGENT_COORD_API_TOKEN" => "tok") do
+      stdout = StringIO.new
+      code = AgentCoord::Runner.new(["doctor", "--deep", "--json"], stdout: stdout, stderr: StringIO.new).run
+      payload = JSON.parse(stdout.string)
+
+      assert_equal 0, code
+      assert_includes payload.fetch("degraded"), "claims filtered by scoped token"
+      assert_includes payload.fetch("degraded"), "heartbeats not readable by scoped token"
+      assert_includes payload.fetch("degraded"), "batches not readable by scoped token"
+      assert_includes payload.fetch("degraded"), "events not readable by scoped token"
+      assert_equal "claims filtered by scoped token", payload.fetch("section_notes").fetch("claims")
+      assert_equal({
+                     "claims" => "filtered",
+                     "heartbeats" => "forbidden",
+                     "batches" => "forbidden",
+                     "events" => "forbidden"
+                   }, payload.fetch("resource_checks"))
+      assert_equal "scoped", payload.dig("identity", "machine")
+      expected_paths = [
+        "/v1/health",
+        "/v1/state?prefix=claims",
+        "/v1/state?prefix=heartbeats",
+        "/v1/state?prefix=batches",
+        "/v1/state?prefix=events",
+        "/v1/whoami"
+      ]
+      assert_equal(expected_paths, stub.requests.map { |request| request[:path] })
+    end
+  ensure
+    stub.shutdown
+  end
+
+  def test_doctor_deep_degrades_when_http_backend_does_not_support_events_yet
+    responses = [
+      [200, { "status" => "ok" }],
+      [200, { "entries" => [] }],
+      [200, { "entries" => [] }],
+      [200, { "entries" => [] }],
+      [400, { "error" => "invalid_prefix" }],
+      [404, { "error" => "route_not_found" }]
     ]
     stub = HttpStoreStub.new(responses)
     with_env("AGENT_COORD_API_URL" => stub.base_url, "AGENT_COORD_API_TOKEN" => "tok") do
@@ -854,23 +938,249 @@ class HttpDoctorTest < HttpEnvTestCase
 
       assert_equal 0, code
       assert_equal "ok", payload.fetch("status")
-      assert_includes payload.fetch("degraded"), "claims filtered by scoped token"
-      assert_includes payload.fetch("degraded"), "heartbeats not readable by scoped token"
-      assert_includes payload.fetch("degraded"), "batches not readable by scoped token"
-      assert_includes payload.fetch("degraded"), "events not readable by scoped token"
-      assert_equal "claims filtered by scoped token", payload.fetch("section_notes").fetch("claims")
+      assert_equal "unsupported", payload.fetch("resource_checks").fetch("events")
+      assert_includes payload.fetch("degraded"), "event state not supported by backend"
+    end
+  ensure
+    stub&.shutdown
+  end
+
+  def test_doctor_deep_unauthorized_names_resource_and_prints_recovery_command
+    stub = HttpStoreStub.new([
+                               [200, { "status" => "ok" }],
+                               [401, { "error" => "unknown_token" }]
+                             ])
+    with_env("AGENT_COORD_API_URL" => stub.base_url, "AGENT_COORD_API_TOKEN" => "stale") do
+      error = assert_raises(AgentCoord::OperationalError) do
+        AgentCoord::Runner.new(["doctor", "--deep"], stdout: StringIO.new, stderr: StringIO.new).run
+      end
+
+      assert_includes error.message, "claims"
+      assert_includes error.message,
+                      "worker/bin/provision-token <machine-name> --local --database <database-name> --rotate " \
+                      "<original-scope-flags>"
+      assert_includes error.message, "do not infer them from the resource that returned 401"
+      assert_includes error.message, "docs/runbooks/rotate-backend.md"
+    end
+  ensure
+    stub&.shutdown
+  end
+
+  def test_doctor_deep_tolerates_worker_without_whoami_route
+    responses = [
+      [200, { "status" => "ok" }],
+      [200, { "entries" => [] }],
+      [200, { "entries" => [] }],
+      [200, { "entries" => [] }],
+      [200, { "entries" => [] }],
+      [404, { "error" => "route_not_found" }]
+    ]
+    stub = HttpStoreStub.new(responses)
+    with_env("AGENT_COORD_API_URL" => stub.base_url, "AGENT_COORD_API_TOKEN" => "tok") do
+      stdout = StringIO.new
+      code = AgentCoord::Runner.new(["doctor", "--deep", "--json"], stdout: stdout, stderr: StringIO.new).run
+      payload = JSON.parse(stdout.string)
+
+      assert_equal 0, code
+      assert_equal "ok", payload.fetch("status")
+      refute payload.key?("identity")
+    end
+  ensure
+    stub&.shutdown
+  end
+
+  def test_doctor_deep_still_checks_custom_exact_path
+    stub = HttpStoreStub.new([
+                               [200, { "status" => "ok" }],
+                               [403, { "error" => "forbidden" }],
+                               [200, { "machine" => "scoped", "read_prefixes" => ["claims/m5"],
+                                       "write_prefixes" => [] }]
+                             ])
+    with_env("AGENT_COORD_API_URL" => stub.base_url, "AGENT_COORD_API_TOKEN" => "tok") do
+      stdout = StringIO.new
+      code = AgentCoord::Runner.new(
+        ["doctor", "--deep", "--doctor-prefix", "heartbeats/m5.json", "--json"],
+        stdout: stdout,
+        stderr: StringIO.new
+      ).run
+      payload = JSON.parse(stdout.string)
+
+      assert_equal 0, code
+      assert_equal "forbidden", payload.fetch("resource_checks").fetch("heartbeats/m5.json")
+      assert_includes payload.fetch("degraded"), "heartbeats/m5.json not readable by scoped token"
+      assert_equal "/v1/state/heartbeats%2Fm5.json", stub.requests[1][:path]
+    end
+  ensure
+    stub&.shutdown
+  end
+
+  def test_doctor_deep_reports_missing_custom_exact_path
+    stub = HttpStoreStub.new([
+                               [200, { "status" => "ok" }],
+                               [404, { "error" => "not_found" }],
+                               [200, { "machine" => "m5", "read_prefixes" => ["heartbeats/m5.json"],
+                                       "write_prefixes" => [] }]
+                             ])
+    with_env("AGENT_COORD_API_URL" => stub.base_url, "AGENT_COORD_API_TOKEN" => "tok") do
+      stdout = StringIO.new
+      code = AgentCoord::Runner.new(
+        ["doctor", "--deep", "--doctor-prefix", "heartbeats/m5.json", "--json"],
+        stdout: stdout,
+        stderr: StringIO.new
+      ).run
+      payload = JSON.parse(stdout.string)
+
+      assert_equal 0, code
+      assert_equal "missing", payload.fetch("resource_checks").fetch("heartbeats/m5.json")
+      assert_includes payload.fetch("degraded"), "heartbeats/m5.json does not exist"
+    end
+  ensure
+    stub&.shutdown
+  end
+
+  def test_doctor_deep_custom_scope_skips_unrelated_resource_probes
+    responses = [
+      [200, { "status" => "ok" }],
+      [200, { "path" => "heartbeats/m5.json", "data" => {}, "version" => 1 }],
+      [200, { "machine" => "m5", "read_prefixes" => ["heartbeats/m5.json"], "write_prefixes" => [] }]
+    ]
+    stub = HttpStoreStub.new(responses)
+    with_env("AGENT_COORD_API_URL" => stub.base_url, "AGENT_COORD_API_TOKEN" => "tok") do
+      stdout = StringIO.new
+      code = AgentCoord::Runner.new(
+        ["doctor", "--deep", "--doctor-prefix", "heartbeats/m5.json", "--json"],
+        stdout: stdout,
+        stderr: StringIO.new
+      ).run
+      payload = JSON.parse(stdout.string)
+
+      assert_equal 0, code
+      assert_equal({ "heartbeats/m5.json" => "ok" }, payload.fetch("resource_checks"))
+      refute payload.key?("degraded")
       expected_paths = [
-        "/v1/state?prefix=claims",
         "/v1/health",
-        "/v1/state?prefix=claims",
-        "/v1/state?prefix=heartbeats",
-        "/v1/state?prefix=batches",
-        "/v1/state?prefix=events"
+        "/v1/state/heartbeats%2Fm5.json",
+        "/v1/whoami"
       ]
       assert_equal(expected_paths, stub.requests.map { |request| request[:path] })
     end
   ensure
-    stub.shutdown
+    stub&.shutdown
+  end
+
+  def test_doctor_deep_custom_scope_unauthorized_prints_recovery_command
+    stub = HttpStoreStub.new([
+                               [200, { "status" => "ok" }],
+                               [401, { "error" => "unknown_token" }]
+                             ])
+    with_env("AGENT_COORD_API_URL" => stub.base_url, "AGENT_COORD_API_TOKEN" => "stale") do
+      error = assert_raises(AgentCoord::OperationalError) do
+        AgentCoord::Runner.new(
+          ["doctor", "--deep", "--doctor-prefix", "heartbeats/m5.json"],
+          stdout: StringIO.new,
+          stderr: StringIO.new
+        ).run
+      end
+
+      assert_includes error.message, "doctor resource heartbeats/m5.json failed authentication"
+      assert_includes error.message, "worker/bin/provision-token"
+      assert_includes error.message, "docs/runbooks/rotate-backend.md"
+    end
+  ensure
+    stub&.shutdown
+  end
+
+  def test_doctor_deep_custom_directory_preserves_filtered_status
+    responses = [
+      [200, { "status" => "ok" }],
+      [200, { "entries" => [], "filtered" => true }],
+      [200, { "machine" => "scoped", "read_prefixes" => ["claims/team/repo"], "write_prefixes" => [] }]
+    ]
+    stub = HttpStoreStub.new(responses)
+    with_env("AGENT_COORD_API_URL" => stub.base_url, "AGENT_COORD_API_TOKEN" => "tok") do
+      stdout = StringIO.new
+      code = AgentCoord::Runner.new(
+        ["doctor", "--deep", "--doctor-prefix", "claims/team", "--json"],
+        stdout: stdout,
+        stderr: StringIO.new
+      ).run
+      payload = JSON.parse(stdout.string)
+
+      assert_equal 0, code
+      assert_equal "filtered", payload.dig("resource_checks", "claims/team")
+      assert_includes payload.fetch("degraded"), "claims/team filtered by scoped token"
+    end
+  ensure
+    stub&.shutdown
+  end
+
+  def test_doctor_deep_custom_directory_preserves_forbidden_status
+    stub = HttpStoreStub.new([
+                               [200, { "status" => "ok" }],
+                               [403, { "error" => "forbidden" }],
+                               [200, { "machine" => "scoped", "read_prefixes" => ["claims/m5"],
+                                       "write_prefixes" => [] }]
+                             ])
+    with_env("AGENT_COORD_API_URL" => stub.base_url, "AGENT_COORD_API_TOKEN" => "tok") do
+      stdout = StringIO.new
+      code = AgentCoord::Runner.new(
+        ["doctor", "--deep", "--doctor-prefix", "heartbeats", "--json"],
+        stdout: stdout,
+        stderr: StringIO.new
+      ).run
+      payload = JSON.parse(stdout.string)
+
+      assert_equal 0, code
+      assert_equal "forbidden", payload.fetch("resource_checks").fetch("heartbeats")
+      assert_includes payload.fetch("degraded"), "heartbeats not readable by scoped token"
+    end
+  ensure
+    stub&.shutdown
+  end
+
+  def test_doctor_deep_custom_event_prefix_degrades_for_older_worker
+    stub = HttpStoreStub.new([
+                               [200, { "status" => "ok" }],
+                               [400, { "error" => "invalid_prefix" }],
+                               [404, { "error" => "route_not_found" }]
+                             ])
+    with_env("AGENT_COORD_API_URL" => stub.base_url, "AGENT_COORD_API_TOKEN" => "tok") do
+      stdout = StringIO.new
+      code = AgentCoord::Runner.new(
+        ["doctor", "--deep", "--doctor-prefix", "events/batch-1", "--json"],
+        stdout: stdout,
+        stderr: StringIO.new
+      ).run
+      payload = JSON.parse(stdout.string)
+
+      assert_equal 0, code
+      assert_equal "unsupported", payload.fetch("resource_checks").fetch("events/batch-1")
+      assert_includes payload.fetch("degraded"), "event state not supported by backend"
+    end
+  ensure
+    stub&.shutdown
+  end
+
+  def test_doctor_deep_text_labels_all_state_scopes
+    responses = [
+      [200, { "status" => "ok" }],
+      [200, { "entries" => [] }],
+      [200, { "entries" => [] }],
+      [200, { "entries" => [] }],
+      [200, { "entries" => [] }],
+      [200, { "machine" => "operator", "read_prefixes" => [""], "write_prefixes" => [""] }]
+    ]
+    stub = HttpStoreStub.new(responses)
+    with_env("AGENT_COORD_API_URL" => stub.base_url, "AGENT_COORD_API_TOKEN" => "tok") do
+      stdout = StringIO.new
+      code = AgentCoord::Runner.new(["doctor", "--deep"], stdout: stdout, stderr: StringIO.new).run
+
+      assert_equal 0, code
+      assert_includes stdout.string, "read_prefixes: all-state"
+      assert_includes stdout.string, "write_prefixes: all-state"
+    end
+  ensure
+    stub&.shutdown
   end
 
   def test_doctor_uses_record_get_for_exact_http_readable_path

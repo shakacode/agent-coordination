@@ -91,15 +91,7 @@ class HttpBackendIntegrationTest < Minitest::Test
     mixed_case_hidden_path = "claims/ShakaCode/api.json/302.json"
     denied_path = "claims/shakacode/outside/300.json"
 
-    code, body = http_json(
-      "PUT",
-      state_path(allowed_path),
-      token: scoped_token,
-      headers: { "If-None-Match" => "*" },
-      body: { "data" => { "schema_version" => 1, "agent_id" => "scoped-worker" } }
-    )
-    assert_equal 201, code
-    assert_equal "scoped", body.fetch("updated_by")
+    assert_scoped_write(scoped_token, allowed_path)
 
     seed_full_token_claims(full_token, secondary_path, hidden_path, mixed_case_hidden_path)
 
@@ -117,6 +109,8 @@ class HttpBackendIntegrationTest < Minitest::Test
     assert_filtered_listed_paths body, allowed_path, secondary_path
 
     assert_scoped_doctor_ok(scoped_token)
+
+    assert_scoped_identity(scoped_token, allowed_prefix, secondary_prefix)
 
     code, body = http_json("GET", state_path("#{allowed_prefix}/300/extra.json"), token: scoped_token)
     assert_equal 400, code
@@ -137,7 +131,40 @@ class HttpBackendIntegrationTest < Minitest::Test
     assert_equal "forbidden", body.fetch("error")
   end
 
+  def test_unknown_token_returns_machine_safe_auth_hint
+    code, body = http_json("GET", "/v1/state?prefix=claims", token: "stale-token")
+
+    assert_equal 401, code
+    assert_equal "unknown_token", body.fetch("error")
+  end
+
+  def test_missing_token_remains_unauthorized
+    code, body = http_json("GET", "/v1/state?prefix=claims", token: "")
+
+    assert_equal 401, code
+    assert_equal "unauthorized", body.fetch("error")
+  end
+
   private
+
+  def assert_scoped_write(scoped_token, allowed_path)
+    code, body = http_json(
+      "PUT",
+      state_path(allowed_path),
+      token: scoped_token,
+      headers: { "If-None-Match" => "*" },
+      body: { "data" => { "schema_version" => 1, "agent_id" => "scoped-worker" } }
+    )
+    assert_equal 201, code
+    assert_equal "scoped", body.fetch("updated_by")
+  end
+
+  def assert_scoped_identity(scoped_token, allowed_prefix, secondary_prefix)
+    code, body = http_json("GET", "/v1/whoami", token: scoped_token)
+    assert_equal 200, code
+    assert_equal "scoped", body.fetch("machine")
+    assert_equal [allowed_prefix, secondary_prefix], body.fetch("read_prefixes")
+  end
 
   def seed_full_token_claims(full_token, *paths)
     paths.each do |path|
@@ -167,10 +194,16 @@ class HttpBackendIntegrationTest < Minitest::Test
       { "AGENT_COORD_API_TOKEN" => scoped_token },
       "ruby",
       CLI,
-      "doctor"
+      "doctor",
+      "--deep",
+      "--json"
     )
     assert doctor_status.success?, doctor_err
-    assert_includes doctor_out, "status: ok"
+    payload = JSON.parse(doctor_out)
+    assert_equal "ok", payload.fetch("status")
+    assert_equal "scoped", payload.dig("identity", "machine")
+    assert_equal "filtered", payload.dig("resource_checks", "claims")
+    assert_equal "forbidden", payload.dig("resource_checks", "heartbeats")
   end
 
   def state_path(path)
