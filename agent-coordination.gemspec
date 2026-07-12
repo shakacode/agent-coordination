@@ -27,6 +27,13 @@ Gem::Specification.new do |spec|
     bin/agent-coord
     contracts/state-schema-v2.json
     docs/protocol-curl.md
+    schema/state/v1/fixtures/invalid/host-limit-active-with-cleared-at.json
+    schema/state/v1/fixtures/invalid/host-limit-cleared-without-cleared-at.json
+    schema/state/v1/fixtures/invalid/host-limit-noncanonical-host.json
+    schema/state/v1/fixtures/replay/two-lanes-one-host-limit.json
+    schema/state/v1/fixtures/valid/host-limit-active.json
+    schema/state/v1/fixtures/valid/host-limit-cleared.json
+    schema/state/v1/host-limit.schema.json
   ]
   spec.bindir = "bin"
   spec.executables = ["agent-coord"]

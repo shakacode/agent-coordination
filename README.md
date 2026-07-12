@@ -390,6 +390,21 @@ Unscoped `status` excludes `archive/` by default. Pass `--include-archived` for
 an explicit archive inventory; scoped status remains hot-state-only so target
 and batch dependency checks never turn into an all-archive scan.
 
+### Host-limit contract foundation
+
+The published
+[`schema/state/v1/host-limit.schema.json`](schema/state/v1/host-limit.schema.json)
+defines a shared usage-limit record keyed by `(workspace, machine, canonical
+quota host, scope)`. It includes active and explicitly cleared states, known or
+unknown reset times, and an optional `host_limits` status projection from which
+consumers may derive `blocked-on-limit` for matching lanes. Positive, negative,
+and two-lane replay fixtures live under [`schema/state/v1/fixtures/`](schema/state/v1/fixtures/).
+
+This is a schema-only foundation. The CLI and Worker do not yet report, persist,
+clear, or project these records, and provider message/probe facts remain
+`UNKNOWN`. See [ADR 0007](docs/adr/0007-host-limit-state-contract.md) for
+canonical host, reset, clear, workspace-key, and non-goal semantics.
+
 `gc` applies one retention plan to local, GitHub, and HTTP stores. Exactly one
 mode is required: `--dry-run` prints proposed actions without writing, while
 `--execute` copies eligible records into `archive/` with compare-and-swap

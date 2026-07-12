@@ -9,6 +9,9 @@ when releases begin.
 
 ### Added
 
+- A schema-first v1 host-limit record and optional status projection contract,
+  with conformance and two-lane replay fixtures; runtime reporting and UI remain
+  explicitly deferred while provider facts are unknown.
 - Archive-first state retention with `agent-coord gc`, explicit dry-run/execute
   modes, 7-day hot and 30-day archive defaults, synthetic-state markers,
   terminal event compaction, local/HTTP parity, and a graveyard replay harness.

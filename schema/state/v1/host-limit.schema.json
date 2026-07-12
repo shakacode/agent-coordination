@@ -1,0 +1,99 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/shakacode/agent-coordination/blob/main/schema/state/v1/host-limit.schema.json",
+  "title": "Agent Coordination Host Limit Record v1",
+  "description": "Contract for a machine and quota-host scoped usage-limit observation. This schema defines state only; reporting, persistence, provider detection, and UI behavior are separate concerns.",
+  "x-contract-version": 1,
+  "x-record-family": "host_limit",
+  "x-logical-key": ["workspace", "machine", "host", "scope"],
+  "x-storage-key": {
+    "template": "host_limits/{workspace}/{machine}/{host}/{scope}.json",
+    "workspace_machine_encoding": "UTF-8 bytes; leave ASCII alphanumeric, underscore, and hyphen; percent-encode every other byte with uppercase hexadecimal"
+  },
+  "$ref": "#/$defs/host_limit",
+  "$defs": {
+    "workspace": {
+      "type": "string",
+      "minLength": 1,
+      "default": "default",
+      "description": "Tenant/workspace dimension required by ADR 0004. Self-hosted producers use default."
+    },
+    "machine": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Stable coordination-machine identifier."
+    },
+    "canonical_host": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^[a-z0-9](?:[a-z0-9._-]{0,126}[a-z0-9])?$",
+      "description": "Canonical quota-pool host identifier: trim and lowercase before writing; use ASCII letters, digits, dot, underscore, or hyphen; omit scheme, port, path, account, and credential data. Equality is exact after canonicalization. Provider alias mapping is intentionally outside v1."
+    },
+    "scope": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^[a-z0-9](?:[a-z0-9._-]{0,126}[a-z0-9])?$",
+      "description": "Canonical provider-neutral quota window or limit class. Multiple scopes may coexist for one workspace, machine, and host."
+    },
+    "host_limit": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "workspace",
+        "machine",
+        "host",
+        "scope",
+        "status",
+        "observed_at",
+        "resets_at",
+        "source"
+      ],
+      "properties": {
+        "schema_version": { "const": 1 },
+        "workspace": { "$ref": "#/$defs/workspace" },
+        "machine": { "$ref": "#/$defs/machine" },
+        "host": { "$ref": "#/$defs/canonical_host" },
+        "scope": { "$ref": "#/$defs/scope" },
+        "status": { "enum": ["active", "cleared"] },
+        "observed_at": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Time the limit was observed. Reset and clear updates retain the original observation time for this logical record."
+        },
+        "resets_at": {
+          "type": ["string", "null"],
+          "format": "date-time",
+          "description": "Known reset time, or null when unknown. An active record with a non-null reset at or before projection time is no longer effective."
+        },
+        "source": { "enum": ["manual", "host-message", "hook", "probe"] },
+        "cleared_at": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Required only after explicit clear and not permitted on an active record."
+        }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "status": { "const": "cleared" } }, "required": ["status"] },
+          "then": { "required": ["cleared_at"] },
+          "else": { "not": { "required": ["cleared_at"] } }
+        }
+      ]
+    },
+    "status_projection": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["host_limits"],
+      "properties": {
+        "host_limits": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/host_limit" },
+          "description": "Optional status section. Each logical key appears at most once; consumers derive blocked-on-limit for lanes matching an effective record's workspace, machine, and host."
+        }
+      }
+    }
+  }
+}
