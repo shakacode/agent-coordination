@@ -92,7 +92,8 @@ fi
 
 beat() {
   "$CLI" heartbeat --agent-id="$AGENT_ID" --repo="$REPO_SLUG" \
-    --target="$ISSUE_KEY" --branch="$BRANCH" --status="$1"
+    --target="$ISSUE_KEY" --branch="$BRANCH" --status="$1" \
+    --synthetic --synthetic-kind=simulation
 }
 
 release_claim() {
@@ -112,6 +113,8 @@ register_batch() {
     File.write(ARGV.fetch(0), JSON.generate(
       "batch_id" => ARGV.fetch(1),
       "repo" => ARGV.fetch(2),
+      "synthetic" => true,
+      "synthetic_kind" => "simulation",
       "lanes" => [{ "name" => "worker", "owner" => ARGV.fetch(3), "targets" => [ARGV.fetch(4)] }]
     ))
   ' "$manifest" "$BATCH_ID" "$REPO_SLUG" "$AGENT_ID" "$ISSUE_KEY"
@@ -150,7 +153,8 @@ trap cleanup_claim EXIT
 
 set +e
 "$CLI" claim --agent-id="$AGENT_ID" --repo="$REPO_SLUG" --target="$ISSUE_KEY" \
-  --batch-id="$BATCH_ID" --branch="$BRANCH" --host="scripted-sim" >/dev/null
+  --batch-id="$BATCH_ID" --branch="$BRANCH" --host="scripted-sim" \
+  --synthetic --synthetic-kind=simulation >/dev/null
 CODE=$?
 set -e
 if [ "$CODE" -eq 3 ]; then

@@ -21,6 +21,7 @@ module AgentCoord
   VERSION = "0.1.0"
   SCHEMA_VERSION = 1
   LANE_CLOSED_SCHEMA_VERSION = 2
+  ARCHIVE_SCHEMA_VERSION = 1
   DEFAULT_WORKSPACE = "default"
   TERMINAL_STATES = %w[done abandoned superseded].freeze
   DEFAULT_BACKEND = nil
@@ -28,18 +29,28 @@ module AgentCoord
   DEFAULT_CLAIM_TTL = 4 * 60 * 60
   DEFAULT_HEARTBEAT_TTL = 15 * 60
   HEARTBEAT_DEAD_AFTER_TTL_MULTIPLIER = 4
+  DEFAULT_HOT_DAYS = 7
+  DEFAULT_ARCHIVE_DAYS = 30
+  DEFAULT_SYNTHETIC_HOT_DAYS = 1
   STATUS_STATE_ROOT_ENV = "AGENT_COORD_STATUS_STATE_ROOT"
   JSON_PREFIXES = %w[claims heartbeats batches].freeze
-  STATE_PREFIXES = (JSON_PREFIXES + %w[events]).freeze
+  STATE_PREFIXES = (JSON_PREFIXES + %w[events archive]).freeze
   STATE_PATH_PATTERN = %r{\A(?:
     claims/[A-Za-z0-9_.:-]+/[A-Za-z0-9_.:-]+/[A-Za-z0-9_.:-]+\.json |
     heartbeats/[A-Za-z0-9_.:-]+\.json |
     batches/[A-Za-z0-9_.:-]+\.json |
-    events/[A-Za-z0-9_.:-]+/[A-Za-z0-9_.:-]+\.json
+    events/[A-Za-z0-9_.:-]+/[A-Za-z0-9_.:-]+\.json |
+    archive/(?:(?:
+      claims/[A-Za-z0-9_.:-]+/[A-Za-z0-9_.:-]+/[A-Za-z0-9_.:-]+\.json |
+      heartbeats/[A-Za-z0-9_.:-]+\.json |
+      batches/[A-Za-z0-9_.:-]+\.json |
+      events/[A-Za-z0-9_.:-]+/[A-Za-z0-9_.:-]+\.json
+    ))
   )\z}x
   DEPENDENCY_DONE_STATUSES = %w[complete completed done merged ready].freeze
   STATUS_BATCH_METADATA_FIELDS = %w[
     repo objective instructions launch_prompt operator dashboard_url status updated_at registered_at completed_at
+    synthetic synthetic_kind
   ].freeze
   STATUS_LANE_METADATA_FIELDS = %w[
     thread_handle chat_handle host pr_url dashboard_url operator phase branch terminal closed_at closed_by
@@ -47,19 +58,22 @@ module AgentCoord
   ].freeze
   STATUS_CLAIM_METADATA_FIELDS = %w[
     batch_id thread_handle chat_handle host pr_url dashboard_url operator phase generation instance_id
-    release_mode handoff_to handoff_note terminal pr_state evidence_url workspace closed_by
+    release_mode handoff_to handoff_note terminal pr_state evidence_url workspace closed_by synthetic synthetic_kind
   ].freeze
   STATUS_HEARTBEAT_METADATA_FIELDS = %w[
     batch_id branch thread_handle chat_handle host pr_url dashboard_url operator phase generation instance_id
+    synthetic synthetic_kind
   ].freeze
   STATUS_EVENT_METADATA_FIELDS = %w[
     event_id lane agent_id repo target branch status message thread_handle chat_handle host pr_url dashboard_url
     operator phase generation instance_id release_mode handoff_to handoff_note terminal pr_state evidence_url
     workspace closed_by
+    synthetic synthetic_kind
   ].freeze
   HEARTBEAT_TARGET_FIELDS = %w[repo target].freeze
   METADATA_OPTION_FIELDS = %w[
     thread_handle chat_handle host pr_url dashboard_url operator phase generation instance_id
+    synthetic synthetic_kind
   ].freeze
   HANDOFF_STATE_FIELDS = %w[
     release_mode handoff_to handoff_note
@@ -139,6 +153,8 @@ module AgentCoord
         record_event(parse_options(command, @argv))
       when "status"
         render_status(parse_options(command, @argv))
+      when "gc"
+        gc(parse_options(command, @argv))
       when "version"
         render_version(parse_options(command, @argv))
       when "config"
@@ -172,6 +188,7 @@ module AgentCoord
           record-event
                      append a lane or batch event into coordination state
           status     render full or scoped coordination state
+          gc         archive and purge terminal coordination state
           version    print CLI contract version
           config     print runtime defaults and exit-code contract
           doctor     verify backend access and state layout
@@ -202,10 +219,13 @@ module AgentCoord
 
         add_backend_options(opts, options)
         add_target_options(opts, options)
+        add_synthetic_options(opts, options)
         add_release_options(opts, options, command)
         add_event_options(opts, options)
         add_register_batch_options(opts, options)
         add_doctor_options(opts, options, command)
+        add_gc_options(opts, options, command)
+        add_status_options(opts, options, command)
         add_bootstrap_options(opts, options)
         add_help_option(opts)
       end
@@ -259,6 +279,15 @@ module AgentCoord
       end
     end
 
+    def add_synthetic_options(opts, options)
+      opts.on("--synthetic", "mark smoke or simulation state for aggressive retention") do
+        options[:synthetic] = true
+      end
+      opts.on("--synthetic-kind KIND", "classify synthetic state, e.g. simulation or smoke") do |value|
+        options[:synthetic_kind] = value
+      end
+    end
+
     def add_release_options(opts, options, command)
       return unless command == "release"
 
@@ -289,6 +318,32 @@ module AgentCoord
       opts.on("--deep", "doctor only: parse every JSON state record") { options[:deep] = true }
       opts.on("--doctor-prefix PREFIX", "doctor only: HTTP readable prefix probe") do |value|
         options[:doctor_prefix] = value
+      end
+    end
+
+    def add_gc_options(opts, options, command)
+      return unless command == "gc"
+
+      opts.on("--dry-run", "plan retention changes without writing") { options[:dry_run] = true }
+      opts.on("--execute", "apply retention changes") { options[:execute] = true }
+      opts.on("--hot-days DAYS", Integer, "days terminal state remains hot (default: #{DEFAULT_HOT_DAYS})") do |value|
+        options[:hot_days] = value
+      end
+      opts.on("--archive-days DAYS", Integer,
+              "days archived state remains before deletion (default: #{DEFAULT_ARCHIVE_DAYS})") do |value|
+        options[:archive_days] = value
+      end
+      opts.on("--synthetic-hot-days DAYS", Integer,
+              "days synthetic state remains hot (default: #{DEFAULT_SYNTHETIC_HOT_DAYS})") do |value|
+        options[:synthetic_hot_days] = value
+      end
+    end
+
+    def add_status_options(opts, options, command)
+      return unless command == "status"
+
+      opts.on("--include-archived", "include archived records in status output") do
+        options[:include_archived] = true
       end
     end
 
@@ -348,7 +403,7 @@ module AgentCoord
     end
 
     def backend_command?(command)
-      %w[claim release heartbeat register-batch record-event status doctor].include?(command)
+      %w[claim release heartbeat register-batch record-event status gc doctor].include?(command)
     end
 
     def default_options
@@ -474,6 +529,7 @@ module AgentCoord
         opts.separator "    --repo OWNER/REPO --target N  target read; claim plus holder heartbeat only"
         opts.separator "    --batch-id ID                 batch read; batch, lane heartbeats, dependencies"
         opts.separator "Scoped JSON includes a degraded array for intentionally omitted state."
+        opts.separator "Use --include-archived with unscoped status to inspect archive records."
         opts.separator "Exit 2 means coordination state for that command is UNKNOWN."
         opts.separator ""
       when "doctor"
@@ -483,6 +539,8 @@ module AgentCoord
         opts.separator "    --deep   parse every claim, heartbeat, and batch JSON file"
         opts.separator "Exit 2 means coordination state is UNKNOWN until backend access is fixed."
         opts.separator ""
+      when "gc"
+        add_gc_command_help(opts)
       when "register-batch"
         opts.separator ""
         opts.separator "Batch registration:"
@@ -506,6 +564,280 @@ module AgentCoord
       end
     end
 
+    def add_gc_command_help(opts)
+      opts.separator ""
+      opts.separator "GC modes:"
+      opts.separator "    --dry-run  plan retention changes without writing"
+      opts.separator "    --execute  apply retention changes"
+      opts.separator "    --hot-days DAYS      hot retention (default: #{DEFAULT_HOT_DAYS})"
+      opts.separator "    --archive-days DAYS  archive retention (default: #{DEFAULT_ARCHIVE_DAYS})"
+      opts.separator "    --synthetic-hot-days DAYS  synthetic hot retention (default: #{DEFAULT_SYNTHETIC_HOT_DAYS})"
+      opts.separator "Exactly one mode is required."
+      opts.separator ""
+    end
+
+    def gc(options)
+      raise Error, "gc requires exactly one of --dry-run or --execute" if options[:dry_run] == options[:execute]
+
+      hot_days = nonnegative_days(options[:hot_days] || DEFAULT_HOT_DAYS, "--hot-days")
+      archive_days = nonnegative_days(options[:archive_days] || DEFAULT_ARCHIVE_DAYS, "--archive-days")
+      synthetic_hot_days = nonnegative_days(
+        options[:synthetic_hot_days] || DEFAULT_SYNTHETIC_HOT_DAYS,
+        "--synthetic-hot-days"
+      )
+      now = now_utc
+      store = build_store(options)
+      candidates = gc_archive_candidates(store, now, hot_days, synthetic_hot_days) +
+                   gc_compaction_candidates(store, now, hot_days, synthetic_hot_days) +
+                   gc_delete_candidates(store, now)
+      if options[:execute]
+        candidates.each do |candidate|
+          case candidate.dig(:action, "action")
+          when "archive" then gc_archive_record(store, candidate, now, archive_days)
+          when "compact" then gc_compact_events(store, candidate, now, archive_days)
+          when "delete" then gc_delete_archive(store, candidate)
+          end
+        end
+      end
+      candidates.sort_by! do |candidate|
+        action = candidate.fetch(:action)
+        action["source_path"] || Array(action["source_paths"]).first || action.fetch("archive_path", "")
+      end
+      actions = candidates.map { |candidate| candidate.fetch(:action) }
+      payload = {
+        "mode" => options[:dry_run] ? "dry-run" : "execute",
+        "policy" => {
+          "hot_days" => hot_days,
+          "archive_days" => archive_days,
+          "synthetic_hot_days" => synthetic_hot_days
+        },
+        "actions" => actions
+      }
+      options[:json] ? @stdout.puts(JSON.pretty_generate(payload)) : render_gc_text(payload)
+      0
+    ensure
+      close_store(store)
+    end
+
+    def nonnegative_days(value, option)
+      raise Error, "#{option} must be zero or greater" if value.negative?
+
+      value
+    end
+
+    def gc_archive_candidates(store, now, hot_days, synthetic_hot_days)
+      candidates = JSON_PREFIXES.flat_map do |prefix|
+        store.list_json(prefix).filter_map do |entry|
+          reason, eligible_at = gc_archive_eligibility(entry, prefix, now)
+          retention_days = entry.data["synthetic"] == true ? synthetic_hot_days : hot_days
+          next unless reason && eligible_at <= now - (retention_days * 86_400)
+
+          action = {
+            "action" => "archive",
+            "source_path" => entry.path,
+            "archive_path" => AgentCoord.archive_path(entry.path),
+            "reason" => reason,
+            "eligible_at" => timestamp(eligible_at)
+          }
+          { entry: entry, action: action }
+        end
+      end
+      candidates.sort_by { |candidate| candidate.dig(:action, "source_path") }
+    end
+
+    def gc_delete_candidates(store, now)
+      store.list_json("archive").filter_map do |entry|
+        delete_after = gc_archive_delete_after(entry)
+        next if delete_after > now
+
+        {
+          entry: entry,
+          action: {
+            "action" => "delete",
+            "source_path" => entry.path,
+            "reason" => "archive_expired",
+            "eligible_at" => timestamp(delete_after)
+          }
+        }
+      end
+    end
+
+    def gc_compaction_candidates(store, now, hot_days, synthetic_hot_days)
+      groups = store.list_json("events").group_by do |entry|
+        data = entry.data
+        [data["batch_id"] || AgentCoord.event_batch_from_path(entry.path), data["repo"], data["target"]&.to_s]
+      end
+      groups.filter_map do |(batch_id, repo, target), entries|
+        next if repo.to_s.empty? || target.to_s.empty?
+
+        terminal = entries.select { |entry| entry.data["type"] == "lane_closed" }
+                          .max_by { |entry| gc_record_time(entry.data) }
+        next unless terminal
+
+        eligible_at = gc_record_time(terminal.data)
+        retention_days = entries.all? { |entry| entry.data["synthetic"] == true } ? synthetic_hot_days : hot_days
+        next if eligible_at > now - (retention_days * 86_400)
+
+        source_paths = entries.map(&:path).sort
+        digest = Digest::SHA256.hexdigest("#{repo}##{target}")[0, 16]
+        archive_path = "archive/events/#{batch_id}/compact-#{digest}.json"
+        {
+          entries: entries.sort_by(&:path),
+          action: {
+            "action" => "compact",
+            "source_paths" => source_paths,
+            "archive_path" => archive_path,
+            "reason" => "terminal_target_events",
+            "eligible_at" => timestamp(eligible_at)
+          }
+        }
+      end
+    end
+
+    def gc_compact_events(store, candidate, now, archive_days)
+      entries = candidate.fetch(:entries)
+      action = candidate.fetch(:action)
+      envelope = {
+        "schema_version" => SCHEMA_VERSION,
+        "record_family" => "compacted_events",
+        "source_paths" => action.fetch("source_paths"),
+        "reason" => action.fetch("reason"),
+        "synthetic" => entries.all? { |entry| entry.data["synthetic"] == true },
+        "archived_at" => timestamp(now),
+        "delete_after" => timestamp(now + (archive_days * 86_400)),
+        "records" => entries.map(&:data)
+      }
+      archive_path = action.fetch("archive_path")
+      begin
+        store.write_json(archive_path, envelope, message: "Compact terminal events", create: true)
+      rescue Conflict
+        existing = store.read_json(archive_path)
+        unless existing && gc_compaction_contains?(existing.data, entries)
+          raise OperationalError, "event compaction destination conflict at #{archive_path}"
+        end
+      end
+      entries.each do |entry|
+        store.delete_json(entry.path, message: "Compact terminal events", sha: entry.sha)
+      rescue Conflict => e
+        raise OperationalError, "gc event changed at #{entry.path}; #{e.message}"
+      end
+    end
+
+    def gc_compaction_contains?(existing, entries)
+      return false unless existing["record_family"] == "compacted_events"
+
+      existing_by_path = Array(existing["source_paths"]).zip(Array(existing["records"])).to_h
+      entries.all? { |entry| existing_by_path[entry.path] == entry.data }
+    end
+
+    def gc_archive_delete_after(entry)
+      data = entry.data
+      unless %w[archived_record compacted_events].include?(data["record_family"])
+        raise OperationalError, "archive record has unknown family at #{entry.path}"
+      end
+
+      Time.iso8601(data.fetch("delete_after")).utc
+    rescue KeyError, ArgumentError
+      raise OperationalError, "archive record has invalid delete_after at #{entry.path}"
+    end
+
+    def gc_delete_archive(store, candidate)
+      entry = candidate.fetch(:entry)
+      store.delete_json(entry.path, message: "Delete expired archive #{entry.path}", sha: entry.sha)
+    rescue Conflict => e
+      raise OperationalError, "gc archive changed at #{entry.path}; #{e.message}"
+    end
+
+    def gc_archive_record(store, candidate, now, archive_days)
+      entry = candidate.fetch(:entry)
+      action = candidate.fetch(:action)
+      archive_path = action.fetch("archive_path")
+      envelope = {
+        "schema_version" => SCHEMA_VERSION,
+        "record_family" => "archived_record",
+        "source_path" => entry.path,
+        "reason" => action.fetch("reason"),
+        "synthetic" => entry.data["synthetic"] == true,
+        "archived_at" => timestamp(now),
+        "delete_after" => timestamp(now + (archive_days * 86_400)),
+        "data" => entry.data
+      }
+      begin
+        store.write_json(archive_path, envelope, message: "Archive #{entry.path}", create: true)
+      rescue Conflict
+        existing = store.read_json(archive_path)
+        unless existing && gc_same_archived_record?(existing.data, envelope)
+          raise OperationalError, "archive destination conflict at #{archive_path}"
+        end
+      end
+      store.delete_json(entry.path, message: "Archive #{entry.path}", sha: entry.sha)
+    rescue Conflict => e
+      raise OperationalError, "gc source changed at #{entry.path}; #{e.message}"
+    end
+
+    def gc_same_archived_record?(existing, requested)
+      existing["record_family"] == "archived_record" &&
+        existing["source_path"] == requested["source_path"] &&
+        existing["data"] == requested["data"]
+    end
+
+    def gc_archive_eligibility(entry, prefix, now)
+      data = entry.data
+      return ["synthetic", gc_record_time(data)] if data["synthetic"] == true
+
+      case prefix
+      when "claims"
+        return unless data["status"] == "released" || TERMINAL_STATES.include?(data["terminal"])
+
+        ["terminal_claim", gc_record_time(data)]
+      when "heartbeats"
+        if TERMINAL_STATES.include?(data["status"])
+          ["terminal_heartbeat", gc_record_time(data)]
+        elsif heartbeat_liveness(data, now) == "dead"
+          ["dead_heartbeat", gc_heartbeat_dead_at(data)]
+        end
+      when "batches"
+        return unless data["status"] == "completed"
+
+        ["completed_batch", gc_record_time(data, "completed_at")]
+      end
+    end
+
+    def gc_record_time(data, preferred = nil)
+      candidates = [preferred, "updated_at", "at", "released_at", "completed_at", "expires_at"].compact
+      value = candidates.filter_map { |field| data[field] }.first
+      raise OperationalError, "gc record is missing a retention timestamp" unless value
+
+      Time.iso8601(value).utc
+    rescue ArgumentError
+      raise OperationalError, "gc record has invalid retention timestamp: #{value}"
+    end
+
+    def gc_heartbeat_dead_at(data)
+      updated_at = Time.iso8601(data.fetch("updated_at")).utc
+      expires_at = Time.iso8601(data.fetch("expires_at")).utc
+      ttl = expires_at - updated_at
+      updated_at + (ttl * HEARTBEAT_DEAD_AFTER_TTL_MULTIPLIER)
+    rescue KeyError, ArgumentError
+      gc_record_time(data)
+    end
+
+    def render_gc_text(payload)
+      @stdout.puts "gc #{payload.fetch('mode')} hot=#{payload.dig('policy', 'hot_days')}d " \
+                   "archive=#{payload.dig('policy', 'archive_days')}d"
+      if payload.fetch("actions").empty?
+        @stdout.puts "- no actions"
+      else
+        payload.fetch("actions").each { |action| @stdout.puts "- #{gc_action_text(action)}" }
+      end
+    end
+
+    def gc_action_text(action)
+      source = action["source_path"] || Array(action["source_paths"]).join(",")
+      destination = action["archive_path"] ? " -> #{action['archive_path']}" : ""
+      "#{action.fetch('action')} #{source}#{destination} (#{action.fetch('reason')})"
+    end
+
     def deep_option_token?(argv)
       # Keep this in sync with value-taking opts.on definitions in parse_options.
       value_options = %w[
@@ -513,7 +845,7 @@ module AgentCoord
         --thread-handle --chat-handle --host --pr-url --dashboard-url --operator --phase --generation --instance-id
         --handoff-to --handoff-note --terminal --pr-state --evidence-url --workspace
         --ttl --status --type --lane --message --file --launch-prompt --install-dir
-        --status-state-root --profile
+        --status-state-root --profile --hot-days --archive-days --synthetic-hot-days
       ]
       skip_next = false
       argv.any? do |arg|
@@ -620,6 +952,7 @@ module AgentCoord
         "version" => VERSION,
         "schema_version" => SCHEMA_VERSION,
         "lane_closed_schema_version" => LANE_CLOSED_SCHEMA_VERSION,
+        "archive_schema_version" => ARCHIVE_SCHEMA_VERSION,
         "default_backend" => DEFAULT_BACKEND,
         "default_ref" => DEFAULT_REF
       }
@@ -627,6 +960,7 @@ module AgentCoord
         @stdout.puts "agent-coord #{VERSION}"
         @stdout.puts "schema_version: #{SCHEMA_VERSION}"
         @stdout.puts "lane_closed_schema_version: #{LANE_CLOSED_SCHEMA_VERSION}"
+        @stdout.puts "archive_schema_version: #{ARCHIVE_SCHEMA_VERSION}"
         @stdout.puts "default_backend: #{default_backend_text}"
         @stdout.puts "default_ref: #{DEFAULT_REF}"
       end
@@ -642,6 +976,10 @@ module AgentCoord
         @stdout.puts "default_claim_ttl_seconds: #{payload.fetch('default_claim_ttl_seconds')}"
         @stdout.puts "default_heartbeat_ttl_seconds: #{payload.fetch('default_heartbeat_ttl_seconds')}"
         @stdout.puts "heartbeat_dead_after_ttl_multiplier: #{payload.fetch('heartbeat_dead_after_ttl_multiplier')}"
+        @stdout.puts "retention_policy: " \
+                     "hot=#{payload.dig('retention_policy', 'hot_days')}d," \
+                     "archive=#{payload.dig('retention_policy', 'archive_days')}d," \
+                     "synthetic_hot=#{payload.dig('retention_policy', 'synthetic_hot_days')}d"
         @stdout.puts "dependency_terminal_statuses: #{payload.fetch('dependency_terminal_statuses').join(',')}"
         @stdout.puts "exit_codes: #{payload.fetch('exit_codes').map { |name, code| "#{name}=#{code}" }.join(',')}"
       end
@@ -785,6 +1123,11 @@ module AgentCoord
         if prefix == "events" && unsupported_event_listing?(e)
           checks[prefix] = "unsupported"
           section_notes[prefix] = "event state not supported by backend"
+          next
+        end
+        if prefix == "archive" && unsupported_event_listing?(e)
+          checks[prefix] = "unsupported"
+          section_notes[prefix] = "archive state not supported by backend"
           next
         end
         if scoped_http_forbidden_listing?(e, prefix)
@@ -1534,6 +1877,11 @@ module AgentCoord
         else
           broad_status_payload(store, now)
         end
+      if options[:include_archived]
+        raise Error, "--include-archived is only valid for unscoped status" unless status_scope(options) == :all
+
+        payload["archive"] = store.list_json("archive").map { |entry| archive_status_hash(entry) }
+      end
 
       if options[:json]
         @stdout.puts JSON.pretty_generate(payload)
@@ -1789,12 +2137,42 @@ module AgentCoord
       end
 
       render_status_events(payload)
+      render_status_archive(payload)
 
       degraded = payload.fetch("degraded", [])
       return if degraded.empty?
 
       @stdout.puts "degraded"
       degraded.each { |note| @stdout.puts "- #{note}" }
+    end
+
+    def archive_status_hash(entry)
+      data = entry.data
+      {
+        "path" => entry.path,
+        "record_family" => data.fetch("record_family", "unknown"),
+        "source_path" => data["source_path"],
+        "source_paths" => data["source_paths"],
+        "reason" => data.fetch("reason", "unknown"),
+        "synthetic" => data.fetch("synthetic", false),
+        "archived_at" => data.fetch("archived_at", "UNKNOWN"),
+        "delete_after" => data.fetch("delete_after", "UNKNOWN")
+      }.compact
+    end
+
+    def render_status_archive(payload)
+      return unless payload.key?("archive")
+
+      @stdout.puts "archive"
+      if payload.fetch("archive").empty?
+        @stdout.puts "- none"
+      else
+        payload.fetch("archive").each do |record|
+          source = record["source_path"] || Array(record["source_paths"]).join(",")
+          @stdout.puts "- #{record.fetch('path')} #{record.fetch('record_family')} source #{source} " \
+                       "delete_after #{record.fetch('delete_after')}"
+        end
+      end
     end
 
     def status_section_note(payload, section)
@@ -2344,11 +2722,17 @@ module AgentCoord
         "version" => VERSION,
         "schema_version" => SCHEMA_VERSION,
         "lane_closed_schema_version" => LANE_CLOSED_SCHEMA_VERSION,
+        "archive_schema_version" => ARCHIVE_SCHEMA_VERSION,
         "default_backend" => DEFAULT_BACKEND,
         "default_ref" => DEFAULT_REF,
         "default_claim_ttl_seconds" => DEFAULT_CLAIM_TTL,
         "default_heartbeat_ttl_seconds" => DEFAULT_HEARTBEAT_TTL,
         "heartbeat_dead_after_ttl_multiplier" => HEARTBEAT_DEAD_AFTER_TTL_MULTIPLIER,
+        "retention_policy" => {
+          "hot_days" => DEFAULT_HOT_DAYS,
+          "archive_days" => DEFAULT_ARCHIVE_DAYS,
+          "synthetic_hot_days" => DEFAULT_SYNTHETIC_HOT_DAYS
+        },
         "dependency_terminal_statuses" => DEPENDENCY_DONE_STATUSES,
         "exit_codes" => EXIT_CODES
       }
@@ -2497,6 +2881,16 @@ module AgentCoord
       end
     end
 
+    def delete_json(path, message:, sha:) # rubocop:disable Lint/UnusedMethodArgument
+      file = expanded_path(path)
+      with_file_lock(file) do
+        raise Conflict, "state changed at #{path}" unless File.exist?(file) && file_sha(file) == sha
+
+        File.delete(file)
+        fsync_parent_directory(file)
+      end
+    end
+
     def verify_layout!(prefixes)
       prefixes.each do |prefix|
         directory = expanded_path(prefix)
@@ -2611,6 +3005,24 @@ module AgentCoord
 
         read_json(path)
       end
+    end
+
+    def delete_json(path, message:, sha:)
+      AgentCoord.safe_path!(path)
+      result = gh_api(
+        "-X", "DELETE",
+        "repos/#{@backend}/contents/#{path}",
+        "-f", "message=#{message}",
+        "-f", "branch=#{@ref}",
+        "-f", "sha=#{sha}"
+      )
+      if result.conflict?
+        invalidate_read_cache(path)
+        raise Conflict, "state changed at #{path}"
+      end
+      raise OperationalError, result.error_message unless result.success?
+
+      invalidate_read_cache(path)
     end
 
     def verify_readable!
@@ -2743,6 +3155,18 @@ module AgentCoord
         raise Conflict, (create ? "state already exists at #{path}" : "state changed at #{path}")
       else
         raise OperationalError, http_error("write #{path}", response)
+      end
+    end
+
+    # message is accepted for interface parity; the HTTP backend has no commit messages.
+    def delete_json(path, message:, sha:) # rubocop:disable Lint/UnusedMethodArgument
+      AgentCoord.safe_path!(path)
+      response = request(Net::HTTP::Delete, state_path(path), headers: { "If-Match" => sha })
+      case response.code
+      when "200", "204" then nil
+      when "409" then raise Conflict, "state changed at #{path}"
+      else
+        raise OperationalError, http_error("delete #{path}", response)
       end
     end
 
@@ -2987,6 +3411,14 @@ module AgentCoord
   def self.event_batch_from_path(path)
     parts = path.split("/")
     parts.length >= 3 ? parts[1] : "UNKNOWN"
+  end
+
+  def self.archive_path(source_path)
+    unless source_path.to_s.match?(%r{\A(?:claims|heartbeats|batches|events)/}) && state_record_path?(source_path)
+      raise PathValidationError, "invalid archive source path: #{source_path}"
+    end
+
+    "archive/#{source_path}"
   end
 
   def self.repo_from_claim_path(path)

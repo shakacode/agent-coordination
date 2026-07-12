@@ -9,6 +9,9 @@ when releases begin.
 
 ### Added
 
+- Archive-first state retention with `agent-coord gc`, explicit dry-run/execute
+  modes, 7-day hot and 30-day archive defaults, synthetic-state markers,
+  terminal event compaction, local/HTTP parity, and a graveyard replay harness.
 - A clearly labeled zero-config local-store default for single-machine
   coordination; shared or multi-machine coordination still requires explicit
   HTTP configuration.

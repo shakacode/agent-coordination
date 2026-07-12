@@ -1,0 +1,98 @@
+#!/usr/bin/env ruby
+# frozen_string_literal: true
+
+require "fileutils"
+require "json"
+require "open3"
+require "tmpdir"
+require "time"
+
+ROOT = File.expand_path("../..", __dir__)
+CLI = File.join(ROOT, "bin", "agent-coord")
+
+requested_root = ARGV.shift if ARGV.first == "--state-root"
+requested_root = ARGV.shift if requested_root
+abort "usage: graveyard [--state-root PATH]" unless ARGV.empty?
+
+state_root = requested_root || Dir.mktmpdir("agent-coord-graveyard")
+FileUtils.mkdir_p(state_root)
+
+begin
+  def write_record(state_root, path, payload)
+    full_path = File.join(state_root, path)
+    FileUtils.mkdir_p(File.dirname(full_path))
+    File.write(full_path, "#{JSON.pretty_generate(payload)}\n")
+  end
+
+  def run_gc(state_root, mode)
+    stdout, stderr, status = Open3.capture3(
+      "ruby", CLI, "gc", mode, "--json", "--state-root", state_root
+    )
+    abort "graveyard gc failed: #{stderr}" unless status.success?
+
+    JSON.parse(stdout)
+  end
+
+  now = Time.now.utc
+  old = (now - (10 * 86_400)).iso8601
+  fresh = now.iso8601
+  write_record(
+    state_root,
+    "claims/shakacode/graveyard/terminal.json",
+    "schema_version" => 1, "repo" => "shakacode/graveyard", "target" => "terminal",
+    "agent_id" => "graveyard-terminal", "status" => "released", "terminal" => "done", "updated_at" => old
+  )
+  write_record(
+    state_root,
+    "claims/shakacode/graveyard/live.json",
+    "schema_version" => 1, "repo" => "shakacode/graveyard", "target" => "live",
+    "agent_id" => "graveyard-live", "status" => "active", "updated_at" => fresh,
+    "expires_at" => (now + 3600).iso8601
+  )
+  write_record(
+    state_root,
+    "heartbeats/graveyard-dead.json",
+    "schema_version" => 1, "agent_id" => "graveyard-dead", "status" => "in_progress",
+    "updated_at" => old, "expires_at" => (Time.iso8601(old) + 900).iso8601
+  )
+  write_record(
+    state_root,
+    "batches/graveyard.json",
+    "schema_version" => 1, "batch_id" => "graveyard", "status" => "completed",
+    "completed_at" => old, "updated_at" => old, "lanes" => []
+  )
+  %w[claimed validating].each do |event_id|
+    write_record(
+      state_root,
+      "events/graveyard/#{event_id}.json",
+      "schema_version" => 1, "event_id" => event_id, "batch_id" => "graveyard", "type" => "phase",
+      "repo" => "shakacode/graveyard", "target" => "terminal", "at" => old
+    )
+  end
+  write_record(
+    state_root,
+    "events/graveyard/lane_closed-terminal.json",
+    "schema_version" => 2, "event_id" => "lane_closed-terminal", "batch_id" => "graveyard",
+    "type" => "lane_closed", "repo" => "shakacode/graveyard", "target" => "terminal",
+    "terminal" => "done", "at" => old
+  )
+
+  planned = run_gc(state_root, "--dry-run")
+  terminal_claim = File.join(state_root, "claims/shakacode/graveyard/terminal.json")
+  abort "graveyard dry-run unexpectedly mutated state" unless File.exist?(terminal_claim)
+  abort "graveyard expected four archive actions" unless planned.fetch("actions").length == 4
+
+  executed = run_gc(state_root, "--execute")
+  abort "graveyard execute did not match dry-run" unless executed.fetch("actions") == planned.fetch("actions")
+  replay = run_gc(state_root, "--dry-run")
+  abort "graveyard replay was not idempotent" unless replay.fetch("actions").empty?
+
+  archive_count = Dir.glob(File.join(state_root, "archive", "**", "*.json")).length
+  hot_claims = Dir.glob(File.join(state_root, "claims", "**", "*.json")).length
+  abort "graveyard archive count mismatch" unless archive_count == 4
+  abort "graveyard live state mismatch" unless hot_claims == 1
+
+  puts "GRAVEYARD_OK archive=#{archive_count} hot_claims=#{hot_claims} replay_actions=0"
+ensure
+  FileUtils.remove_entry(state_root) if state_root && !requested_root && File.exist?(state_root)
+end

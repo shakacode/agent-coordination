@@ -24,8 +24,15 @@ const MAX_STATE_BYTES = 256 * 1024;
 const MAX_REQUEST_BYTES = MAX_STATE_BYTES + 4096;
 const MAX_STATE_PATH_BYTES = 512;
 const MAX_LIST_LIMIT = 1000;
-const STATE_PATH = /^(?:claims\/[A-Za-z0-9_.:-]+\/[A-Za-z0-9_.:-]+\/[A-Za-z0-9_.:-]+\.json|heartbeats\/[A-Za-z0-9_.:-]+\.json|batches\/[A-Za-z0-9_.:-]+\.json|events\/[A-Za-z0-9_.:-]+\/[A-Za-z0-9_.:-]+\.json)$/;
-const STATE_PREFIX = /^(?:claims(?:\/[A-Za-z0-9_.:-]+(?:\/[A-Za-z0-9_.:-]+)?)?|heartbeats|batches|events(?:\/[A-Za-z0-9_.:-]+)?)$/;
+const RECORD_PATH = "(?:claims/[A-Za-z0-9_.:-]+/[A-Za-z0-9_.:-]+/[A-Za-z0-9_.:-]+\\.json"
+  + "|heartbeats/[A-Za-z0-9_.:-]+\\.json"
+  + "|batches/[A-Za-z0-9_.:-]+\\.json"
+  + "|events/[A-Za-z0-9_.:-]+/[A-Za-z0-9_.:-]+\\.json)";
+const STATE_PATH = new RegExp(`^(?:${RECORD_PATH}|archive/${RECORD_PATH})$`);
+const ACTIVE_PREFIX = "(?:claims(?:/[A-Za-z0-9_.:-]+(?:/[A-Za-z0-9_.:-]+)?)?"
+  + "|heartbeats|batches|events(?:/[A-Za-z0-9_.:-]+)?)";
+const ARCHIVE_PREFIX = `archive(?:/${ACTIVE_PREFIX})?`;
+const STATE_PREFIX = new RegExp(`^(?:${ACTIVE_PREFIX}|${ARCHIVE_PREFIX})$`);
 
 function validPath(path: string): boolean {
   return new TextEncoder().encode(path).byteLength <= MAX_STATE_PATH_BYTES
@@ -53,6 +60,7 @@ function exactStatePathScope(scope: string): boolean {
   if (!validPath(scope)) return false;
   // Keep these explicit record shapes in sync with STATE_PATH if the state grammar expands.
   const parts = scope.split("/");
+  if (parts[0] === "archive") return true;
   switch (parts[0]) {
     case "claims":
       return parts.length === 4;
@@ -225,6 +233,18 @@ async function putState(request: Request, env: Env, path: string, machine: strin
   return json(400, { error: "precondition_required" });
 }
 
+async function deleteState(request: Request, env: Env, path: string, machine: string): Promise<Response> {
+  const ifMatch = request.headers.get("if-match");
+  if (!ifMatch || !/^\d+$/.test(ifMatch)) return json(400, { error: "precondition_required" });
+  const version = Number.parseInt(ifMatch, 10);
+  if (!Number.isSafeInteger(version)) return json(400, { error: "invalid_if_match" });
+  const result = await env.DB.prepare(
+    "DELETE FROM state WHERE path = ? AND version = ?",
+  ).bind(path, version).run();
+  if (result.meta.changes === 0) return json(409, { error: "version_conflict" });
+  return json(200, { path, deleted: true, updated_by: machine });
+}
+
 async function listState(
   env: Env,
   prefix: string,
@@ -336,6 +356,10 @@ export default {
       if (request.method === "PUT") {
         if (!canAccessPath(auth.writePrefixes, path)) return json(403, { error: "forbidden" });
         return putState(request, env, path, auth.machine);
+      }
+      if (request.method === "DELETE") {
+        if (!canAccessPath(auth.writePrefixes, path)) return json(403, { error: "forbidden" });
+        return deleteState(request, env, path, auth.machine);
       }
       return json(405, { error: "method_not_allowed" });
     }

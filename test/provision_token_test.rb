@@ -147,6 +147,21 @@ class ProvisionTokenTest < Minitest::Test
     assert_includes sql, "'[]', '[\"events/batch-1\"]'"
   end
 
+  def test_provisions_archive_directory_and_exact_record_scopes
+    stdout, stderr, status = run_script(
+      "gc-runner",
+      "--local",
+      "--read-prefix",
+      "archive",
+      "--write-prefix",
+      "archive/claims/shakacode/example/42.json"
+    )
+
+    assert status.success?, stderr
+    assert_includes stdout, "reads:    [\"archive\"]"
+    assert_includes stdout, "writes:   [\"archive/claims/shakacode/example/42.json\"]"
+  end
+
   def test_remote_mode_uses_remote_flag
     _, stderr, status = run_script("m1", "--all-state")
 

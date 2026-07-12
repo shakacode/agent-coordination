@@ -280,12 +280,13 @@ bin/agent-coord release   --agent-id ID --repo OWNER/REPO --target ISSUE_OR_PR [
 bin/agent-coord heartbeat --agent-id ID [--repo OWNER/REPO] [--target ISSUE_OR_PR] [--batch-id ID] [--branch BRANCH] [--metadata options] [--status STATUS]
 bin/agent-coord register-batch --file PATH [--launch-prompt PATH|-]
 bin/agent-coord record-event --batch-id ID --type TYPE [--lane NAME] [--agent-id ID] [--repo OWNER/REPO] [--target ISSUE_OR_PR] [--branch BRANCH] [--status STATUS] [--metadata options] [--message TEXT]
-bin/agent-coord status [--json]
+bin/agent-coord status [--json] [--include-archived]
 bin/agent-coord status --repo OWNER/REPO --target ISSUE_OR_PR [--json]
 bin/agent-coord status --batch-id ID [--json]
 bin/agent-coord version [--json]
 bin/agent-coord config [show] [--json]
 bin/agent-coord doctor [--json] [--deep] [--doctor-prefix PREFIX] [--state-root PATH]
+bin/agent-coord gc (--dry-run|--execute) [--json] [--hot-days DAYS] [--archive-days DAYS] [--synthetic-hot-days DAYS]
 bin/agent-coord bootstrap [--install-dir PATH] [--profile PATH] [--no-profile]
 bin/agent-coord demo
 ```
@@ -303,7 +304,8 @@ instead of silently overwriting each other.
 
 Metadata options available on `claim`, `heartbeat`, and `release` are
 `--thread-handle`, `--chat-handle`, `--host`, `--pr-url`, `--dashboard-url`,
-`--operator`, `--phase`, `--generation`, and `--instance-id`. These fields are
+`--operator`, `--phase`, `--generation`, `--instance-id`, `--synthetic`, and
+`--synthetic-kind`. These fields are
 additive, optional, and included in JSON status output when present. Workers use
 them to connect a lane, chat, host app, branch, PR, operator, and dashboard deep
 link without parsing handoff prose.
@@ -374,6 +376,33 @@ coordination backend result is `UNKNOWN` for that command. Text status renders t
 same degraded notes as a footer when rows are present. In large backends, prefer
 target or batch scoped status for React on Rails batch lanes and treat a timed
 out full coordination read as degraded/`UNKNOWN` rather than guessing.
+Unscoped `status` excludes `archive/` by default. Pass `--include-archived` for
+an explicit archive inventory; scoped status remains hot-state-only so target
+and batch dependency checks never turn into an all-archive scan.
+
+`gc` applies one retention plan to local, GitHub, and HTTP stores. Exactly one
+mode is required: `--dry-run` prints proposed actions without writing, while
+`--execute` copies eligible records into `archive/` with compare-and-swap
+protection and only then removes their hot source. Terminal target events are
+compacted into one archive envelope before their source events are removed.
+Expired archive envelopes are deleted with the same compare-and-swap guard.
+
+| Record state | Hot retention | Archive retention | Result |
+| --- | ---: | ---: | --- |
+| Released/terminal claim | 7 days | 30 days | Archive, then delete |
+| Dead or terminal heartbeat | 7 days | 30 days | Archive, then delete |
+| Completed batch | 7 days | 30 days | Archive, then delete |
+| Events for a terminal target | 7 days | 30 days | Compact, then delete |
+| `synthetic: true` smoke/simulation state | 1 day | 30 days | Aggressive archive, then delete |
+
+`--hot-days`, `--archive-days`, and `--synthetic-hot-days` override those
+defaults. Archive retention starts at `archived_at`, so the default lifecycle
+is 7 hot days followed by 30 archive days. Producers mark non-production state
+with `--synthetic --synthetic-kind simulation|smoke`; batch manifests may carry
+the same fields. Run `ruby sim/bin/graveyard` for a deterministic dry-run,
+execute, compaction, and idempotent replay check.
+Scoped HTTP tokens used for GC need read and write coverage for each selected
+hot prefix and `archive`; use `--all-state` only for a trusted operator machine.
 `release` marks a claim released while preserving the record for auditability.
 Only the recorded holder can release or restamp metadata on an existing claim;
 another agent should claim the target after release instead of re-releasing the
@@ -499,6 +528,10 @@ claims/<owner>/<repo>/<issue-or-pr>.json
 heartbeats/<agent-id>.json
 batches/<batch-id>.json
 events/<batch-id>/<event-id>.json
+archive/claims/<owner>/<repo>/<issue-or-pr>.json
+archive/heartbeats/<agent-id>.json
+archive/batches/<batch-id>.json
+archive/events/<batch-id>/<event-or-compaction-id>.json
 ```
 
 The checked-in `.gitkeep` files only preserve the directories. Schema examples
@@ -577,6 +610,21 @@ Optional lane metadata fields on heartbeats are `thread_handle`, `chat_handle`,
 `host`, `pr_url`, `dashboard_url`, `operator`, `phase`, `generation`, and
 `instance_id`. Status readers should treat missing metadata as `UNKNOWN` rather
 than inferring it from branch names or handoff text.
+
+Claims and heartbeats may carry `synthetic: true` and a `synthetic_kind` such as
+`simulation` or `smoke`. These markers are protocol metadata: they let `gc`
+apply the shorter synthetic hot-retention window without guessing from names.
+
+## Archive Schema
+
+Archive paths mirror the hot record grammar below `archive/`. A single-record
+envelope retains `source_path` and the original `data`; terminal event
+compaction retains aligned `source_paths` and `records`. Both carry
+`archived_at`, `delete_after`, `reason`, and the synthetic marker. The published
+contract and fixture are
+[`contracts/archive-record-schema-v1.json`](contracts/archive-record-schema-v1.json)
+and
+[`contracts/fixtures/v1/`](contracts/fixtures/v1/).
 
 ## Event Schema
 

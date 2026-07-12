@@ -1,0 +1,69 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/shakacode/agent-coordination/blob/main/contracts/archive-record-schema-v1.json",
+  "title": "Agent Coordination Archive Record Contract v1",
+  "description": "Archive envelopes produced by agent-coord gc. Archived records retain their source payload; compacted event records retain the terminal target event sequence.",
+  "x-contract-version": 1,
+  "x-record-family": "archive",
+  "oneOf": [
+    { "$ref": "#/$defs/archived_record" },
+    { "$ref": "#/$defs/compacted_events" }
+  ],
+  "$defs": {
+    "source_path": {
+      "type": "string",
+      "pattern": "^(?!.*\\.\\.)(?:claims/[A-Za-z0-9_.:-]+/[A-Za-z0-9_.:-]+/[A-Za-z0-9_.:-]+\\.json|heartbeats/[A-Za-z0-9_.:-]+\\.json|batches/[A-Za-z0-9_.:-]+\\.json|events/[A-Za-z0-9_.:-]+/[A-Za-z0-9_.:-]+\\.json)$"
+    },
+    "common": {
+      "type": "object",
+      "required": ["schema_version", "record_family", "reason", "synthetic", "archived_at", "delete_after"],
+      "properties": {
+        "schema_version": { "const": 1 },
+        "record_family": { "enum": ["archived_record", "compacted_events"] },
+        "reason": { "type": "string", "minLength": 1 },
+        "synthetic": { "type": "boolean" },
+        "archived_at": { "type": "string", "format": "date-time" },
+        "delete_after": { "type": "string", "format": "date-time" }
+      }
+    },
+    "archived_record": {
+      "allOf": [
+        { "$ref": "#/$defs/common" },
+        {
+          "type": "object",
+          "required": ["source_path", "data"],
+          "properties": {
+            "record_family": { "const": "archived_record" },
+            "source_path": { "$ref": "#/$defs/source_path" },
+            "data": { "type": "object" }
+          }
+        }
+      ],
+      "unevaluatedProperties": false
+    },
+    "compacted_events": {
+      "allOf": [
+        { "$ref": "#/$defs/common" },
+        {
+          "type": "object",
+          "required": ["source_paths", "records"],
+          "properties": {
+            "record_family": { "const": "compacted_events" },
+            "source_paths": {
+              "type": "array",
+              "minItems": 1,
+              "uniqueItems": true,
+              "items": { "$ref": "#/$defs/source_path" }
+            },
+            "records": {
+              "type": "array",
+              "minItems": 1,
+              "items": { "type": "object" }
+            }
+          }
+        }
+      ],
+      "unevaluatedProperties": false
+    }
+  }
+}

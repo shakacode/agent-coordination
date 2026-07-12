@@ -80,6 +80,51 @@ class HttpBackendIntegrationTest < Minitest::Test
     assert_equal([batch], events.map { |event| event.fetch("batch_id") })
   end
 
+  def test_gc_has_local_equivalent_archive_and_purge_semantics_over_http
+    token = ENV.fetch("AGENT_COORD_API_TOKEN")
+    target = "gc-#{Process.pid}"
+    source_path = "claims/shakacode/integration-#{Process.pid}/#{target}.json"
+    archive_path = "archive/#{source_path}"
+    code, body = http_json(
+      "PUT", state_path(source_path), token: token, headers: { "If-None-Match" => "*" },
+                                      body: {
+                                        "data" => {
+                                          "schema_version" => 1,
+                                          "repo" => REPO,
+                                          "target" => target,
+                                          "agent_id" => "gc-worker",
+                                          "status" => "released",
+                                          "terminal" => "done",
+                                          "updated_at" => "2000-01-01T00:00:00Z"
+                                        }
+                                      }
+    )
+    assert_equal 201, code, body.inspect
+
+    cli_code, output, error = cli("gc", "--execute", "--json")
+    assert_equal 0, cli_code, error
+    assert(JSON.parse(output).fetch("actions").any? { |action| action["archive_path"] == archive_path })
+    code, body = http_json("GET", state_path(source_path), token: token)
+    assert_equal 404, code
+    assert_equal "not_found", body.fetch("error")
+    code, body = http_json("GET", state_path(archive_path), token: token)
+    assert_equal 200, code
+    archived = body.fetch("data")
+    assert_equal "archived_record", archived.fetch("record_family")
+
+    archived["delete_after"] = "2000-01-02T00:00:00Z"
+    code, = http_json(
+      "PUT", state_path(archive_path), token: token, headers: { "If-Match" => body.fetch("version").to_s },
+                                       body: { "data" => archived }
+    )
+    assert_equal 200, code
+    cli_code, = cli("gc", "--execute", "--json")
+    assert_equal 0, cli_code
+    code, body = http_json("GET", state_path(archive_path), token: token)
+    assert_equal 404, code
+    assert_equal "not_found", body.fetch("error")
+  end
+
   def test_scoped_machine_token_enforces_path_prefix_and_records_writer
     scoped_token = ENV.fetch("SCOPED_AGENT_COORD_API_TOKEN")
     full_token = ENV.fetch("AGENT_COORD_API_TOKEN")
@@ -214,7 +259,8 @@ class HttpBackendIntegrationTest < Minitest::Test
     uri = URI("#{ENV.fetch('AGENT_COORD_API_URL')}#{path}")
     request_class = {
       "GET" => Net::HTTP::Get,
-      "PUT" => Net::HTTP::Put
+      "PUT" => Net::HTTP::Put,
+      "DELETE" => Net::HTTP::Delete
     }.fetch(method)
     request = request_class.new(uri)
     request["Authorization"] = "Bearer #{token}"

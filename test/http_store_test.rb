@@ -9,6 +9,17 @@ require "webrick"
 
 load File.expand_path("../bin/agent-coord", __dir__)
 
+class HttpStoreStubServlet < WEBrick::HTTPServlet::AbstractServlet
+  def initialize(server, handler)
+    super(server)
+    @handler = handler
+  end
+
+  def service(req, res)
+    @handler.call(req, res)
+  end
+end
+
 class HttpStoreStub
   attr_reader :requests
 
@@ -18,7 +29,7 @@ class HttpStoreStub
     @server = WEBrick::HTTPServer.new(
       Port: 0, Logger: WEBrick::Log.new(File::NULL), AccessLog: []
     )
-    @server.mount_proc("/") do |req, res|
+    handler = proc do |req, res|
       @requests << { method: req.request_method, path: req.unparsed_uri,
                      auth: req["authorization"], if_match: req["if-match"],
                      if_none_match: req["if-none-match"] }
@@ -34,6 +45,7 @@ class HttpStoreStub
         res.body = JSON.generate(body)
       end
     end
+    @server.mount("/", HttpStoreStubServlet, handler)
     @thread = Thread.new { @server.start }
   end
 
@@ -399,6 +411,18 @@ class HttpStoreWriteTest < HttpStoreTestCase
       assert_raises(AgentCoord::Error) do
         store.write_json("claims/o/r/1.json", {}, message: "m")
       end
+    end
+  end
+
+  def test_delete_sends_if_match_and_maps_version_conflict
+    with_stub([[409, { "error" => "version_conflict" }]]) do |store, stub|
+      error = assert_raises(AgentCoord::Conflict) do
+        store.delete_json("claims/o/r/1.json", message: "gc", sha: "7")
+      end
+
+      assert_equal "DELETE", stub.requests.first[:method]
+      assert_equal "7", stub.requests.first[:if_match]
+      assert_equal "state changed at claims/o/r/1.json", error.message
     end
   end
 end
@@ -886,6 +910,7 @@ class HttpDoctorTest < HttpEnvTestCase
       [403, { "error" => "forbidden" }],
       [403, { "error" => "forbidden" }],
       [403, { "error" => "forbidden" }],
+      [403, { "error" => "forbidden" }],
       [200, { "machine" => "scoped", "read_prefixes" => ["claims/x/y"], "write_prefixes" => [] }]
     ]
     stub = HttpStoreStub.new(responses)
@@ -895,27 +920,7 @@ class HttpDoctorTest < HttpEnvTestCase
       payload = JSON.parse(stdout.string)
 
       assert_equal 0, code
-      assert_includes payload.fetch("degraded"), "claims filtered by scoped token"
-      assert_includes payload.fetch("degraded"), "heartbeats not readable by scoped token"
-      assert_includes payload.fetch("degraded"), "batches not readable by scoped token"
-      assert_includes payload.fetch("degraded"), "events not readable by scoped token"
-      assert_equal "claims filtered by scoped token", payload.fetch("section_notes").fetch("claims")
-      assert_equal({
-                     "claims" => "filtered",
-                     "heartbeats" => "forbidden",
-                     "batches" => "forbidden",
-                     "events" => "forbidden"
-                   }, payload.fetch("resource_checks"))
-      assert_equal "scoped", payload.dig("identity", "machine")
-      expected_paths = [
-        "/v1/health",
-        "/v1/state?prefix=claims",
-        "/v1/state?prefix=heartbeats",
-        "/v1/state?prefix=batches",
-        "/v1/state?prefix=events",
-        "/v1/whoami"
-      ]
-      assert_equal(expected_paths, stub.requests.map { |request| request[:path] })
+      assert_deep_scoped_doctor(payload, stub)
     end
   ensure
     stub.shutdown
@@ -927,6 +932,7 @@ class HttpDoctorTest < HttpEnvTestCase
       [200, { "entries" => [] }],
       [200, { "entries" => [] }],
       [200, { "entries" => [] }],
+      [400, { "error" => "invalid_prefix" }],
       [400, { "error" => "invalid_prefix" }],
       [404, { "error" => "route_not_found" }]
     ]
@@ -940,6 +946,8 @@ class HttpDoctorTest < HttpEnvTestCase
       assert_equal "ok", payload.fetch("status")
       assert_equal "unsupported", payload.fetch("resource_checks").fetch("events")
       assert_includes payload.fetch("degraded"), "event state not supported by backend"
+      assert_equal "unsupported", payload.fetch("resource_checks").fetch("archive")
+      assert_includes payload.fetch("degraded"), "archive state not supported by backend"
     end
   ensure
     stub&.shutdown
@@ -969,6 +977,7 @@ class HttpDoctorTest < HttpEnvTestCase
   def test_doctor_deep_tolerates_worker_without_whoami_route
     responses = [
       [200, { "status" => "ok" }],
+      [200, { "entries" => [] }],
       [200, { "entries" => [] }],
       [200, { "entries" => [] }],
       [200, { "entries" => [] }],
@@ -1168,6 +1177,7 @@ class HttpDoctorTest < HttpEnvTestCase
       [200, { "entries" => [] }],
       [200, { "entries" => [] }],
       [200, { "entries" => [] }],
+      [200, { "entries" => [] }],
       [200, { "machine" => "operator", "read_prefixes" => [""], "write_prefixes" => [""] }]
     ]
     stub = HttpStoreStub.new(responses)
@@ -1202,5 +1212,24 @@ class HttpDoctorTest < HttpEnvTestCase
     end
   ensure
     stub.shutdown
+  end
+
+  def assert_deep_scoped_doctor(payload, stub)
+    expected_notes = [
+      "claims filtered by scoped token",
+      "heartbeats not readable by scoped token",
+      "batches not readable by scoped token",
+      "events not readable by scoped token",
+      "archive not readable by scoped token"
+    ]
+    expected_notes.each { |note| assert_includes payload.fetch("degraded"), note }
+    assert_equal expected_notes.first, payload.fetch("section_notes").fetch("claims")
+    assert_equal({
+                   "claims" => "filtered", "heartbeats" => "forbidden", "batches" => "forbidden",
+                   "events" => "forbidden", "archive" => "forbidden"
+                 }, payload.fetch("resource_checks"))
+    assert_equal "scoped", payload.dig("identity", "machine")
+    prefixes = %w[claims heartbeats batches events archive].map { |prefix| "/v1/state?prefix=#{prefix}" }
+    assert_equal(["/v1/health", *prefixes, "/v1/whoami"], stub.requests.map { |request| request[:path] })
   end
 end

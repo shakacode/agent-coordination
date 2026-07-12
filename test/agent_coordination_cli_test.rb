@@ -119,12 +119,266 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     assert_includes result.stdout, "claim"
     assert_includes result.stdout, "release"
     assert_includes result.stdout, "heartbeat"
+    assert_includes result.stdout, "gc"
     assert_includes result.stdout, "status"
     assert_includes result.stdout, "version"
     assert_includes result.stdout, "config"
     assert_includes result.stdout, "doctor"
     assert_includes result.stdout, "bootstrap"
     assert_includes result.stdout, "demo"
+  end
+
+  def test_gc_requires_an_explicit_mode
+    result = run_agent_coord("gc")
+
+    assert_equal 1, result.status.exitstatus
+    assert_includes result.stderr, "gc requires exactly one of --dry-run or --execute"
+  end
+
+  def test_gc_dry_run_uses_terminal_semantics_and_default_7_day_hot_policy
+    now = Time.utc(2026, 7, 12, 12, 0, 0)
+    write_state_record(
+      "claims/shakacode/example/old.json",
+      "schema_version" => 1,
+      "repo" => "shakacode/example",
+      "target" => "old",
+      "agent_id" => "worker-old",
+      "status" => "released",
+      "terminal" => "done",
+      "updated_at" => (now - (8 * 86_400)).iso8601
+    )
+    write_state_record(
+      "claims/shakacode/example/hot.json",
+      "schema_version" => 1,
+      "repo" => "shakacode/example",
+      "target" => "hot",
+      "agent_id" => "worker-hot",
+      "status" => "released",
+      "terminal" => "done",
+      "updated_at" => (now - (6 * 86_400)).iso8601
+    )
+    write_state_record(
+      "claims/shakacode/example/active.json",
+      "schema_version" => 1,
+      "repo" => "shakacode/example",
+      "target" => "active",
+      "agent_id" => "worker-active",
+      "status" => "active",
+      "updated_at" => (now - (30 * 86_400)).iso8601,
+      "expires_at" => (now - (29 * 86_400)).iso8601
+    )
+
+    stdout = StringIO.new
+    runner = AgentCoord::Runner.new([], stdout: stdout, clock: FixedClock.new(now))
+    result = runner.send(:gc, state_root: @state_root, dry_run: true, execute: false, json: true)
+
+    assert_equal 0, result
+    payload = JSON.parse(stdout.string)
+    assert_equal "dry-run", payload.fetch("mode")
+    assert_equal 7, payload.fetch("policy").fetch("hot_days")
+    assert_equal 30, payload.fetch("policy").fetch("archive_days")
+    assert_equal(["claims/shakacode/example/old.json"], payload.fetch("actions").map { |row| row.fetch("source_path") })
+    assert_equal "archive", payload.fetch("actions").first.fetch("action")
+    assert_empty Dir.glob(File.join(@state_root, "archive", "**", "*.json"))
+  end
+
+  def test_gc_execute_archives_terminal_record_with_a_30_day_delete_deadline
+    now = Time.utc(2026, 7, 12, 12, 0, 0)
+    source_path = "claims/shakacode/example/old.json"
+    write_state_record(
+      source_path,
+      "schema_version" => 1,
+      "repo" => "shakacode/example",
+      "target" => "old",
+      "agent_id" => "worker-old",
+      "status" => "released",
+      "terminal" => "done",
+      "updated_at" => (now - (8 * 86_400)).iso8601
+    )
+
+    stdout = StringIO.new
+    runner = AgentCoord::Runner.new([], stdout: stdout, clock: FixedClock.new(now))
+    result = runner.send(:gc, state_root: @state_root, dry_run: false, execute: true, json: true)
+
+    assert_equal 0, result
+    refute_path_exists File.join(@state_root, source_path)
+    archive_path = File.join(@state_root, "archive", source_path)
+    assert_path_exists archive_path
+    archived = JSON.parse(File.read(archive_path))
+    assert_equal 1, archived.fetch("schema_version")
+    assert_equal "archived_record", archived.fetch("record_family")
+    assert_equal source_path, archived.fetch("source_path")
+    assert_equal now.iso8601, archived.fetch("archived_at")
+    assert_equal (now + (30 * 86_400)).iso8601, archived.fetch("delete_after")
+    assert_equal "old", archived.fetch("data").fetch("target")
+  end
+
+  def test_gc_execute_deletes_archive_after_30_days
+    now = Time.utc(2026, 7, 12, 12, 0, 0)
+    archive_path = "archive/claims/shakacode/example/old.json"
+    write_state_record(
+      archive_path,
+      "schema_version" => 1,
+      "record_family" => "archived_record",
+      "source_path" => "claims/shakacode/example/old.json",
+      "reason" => "terminal_claim",
+      "synthetic" => false,
+      "archived_at" => (now - (31 * 86_400)).iso8601,
+      "delete_after" => (now - 86_400).iso8601,
+      "data" => { "schema_version" => 1, "status" => "released" }
+    )
+
+    stdout = StringIO.new
+    runner = AgentCoord::Runner.new([], stdout: stdout, clock: FixedClock.new(now))
+    result = runner.send(:gc, state_root: @state_root, dry_run: false, execute: true, json: true)
+
+    assert_equal 0, result
+    refute_path_exists File.join(@state_root, archive_path)
+    actions = JSON.parse(stdout.string).fetch("actions")
+    assert_equal 1, actions.length
+    action = actions.fetch(0)
+    assert_equal "delete", action.fetch("action")
+    assert_equal archive_path, action.fetch("source_path")
+    assert_equal "archive_expired", action.fetch("reason")
+  end
+
+  def test_gc_text_renders_delete_and_compaction_actions_without_assuming_archive_shape
+    payload = {
+      "mode" => "dry-run",
+      "policy" => { "hot_days" => 7, "archive_days" => 30, "synthetic_hot_days" => 1 },
+      "actions" => [
+        {
+          "action" => "compact", "source_paths" => %w[events/b/e1.json events/b/e2.json],
+          "archive_path" => "archive/events/b/compact-a.json", "reason" => "terminal_target_events"
+        },
+        {
+          "action" => "delete", "source_path" => "archive/claims/o/r/1.json", "reason" => "archive_expired"
+        }
+      ]
+    }
+    stdout = StringIO.new
+    runner = AgentCoord::Runner.new([], stdout: stdout)
+
+    runner.send(:render_gc_text, payload)
+
+    assert_includes stdout.string, "compact events/b/e1.json,events/b/e2.json -> archive/events/b/compact-a.json"
+    assert_includes stdout.string, "delete archive/claims/o/r/1.json (archive_expired)"
+  end
+
+  def test_synthetic_marker_is_written_and_preserved_across_claim_and_heartbeat_updates
+    claim = run_agent_coord(
+      "claim", "--agent-id", "sim-worker", "--repo", "shakacode/example", "--target", "smoke-1",
+      "--synthetic", "--synthetic-kind", "simulation"
+    )
+    heartbeat = run_agent_coord(
+      "heartbeat", "--agent-id", "sim-worker", "--repo", "shakacode/example", "--target", "smoke-1",
+      "--synthetic", "--synthetic-kind", "simulation"
+    )
+    refresh = run_agent_coord("heartbeat", "--agent-id", "sim-worker", "--status", "validating")
+
+    assert_equal 0, claim.status.exitstatus, claim.stderr
+    assert_equal 0, heartbeat.status.exitstatus, heartbeat.stderr
+    assert_equal 0, refresh.status.exitstatus, refresh.stderr
+    claim_payload = JSON.parse(File.read(File.join(@state_root, "claims", "shakacode", "example", "smoke-1.json")))
+    heartbeat_payload = JSON.parse(File.read(File.join(@state_root, "heartbeats", "sim-worker.json")))
+    [claim_payload, heartbeat_payload].each do |payload|
+      assert_equal true, payload.fetch("synthetic")
+      assert_equal "simulation", payload.fetch("synthetic_kind")
+    end
+  end
+
+  def test_gc_compacts_events_per_target_after_terminal_closeout
+    now = Time.utc(2026, 7, 12, 12, 0, 0)
+    at = (now - (8 * 86_400)).iso8601
+    %w[claimed validating].each do |event_id|
+      write_state_record(
+        "events/batch-1/#{event_id}.json",
+        "schema_version" => 1,
+        "event_id" => event_id,
+        "batch_id" => "batch-1",
+        "type" => "phase",
+        "repo" => "shakacode/example",
+        "target" => "42",
+        "at" => at
+      )
+    end
+    write_state_record(
+      "events/batch-1/lane_closed-deadbeef.json",
+      "schema_version" => 2,
+      "event_id" => "lane_closed-deadbeef",
+      "batch_id" => "batch-1",
+      "type" => "lane_closed",
+      "repo" => "shakacode/example",
+      "target" => "42",
+      "terminal" => "done",
+      "at" => at
+    )
+
+    stdout = StringIO.new
+    runner = AgentCoord::Runner.new([], stdout: stdout, clock: FixedClock.new(now))
+    result = runner.send(:gc, state_root: @state_root, dry_run: false, execute: true, json: true)
+
+    assert_equal 0, result
+    action = JSON.parse(stdout.string).fetch("actions").find { |row| row["action"] == "compact" }
+    refute_nil action
+    assert_equal 3, action.fetch("source_paths").length
+    action.fetch("source_paths").each { |path| refute_path_exists File.join(@state_root, path) }
+    compacted = JSON.parse(File.read(File.join(@state_root, action.fetch("archive_path"))))
+    assert_equal "compacted_events", compacted.fetch("record_family")
+    assert_equal(%w[claimed lane_closed-deadbeef validating], compacted.fetch("records").map do |row|
+      row.fetch("event_id")
+    end)
+  end
+
+  def test_gc_uses_one_day_hot_window_for_synthetic_terminal_events
+    now = Time.utc(2026, 7, 12, 12, 0, 0)
+    at = (now - (2 * 86_400)).iso8601
+    write_state_record(
+      "events/synthetic/lane_closed-synthetic.json",
+      "schema_version" => 2,
+      "event_id" => "lane_closed-synthetic",
+      "batch_id" => "synthetic",
+      "type" => "lane_closed",
+      "repo" => "shakacode/example",
+      "target" => "synthetic",
+      "terminal" => "done",
+      "synthetic" => true,
+      "at" => at
+    )
+
+    stdout = StringIO.new
+    runner = AgentCoord::Runner.new([], stdout: stdout, clock: FixedClock.new(now))
+    result = runner.send(:gc, state_root: @state_root, dry_run: true, execute: false, json: true)
+
+    assert_equal 0, result
+    action = JSON.parse(stdout.string).fetch("actions").find { |row| row["action"] == "compact" }
+    refute_nil action
+    assert_equal ["events/synthetic/lane_closed-synthetic.json"], action.fetch("source_paths")
+  end
+
+  def test_status_excludes_archive_by_default_and_includes_it_only_when_requested
+    write_state_record(
+      "archive/claims/shakacode/example/old.json",
+      "schema_version" => 1,
+      "record_family" => "archived_record",
+      "source_path" => "claims/shakacode/example/old.json",
+      "reason" => "terminal_claim",
+      "synthetic" => false,
+      "archived_at" => "2026-07-01T00:00:00Z",
+      "delete_after" => "2026-07-31T00:00:00Z",
+      "data" => { "schema_version" => 1, "repo" => "shakacode/example", "target" => "old" }
+    )
+
+    default_status = run_agent_coord("status", "--json")
+    archive_status = run_agent_coord("status", "--json", "--include-archived")
+
+    assert_equal 0, default_status.status.exitstatus, default_status.stderr
+    assert_equal 0, archive_status.status.exitstatus, archive_status.stderr
+    refute JSON.parse(default_status.stdout).key?("archive")
+    archived = JSON.parse(archive_status.stdout).fetch("archive")
+    assert_equal 1, archived.length
+    assert_equal "archive/claims/shakacode/example/old.json", archived.first.fetch("path")
+    assert_equal "claims/shakacode/example/old.json", archived.first.fetch("source_path")
   end
 
   def test_demo_walks_claim_liveness_and_takeover_deterministically
@@ -227,6 +481,7 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     assert_match(/\A\d+\.\d+\.\d+\z/, payload.fetch("version"))
     assert_equal 1, payload.fetch("schema_version")
     assert_equal 2, payload.fetch("lane_closed_schema_version")
+    assert_equal 1, payload.fetch("archive_schema_version")
     assert_nil payload.fetch("default_backend")
     assert_equal "state", payload.fetch("default_ref")
   end
@@ -247,6 +502,10 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     assert_equal 4 * 60 * 60, payload.fetch("default_claim_ttl_seconds")
     assert_equal 15 * 60, payload.fetch("default_heartbeat_ttl_seconds")
     assert_equal 4, payload.fetch("heartbeat_dead_after_ttl_multiplier")
+    assert_equal(
+      { "hot_days" => 7, "archive_days" => 30, "synthetic_hot_days" => 1 },
+      payload.fetch("retention_policy")
+    )
     assert_includes payload.fetch("dependency_terminal_statuses"), "done"
     assert_equal 3, payload.fetch("exit_codes").fetch("claim_refused")
     assert_equal 2, payload.fetch("exit_codes").fetch("operational")
@@ -4033,6 +4292,12 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
         "expires_at" => expires_at.iso8601
       )
     )
+  end
+
+  def write_state_record(path, payload)
+    full_path = File.join(@state_root, path)
+    FileUtils.mkdir_p(File.dirname(full_path))
+    File.write(full_path, "#{JSON.pretty_generate(payload)}\n")
   end
 
   def run_agent_coord(*, state_root: @state_root, stdin_data: nil)
