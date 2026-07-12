@@ -86,7 +86,7 @@
     "status_projection": {
       "type": "object",
       "additionalProperties": true,
-      "required": ["host_limits"],
+      "description": "Embeddable additive fragment for existing status documents. host_limits is optional; an omitted or empty section means no host-limit records were projected. When present, every item must conform to the host-limit record contract.",
       "properties": {
         "host_limits": {
           "type": "array",

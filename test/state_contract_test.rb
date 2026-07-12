@@ -154,6 +154,17 @@ class StateContractTest < Minitest::Test
     assert_equal replay.dig("expected", "lane_statuses"), lane_statuses
   end
 
+  def test_status_projection_allows_omitted_or_empty_host_limits
+    schema_document = JSON.parse(File.read(HOST_LIMIT_SCHEMA_PATH))
+    projection_schema = JSONSchemer.schema(schema_document.merge("$ref" => "#/$defs/status_projection"))
+    replay = read_fixture(File.join(HOST_LIMIT_FIXTURES_PATH, "replay", "two-lanes-one-host-limit.json"))
+    existing_status = replay.fetch("status").except("host_limits")
+
+    assert_empty projection_schema.validate(existing_status).to_a
+    assert_empty projection_schema.validate(existing_status.merge("host_limits" => [])).to_a
+    refute_empty projection_schema.validate(existing_status.merge("host_limits" => nil)).to_a
+  end
+
   def test_status_projection_excludes_cleared_and_elapsed_reset_records
     active = read_fixture(File.join(HOST_LIMIT_FIXTURES_PATH, "valid", "host-limit-active.json"))
     cleared = read_fixture(File.join(HOST_LIMIT_FIXTURES_PATH, "valid", "host-limit-cleared.json"))
