@@ -278,7 +278,7 @@ rm -rf "$STATE_ROOT"
 bin/agent-coord claim     --agent-id ID --repo OWNER/REPO --target ISSUE_OR_PR [--batch-id ID] [--branch BRANCH] [--metadata options] [--ttl SECONDS]
 bin/agent-coord release   --agent-id ID --repo OWNER/REPO --target ISSUE_OR_PR [--metadata options] [--handoff-to ID] [--handoff-note TEXT] [--terminal done|abandoned|superseded] [--pr-state STATE] [--evidence-url URL] [--workspace WORKSPACE]
 bin/agent-coord heartbeat --agent-id ID [--repo OWNER/REPO] [--target ISSUE_OR_PR] [--batch-id ID] [--branch BRANCH] [--metadata options] [--status STATUS]
-bin/agent-coord register-batch --file PATH
+bin/agent-coord register-batch --file PATH [--launch-prompt PATH|-]
 bin/agent-coord record-event --batch-id ID --type TYPE [--lane NAME] [--agent-id ID] [--repo OWNER/REPO] [--target ISSUE_OR_PR] [--branch BRANCH] [--status STATUS] [--metadata options] [--message TEXT]
 bin/agent-coord status [--json]
 bin/agent-coord status --repo OWNER/REPO --target ISSUE_OR_PR [--json]
@@ -324,10 +324,12 @@ requires a claim with `batch_id`. `--pr-state` records the final pull-request
 state; `--evidence-url` can point at replayable closeout evidence.
 
 `register-batch --file PATH` validates and writes a JSON batch manifest to
-`batches/<batch-id>.json` using the active store. It stamps `schema_version`,
-`registered_at`, and `updated_at`, preserves optional operator/dashboard/thread
-metadata, and rejects malformed lane names or owner/target fields before workers
-claim lanes.
+`batches/<batch-id>.json` using the active store. Pass `--launch-prompt PATH` to
+read the exact coordination prompt from a file, or `--launch-prompt -` to read it
+from stdin; the explicit option overrides any `launch_prompt` already present in
+the manifest. Registration stamps `schema_version`, `registered_at`, and
+`updated_at`, preserves optional operator/dashboard/thread metadata, and rejects
+malformed lane names or owner/target fields before workers claim lanes.
 
 `record-event` appends immutable batch or lane events under
 `events/<batch-id>/<event-id>.json`. Use it for phase changes and noteworthy
@@ -659,7 +661,9 @@ prefix snapshots become expensive.
 ```
 
 Required manifest fields before registration: `batch_id` and non-empty `lanes`.
-`register-batch` writes `schema_version`, `registered_at`, and `updated_at`.
+`register-batch` writes `schema_version`, `registered_at`, and `updated_at`. Use
+`--launch-prompt PATH|-` to attach the exact coordination prompt without editing
+the manifest JSON.
 
 Each lane should include `name`, `owner`, and `targets`. `owner` is the stable
 agent id used by `heartbeat`, so `status` can attach the lane's latest heartbeat

@@ -278,6 +278,9 @@ module AgentCoord
 
     def add_register_batch_options(opts, options)
       opts.on("--file PATH", "batch manifest JSON file") { |value| options[:file] = value }
+      opts.on("--launch-prompt PATH|-", "coordination launch prompt file or stdin") do |value|
+        options[:launch_prompt] = value
+      end
     end
 
     def add_doctor_options(opts, options, command)
@@ -474,7 +477,8 @@ module AgentCoord
       when "register-batch"
         opts.separator ""
         opts.separator "Batch registration:"
-        opts.separator "    --file PATH  JSON manifest with batch_id and lanes"
+        opts.separator "    --file PATH           JSON manifest with batch_id and lanes"
+        opts.separator "    --launch-prompt PATH|-  prompt file or stdin (overrides manifest)"
         opts.separator ""
       when "record-event"
         opts.separator ""
@@ -499,7 +503,7 @@ module AgentCoord
         --backend --ref --state-root --api-url --agent-id --repo --target --batch-id --branch
         --thread-handle --chat-handle --host --pr-url --dashboard-url --operator --phase --generation --instance-id
         --handoff-to --handoff-note --terminal --pr-state --evidence-url --workspace
-        --ttl --status --type --lane --message --file --install-dir
+        --ttl --status --type --lane --message --file --launch-prompt --install-dir
         --status-state-root --profile
       ]
       skip_next = false
@@ -1106,6 +1110,7 @@ module AgentCoord
         "registered_at" => manifest["registered_at"] || timestamp(now),
         "updated_at" => timestamp(now)
       )
+      payload["launch_prompt"] = load_launch_prompt(options[:launch_prompt]) if options[:launch_prompt]
       validate_batch_manifest!(payload)
 
       store = build_store(options)
@@ -2228,6 +2233,14 @@ module AgentCoord
       raise Error, "batch manifest JSON invalid: #{e.message}"
     rescue SystemCallError => e
       raise OperationalError, "batch manifest unreadable: #{e.message}"
+    end
+
+    def load_launch_prompt(path)
+      return $stdin.read if path == "-"
+
+      File.read(path)
+    rescue SystemCallError => e
+      raise OperationalError, "launch prompt unreadable: #{e.message}"
     end
 
     def validate_batch_manifest!(manifest)
