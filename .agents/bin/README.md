@@ -9,7 +9,7 @@ is absent means that capability is n/a in this repository.
 | --- | --- | --- |
 | `setup` | Install dependencies | n/a |
 | `validate` | Pre-push gate | `bundle exec rubocop` |
-| `test` | Run tests | `ruby -Itest test/agent_coordination_cli_test.rb` |
+| `test` | Run tests | CI's non-integration unit and simulation test scope |
 | `lint` | Lint / format | n/a |
 | `build` | Build / type-check | n/a |
 | `docs` | Docs checks | n/a |
