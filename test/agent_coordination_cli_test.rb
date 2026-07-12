@@ -745,9 +745,12 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     store.write_json(path, { "sequence" => 0, "payload" => "x" * 100_000 }, message: "seed", create: true)
     ready = Queue.new
     start = Queue.new
+    observed = Queue.new
+    acknowledged = Queue.new
     writer = Thread.new do
       4.times { ready.pop }
       4.times { start << true }
+      4.times { acknowledged.pop }
       50.times do |sequence|
         current = store.read_json(path)
         store.write_json(path, { "sequence" => sequence, "payload" => "x" * 100_000 },
@@ -758,12 +761,16 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
       Thread.new do
         ready << true
         start.pop
-        200.times { store.read_json(path) }
+        initial = store.read_json(path).data.fetch("sequence")
+        observed << initial
+        acknowledged << true
+        199.times { store.read_json(path) }
       end
     end
     thread_values!([writer] + readers, "atomic LocalStore readers/writer")
 
     final = store.read_json(path).data
+    assert_equal [0, 0, 0, 0], 4.times.map { observed.pop }.sort
     assert_equal 49, final.fetch("sequence")
     assert_equal 100_000, final.fetch("payload").length
   end
