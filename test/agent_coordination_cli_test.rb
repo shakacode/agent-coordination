@@ -1162,8 +1162,8 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
       "--repo", "shakacode/react_on_rails",
       "--target", "3980",
       "--terminal", "done",
-      "--pr-url", "https://github.com/shakacode/react_on_rails/pull/3980",
-      "--pr-state", "merged"
+      "--pr-url", "HTTPS://github.com/shakacode/react_on_rails/pull/3980",
+      "--pr-state", "merged", "--evidence-url", "HtTpS://example.test/evidence/3980"
     )
 
     assert_equal 0, release.status.exitstatus, release.stderr
@@ -2628,6 +2628,7 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
 
       assert_equal 1, result.status.exitstatus
       assert_includes result.stderr, "--#{field}"
+      assert_includes result.stderr, "must be an HTTP(S) URL with a host" unless field == "workspace"
       refute_path_exists File.join(@state_root, "events", batch_id)
       assert_equal original_batch, File.read(batch_path)
     end

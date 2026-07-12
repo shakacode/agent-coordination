@@ -48,9 +48,9 @@
         "target": { "type": "string", "minLength": 1 },
         "branch": { "type": "string", "minLength": 1 },
         "terminal": { "enum": ["done", "abandoned", "superseded"] },
-        "pr_url": { "type": "string", "format": "uri", "pattern": "^https?://[^/?#\\s]+(?:[/?#]|$)" },
+        "pr_url": { "type": "string", "format": "uri", "pattern": "^[Hh][Tt][Tt][Pp][Ss]?://[^/?#\\s]+(?:[/?#]|$)" },
         "pr_state": { "type": "string", "minLength": 1 },
-        "evidence_url": { "type": "string", "format": "uri", "pattern": "^https?://[^/?#\\s]+(?:[/?#]|$)" },
+        "evidence_url": { "type": "string", "format": "uri", "pattern": "^[Hh][Tt][Tt][Pp][Ss]?://[^/?#\\s]+(?:[/?#]|$)" },
         "workspace": { "$ref": "#/$defs/workspace" },
         "closed_by": { "$ref": "#/$defs/closed_by" },
         "at": { "type": "string", "format": "date-time" }

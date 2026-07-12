@@ -1302,9 +1302,9 @@ module AgentCoord
       uri = URI.parse(value)
       return if %w[http https].include?(uri.scheme) && !uri.host.to_s.empty? && !value.match?(/\s/)
 
-      raise Error, "--#{field.tr('_', '-')} must be an absolute URI"
+      raise Error, "--#{field.tr('_', '-')} must be an HTTP(S) URL with a host"
     rescue URI::InvalidURIError
-      raise Error, "--#{field.tr('_', '-')} must be an absolute URI"
+      raise Error, "--#{field.tr('_', '-')} must be an HTTP(S) URL with a host"
     end
 
     def closed_by_payload(options)
