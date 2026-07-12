@@ -1,6 +1,7 @@
 # frozen_string_literal: true
 
 require "json"
+require "json_schemer"
 require "minitest/autorun"
 
 class StateContractTest < Minitest::Test
@@ -9,16 +10,26 @@ class StateContractTest < Minitest::Test
   FIXTURE_PATH = File.join(ROOT, "contracts", "fixtures", "v2", "lane_closed.json")
 
   def test_lane_closed_fixture_conforms_to_published_v2_contract
-    schema = JSON.parse(File.read(SCHEMA_PATH))
+    schema_document = JSON.parse(File.read(SCHEMA_PATH))
     fixture = JSON.parse(File.read(FIXTURE_PATH))
-    event_schema = schema.fetch("$defs").fetch("lane_closed")
+    schema = JSONSchemer.schema(schema_document)
 
-    assert_equal 2, schema.fetch("x-contract-version")
-    assert_equal "default", schema.fetch("$defs").fetch("workspace").fetch("default")
-    assert_empty event_schema.fetch("required") - fixture.keys
-    assert_equal event_schema.fetch("properties").fetch("type").fetch("const"), fixture.fetch("type")
-    assert_includes event_schema.fetch("properties").fetch("terminal").fetch("enum"), fixture.fetch("terminal")
-    assert_equal "default", fixture.fetch("workspace")
-    assert_equal %w[agent_id machine], fixture.fetch("closed_by").keys.sort
+    assert_equal 2, schema_document.fetch("x-contract-version")
+    assert_equal "default", schema_document.fetch("$defs").fetch("workspace").fetch("default")
+    assert_empty schema.validate(fixture).to_a
+  end
+
+  def test_lane_closed_contract_rejects_missing_workspace_and_invalid_terminal
+    schema = JSONSchemer.schema(JSON.parse(File.read(SCHEMA_PATH)))
+    fixture = JSON.parse(File.read(FIXTURE_PATH))
+    fixture.delete("workspace")
+    fixture["terminal"] = "finished"
+
+    errors = schema.validate(fixture).to_a
+
+    refute_empty errors
+    error_pointers = errors.map { |error| error.fetch("data_pointer") }
+    assert_includes error_pointers, ""
+    assert_includes error_pointers, "/terminal"
   end
 end

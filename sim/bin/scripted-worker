@@ -149,7 +149,6 @@ cleanup_claim() {
 trap cleanup_claim EXIT
 
 set +e
-register_batch
 "$CLI" claim --agent-id="$AGENT_ID" --repo="$REPO_SLUG" --target="$ISSUE_KEY" \
   --batch-id="$BATCH_ID" --branch="$BRANCH" --host="scripted-sim" >/dev/null
 CODE=$?
@@ -160,6 +159,7 @@ if [ "$CODE" -eq 3 ]; then
 fi
 [ "$CODE" -eq 0 ] || exit 2
 CLAIM_ACQUIRED=1
+register_batch
 beat claimed >/dev/null
 
 mkdir -p "$WORKDIR"

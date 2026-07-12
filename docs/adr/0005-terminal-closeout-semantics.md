@@ -18,10 +18,13 @@ versioned producer/consumer contract. ADR
 
 ## Decision
 
-Version 2 of the published state contract adds a `lane_closed` event with a
-terminal value of `done`, `abandoned`, or `superseded`. It identifies the
-repository and target, closing agent and machine, workspace, and optional batch,
-lane, pull-request state, and replayable evidence URL.
+The published `lane_closed` event contract is version 2 and carries a terminal
+value of `done`, `abandoned`, or `superseded`. It identifies the repository and
+target, closing agent and machine, workspace, and optional batch, lane,
+pull-request state, and replayable evidence URL. Baseline claims, heartbeats,
+batches, and ordinary events remain schema version 1; the CLI advertises the
+specialized `lane_closed_schema_version` separately so it never labels those
+ordinary records as conforming to a contract that only describes closeout.
 
 `agent-coord release --terminal STATE` is the closeout command. It records the
 event, releases the held claim, stamps the matching registered lane, and marks
@@ -46,9 +49,10 @@ the dashboard and does not create a release process.
   event and released claim record.
 - Batch completion is a write-time protocol fact, so consumers do not need to
   derive it independently.
-- Contract v2 is intentionally incompatible with producers that claim v2 while
-  omitting terminal closeout fields. The checked-in conformance fixture gives
-  Ruby and external TypeScript consumers the same example.
+- The lane-close contract v2 is intentionally incompatible with producers that
+  claim v2 while omitting terminal closeout fields. The checked-in conformance
+  fixture gives Ruby and external TypeScript consumers the same example without
+  changing the baseline v1 record family.
 - GitHub remains a useful fallback for legacy or interrupted runs, but it cannot
   override an explicit protocol terminal result.
 - The `workspace` field is present now with the self-hosted `default`; broader

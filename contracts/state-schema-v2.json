@@ -1,9 +1,10 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://github.com/shakacode/agent-coordination/blob/main/contracts/state-schema-v2.json",
-  "title": "Agent Coordination State Contract v2",
-  "description": "Published protocol contract for coordination state records. Consumers treat declared terminal state as authoritative and may derive state from GitHub only when it is absent.",
+  "title": "Agent Coordination lane_closed Event Contract v2",
+  "description": "Published protocol extension for lane_closed events. Baseline claims, heartbeats, batches, and ordinary events remain schema version 1. Consumers treat declared terminal state as authoritative and may derive state from GitHub only when it is absent.",
   "x-contract-version": 2,
+  "x-record-family": "lane_closed",
   "oneOf": [
     { "$ref": "#/$defs/lane_closed" }
   ],

@@ -19,7 +19,8 @@ require "uri"
 
 module AgentCoord
   VERSION = "0.1.0"
-  SCHEMA_VERSION = 2
+  SCHEMA_VERSION = 1
+  LANE_CLOSED_SCHEMA_VERSION = 2
   DEFAULT_WORKSPACE = "default"
   TERMINAL_STATES = %w[done abandoned superseded].freeze
   DEFAULT_BACKEND = nil
@@ -305,12 +306,33 @@ module AgentCoord
     end
 
     def finalize_options(command, options)
+      validate_closeout_option_usage!(command, options)
       if backend_command?(command)
         resolve_backend_env(options)
         resolve_default_local_backend(command, options)
         warn_consumer_split_brain(command, options)
       end
       options
+    end
+
+    def validate_closeout_option_usage!(command, options)
+      fields = %i[terminal pr_state evidence_url workspace]
+      supplied = fields.select { |field| options.key?(field) }
+      return if supplied.empty?
+
+      if command == "release"
+        missing_terminal = supplied.reject { |field| field == :terminal }
+        if !missing_terminal.empty? && options[:terminal].to_s.empty?
+          raise Error, "--#{missing_terminal.first.to_s.tr('_', '-')} requires --terminal"
+        end
+
+        return
+      end
+      return if command == "record-event" && options[:type] == "lane_closed"
+
+      raise Error, "terminal-only options require --type lane_closed" if command == "record-event"
+
+      raise Error, "--#{supplied.first.to_s.tr('_', '-')} is only valid with terminal closeout"
     end
 
     def backend_command?(command)
@@ -580,12 +602,14 @@ module AgentCoord
       payload = {
         "version" => VERSION,
         "schema_version" => SCHEMA_VERSION,
+        "lane_closed_schema_version" => LANE_CLOSED_SCHEMA_VERSION,
         "default_backend" => DEFAULT_BACKEND,
         "default_ref" => DEFAULT_REF
       }
       emit_payload(payload, options) do
         @stdout.puts "agent-coord #{VERSION}"
         @stdout.puts "schema_version: #{SCHEMA_VERSION}"
+        @stdout.puts "lane_closed_schema_version: #{LANE_CLOSED_SCHEMA_VERSION}"
         @stdout.puts "default_backend: #{default_backend_text}"
         @stdout.puts "default_ref: #{DEFAULT_REF}"
       end
@@ -1099,6 +1123,7 @@ module AgentCoord
 
       store = build_store(options)
       now = now_utc
+      terminal_batch_lane(store, options) if options[:type] == "lane_closed"
       write_event_record(store, options, now, output: true)
       complete_terminal_batch(store, terminal_event_data(options), now) if options[:type] == "lane_closed"
       0
@@ -1164,7 +1189,7 @@ module AgentCoord
 
     def event_payload(options, event_id, now)
       payload = {
-        "schema_version" => SCHEMA_VERSION,
+        "schema_version" => terminal_event?(options) ? LANE_CLOSED_SCHEMA_VERSION : SCHEMA_VERSION,
         "event_id" => event_id,
         "batch_id" => options.fetch(:batch_id).to_s,
         "type" => options.fetch(:type),
@@ -1254,48 +1279,92 @@ module AgentCoord
         evidence_url: release_payload["evidence_url"],
         workspace: release_payload["workspace"] || DEFAULT_WORKSPACE
       }.compact
-      options[:lane] = terminal_batch_lane(store, options).fetch("name")
+      options[:lane] = lane_name(terminal_batch_lane(store, options))
       write_event_record(store, options, now, output: false)
     end
 
     def complete_terminal_batch(store, payload, now)
       batch_id = payload["batch_id"] || payload[:batch_id]
       batch_path = AgentCoord.batch_path(batch_id)
-      existing = store.read_json(batch_path)
-      raise Error, "batch #{batch_id} not found for terminal closeout" unless existing
+      3.times do
+        existing = store.read_json(batch_path)
+        raise Error, "batch #{batch_id} not found for terminal closeout" unless existing
 
-      updated = JSON.parse(JSON.generate(existing.data))
+        updated = terminal_batch_payload(store, existing.data, payload, now)
+        begin
+          store.write_json(batch_path, updated, message: "Close lane in batch #{batch_id}", sha: existing.sha)
+          return
+        rescue Conflict
+          next
+        end
+      end
+
+      raise OperationalError, "batch #{batch_id} changed repeatedly during terminal closeout"
+    end
+
+    def terminal_batch_payload(store, batch, payload, now)
+      updated = JSON.parse(JSON.generate(batch))
       lane = terminal_batch_lane(store, payload, batch: updated)
-      lane["status"] = payload["terminal"] || payload[:terminal]
-      lane["terminal"] = lane.fetch("status")
-      lane["closed_at"] = timestamp(now)
-      lane["closed_by"] = payload["closed_by"] || closed_by_payload(payload)
+      terminal = payload["terminal"] || payload[:terminal]
+      lane["status"] = terminal
+      lane["terminal"] = terminal
+      lane["closed_at"] ||= timestamp(now)
+      lane["closed_by"] ||= payload["closed_by"] || closed_by_payload(payload)
       %w[pr_url pr_state evidence_url].each do |field|
         value = payload[field] || payload[field.to_sym]
         lane[field] = value unless value.nil?
       end
       lanes = Array(updated["lanes"])
       updated["status"] = "completed" if lanes.all? { |item| TERMINAL_STATES.include?(item["terminal"]) }
-      updated["completed_at"] = timestamp(now) if updated["status"] == "completed"
-      updated["schema_version"] = SCHEMA_VERSION
+      updated["completed_at"] ||= timestamp(now) if updated["status"] == "completed"
       updated["updated_at"] = timestamp(now)
-      store.write_json(batch_path, updated, message: "Close lane in batch #{batch_id}", sha: existing.sha)
+      updated
     end
 
     def terminal_batch_lane(store, payload, batch: nil)
-      batch_id = payload["batch_id"] || payload[:batch_id]
+      batch_id = terminal_payload_value(payload, "batch_id")
       batch ||= store.read_json(AgentCoord.batch_path(batch_id))&.data
       raise Error, "batch #{batch_id} not found for terminal closeout" unless batch
 
-      requested_lane = payload["lane"] || payload[:lane]
-      target = (payload["target"] || payload[:target]).to_s
+      validate_terminal_batch_repo!(batch, payload, batch_id)
+      lane = matching_terminal_batch_lane(batch, payload, batch_id)
+      validate_terminal_lane_identity!(lane, payload)
+      lane
+    end
+
+    def validate_terminal_batch_repo!(batch, payload, batch_id)
+      return unless batch["repo"] && batch["repo"] != terminal_payload_value(payload, "repo")
+
+      raise Error, "terminal closeout repo does not match batch #{batch_id}"
+    end
+
+    def matching_terminal_batch_lane(batch, payload, batch_id)
+      requested_lane = terminal_payload_value(payload, "lane")
+      target = terminal_payload_value(payload, "target").to_s
       matches = Array(batch["lanes"]).select do |lane|
-        lane_targets = Array(lane["targets"] || lane["target"]).map(&:to_s)
-        requested_lane ? lane_name(lane) == requested_lane : lane_targets.include?(target)
+        requested_lane ? lane_name(lane) == requested_lane : terminal_lane_targets(lane).include?(target)
       end
       raise Error, "terminal closeout does not match exactly one lane in batch #{batch_id}" unless matches.one?
 
       matches.first
+    end
+
+    def validate_terminal_lane_identity!(lane, payload)
+      target = terminal_payload_value(payload, "target").to_s
+      unless terminal_lane_targets(lane).include?(target)
+        raise Error, "terminal closeout target does not match lane #{lane_name(lane)}"
+      end
+      return if lane_owner(lane) == terminal_payload_value(payload, "agent_id")
+
+      raise Error, "terminal closeout agent does not match lane #{lane_name(lane)}"
+    end
+
+    def terminal_lane_targets(lane)
+      Array(lane["targets"] || lane["target"]).map(&:to_s)
+    end
+
+    def terminal_payload_value(payload, field)
+      payload[field] || payload[field.to_sym]
     end
 
     def build_event_id(now)
@@ -2115,6 +2184,7 @@ module AgentCoord
       {
         "version" => VERSION,
         "schema_version" => SCHEMA_VERSION,
+        "lane_closed_schema_version" => LANE_CLOSED_SCHEMA_VERSION,
         "default_backend" => DEFAULT_BACKEND,
         "default_ref" => DEFAULT_REF,
         "default_claim_ttl_seconds" => DEFAULT_CLAIM_TTL,

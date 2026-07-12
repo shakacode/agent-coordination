@@ -212,7 +212,8 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
 
     payload = JSON.parse(result.stdout)
     assert_match(/\A\d+\.\d+\.\d+\z/, payload.fetch("version"))
-    assert_equal 2, payload.fetch("schema_version")
+    assert_equal 1, payload.fetch("schema_version")
+    assert_equal 2, payload.fetch("lane_closed_schema_version")
     assert_nil payload.fetch("default_backend")
     assert_equal "state", payload.fetch("default_ref")
   end
@@ -888,7 +889,7 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     assert_equal 0, result.status.exitstatus, result.stderr
 
     heartbeat = JSON.parse(File.read(File.join(@state_root, "heartbeats", "worker-3969.json")))
-    assert_equal 2, heartbeat.fetch("schema_version")
+    assert_equal 1, heartbeat.fetch("schema_version")
     assert_equal "worker-3969", heartbeat.fetch("agent_id")
     assert_equal "shakacode/react_on_rails", heartbeat.fetch("repo")
     assert_equal "3969", heartbeat.fetch("target")
@@ -1204,6 +1205,66 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     claim_path = File.join(@state_root, "claims", "shakacode", "react_on_rails", "3983.json")
     assert_equal "active", JSON.parse(File.read(claim_path)).fetch("status")
     refute_path_exists File.join(@state_root, "events")
+  end
+
+  def test_terminal_release_closes_legacy_id_only_lane
+    write_batch(
+      "batch-legacy-id",
+      lanes: [{ "id" => "legacy", "owner" => "worker-a", "targets" => ["3985"] }]
+    )
+    claim = run_agent_coord(
+      "claim", "--agent-id", "worker-a", "--repo", "shakacode/react_on_rails",
+      "--target", "3985", "--batch-id", "batch-legacy-id"
+    )
+    assert_equal 0, claim.status.exitstatus, claim.stderr
+
+    release = run_agent_coord(
+      "release", "--agent-id", "worker-a", "--repo", "shakacode/react_on_rails",
+      "--target", "3985", "--terminal", "done"
+    )
+
+    assert_equal 0, release.status.exitstatus, release.stderr
+    event_path = Dir.glob(File.join(@state_root, "events", "batch-legacy-id", "*.json")).fetch(0)
+    assert_equal "legacy", JSON.parse(File.read(event_path)).fetch("lane")
+  end
+
+  def test_concurrent_terminal_releases_reconcile_both_batch_lanes
+    write_batch(
+      "batch-concurrent-close",
+      lanes: [
+        { "name" => "one", "owner" => "worker-a", "targets" => ["3987"] },
+        { "name" => "two", "owner" => "worker-b", "targets" => ["3988"] }
+      ]
+    )
+    %w[worker-a worker-b].zip(%w[3987 3988]).each do |agent_id, target|
+      claim = run_agent_coord(
+        "claim", "--agent-id", agent_id, "--repo", "shakacode/react_on_rails",
+        "--target", target, "--batch-id", "batch-concurrent-close"
+      )
+      assert_equal 0, claim.status.exitstatus, claim.stderr
+    end
+
+    store = ConcurrentBatchStore.new(@state_root, "batch-concurrent-close")
+    errors = []
+    threads = %w[worker-a worker-b].zip(%w[3987 3988]).map do |agent_id, target|
+      Thread.new do
+        runner = StoreInjectedRunner.new(
+          ["release", "--agent-id", agent_id, "--repo", "shakacode/react_on_rails",
+           "--target", target, "--terminal", "done"],
+          store: store
+        )
+        runner.run
+      rescue AgentCoord::Error => e
+        errors << e
+      end
+    end
+    threads.each(&:join)
+
+    assert_empty errors
+    batch = JSON.parse(File.read(File.join(@state_root, "batches", "batch-concurrent-close.json")))
+    assert_equal "completed", batch.fetch("status")
+    terminal_states = batch.fetch("lanes").map { |lane| lane.fetch("terminal") }
+    assert_equal %w[done done], terminal_states
   end
 
   def test_release_handoff_preserves_resume_metadata_and_records_event
@@ -2187,7 +2248,7 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     assert_equal 0, result.status.exitstatus, result.stderr
     assert_includes result.stdout, "registered batch batch-b"
     stored = JSON.parse(File.read(File.join(@state_root, "batches", "batch-b.json")))
-    assert_equal 2, stored.fetch("schema_version")
+    assert_equal 1, stored.fetch("schema_version")
     assert_equal "batch-b", stored.fetch("batch_id")
     assert_equal "Ship a low-risk batch", stored.fetch("objective")
     assert_equal "Coordinate the batch, then report the result.", stored.fetch("launch_prompt")
@@ -2241,7 +2302,7 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     assert_equal 1, event_files.length
 
     event = JSON.parse(File.read(event_files.first))
-    assert_equal 2, event.fetch("schema_version")
+    assert_equal 1, event.fetch("schema_version")
     assert_equal "batch-b", event.fetch("batch_id")
     assert_equal "phase", event.fetch("type")
     assert_equal "docs", event.fetch("lane")
@@ -2294,6 +2355,35 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     assert_equal %w[done abandoned], terminal_states
   end
 
+  def test_lane_closed_event_rejects_identity_that_does_not_match_registered_lane
+    write_batch(
+      "batch-identity",
+      lanes: [{ "name" => "code", "owner" => "worker-a", "targets" => ["3984"] }]
+    )
+    batch_path = File.join(@state_root, "batches", "batch-identity.json")
+    batch = JSON.parse(File.read(batch_path)).merge("repo" => "shakacode/react_on_rails")
+    File.write(batch_path, JSON.pretty_generate(batch))
+
+    mismatches = [
+      ["worker-a", "other/repo", "3984", "repo does not match"],
+      ["worker-a", "shakacode/react_on_rails", "unrelated", "target does not match"],
+      ["intruder", "shakacode/react_on_rails", "3984", "agent does not match"]
+    ]
+    mismatches.each do |agent_id, repo, target, message|
+      result = run_agent_coord(
+        "record-event", "--batch-id", "batch-identity", "--type", "lane_closed",
+        "--lane", "code", "--agent-id", agent_id, "--repo", repo,
+        "--target", target, "--terminal", "done"
+      )
+      assert_equal 1, result.status.exitstatus
+      assert_includes result.stderr, message
+    end
+
+    refute_path_exists File.join(@state_root, "events", "batch-identity")
+    persisted = JSON.parse(File.read(batch_path))
+    refute persisted.fetch("lanes").fetch(0).key?("terminal")
+  end
+
   def test_record_event_rejects_malformed_lane_names
     result = run_agent_coord(
       "record-event",
@@ -2305,6 +2395,28 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     assert_equal 1, result.status.exitstatus
     assert_includes result.stderr, "event lane docs:copy cannot contain ':'"
     refute_path_exists File.join(@state_root, "events", "batch-b")
+  end
+
+  def test_terminal_only_flags_are_rejected_outside_terminal_closeout
+    claim = run_agent_coord(
+      "claim", "--agent-id", "worker-a", "--repo", "shakacode/react_on_rails",
+      "--target", "3986", "--terminal", "done"
+    )
+    assert_equal 1, claim.status.exitstatus
+    assert_includes claim.stderr, "--terminal is only valid"
+
+    event = run_agent_coord(
+      "record-event", "--batch-id", "batch-b", "--type", "phase", "--terminal", "done"
+    )
+    assert_equal 1, event.status.exitstatus
+    assert_includes event.stderr, "terminal-only options require --type lane_closed"
+
+    normal_release = run_agent_coord(
+      "release", "--agent-id", "worker-a", "--repo", "shakacode/react_on_rails",
+      "--target", "3986", "--pr-state", "merged"
+    )
+    assert_equal 1, normal_release.status.exitstatus
+    assert_includes normal_release.stderr, "--pr-state requires --terminal"
   end
 
   def test_record_event_accepts_registered_lane_name_characters
@@ -2987,6 +3099,55 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
   FakeStatus = Struct.new(:successful) do
     def success?
       successful
+    end
+  end
+
+  class StoreInjectedRunner < AgentCoord::Runner
+    def initialize(argv, store:)
+      @injected_store = store
+      super(argv, stdout: StringIO.new, stderr: StringIO.new)
+    end
+
+    private
+
+    def build_store(_options)
+      @injected_store
+    end
+
+    def close_store(_store); end
+  end
+
+  class ConcurrentBatchStore < AgentCoord::LocalStore
+    def initialize(root, batch_id)
+      super(root)
+      @batch_path = AgentCoord.batch_path(batch_id)
+      @mutex = Mutex.new
+      @condition = ConditionVariable.new
+      @batch_reads = Hash.new(0)
+      @waiting = 0
+    end
+
+    def read_json(path)
+      entry = super
+      synchronize_second_batch_read if path == @batch_path
+      entry
+    end
+
+    private
+
+    def synchronize_second_batch_read
+      thread_id = Thread.current.object_id
+      @mutex.synchronize do
+        @batch_reads[thread_id] += 1
+        return unless @batch_reads[thread_id] == 2
+
+        @waiting += 1
+        if @waiting == 2
+          @condition.broadcast
+        else
+          @condition.wait(@mutex) until @waiting == 2
+        end
+      end
     end
   end
 

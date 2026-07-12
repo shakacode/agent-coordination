@@ -499,7 +499,7 @@ does not show fake work.
 
 ```json
 {
-  "schema_version": 2,
+  "schema_version": 1,
   "repo": "shakacode/react_on_rails",
   "target": "3969",
   "agent_id": "worker-3969",
@@ -540,7 +540,7 @@ final `pr_url` or `phase`.
 
 ```json
 {
-  "schema_version": 2,
+  "schema_version": 1,
   "agent_id": "worker-3969",
   "repo": "shakacode/react_on_rails",
   "target": "3969",
@@ -572,7 +572,7 @@ than inferring it from branch names or handoff text.
 
 ```json
 {
-  "schema_version": 2,
+  "schema_version": 1,
   "event_id": "20260708T235500.123456Z-deadbeef",
   "batch_id": "batch-2026-06-13",
   "type": "phase",
@@ -591,6 +591,10 @@ than inferring it from branch names or handoff text.
 ```
 
 Required fields: `schema_version`, `event_id`, `batch_id`, `type`, and `at`.
+Ordinary events retain schema version 1. The explicitly versioned
+`lane_closed` event uses schema version 2 and follows the published contract;
+`version --json` advertises both `schema_version` and
+`lane_closed_schema_version` so producers do not mislabel unrelated records.
 Lane events should include `lane` and `agent_id` when available. Lane names
 follow the same rules as registered batch lanes: non-empty and no `:`
 characters, because dependency refs split on the last colon. Event ids are
@@ -611,7 +615,7 @@ prefix snapshots become expensive.
 
 ```json
 {
-  "schema_version": 2,
+  "schema_version": 1,
   "batch_id": "batch-2026-06-13",
   "repo": "shakacode/react_on_rails",
   "objective": "Ship backend and docs updates",
