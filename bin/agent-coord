@@ -675,10 +675,15 @@ module AgentCoord
     end
 
     def gc_compaction_candidates(store, now, hot_days, synthetic_hot_days)
-      groups = store.list_json("events").group_by do |entry|
+      entries = store.list_json("events")
+      terminal_lanes = gc_terminal_lanes_by_provenance(entries)
+      groups = entries.group_by do |entry|
         data = entry.data
-        [data["batch_id"] || AgentCoord.event_batch_from_path(entry.path), data["lane"],
-         data["repo"], data["target"]&.to_s]
+        provenance = gc_event_provenance(entry)
+        lane = data["lane"]
+        lanes = terminal_lanes[provenance]
+        lane = lanes.first if lane.to_s.empty? && lanes&.one?
+        [*provenance, lane]
       end
       groups.filter_map do |group, entries|
         gc_compaction_candidate(group, entries, now, hot_days, synthetic_hot_days)
@@ -686,7 +691,7 @@ module AgentCoord
     end
 
     def gc_compaction_candidate(group, entries, now, hot_days, synthetic_hot_days)
-      batch_id, lane, repo, target = group
+      batch_id, repo, target, lane = group
 
       terminal = entries.select { |entry| gc_terminal_event?(entry.data) }
                         .max_by { |entry| gc_record_time(entry.data) }
@@ -707,6 +712,24 @@ module AgentCoord
           "eligible_at" => timestamp(eligible_at)
         }
       }
+    end
+
+    def gc_event_provenance(entry)
+      data = entry.data
+      batch_id = data["batch_id"].to_s
+      batch_id = AgentCoord.event_batch_from_path(entry.path) if batch_id.empty?
+      [batch_id, data["repo"], data["target"]&.to_s]
+    end
+
+    def gc_terminal_lanes_by_provenance(entries)
+      entries.each_with_object({}) do |entry, lanes_by_provenance|
+        data = entry.data
+        lane = data["lane"]
+        next unless gc_terminal_event?(data) && !lane.to_s.empty?
+
+        lanes = (lanes_by_provenance[gc_event_provenance(entry)] ||= [])
+        lanes << lane unless lanes.include?(lane)
+      end
     end
 
     def gc_event_compaction_eligibility(entries, terminal, now, hot_days, synthetic_hot_days)
@@ -1622,6 +1645,7 @@ module AgentCoord
 
       store = build_store(options)
       existing = store.read_json(path)
+      apply_batch_synthetic_metadata!(payload, options, existing)
       payload["registered_at"] = manifest["registered_at"] || existing&.data&.fetch("registered_at", nil) ||
                                  payload.fetch("registered_at")
       write_with_cas(store, path, payload, existing, "Register batch #{batch_id}")
@@ -1631,6 +1655,17 @@ module AgentCoord
       raise OperationalError, "batch registration write contention for #{batch_id}; #{e.message}"
     ensure
       close_store(store)
+    end
+
+    def apply_batch_synthetic_metadata!(payload, options, existing)
+      %w[synthetic synthetic_kind].each do |field|
+        option = field.to_sym
+        if options.key?(option)
+          payload[field] = options[option]
+        elsif !payload.key?(field) && existing&.data&.key?(field)
+          payload[field] = existing.data[field]
+        end
+      end
     end
 
     def record_event(options)

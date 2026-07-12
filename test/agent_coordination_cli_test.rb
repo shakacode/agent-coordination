@@ -461,6 +461,73 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     assert_path_exists File.join(@state_root, "events/lane-scoped/lane-b-phase.json")
   end
 
+  def test_gc_joins_lane_less_handoff_to_the_only_terminal_lane
+    write_batch(
+      "batch-handoff-gc",
+      lanes: [{ "name" => "code", "owner" => "worker-a", "targets" => ["handoff-gc"] }]
+    )
+    claim = run_agent_coord(
+      "claim", "--agent-id", "worker-a", "--repo", "shakacode/example", "--target", "handoff-gc",
+      "--batch-id", "batch-handoff-gc"
+    )
+    handoff = run_agent_coord(
+      "release", "--agent-id", "worker-a", "--repo", "shakacode/example", "--target", "handoff-gc",
+      "--handoff-to", "worker-a", "--handoff-note", "resume"
+    )
+    reclaim = run_agent_coord(
+      "claim", "--agent-id", "worker-a", "--repo", "shakacode/example", "--target", "handoff-gc",
+      "--batch-id", "batch-handoff-gc"
+    )
+    close = run_agent_coord(
+      "release", "--agent-id", "worker-a", "--repo", "shakacode/example", "--target", "handoff-gc",
+      "--terminal", "done"
+    )
+    [claim, handoff, reclaim, close].each { |result| assert_equal 0, result.status.exitstatus, result.stderr }
+    event_paths = Dir.glob(File.join(@state_root, "events/batch-handoff-gc/*.json"))
+    events = event_paths.map { |path| JSON.parse(File.read(path)) }
+    assert_equal(1, events.count { |event| event["type"] == "handoff" && !event.key?("lane") })
+    assert_equal(1, events.count { |event| event["type"] == "lane_closed" && event["lane"] == "code" })
+    old = (Time.utc(2026, 7, 12, 12, 0, 0) - (8 * 86_400)).iso8601
+    event_paths.each do |path|
+      event = JSON.parse(File.read(path)).merge("at" => old)
+      File.write(path, JSON.pretty_generate(event))
+    end
+
+    stdout = StringIO.new
+    runner = AgentCoord::Runner.new([], stdout: stdout, clock: FixedClock.new(Time.utc(2026, 7, 12, 12, 0, 0)))
+    assert_equal 0, runner.send(:gc, state_root: @state_root, dry_run: true, execute: false, json: true)
+    action = JSON.parse(stdout.string).fetch("actions").find { |row| row["action"] == "compact" }
+    assert_equal event_paths.map { |path| path.delete_prefix("#{@state_root}/") }.sort, action.fetch("source_paths")
+  end
+
+  def test_gc_keeps_lane_less_history_separate_when_terminal_lane_is_ambiguous
+    now = Time.utc(2026, 7, 12, 12, 0, 0)
+    old = (now - (8 * 86_400)).iso8601
+    %w[lane-a lane-b].each do |lane|
+      write_state_record(
+        "events/ambiguous-lanes/#{lane}-closed.json",
+        valid_gc_lane_closed(
+          event_id: "#{lane}-closed", batch_id: "ambiguous-lanes", target: "shared", at: old,
+          extra: { "lane" => lane }
+        )
+      )
+    end
+    handoff_path = "events/ambiguous-lanes/lane-less-handoff.json"
+    write_state_record(
+      handoff_path,
+      "schema_version" => 1, "event_id" => "lane-less-handoff", "batch_id" => "ambiguous-lanes",
+      "type" => "handoff", "repo" => "shakacode/example", "target" => "shared", "at" => old
+    )
+
+    stdout = StringIO.new
+    runner = AgentCoord::Runner.new([], stdout: stdout, clock: FixedClock.new(now))
+    assert_equal 0, runner.send(:gc, state_root: @state_root, dry_run: false, execute: true, json: true)
+    actions = JSON.parse(stdout.string).fetch("actions").select { |row| row["action"] == "compact" }
+    assert_equal 2, actions.length
+    refute(actions.any? { |action| action.fetch("source_paths").include?(handoff_path) })
+    assert_path_exists File.join(@state_root, handoff_path)
+  end
+
   def test_gc_compacts_only_events_whose_individual_hot_window_has_elapsed
     now = Time.utc(2026, 7, 12, 12, 0, 0)
     old_at = (now - (8 * 86_400)).iso8601
@@ -3069,6 +3136,39 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     assert_equal "m5", lane.fetch("host")
     assert_equal "https://github.com/shakacode/react_on_rails/pull/3972", lane.fetch("pr_url")
     assert_equal "https://coord.example.test/batches/batch-b/docs", lane.fetch("dashboard_url")
+  end
+
+  def test_register_batch_persists_and_renews_synthetic_metadata_for_one_day_gc
+    now = Time.utc(2026, 7, 12, 12, 0, 0)
+    manifest_path = File.join(@state_root, "synthetic-batch.json")
+    File.write(
+      manifest_path,
+      JSON.generate(
+        "batch_id" => "synthetic-batch", "status" => "active",
+        "lanes" => [{ "name" => "simulation", "owner" => "sim-worker", "targets" => ["sim"] }]
+      )
+    )
+    first = run_agent_coord(
+      "register-batch", "--file", manifest_path, "--synthetic", "--synthetic-kind", "simulation"
+    )
+    renewal = run_agent_coord("register-batch", "--file", manifest_path)
+    assert_equal 0, first.status.exitstatus, first.stderr
+    assert_equal 0, renewal.status.exitstatus, renewal.stderr
+    batch_path = File.join(@state_root, "batches/synthetic-batch.json")
+    batch = JSON.parse(File.read(batch_path))
+    assert_equal true, batch.fetch("synthetic")
+    assert_equal "simulation", batch.fetch("synthetic_kind")
+    batch["status"] = "completed"
+    batch["completed_at"] = (now - (2 * 86_400)).iso8601
+    batch["updated_at"] = batch.fetch("completed_at")
+    File.write(batch_path, JSON.pretty_generate(batch))
+
+    stdout = StringIO.new
+    runner = AgentCoord::Runner.new([], stdout: stdout, clock: FixedClock.new(now))
+    assert_equal 0, runner.send(:gc, state_root: @state_root, dry_run: true, execute: false, json: true)
+    actions = JSON.parse(stdout.string).fetch("actions")
+    action = actions.find { |row| row["source_path"] == "batches/synthetic-batch.json" }
+    assert_equal "archive", action.fetch("action")
   end
 
   def test_register_batch_reads_launch_prompt_from_path_and_overrides_manifest

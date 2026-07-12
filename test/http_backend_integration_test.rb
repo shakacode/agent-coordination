@@ -242,6 +242,30 @@ class HttpBackendIntegrationTest < Minitest::Test
     assert_http_delete(full_token, archive_denied_active_path)
   end
 
+  def test_maximum_active_path_has_a_valid_archive_mirror
+    token = ENV.fetch("AGENT_COORD_API_TOKEN")
+    active_path = "claims/o/r/#{'x' * 496}.json"
+    archive_path = "archive/#{active_path}"
+    too_long_active = "claims/o/r/#{'x' * 497}.json"
+    too_long_archive = "archive/#{too_long_active}"
+    assert_equal 512, active_path.bytesize
+    assert_equal 520, archive_path.bytesize
+
+    assert_http_create(token, active_path)
+    assert_http_create(token, archive_path)
+    [too_long_active, too_long_archive].each do |path|
+      code, body = http_json(
+        "PUT", state_path(path), token: token, headers: { "If-None-Match" => "*" },
+                                 body: { "data" => { "schema_version" => 1 } }
+      )
+      assert_equal 400, code
+      assert_equal "invalid_path", body.fetch("error")
+    end
+
+    assert_http_delete(token, active_path)
+    assert_http_delete(token, archive_path)
+  end
+
   def test_unknown_token_returns_machine_safe_auth_hint
     code, body = http_json("GET", "/v1/state?prefix=claims", token: "stale-token")
 

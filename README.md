@@ -188,6 +188,9 @@ Ordinary active-only writer tokens therefore cannot delete, while GC tokens use
 explicit active-plus-archive mirrors or the trusted all-state scope. Claim takeover
 checks may need read access to the current holder's heartbeat; use an exact
 heartbeat write scope only when the machine's agent id is stable.
+Active state paths are limited to 512 UTF-8 bytes. Mirrored archive paths allow
+520 bytes total for the `archive/` prefix plus that same at-most-512-byte active
+suffix; an archive path cannot carry a longer original suffix.
 When listing a parent prefix above a scoped token's read scope, the Worker
 returns only covered descendants. Claims-scoped tokens can pass the default
 `agent-coord doctor` read probe; tokens scoped only to other prefixes should use
@@ -336,6 +339,9 @@ from stdin; the explicit option overrides any `launch_prompt` already present in
 the manifest. Registration stamps `schema_version`, `registered_at`, and
 `updated_at`, preserves optional operator/dashboard/thread metadata, and rejects
 malformed lane names or owner/target fields before workers claim lanes.
+`--synthetic --synthetic-kind KIND` stamps batch-level simulation provenance;
+re-registration preserves those fields when a later manifest and command omit
+them, so completed synthetic batches retain the one-day GC window.
 
 `record-event` appends immutable batch or lane events under
 `events/<batch-id>/<event-id>.json`. Use it for phase changes and noteworthy
@@ -389,9 +395,10 @@ mode is required: `--dry-run` prints proposed actions without writing, while
 `--execute` copies eligible records into `archive/` with compare-and-swap
 protection and only then removes their hot source. Terminal lane/target events are
 compacted into an immutable archive envelope before their source events are
-removed. Events are grouped by batch, lane, repository, and target; absent-lane
-legacy events form an explicit legacy group, so one lane's terminal marker
-cannot sweep a sibling lane. A generation is deferred until every current
+removed. Events are grouped by batch, lane, repository, and target. A lane-less
+event joins the sole valid terminal lane for the same batch/repository/target;
+when zero or multiple terminal lanes exist it remains in the explicit legacy
+group, so one lane's marker cannot sweep a sibling lane. A generation is deferred until every current
 source event has independently passed its hot window. Each envelope path
 includes a deterministic digest of lane/provenance identity, source paths, and
 recursively key-sorted JSON content, so an identical retry reuses the same
@@ -400,6 +407,9 @@ without rewriting the first. The envelope lists every consumed
 source path but retains only the first
 event, last event, and actual phase transitions; repeated same-phase renewals
 are intentionally dropped.
+If a multi-source delete stops after some hot events are removed, retry can
+leave the immutable archive envelope as a safe expiring duplicate;
+copy-before-delete still guarantees retained history is not lost.
 Expired archive envelopes are deleted with the same compare-and-swap guard.
 
 | Record state | Hot retention | Archive retention | Result |

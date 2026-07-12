@@ -32,9 +32,10 @@ selects the shorter window only after those family-specific conditions hold;
 it never makes active claims, live heartbeats, or incomplete batches eligible.
 Events are compacted per batch, lane, repository, and target after a schema-v2
 `lane_closed` event declares `done`, `abandoned`, or `superseded` and every
-current event in that lane group has passed its own hot window. Missing lane on
-legacy events is an explicit legacy group, preventing one lane's terminal event
-from sweeping sibling-lane history. A fully synthetic group without a valid
+current event in that lane group has passed its own hot window. A lane-less
+event is normalized to the sole valid terminal lane for identical
+batch/repository/target provenance; if that choice is ambiguous or absent it
+stays in the explicit legacy group, preventing sibling-lane sweeps. A fully synthetic group without a valid
 terminal marker is also compacted once each event passes the synthetic window.
 Such orphan groups may lack repository and/or target metadata: batch, lane, and
 available provenance form a deterministic safe identity, preventing simulation
@@ -61,12 +62,17 @@ coverage. This derives GC authority from existing prefix lists without a token
 schema migration. Both the CLI preflight and HTTP Worker cap serialized
 archive envelopes at 1 MiB; an oversized plan fails before GC writes anything,
 while active HTTP records keep their existing 256 KiB limit.
+Active state paths remain capped at 512 UTF-8 bytes. Archive paths permit 520
+bytes only for the `archive/` prefix over a suffix that independently passes the
+512-byte active-path bound.
 
 ## Consequences
 
 - Current-state consumers stay clean without presentation-layer age filtering.
 - Dry-run and execute share one deterministic action plan.
 - Event history remains replayable as a compacted archive envelope.
+- Interrupted multi-source deletion can leave a safe expiring duplicate
+  envelope; retry remains copy-before-delete and fail-fast.
 - Synthetic simulation records are identifiable without name heuristics.
 - Archive readers must consume the published archive envelope v1 contract.
 - Scheduled Worker triggers remain a separate operational follow-up; this ADR

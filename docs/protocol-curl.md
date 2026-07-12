@@ -79,6 +79,10 @@ Relevant responses are:
 - `409` when create finds an existing record or an update uses a stale version.
 - `413` when the request or serialized state exceeds protocol size limits.
 
+Active state paths are at most 512 UTF-8 bytes. Archive state paths are at most
+520 bytes total, and the suffix after `archive/` must independently satisfy the
+512-byte active-path limit.
+
 Treat a `409` as contention: read again and reconsider the coordination action
 instead of retrying the old write blindly. Prefer `agent-coord` for claims and
 heartbeats because it applies the protocol's lease and liveness rules above

@@ -26,7 +26,8 @@ const MAX_STATE_BYTES = 256 * 1024;
 // allowing bounded GC output without granting broader scopes or bypassing auth.
 const MAX_ARCHIVE_STATE_BYTES = 1024 * 1024;
 const REQUEST_ENVELOPE_BYTES = 4096;
-const MAX_STATE_PATH_BYTES = 512;
+const MAX_ACTIVE_STATE_PATH_BYTES = 512;
+const MAX_ARCHIVE_STATE_PATH_BYTES = MAX_ACTIVE_STATE_PATH_BYTES + "archive/".length;
 const MAX_LIST_LIMIT = 1000;
 const RECORD_PATH = "(?:claims/[A-Za-z0-9_.:-]+/[A-Za-z0-9_.:-]+/[A-Za-z0-9_.:-]+\\.json"
   + "|heartbeats/[A-Za-z0-9_.:-]+\\.json"
@@ -39,14 +40,19 @@ const ARCHIVE_PREFIX = `archive(?:/${ACTIVE_PREFIX})?`;
 const STATE_PREFIX = new RegExp(`^(?:${ACTIVE_PREFIX}|${ARCHIVE_PREFIX})$`);
 
 function validPath(path: string): boolean {
-  return new TextEncoder().encode(path).byteLength <= MAX_STATE_PATH_BYTES
+  const encoder = new TextEncoder();
+  const archive = path.startsWith("archive/");
+  const activePath = archive ? path.slice("archive/".length) : path;
+  const maxPathBytes = archive ? MAX_ARCHIVE_STATE_PATH_BYTES : MAX_ACTIVE_STATE_PATH_BYTES;
+  return encoder.encode(path).byteLength <= maxPathBytes
+    && encoder.encode(activePath).byteLength <= MAX_ACTIVE_STATE_PATH_BYTES
     && STATE_PATH.test(path)
     && !path.includes("..")
     && !path.includes("//");
 }
 
 function validPrefix(prefix: string): boolean {
-  return new TextEncoder().encode(prefix).byteLength <= MAX_STATE_PATH_BYTES
+  return new TextEncoder().encode(prefix).byteLength <= MAX_ACTIVE_STATE_PATH_BYTES
     && STATE_PREFIX.test(prefix)
     && !prefix.includes("..")
     && !prefix.includes("//");
