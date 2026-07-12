@@ -752,6 +752,30 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     assert_equal 100_000, store.read_json(path).data.fetch("payload").length
   end
 
+  def test_local_store_fsyncs_leaf_directory_after_atomic_rename
+    store = ObservedDirectoryFsyncLocalStore.new(@state_root)
+    store.write_json("batches/durable.json", { "ok" => true }, message: "durable", create: true)
+
+    assert store.target_existed_during_fsync
+    assert_equal [File.join(@state_root, "batches")], store.fsynced_directories
+  end
+
+  def test_local_store_tolerates_known_unsupported_directory_fsync
+    store = UnsupportedDirectoryFsyncLocalStore.new(@state_root)
+
+    store.write_json("batches/unsupported.json", { "ok" => true }, message: "durable", create: true)
+
+    assert store.read_json("batches/unsupported.json").data.fetch("ok")
+  end
+
+  def test_local_store_propagates_unexpected_directory_fsync_errors
+    store = FailingDirectoryFsyncLocalStore.new(@state_root)
+
+    assert_raises(Errno::EACCES) do
+      store.write_json("batches/failing.json", { "ok" => true }, message: "durable", create: true)
+    end
+  end
+
   def test_operational_holder_heartbeat_read_failure_is_not_treated_as_missing
     runner = AgentCoord::Runner.new([])
     store = Class.new do
@@ -3398,6 +3422,43 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
   FakeStatus = Struct.new(:successful) do
     def success?
       successful
+    end
+  end
+
+  class ObservedDirectoryFsyncLocalStore < AgentCoord::LocalStore
+    attr_reader :fsynced_directories, :target_existed_during_fsync
+
+    def initialize(root)
+      super
+      @fsynced_directories = []
+    end
+
+    private
+
+    def fsync_parent_directory(file)
+      @target_existed_during_fsync = File.exist?(file)
+      super
+    end
+
+    def fsync_directory(directory)
+      @fsynced_directories << directory
+      super
+    end
+  end
+
+  class UnsupportedDirectoryFsyncLocalStore < AgentCoord::LocalStore
+    private
+
+    def fsync_directory(_directory)
+      raise Errno::EINVAL
+    end
+  end
+
+  class FailingDirectoryFsyncLocalStore < AgentCoord::LocalStore
+    private
+
+    def fsync_directory(_directory)
+      raise Errno::EACCES
     end
   end
 

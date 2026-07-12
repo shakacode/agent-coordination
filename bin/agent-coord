@@ -2496,8 +2496,21 @@ module AgentCoord
         output.fsync
       end
       File.rename(temporary, file)
+      fsync_parent_directory(file)
     ensure
       FileUtils.rm_f(temporary) if temporary
+    end
+
+    def fsync_parent_directory(file)
+      return if Gem.win_platform?
+
+      fsync_directory(File.dirname(file))
+    rescue Errno::EINVAL, Errno::ENOTSUP
+      nil
+    end
+
+    def fsync_directory(directory)
+      File.open(directory, File::RDONLY, &:fsync)
     end
 
     def expanded_path(path)
