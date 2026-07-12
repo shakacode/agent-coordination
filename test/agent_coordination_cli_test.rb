@@ -727,6 +727,31 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     refute_includes readme, "git clone --branch state --single-branch"
   end
 
+  def test_local_store_concurrent_readers_never_observe_partial_json
+    store = AgentCoord::LocalStore.new(@state_root)
+    path = "batches/atomic.json"
+    store.write_json(path, { "sequence" => 0, "payload" => "x" * 100_000 }, message: "seed", create: true)
+    errors = []
+    writer = Thread.new do
+      50.times do |sequence|
+        current = store.read_json(path)
+        store.write_json(path, { "sequence" => sequence, "payload" => "x" * 100_000 },
+                         message: "update", sha: current.sha)
+      end
+    end
+    readers = 4.times.map do
+      Thread.new do
+        200.times { store.read_json(path) }
+      rescue JSON::ParserError => e
+        errors << e
+      end
+    end
+    ([writer] + readers).each(&:join)
+
+    assert_empty errors
+    assert_equal 100_000, store.read_json(path).data.fetch("payload").length
+  end
+
   def test_operational_holder_heartbeat_read_failure_is_not_treated_as_missing
     runner = AgentCoord::Runner.new([])
     store = Class.new do

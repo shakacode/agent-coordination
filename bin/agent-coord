@@ -2459,7 +2459,7 @@ module AgentCoord
         raise Conflict, "state already exists at #{path}" if create && File.exist?(file)
         raise Conflict, "state changed at #{path}" if sha && (!File.exist?(file) || file_sha(file) != sha)
 
-        File.write(file, "#{JSON.pretty_generate(data)}\n")
+        atomic_write_json(file, data)
       end
     end
 
@@ -2485,6 +2485,20 @@ module AgentCoord
     end
 
     private
+
+    def atomic_write_json(file, data)
+      temporary = File.join(File.dirname(file), ".#{File.basename(file)}.tmp-#{Process.pid}-#{SecureRandom.hex(8)}")
+      mode = File.exist?(file) ? File.stat(file).mode & 0o777 : 0o666
+      File.open(temporary, File::WRONLY | File::CREAT | File::EXCL, mode) do |output|
+        output.chmod(mode) if File.exist?(file)
+        output.write("#{JSON.pretty_generate(data)}\n")
+        output.flush
+        output.fsync
+      end
+      File.rename(temporary, file)
+    ensure
+      FileUtils.rm_f(temporary) if temporary
+    end
 
     def expanded_path(path)
       AgentCoord.safe_path!(path)
