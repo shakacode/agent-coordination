@@ -55,7 +55,10 @@ GitHub.
 Normal status reads never scan `archive/`. Operators opt in with unscoped
 `status --include-archived`. The HTTP API accepts the mirrored archive path
 grammar and exposes compare-and-swap DELETE so local and HTTP execution share
-the same semantics. Both the CLI preflight and HTTP Worker cap serialized
+the same semantics. Active deletion requires write coverage for both the active
+path and its archive mirror, while archive deletion requires archive write
+coverage. This derives GC authority from existing prefix lists without a token
+schema migration. Both the CLI preflight and HTTP Worker cap serialized
 archive envelopes at 1 MiB; an oversized plan fails before GC writes anything,
 while active HTTP records keep their existing 256 KiB limit.
 

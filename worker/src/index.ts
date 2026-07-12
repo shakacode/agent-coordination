@@ -146,6 +146,11 @@ function canAccessPath(prefixes: string[], path: string): boolean {
   return prefixes.some((prefix) => scopeCoversPath(prefix, path));
 }
 
+function canDeletePath(prefixes: string[], path: string): boolean {
+  if (path.startsWith("archive/")) return canAccessPath(prefixes, path);
+  return canAccessPath(prefixes, path) && canAccessPath(prefixes, `archive/${path}`);
+}
+
 async function readJsonBody(
   request: Request,
   maxRequestBytes: number,
@@ -367,7 +372,7 @@ export default {
         return putState(request, env, path, auth.machine);
       }
       if (request.method === "DELETE") {
-        if (!canAccessPath(auth.writePrefixes, path)) return json(403, { error: "forbidden" });
+        if (!canDeletePath(auth.writePrefixes, path)) return json(403, { error: "forbidden" });
         return deleteState(request, env, path, auth.machine);
       }
       return json(405, { error: "method_not_allowed" });

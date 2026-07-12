@@ -37,6 +37,9 @@ class StateContractTest < Minitest::Test
     fixtures.each { |fixture| assert_empty schema.validate(fixture).to_a }
     compacted = fixtures.fetch(1)
     assert_operator compacted.fetch("source_paths").length, :>, compacted.fetch("records").length
+    lane_closed = compacted.fetch("records").find { |record| record["type"] == "lane_closed" }
+    state_schema = JSONSchemer.schema(JSON.parse(File.read(SCHEMA_PATH)))
+    assert_empty state_schema.validate(lane_closed).to_a
   end
 
   def test_lane_closed_contract_rejects_missing_workspace_and_invalid_terminal

@@ -28,6 +28,11 @@
       "repo": "shakacode/example",
       "target": "42",
       "terminal": "done",
+      "workspace": "default",
+      "closed_by": {
+        "agent_id": "worker-42",
+        "machine": "fixture"
+      },
       "at": "2026-07-01T01:00:00Z"
     }
   ]

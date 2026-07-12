@@ -181,7 +181,11 @@ explicit flag. A directory scope such as
 scope such as `heartbeats/m5-codex.json` covers exactly that flat record. The
 Worker enforces read scopes for `GET /v1/state/<path>` and
 `GET /v1/state?prefix=...`, write scopes for `PUT /v1/state/<path>`, and records
-the authenticated machine as `updated_by` on each state write. Claim takeover
+the authenticated machine as `updated_by` on each state write. Active-path
+`DELETE` requires write coverage for both the active path and its
+`archive/<path>` mirror; archive-path `DELETE` requires archive write coverage.
+Ordinary active-only writer tokens therefore cannot delete, while GC tokens use
+explicit active-plus-archive mirrors or the trusted all-state scope. Claim takeover
 checks may need read access to the current holder's heartbeat; use an exact
 heartbeat write scope only when the machine's agent id is stable.
 When listing a parent prefix above a scoped token's read scope, the Worker

@@ -202,6 +202,43 @@ class HttpBackendIntegrationTest < Minitest::Test
     assert_equal "forbidden", body.fetch("error")
   end
 
+  def test_delete_requires_archive_coverage_for_active_paths
+    full_token = ENV.fetch("AGENT_COORD_API_TOKEN")
+    active_token = ENV.fetch("SCOPED_AGENT_COORD_API_TOKEN")
+    archive_token = ENV.fetch("ARCHIVE_AGENT_COORD_API_TOKEN")
+    mirrored_token = ENV.fetch("MIRRORED_AGENT_COORD_API_TOKEN")
+    active_path = "#{ENV.fetch('SCOPED_CLAIM_PREFIX')}/delete-active-only.json"
+    archive_path = "archive/claims/shakacode/archive-only/delete.json"
+    archive_denied_active_path = "claims/shakacode/archive-only/delete.json"
+    mirrored_path = "#{ENV.fetch('MIRRORED_CLAIM_PREFIX')}/delete.json"
+
+    assert_http_create(active_token, active_path)
+    code, body = http_json(
+      "DELETE", state_path(active_path), token: active_token, headers: { "If-Match" => "1" }
+    )
+    assert_equal 403, code
+    assert_equal "forbidden", body.fetch("error")
+
+    assert_http_create(full_token, archive_path)
+    assert_http_create(full_token, archive_denied_active_path)
+    code, = http_json(
+      "DELETE", state_path(archive_denied_active_path), token: archive_token, headers: { "If-Match" => "1" }
+    )
+    assert_equal 403, code
+    code, body = http_json(
+      "DELETE", state_path(archive_path), token: archive_token, headers: { "If-Match" => "1" }
+    )
+    assert_equal 200, code
+    assert_equal true, body.fetch("deleted")
+
+    assert_http_create(mirrored_token, mirrored_path)
+    code, body = http_json(
+      "DELETE", state_path(mirrored_path), token: mirrored_token, headers: { "If-Match" => "1" }
+    )
+    assert_equal 200, code
+    assert_equal true, body.fetch("deleted")
+  end
+
   def test_unknown_token_returns_machine_safe_auth_hint
     code, body = http_json("GET", "/v1/state?prefix=claims", token: "stale-token")
 
@@ -217,6 +254,14 @@ class HttpBackendIntegrationTest < Minitest::Test
   end
 
   private
+
+  def assert_http_create(token, path)
+    code, body = http_json(
+      "PUT", state_path(path), token: token, headers: { "If-None-Match" => "*" },
+                               body: { "data" => { "schema_version" => 1, "agent_id" => "delete-test" } }
+    )
+    assert_equal 201, code, body.inspect
+  end
 
   def assert_scoped_write(scoped_token, allowed_path)
     code, body = http_json(

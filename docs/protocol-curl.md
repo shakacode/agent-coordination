@@ -72,6 +72,8 @@ Relevant responses are:
 
 - `401` for a missing or invalid token.
 - `403` when the token scope does not cover the requested path.
+- Active-path `DELETE` requires write scope for both the active path and its
+  `archive/<path>` mirror; archive-path `DELETE` requires archive write scope.
 - `404` when an exact read has no record.
 - `400` for an invalid or overlong path/prefix, malformed body, or missing precondition.
 - `409` when create finds an existing record or an update uses a stale version.
