@@ -1208,21 +1208,38 @@ module AgentCoord
       command_options = registered_options(command)
       doctor_options = command == "doctor" ? command_options : registered_options("doctor")
       value_options = command_options.value_options
-      long_options = command_options.long_options
       skip_next = false
       argv.count do |arg|
         option_name, option_value = arg.split("=", 2)
-        command_option = resolve_long_option(option_name, long_options)
+        resolved_option = resolve_standalone_option(option_name, command_options, doctor_options)
         if skip_next
           skip_next = false
           false
-        elsif option_value.nil? && value_options.include?(command_option)
+        elsif option_value.nil? && value_options.include?(resolved_option)
           skip_next = true
           false
         else
-          tokens.include?(resolve_long_option(option_name, doctor_options.long_options))
+          tokens.include?(resolved_option)
         end
       end
+    end
+
+    def resolve_standalone_option(option_name, command_options, target_options)
+      return unless option_name&.start_with?("--")
+
+      all_options = command_options.long_options | target_options.long_options
+      matches = all_options.select { |candidate| candidate.start_with?(option_name) }
+      command_matches = matches & command_options.long_options
+      command_option = exact_or_unique_long_option(option_name, command_matches)
+      return command_option if command_options.value_options.include?(command_option)
+
+      exact_or_unique_long_option(option_name, matches & target_options.long_options)
+    end
+
+    def exact_or_unique_long_option(option_name, matches)
+      return option_name if matches.include?(option_name)
+
+      matches.one? ? matches.first : nil
     end
 
     def registered_options(command)
@@ -1232,14 +1249,6 @@ module AgentCoord
         { stack_json: false, backend_selector_count: 0, empty_backend_selector: false }
       )
       registry
-    end
-
-    def resolve_long_option(option_name, long_options)
-      return unless option_name&.start_with?("--")
-      return option_name if long_options.include?(option_name)
-
-      matches = long_options.select { |candidate| candidate.start_with?(option_name) }
-      matches.one? ? matches.first : nil
     end
 
     def claim(options)
