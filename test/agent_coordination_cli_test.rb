@@ -1622,6 +1622,26 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     end
   end
 
+  def test_standalone_option_detector_does_not_resolve_swallowed_value
+    runner = AgentCoord::Runner.new([])
+    resolver = runner.method(:resolve_standalone_option)
+    resolved_names = []
+    runner.define_singleton_method(:resolve_standalone_option) do |option_name, command_options, target_options|
+      resolved_names << option_name
+      resolver.call(option_name, command_options, target_options)
+    end
+
+    count = runner.send(
+      :standalone_option_token_count,
+      ["--branch", "--deep", "--deep"],
+      ["--deep"],
+      command: "status"
+    )
+
+    assert_equal 1, count
+    assert_equal %w[--branch --deep], resolved_names
+  end
+
   def test_bootstrap_installs_command_and_removes_generated_underscore_alias
     install_dir = Dir.mktmpdir("agent-coord-bin")
     legacy_alias = File.join(install_dir, "agent_coord")

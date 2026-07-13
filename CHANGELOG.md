@@ -9,6 +9,11 @@ when releases begin.
 
 ### Added
 
+- `agent-coord doctor --stack-json`, a read-only schema v1 component report with
+  exits `0` healthy, `1` degraded, `2` failed, and `64` invalid usage; it
+  strictly requires exactly one direct `--state-root`, `--api-url`, or
+  `--backend` selector. The contract lives in the README's
+  [doctor setup section](README.md#setup).
 - A schema-first v1 host-limit record keyed by explicit `quota_host` and an
   additive optional status projection contract, with conformance, composite-key,
   and two-lane replay fixtures; runtime reporting and UI remain explicitly

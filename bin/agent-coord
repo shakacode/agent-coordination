@@ -1210,12 +1210,14 @@ module AgentCoord
       value_options = command_options.value_options
       skip_next = false
       argv.count do |arg|
-        option_name, option_value = arg.split("=", 2)
-        resolved_option = resolve_standalone_option(option_name, command_options, doctor_options)
         if skip_next
           skip_next = false
-          false
-        elsif option_value.nil? && value_options.include?(resolved_option)
+          next false
+        end
+
+        option_name, option_value = arg.split("=", 2)
+        resolved_option = resolve_standalone_option(option_name, command_options, doctor_options)
+        if option_value.nil? && value_options.include?(resolved_option)
           skip_next = true
           false
         else
