@@ -1030,6 +1030,35 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     assert_equal "claims/shakacode/example/old.json", archived.first.fetch("source_path")
   end
 
+  def test_status_reports_non_directory_root_parent_without_backtrace
+    parent = File.join(@state_root, "state-parent-file")
+    File.write(parent, "not a directory")
+
+    result = run_agent_coord("status", state_root: File.join(parent, "state"))
+
+    assert_equal 2, result.status.exitstatus
+    assert_empty result.stdout
+    assert_includes result.stderr, "state root is not accessible"
+    refute_includes result.stderr, "bin/agent-coord:"
+  end
+
+  def test_status_reports_permission_denied_root_without_backtrace
+    restricted = File.join(@state_root, "restricted-parent")
+    state_root = File.join(restricted, "state")
+    FileUtils.mkdir_p(state_root)
+    FileUtils.chmod(0o000, restricted)
+    skip "filesystem permissions are not enforced for this user" if File.stat(state_root)
+  rescue Errno::EACCES
+    result = run_agent_coord("status", state_root: state_root)
+
+    assert_equal 2, result.status.exitstatus
+    assert_empty result.stdout
+    assert_includes result.stderr, "state root is not accessible"
+    refute_includes result.stderr, "bin/agent-coord:"
+  ensure
+    FileUtils.chmod(0o755, restricted) if restricted && File.exist?(restricted)
+  end
+
   def test_demo_walks_claim_liveness_and_takeover_deterministically
     first = run_agent_coord("demo", state_root: nil)
     second = run_agent_coord("demo", state_root: nil)
@@ -1158,6 +1187,8 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     assert_includes payload.fetch("dependency_terminal_statuses"), "done"
     assert_equal 3, payload.fetch("exit_codes").fetch("claim_refused")
     assert_equal 2, payload.fetch("exit_codes").fetch("operational")
+    assert_equal 64, payload.fetch("exit_codes").fetch("stack_usage")
+    refute payload.key?("doctor_prefix_supplied")
   end
 
   def test_config_text_renders_missing_default_backend_as_none
@@ -1321,6 +1352,17 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     refute_includes result.stderr, "from "
   end
 
+  def test_legacy_local_deep_doctor_prefix_still_audits_all_state
+    FileUtils.mkdir_p(File.join(@state_root, "heartbeats"))
+    File.write(File.join(@state_root, "heartbeats", "broken.json"), "{")
+
+    result = run_agent_coord("doctor", "--deep", "--doctor-prefix", "claims")
+
+    assert_equal 2, result.status.exitstatus
+    assert_includes result.stderr, "state unreadable"
+    refute_includes result.stdout, "status: ok"
+  end
+
   def test_doctor_deep_checks_all_local_state_prefixes
     %w[claims batches events].each do |prefix|
       state_root = Dir.mktmpdir("agent-coord-test")
@@ -1335,6 +1377,76 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     ensure
       FileUtils.remove_entry(state_root) if state_root && Dir.exist?(state_root)
     end
+  end
+
+  def test_stack_doctor_contains_unexpected_resource_failure_without_leaking_details
+    secret = "resource-secret-value"
+    store = Class.new do
+      def initialize(message)
+        @message = message
+      end
+
+      def verify_layout!(_prefixes); end
+
+      def list_json(_prefix)
+        raise @message
+      end
+    end.new(secret)
+    stdout = StringIO.new
+    stderr = StringIO.new
+    runner = AgentCoord::Runner.new(
+      ["doctor", "--stack-json", "--deep", "--api-url", "https://coordination.invalid"],
+      stdout:, stderr:
+    )
+    runner.define_singleton_method(:build_store) { |_options| store }
+    runner.define_singleton_method(:close_store) { |_store| nil }
+
+    assert_equal 2, runner.run
+    assert_empty stderr.string
+    report = JSON.parse(stdout.string)
+    resource_check = report.fetch("checks").find { |check| check.fetch("id") == "resources.deep" }
+    assert_equal "failed", report.fetch("status")
+    assert_equal "failed", resource_check.fetch("status")
+    assert_equal "Unexpected resource-check failure", resource_check.dig("details", "error")
+    assert_equal "RuntimeError", resource_check.dig("details", "error_class")
+    refute_includes stdout.string, secret
+  end
+
+  def test_stack_doctor_contains_unexpected_backend_failure_without_leaking_details
+    secret = "backend-secret-value"
+    store = Class.new do
+      def initialize(message)
+        @message = message
+      end
+
+      def verify_layout!(_prefixes)
+        raise TypeError, @message
+      end
+    end.new(secret)
+    stdout = StringIO.new
+    stderr = StringIO.new
+    runner = AgentCoord::Runner.new(
+      ["doctor", "--stack-json", "--deep", "--api-url", "https://coordination.invalid"],
+      stdout:, stderr:
+    )
+    runner.define_singleton_method(:build_store) { |_options| store }
+    runner.define_singleton_method(:close_store) { |_store| nil }
+
+    assert_equal 2, runner.run
+    assert_empty stderr.string
+    report = JSON.parse(stdout.string)
+    backend_check = report.fetch("checks").find { |check| check.fetch("id") == "backend.readability" }
+    resource_check = report.fetch("checks").find { |check| check.fetch("id") == "resources.deep" }
+    assert_equal "failed", report.fetch("status")
+    assert_equal "failed", backend_check.fetch("status")
+    assert_equal "Unexpected backend-readability failure", backend_check.dig("details", "error")
+    refute backend_check.fetch("details").key?("error_class")
+    assert_equal "skipped", resource_check.fetch("status")
+    assert_equal "deep", resource_check.dig("details", "mode")
+    assert_equal "backend_unavailable", resource_check.dig("details", "reason")
+    refute_includes stdout.string, secret
+    refute_includes stdout.string, "TypeError"
+    refute_includes stdout.string, __method__.to_s
   end
 
   def test_doctor_rejects_file_state_root
@@ -1465,7 +1577,9 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
       ["release", "--agent-id", "a", "--repo", "o/r", "--target", "1", "--terminal", "--deep"],
       ["release", "--agent-id", "a", "--repo", "o/r", "--target", "1", "--pr-state", "--deep"],
       ["release", "--agent-id", "a", "--repo", "o/r", "--target", "1", "--evidence-url", "--deep"],
-      ["release", "--agent-id", "a", "--repo", "o/r", "--target", "1", "--workspace", "--deep"]
+      ["release", "--agent-id", "a", "--repo", "o/r", "--target", "1", "--workspace", "--deep"],
+      ["release", "--agent-id", "a", "--repo", "o/r", "--target", "1", "--handoff-note", "--deep"],
+      ["gc", "--dry-run", "--hot-d", "--deep"]
     ]
     commands.each do |args|
       result = run_agent_coord(*args)
@@ -1695,6 +1809,33 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     assert_equal [0, 0, 0, 0], 4.times.map { observed.pop }.sort
     assert_equal 49, final.fetch("sequence")
     assert_equal 100_000, final.fetch("payload").length
+  end
+
+  def test_local_store_lists_missing_root_and_nested_prefix_as_healthy_empty_without_mutation
+    missing_root = File.join(@state_root, "missing-root")
+    assert_empty AgentCoord::LocalStore.new(missing_root).list_json("claims")
+    refute_path_exists missing_root
+
+    claims = File.join(@state_root, "claims")
+    FileUtils.mkdir_p(claims)
+    assert_empty AgentCoord::LocalStore.new(@state_root).list_json("claims/missing")
+    assert_equal ["claims"], Dir.children(@state_root)
+    assert_empty Dir.children(claims)
+  end
+
+  def test_local_store_list_ignores_hidden_files_and_directories
+    visible_path = "claims/shakacode/example/visible.json"
+    write_state_record(visible_path, "schema_version" => 1, "visible" => true)
+    claims = File.join(@state_root, "claims")
+    File.write(File.join(claims, ".broken.json"), "{")
+    hidden_directory = File.join(claims, ".cache")
+    FileUtils.mkdir_p(hidden_directory)
+    File.write(File.join(hidden_directory, "broken.json"), "{")
+
+    entries = AgentCoord::LocalStore.new(@state_root).list_json("claims")
+
+    assert_equal [visible_path], entries.map(&:path)
+    assert entries.fetch(0).data.fetch("visible")
   end
 
   def test_local_store_fsyncs_leaf_directory_after_atomic_rename

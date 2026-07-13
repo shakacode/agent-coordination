@@ -855,6 +855,7 @@ class HttpDoctorTest < HttpEnvTestCase
       assert_equal 0, code
       assert_includes stdout.string, "backend: http"
       assert_includes stdout.string, stub.base_url
+      assert_includes stdout.string, "doctor_prefix: claims"
     end
   ensure
     stub.shutdown
@@ -881,6 +882,36 @@ class HttpDoctorTest < HttpEnvTestCase
     stub.shutdown
   end
 
+  def test_doctor_json_includes_default_http_readable_prefix
+    responses = [
+      [200, { "entries" => [] }],
+      [200, { "status" => "ok" }]
+    ]
+    stub = HttpStoreStub.new(responses)
+    with_env("AGENT_COORD_API_URL" => stub.base_url, "AGENT_COORD_API_TOKEN" => "tok") do
+      stdout = StringIO.new
+      code = AgentCoord::Runner.new(["doctor", "--json"], stdout: stdout, stderr: StringIO.new).run
+      payload = JSON.parse(stdout.string)
+
+      assert_equal 0, code
+      assert_equal(
+        {
+          "version" => "0.1.0",
+          "backend" => "http",
+          "backend_repo" => nil,
+          "backend_url" => stub.base_url,
+          "state_root" => nil,
+          "deep" => false,
+          "status" => "ok",
+          "doctor_prefix" => "claims"
+        },
+        payload
+      )
+    end
+  ensure
+    stub.shutdown
+  end
+
   def test_doctor_json_includes_custom_http_readable_prefix
     responses = [
       [200, { "entries" => [] }],
@@ -897,7 +928,19 @@ class HttpDoctorTest < HttpEnvTestCase
       payload = JSON.parse(stdout.string)
 
       assert_equal 0, code
-      assert_equal "events/batch", payload.fetch("doctor_prefix")
+      assert_equal(
+        {
+          "version" => "0.1.0",
+          "backend" => "http",
+          "backend_repo" => nil,
+          "backend_url" => stub.base_url,
+          "state_root" => nil,
+          "deep" => false,
+          "status" => "ok",
+          "doctor_prefix" => "events/batch"
+        },
+        payload
+      )
     end
   ensure
     stub.shutdown

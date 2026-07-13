@@ -306,7 +306,7 @@ bin/agent-coord status --repo OWNER/REPO --target ISSUE_OR_PR [--json]
 bin/agent-coord status --batch-id ID [--json]
 bin/agent-coord version [--json]
 bin/agent-coord config [show] [--json]
-bin/agent-coord doctor [--json|--stack-json] [--deep] [--doctor-prefix PREFIX] [--state-root PATH]
+bin/agent-coord doctor [--json|--stack-json] [--deep] [--doctor-prefix PREFIX] [--state-root PATH|--api-url URL|--backend OWNER/REPO]
 bin/agent-coord gc (--dry-run|--execute) [--json] [--hot-days DAYS] [--archive-days DAYS] [--synthetic-hot-days DAYS]
 bin/agent-coord bootstrap [--install-dir PATH] [--profile PATH] [--no-profile]
 bin/agent-coord demo
@@ -494,13 +494,15 @@ JSON validation. For HTTP tokens whose read scope does not overlap `claims`, use
 `bootstrap` installs the `agent-coord` command used by public
 workflow docs.
 
-## CLI Contract And Exit Codes
+## Legacy / Non-Stack CLI Contract And Exit Codes
 
 Use `agent-coord version --json` and `agent-coord config show --json` as the
 stable contract for public workflow docs. Public repos should avoid copying
 private implementation defaults when they can point agents at these commands.
 
-Current exit code contract:
+The following exit code contract applies to legacy and non-stack commands. The
+`doctor --stack-json` component contract and its exit codes are documented in
+the doctor section above.
 
 | Exit | Meaning                                  | Agent behavior                                                                 |
 | ---- | ---------------------------------------- | ------------------------------------------------------------------------------ |
