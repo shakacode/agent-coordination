@@ -1418,8 +1418,11 @@ module AgentCoord
       )
     rescue OperationalError, JSON::ParserError, SystemCallError => e
       emit_failed_stack_backend_report(checks, options, backend_kind, e.message)
-    rescue StandardError
-      emit_failed_stack_backend_report(checks, options, backend_kind, "Unexpected backend-readability failure")
+    rescue StandardError => e
+      emit_failed_stack_backend_report(
+        checks, options, backend_kind, "Unexpected backend-readability failure",
+        error_class: safe_stack_error_class(e)
+      )
     else
       checks << stack_resource_check(store, backend_kind, options)
       emit_stack_report(checks)
@@ -1427,12 +1430,14 @@ module AgentCoord
       close_store(store)
     end
 
-    def emit_failed_stack_backend_report(checks, options, backend_kind, error)
+    def emit_failed_stack_backend_report(checks, options, backend_kind, error, error_class: nil)
+      details = stack_backend_details(options, backend_kind).merge("error" => error)
+      details["error_class"] = error_class if error_class
       checks << stack_check(
         "backend.readability",
         "failed",
         "Coordination backend is not readable",
-        stack_backend_details(options, backend_kind).merge("error" => error),
+        details,
         "Restore access to the configured coordination backend, then rerun the doctor."
       )
       checks << stack_check(

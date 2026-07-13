@@ -1442,12 +1442,11 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     assert_equal "failed", report.fetch("status")
     assert_equal "failed", backend_check.fetch("status")
     assert_equal "Unexpected backend-readability failure", backend_check.dig("details", "error")
-    refute backend_check.fetch("details").key?("error_class")
+    assert_equal "TypeError", backend_check.dig("details", "error_class")
     assert_equal "skipped", resource_check.fetch("status")
     assert_equal "deep", resource_check.dig("details", "mode")
     assert_equal "backend_unavailable", resource_check.dig("details", "reason")
     refute_includes stdout.string, secret
-    refute_includes stdout.string, "TypeError"
     refute_includes stdout.string, __method__.to_s
   end
 

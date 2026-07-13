@@ -1288,6 +1288,7 @@ class StackDoctorCliTest < Minitest::Test
     assert_equal "http", backend_check.dig("details", "backend")
     assert_equal "https://coordination.invalid", backend_check.dig("details", "backend_url")
     assert_includes backend_check.dig("details", "error"), "AGENT_COORD_API_TOKEN is required"
+    refute backend_check.fetch("details").key?("error_class")
     assert_equal "skipped", check(report, "resources.deep").fetch("status")
   end
 
