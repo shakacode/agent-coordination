@@ -153,6 +153,30 @@ class LocalStoreReadabilityStackDoctorTest < Minitest::Test
     end
   end
 
+  def test_deep_check_explicitly_rejects_requested_directory_prefix_symlink
+    Dir.mktmpdir("agent-coord-stack-doctor") do |root|
+      state_root = File.join(root, "state")
+      outside = File.join(root, "outside")
+      FileUtils.mkdir_p([File.join(state_root, "claims"), outside])
+      link = File.join(state_root, "claims", "org")
+      File.symlink(outside, link)
+
+      result = run_doctor(
+        "--stack-json", "--deep", "--state-root", state_root,
+        "--doctor-prefix", "claims/org"
+      )
+
+      assert_equal 2, result.fetch(:status).exitstatus
+      assert_empty result.fetch(:stderr)
+      report = JSON.parse(result.fetch(:stdout))
+      resource_check = check(report, "resources.deep")
+      assert_equal "failed", resource_check.fetch("status")
+      assert_includes resource_check.dig("details", "error"), "claims/org is a symlink"
+      assert File.symlink?(link)
+      assert_empty Dir.children(outside)
+    end
+  end
+
   def test_explicit_state_root_symlink_is_trusted_for_status_and_deep_doctor
     Dir.mktmpdir("agent-coord-stack-doctor") do |root|
       target = File.join(root, "actual-state")
@@ -745,6 +769,14 @@ class StackDoctorCliTest < Minitest::Test
       result.fetch(:stderr),
       "doctor --stack-json requires exactly one of --state-root, --api-url, or --backend"
     )
+  end
+
+  def test_stack_report_rejects_malformed_direct_github_backend_as_usage
+    result = run_doctor("--stack-json", "--backend", "not-a-repo")
+
+    assert_equal 64, result.fetch(:status).exitstatus
+    assert_empty result.fetch(:stdout)
+    assert_equal "invalid backend repo: not-a-repo\n", result.fetch(:stderr)
   end
 
   def test_stack_report_rejects_empty_direct_backend_selector_values
