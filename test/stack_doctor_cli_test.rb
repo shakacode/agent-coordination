@@ -360,6 +360,80 @@ class LocalStoreReadabilityStackDoctorTest < Minitest::Test
     end
   end
 
+  def test_stack_report_rejects_malformed_below_family_doctor_prefixes
+    prefixes = %w[
+      claims/org/repo/1
+      heartbeats/agent
+      batches/batch
+      events/batch/event
+      archive/claims/org/repo/1
+      archive/heartbeats/agent
+    ]
+
+    Dir.mktmpdir("agent-coord-stack-doctor") do |state_root|
+      prefixes.each do |prefix|
+        result = run_doctor(
+          "--stack-json", "--deep", "--state-root", state_root, "--doctor-prefix", prefix
+        )
+
+        assert_equal 64, result.fetch(:status).exitstatus, prefix
+        assert_empty result.fetch(:stdout), prefix
+        assert_equal "invalid doctor prefix shape: #{prefix}\n", result.fetch(:stderr)
+      end
+      assert_empty Dir.children(state_root)
+    end
+  end
+
+  def test_stack_report_rejects_malformed_prefix_before_every_backend_probe
+    Dir.mktmpdir("agent-coord-stack-doctor") do |state_root|
+      fake_bin = File.join(state_root, "bin")
+      github_log = File.join(state_root, "github.log")
+      FileUtils.mkdir_p(fake_bin)
+      StackDoctorTestFixtures.write_fake_github(fake_bin)
+
+      with_recording_http_backend do |api_url, http_requests|
+        unknown_prefix_cases(state_root, api_url, fake_bin, github_log).each do |label, (selector, env)|
+          result = run_doctor(
+            "--stack-json", "--deep", *selector, "--doctor-prefix", "claims/org/repo/1", env:
+          )
+
+          assert_equal 64, result.fetch(:status).exitstatus, label
+          assert_empty result.fetch(:stdout), label
+          assert_equal "invalid doctor prefix shape: claims/org/repo/1\n", result.fetch(:stderr), label
+        end
+
+        assert_empty http_requests
+        refute_path_exists github_log
+      end
+    end
+  end
+
+  def test_stack_report_accepts_valid_family_directory_and_record_prefix_shapes
+    prefixes = %w[
+      claims
+      claims/org/repo
+      claims/org/repo/1.json
+      heartbeats/agent.json
+      events/batch
+      archive/events/batch
+      archive/events/batch/event.json
+    ]
+
+    Dir.mktmpdir("agent-coord-stack-doctor") do |state_root|
+      prefixes.each do |prefix|
+        result = run_doctor(
+          "--stack-json", "--deep", "--state-root", state_root, "--doctor-prefix", prefix
+        )
+
+        assert_includes [0, 1], result.fetch(:status).exitstatus, prefix
+        assert_empty result.fetch(:stderr), prefix
+        report = JSON.parse(result.fetch(:stdout))
+        assert_equal [prefix], check(report, "resources.deep").dig("details", "prefixes"), prefix
+      end
+      assert_empty Dir.children(state_root)
+    end
+  end
+
   private
 
   def assert_deep_doctor_through_root_symlink(state_root)

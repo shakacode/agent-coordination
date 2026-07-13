@@ -48,6 +48,18 @@ module AgentCoord
       events/[A-Za-z0-9_.:-]+/[A-Za-z0-9_.:-]+\.json
     ))
   )\z}x
+  STATE_DIRECTORY_PREFIX_PATTERN = %r{\A(?:
+    claims(?:/[A-Za-z0-9_.:-]+(?:/[A-Za-z0-9_.:-]+)?)? |
+    heartbeats |
+    batches |
+    events(?:/[A-Za-z0-9_.:-]+)? |
+    archive(?:/(?:
+      claims(?:/[A-Za-z0-9_.:-]+(?:/[A-Za-z0-9_.:-]+)?)? |
+      heartbeats |
+      batches |
+      events(?:/[A-Za-z0-9_.:-]+)?
+    ))?
+  )\z}x
   DEPENDENCY_DONE_STATUSES = %w[complete completed done merged ready].freeze
   STATUS_BATCH_METADATA_FIELDS = %w[
     repo objective instructions launch_prompt operator dashboard_url status updated_at registered_at completed_at
@@ -482,9 +494,10 @@ module AgentCoord
       return unless options[:stack_json]
 
       family = prefix.split("/", 2).first
-      return if STATE_PREFIXES.include?(family)
+      raise PathValidationError, "unknown doctor prefix family: #{family}" unless STATE_PREFIXES.include?(family)
+      return if AgentCoord.state_directory_prefix?(prefix) || AgentCoord.state_record_path?(prefix)
 
-      raise PathValidationError, "unknown doctor prefix family: #{family}"
+      raise PathValidationError, "invalid doctor prefix shape: #{prefix}"
     end
 
     def validate_register_batch_option_usage!(command, options)
@@ -4040,6 +4053,10 @@ module AgentCoord
 
   def self.state_record_path?(path)
     path.to_s.match?(STATE_PATH_PATTERN)
+  end
+
+  def self.state_directory_prefix?(path)
+    path.to_s.match?(STATE_DIRECTORY_PREFIX_PATTERN)
   end
 
   def self.validate_repo!(repo, field)
