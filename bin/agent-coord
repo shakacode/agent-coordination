@@ -273,6 +273,8 @@ module AgentCoord
       raise Error, "--deep is only valid for doctor" if command != "doctor" && deep_option_token?(argv, command:)
 
       parser.parse!(argv)
+      raise Error, "doctor --json and --stack-json are mutually exclusive" if options[:json] && options[:stack_json]
+
       validate_stack_json_backend_selector_count!(options, parse_state)
       raise Error, "unexpected arguments: #{argv.join(' ')}" unless argv.empty?
 

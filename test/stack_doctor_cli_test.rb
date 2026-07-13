@@ -542,6 +542,33 @@ class ExplicitBackendPrecedenceStackDoctorTest < Minitest::Test
   end
 end
 
+class StackDoctorOutputModeCliTest < Minitest::Test
+  ROOT = File.expand_path("..", __dir__)
+  BIN = File.join(ROOT, "bin", "agent-coord")
+  CLEAN_ENV = {
+    "AGENT_COORD_API_TOKEN" => nil,
+    "AGENT_COORD_API_URL" => nil,
+    "AGENT_COORD_BACKEND" => nil,
+    "AGENT_COORD_ENV_FILE" => nil,
+    "AGENT_COORD_STATE_ROOT" => nil,
+    "AGENT_COORD_STATUS_STATE_ROOT" => nil
+  }.freeze
+
+  def test_stack_report_rejects_legacy_json_output_flag
+    [%w[--json --stack-json], %w[--stack-json --json]].each do |output_flags|
+      Dir.mktmpdir("agent-coord-stack-doctor") do |state_root|
+        stdout, stderr, status = Open3.capture3(
+          CLEAN_ENV, RbConfig.ruby, BIN, "doctor", *output_flags, "--state-root", state_root
+        )
+
+        assert_equal 64, status.exitstatus, output_flags.join(" ")
+        assert_empty stdout, output_flags.join(" ")
+        assert_equal "doctor --json and --stack-json are mutually exclusive\n", stderr
+      end
+    end
+  end
+end
+
 class StackDoctorCliTest < Minitest::Test
   ROOT = File.expand_path("..", __dir__)
   BIN = File.join(ROOT, "bin", "agent-coord")
