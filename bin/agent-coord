@@ -180,6 +180,10 @@ module AgentCoord
     def run_doctor_command(command)
       doctor_argv = @argv.dup
       stack_json = stack_json_option_token?(doctor_argv)
+      if stack_json && stack_json_backend_selector_count(doctor_argv) != 1
+        raise Error, "doctor --stack-json requires exactly one of --state-root, --api-url, or --backend"
+      end
+
       doctor(parse_options(command, @argv))
     rescue OptionParser::ParseError => e
       raise Error.new(e.message, exit_code: stack_json ? STACK_EXIT_USAGE : EXIT_USAGE)
@@ -495,6 +499,7 @@ module AgentCoord
 
     def warn_consumer_split_brain(command, options)
       return unless %w[status doctor].include?(command)
+      return if options[:stack_json]
       return unless options[:state_root] && !options[:api_url]
       return unless ENV.fetch("AGENT_COORD_API_URL", "").empty?
 
@@ -1103,7 +1108,15 @@ module AgentCoord
       standalone_option_token?(argv, "--stack-json")
     end
 
+    def stack_json_backend_selector_count(argv)
+      standalone_option_token_count(argv, %w[--state-root --api-url --backend])
+    end
+
     def standalone_option_token?(argv, token)
+      standalone_option_token_count(argv, [token]).positive?
+    end
+
+    def standalone_option_token_count(argv, tokens)
       # Keep this in sync with value-taking opts.on definitions in parse_options.
       value_options = %w[
         --backend --ref --state-root --api-url --agent-id --repo --target --batch-id --branch
@@ -1114,15 +1127,15 @@ module AgentCoord
         --doctor-prefix --prefix
       ]
       skip_next = false
-      argv.any? do |arg|
+      argv.count do |arg|
         if skip_next
           skip_next = false
           false
         elsif value_options.include?(arg)
           skip_next = true
-          false
+          tokens.include?(arg)
         else
-          arg == token
+          tokens.include?(arg.split("=", 2).first)
         end
       end
     end
@@ -1552,6 +1565,9 @@ module AgentCoord
       end
       if prefix.match?(%r{\Aevents(?:/|\z)}) && unsupported_event_listing?(e)
         return [{ prefix => "event state not supported by backend" }, { prefix => "unsupported" }]
+      end
+      if prefix.match?(%r{\Aarchive(?:/|\z)}) && unsupported_event_listing?(e)
+        return [{ prefix => "archive state not supported by backend" }, { prefix => "unsupported" }]
       end
 
       raise

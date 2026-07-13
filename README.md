@@ -264,16 +264,19 @@ backend access.
 For HTTP tokens scoped outside `claims`, pass a readable scope:
 `agent-coord doctor --doctor-prefix events/<batch-id>`.
 
-Stack aggregators should invoke `agent-coord doctor --stack-json --deep`. The
+Stack aggregators should invoke `agent-coord doctor --stack-json --deep` with
+exactly one direct backend selector: `--state-root PATH`, `--api-url URL`, or
+`--backend OWNER/REPO`. Environment defaults still participate in normal backend
+resolution, but do not satisfy this machine-contract selector requirement. The
 explicit stack output is the component contract v1: it reports
 `agent-coordination` as `healthy`, `degraded`, or `failed`, with normalized
 checks for CLI version readiness, backend readability, and deep resource
 evidence. Exit codes are `0` for healthy, `1` for degraded, `2` for failed, and
-`64` for invalid usage. `--stack-json` is strictly read-only: it never creates
-the implicit local state root, and a missing configured or explicit root is a
-failed component report rather than a backend fallback. Omit `--deep` only when
-a shallow report with skipped resource evidence is intentional. Legacy text and
-`doctor --json` output remain unchanged.
+`64` for invalid usage. Usage errors emit no JSON. `--stack-json` is strictly
+read-only: it never creates a missing explicit local state root, and reports
+that missing root as a failed component rather than falling back. Omit `--deep`
+only when a shallow report with skipped resource evidence is intentional.
+Legacy text and `doctor --json` output remain unchanged.
 
 To override the default for a local smoke check, set `AGENT_COORD_STATE_ROOT` or
 pass `--state-root` to use a temporary filesystem state directory:
