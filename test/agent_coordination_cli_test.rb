@@ -1450,6 +1450,21 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     refute_includes stdout.string, __method__.to_s
   end
 
+  def test_stack_backend_details_never_report_nonlocal_state_root
+    runner = AgentCoord::Runner.new([])
+    options = {
+      backend: "example/coordination",
+      api_url: "https://coordination.invalid",
+      state_root: "/ambient/state"
+    }
+
+    %w[github http].each do |backend_kind|
+      details = runner.send(:stack_backend_details, options, backend_kind)
+
+      assert_nil details.fetch("state_root"), backend_kind
+    end
+  end
+
   def test_doctor_rejects_file_state_root
     state_root = File.join(@state_root, "state-root-file")
     File.write(state_root, "not a directory")

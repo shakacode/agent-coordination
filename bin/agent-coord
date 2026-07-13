@@ -134,8 +134,8 @@ module AgentCoord
   class Conflict < OperationalError
   end
 
-  # Records the same long-option registrations that OptionParser consumes so
-  # pre-parse token detection cannot drift from the command's real grammar.
+  # Records the long-option declaration shapes used by this CLI so pre-parse
+  # token detection can share its registered option names.
   class OptionRegistry
     attr_reader :value_options, :flag_options
 
@@ -147,6 +147,9 @@ module AgentCoord
 
     def on(*declarations, &)
       @parser.on(*declarations, &)
+      # This is a narrow extractor, not a parser for every OptionParser declaration form.
+      # Before adding optional arguments or a non-first long switch, update this grammar
+      # and its token-detection tests together.
       long_declaration = declarations.find { |declaration| declaration.is_a?(String) && declaration.start_with?("--") }
       if long_declaration
         option_name, argument = long_declaration.split(/\s+/, 2)
@@ -1464,7 +1467,7 @@ module AgentCoord
         "backend" => backend_kind,
         "backend_repo" => backend_kind == "github" ? options.fetch(:backend) : nil,
         "backend_url" => active_backend_url(options, backend_kind),
-        "state_root" => options[:state_root]
+        "state_root" => backend_kind == "local" ? options[:state_root] : nil
       }
     end
 
