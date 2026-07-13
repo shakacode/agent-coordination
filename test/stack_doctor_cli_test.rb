@@ -119,6 +119,79 @@ class StackDoctorCliTest < Minitest::Test
     )
   end
 
+  def test_abbreviated_stack_json_requires_a_direct_backend_selector
+    Dir.mktmpdir("agent-coord-stack-doctor") do |state_root|
+      result = run_doctor(
+        "--stack-j",
+        env: {
+          "AGENT_COORD_STATE_ROOT" => state_root,
+          "XDG_CONFIG_HOME" => File.join(state_root, "config")
+        }
+      )
+
+      assert_equal 64, result.fetch(:status).exitstatus
+      assert_empty result.fetch(:stdout)
+      assert_includes(
+        result.fetch(:stderr),
+        "doctor --stack-json requires exactly one of --state-root, --api-url, or --backend"
+      )
+    end
+  end
+
+  def test_abbreviated_stack_json_accepts_one_direct_backend_selector
+    Dir.mktmpdir("agent-coord-stack-doctor") do |state_root|
+      result = run_doctor("--stack-j", "--state-root", state_root)
+
+      assert_equal 0, result.fetch(:status).exitstatus, result.fetch(:stderr)
+      assert_empty result.fetch(:stderr)
+      report = JSON.parse(result.fetch(:stdout))
+      assert_equal "healthy", report.fetch("status")
+      assert_equal state_root, check(report, "backend.readability").dig("details", "state_root")
+    end
+  end
+
+  def test_abbreviated_stack_json_rejects_conflicting_backend_selectors
+    Dir.mktmpdir("agent-coord-stack-doctor") do |state_root|
+      result = run_doctor(
+        "--stack-j",
+        "--state-root", state_root,
+        "--api-url", "http://127.0.0.1:9",
+        "--backend", "example/coordination"
+      )
+
+      assert_equal 64, result.fetch(:status).exitstatus
+      assert_empty result.fetch(:stdout)
+      assert_includes(
+        result.fetch(:stderr),
+        "doctor --stack-json requires exactly one of --state-root, --api-url, or --backend"
+      )
+    end
+  end
+
+  def test_option_parser_selector_abbreviations_preserve_stack_cardinality
+    Dir.mktmpdir("agent-coord-stack-doctor") do |state_root|
+      valid = run_doctor("--stack-json", "--state-r", state_root)
+
+      assert_equal 0, valid.fetch(:status).exitstatus, valid.fetch(:stderr)
+      assert_equal "healthy", JSON.parse(valid.fetch(:stdout)).fetch("status")
+
+      [
+        ["abbreviated API URL", "--api-u", "http://127.0.0.1:9"],
+        ["abbreviated legacy backend", "--back", "example/coordination"]
+      ].each do |label, selector, value|
+        result = run_doctor("--stack-json", "--state-root", state_root, selector, value)
+
+        assert_equal 64, result.fetch(:status).exitstatus, label
+        assert_empty result.fetch(:stdout), label
+        assert_includes result.fetch(:stderr), "requires exactly one of", label
+      end
+
+      repeated = run_doctor("--stack-json", "--state-r", state_root, "--state-r", state_root)
+      assert_equal 64, repeated.fetch(:status).exitstatus
+      assert_empty repeated.fetch(:stdout)
+    end
+  end
+
   def test_stack_report_rejects_every_conflicting_backend_selector_combination
     Dir.mktmpdir("agent-coord-stack-doctor") do |state_root|
       cases = {

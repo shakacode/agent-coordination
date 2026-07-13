@@ -179,15 +179,13 @@ module AgentCoord
 
     def run_doctor_command(command)
       doctor_argv = @argv.dup
-      stack_json = stack_json_option_token?(doctor_argv)
-      if stack_json && stack_json_backend_selector_count(doctor_argv) != 1
-        raise Error, "doctor --stack-json requires exactly one of --state-root, --api-url, or --backend"
-      end
-
-      doctor(parse_options(command, @argv))
+      parse_state = { stack_json: false, backend_selector_count: 0 }
+      doctor(parse_options(command, @argv, parse_state: parse_state))
     rescue OptionParser::ParseError => e
+      stack_json = parse_state[:stack_json] || stack_json_option_token?(doctor_argv)
       raise Error.new(e.message, exit_code: stack_json ? STACK_EXIT_USAGE : EXIT_USAGE)
     rescue Error => e
+      stack_json = parse_state[:stack_json] || stack_json_option_token?(doctor_argv)
       raise unless stack_json
       return stack_doctor_startup_failure(e, deep: deep_option_token?(doctor_argv)) unless e.exit_code == EXIT_USAGE
 
@@ -249,20 +247,21 @@ module AgentCoord
       ["-h", "--help", "help"].include?(value)
     end
 
-    def parse_options(command, argv)
+    def parse_options(command, argv, parse_state: nil)
       options = default_options
+      parse_state ||= { stack_json: false, backend_selector_count: 0 }
 
       parser = OptionParser.new do |opts|
         opts.banner = "Usage: agent-coord #{command} [options]"
         add_command_help(opts, command)
 
-        add_backend_options(opts, options)
+        add_backend_options(opts, options, parse_state)
         add_target_options(opts, options)
         add_synthetic_options(opts, options)
         add_release_options(opts, options, command)
         add_event_options(opts, options)
         add_register_batch_options(opts, options)
-        add_doctor_options(opts, options, command)
+        add_doctor_options(opts, options, command, parse_state)
         add_gc_options(opts, options, command)
         add_status_options(opts, options, command)
         add_bootstrap_options(opts, options)
@@ -271,17 +270,34 @@ module AgentCoord
       raise Error, "--deep is only valid for doctor" if command != "doctor" && deep_option_token?(argv)
 
       parser.parse!(argv)
+      validate_stack_json_backend_selector_count!(options, parse_state)
       raise Error, "unexpected arguments: #{argv.join(' ')}" unless argv.empty?
 
       finalize_options(command, options)
     end
 
-    def add_backend_options(opts, options)
-      opts.on("--backend OWNER/REPO", "backend repository") { |value| options[:backend] = value }
+    def add_backend_options(opts, options, parse_state)
+      opts.on("--backend OWNER/REPO", "backend repository") do |value|
+        options[:backend] = value
+        parse_state[:backend_selector_count] += 1
+      end
       opts.on("--ref REF", "backend branch/ref") { |value| options[:ref] = value }
-      opts.on("--state-root PATH", "use local files instead of GitHub API") { |value| options[:state_root] = value }
-      opts.on("--api-url URL", "use the HTTP backend at URL") { |value| options[:api_url] = value }
+      opts.on("--state-root PATH", "use local files instead of GitHub API") do |value|
+        options[:state_root] = value
+        parse_state[:backend_selector_count] += 1
+      end
+      opts.on("--api-url URL", "use the HTTP backend at URL") do |value|
+        options[:api_url] = value
+        parse_state[:backend_selector_count] += 1
+      end
       opts.on("--json", "emit JSON for supported commands") { options[:json] = true }
+    end
+
+    def validate_stack_json_backend_selector_count!(options, parse_state)
+      return unless options[:stack_json]
+      return if parse_state[:backend_selector_count] == 1
+
+      raise Error, "doctor --stack-json requires exactly one of --state-root, --api-url, or --backend"
     end
 
     def add_target_options(opts, options)
@@ -351,11 +367,12 @@ module AgentCoord
       end
     end
 
-    def add_doctor_options(opts, options, command)
+    def add_doctor_options(opts, options, command, parse_state)
       return unless command == "doctor"
 
       opts.on("--stack-json", "doctor only: emit the component stack-doctor contract") do
         options[:stack_json] = true
+        parse_state[:stack_json] = true
       end
       opts.on("--deep", "doctor only: parse every JSON state record") { options[:deep] = true }
       opts.on("--doctor-prefix PREFIX", "doctor only: HTTP readable prefix probe") do |value|
@@ -1106,10 +1123,6 @@ module AgentCoord
 
     def stack_json_option_token?(argv)
       standalone_option_token?(argv, "--stack-json")
-    end
-
-    def stack_json_backend_selector_count(argv)
-      standalone_option_token_count(argv, %w[--state-root --api-url --backend])
     end
 
     def standalone_option_token?(argv, token)
