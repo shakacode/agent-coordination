@@ -33,6 +33,10 @@ when releases begin.
 
 - Token provisioning now requires explicit read/write scopes, with `--all-state`
   available only as an explicit opt-out for trusted single-operator deployments.
+- Documented the `LocalStore` symlink trust boundary: explicitly selected
+  top-level roots remain trusted, while deep reads fail closed on top-level
+  state-prefix and deeper descendant links using check-then-use guards rather
+  than atomic filesystem traversal.
 
 ### Fixed
 

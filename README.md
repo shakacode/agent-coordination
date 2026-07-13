@@ -278,6 +278,13 @@ that missing root as a failed component rather than falling back. Omit `--deep`
 only when a shallow report with skipped resource evidence is intentional.
 Legacy text and `doctor --json` output remain unchanged.
 
+For `LocalStore`, the explicitly selected top-level state root is an
+operator-owned trust boundary and may itself be a symlink. Deep reads fail
+closed when a top-level state prefix such as `claims/`, or any directory or
+record below it, is a symlink. These are check-then-use guards for cooperative
+local state, not atomic filesystem traversal: another process able to rewrite
+the tree concurrently under the same local owner is inside that trust boundary.
+
 To override the default for a local smoke check, set `AGENT_COORD_STATE_ROOT` or
 pass `--state-root` to use a temporary filesystem state directory:
 

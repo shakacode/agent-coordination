@@ -1115,6 +1115,7 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     refute_includes result.stdout, "--doctor-prefix"
     assert_includes doctor.stdout, "--deep"
     assert_includes doctor.stdout, "--doctor-prefix"
+    assert_includes doctor.stdout, "--stack-json  emit the versioned component report for stack aggregators"
   end
 
   def test_status_help_omits_doctor_only_deep_option
@@ -1123,6 +1124,7 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     assert_equal 0, result.status.exitstatus, result.stderr
     refute_includes result.stdout, "--deep"
     refute_includes result.stdout, "--doctor-prefix"
+    refute_includes result.stdout, "--stack-json"
   end
 
   def test_http_integration_harness_uses_portable_hashing_and_cleans_up_wrangler
@@ -1569,6 +1571,7 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     assert_equal 0, result.status.exitstatus, result.stderr
     assert_includes result.stdout, "--deep"
     assert_includes result.stdout, "--doctor-prefix"
+    assert_includes result.stdout, "--stack-json  emit the versioned component report for stack aggregators"
   end
 
   def test_non_doctor_deep_guard_ignores_deep_as_option_value

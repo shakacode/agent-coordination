@@ -42,7 +42,7 @@ module StackDoctorTestFixtures
   end
 end
 
-class LocalStoreReadabilityStackDoctorTest < Minitest::Test
+module StackDoctorCliTestHarness
   ROOT = File.expand_path("..", __dir__)
   BIN = File.join(ROOT, "bin", "agent-coord")
   CLEAN_ENV = {
@@ -53,6 +53,21 @@ class LocalStoreReadabilityStackDoctorTest < Minitest::Test
     "AGENT_COORD_STATE_ROOT" => nil,
     "AGENT_COORD_STATUS_STATE_ROOT" => nil
   }.freeze
+
+  def run_doctor(*, env: {})
+    stdout, stderr, status = Open3.capture3(CLEAN_ENV.merge(env), RbConfig.ruby, BIN, "doctor", *)
+    { stdout:, stderr:, status: }
+  end
+
+  def check(report, id)
+    report.fetch("checks").find { |entry| entry.fetch("id") == id }.tap do |entry|
+      refute_nil entry, "missing check #{id}"
+    end
+  end
+end
+
+class LocalStoreReadabilityStackDoctorTest < Minitest::Test
+  include StackDoctorCliTestHarness
 
   def test_default_and_custom_deep_checks_fail_for_unreadable_prefix_without_mutation
     Dir.mktmpdir("agent-coord-stack-doctor") do |state_root|
@@ -509,30 +524,10 @@ class LocalStoreReadabilityStackDoctorTest < Minitest::Test
 
     assert_equal %w[heartbeats batches events archive], resource_check.dig("details", "unprobed_prefixes")
   end
-
-  def run_doctor(*, env: {})
-    stdout, stderr, status = Open3.capture3(CLEAN_ENV.merge(env), RbConfig.ruby, BIN, "doctor", *)
-    { stdout:, stderr:, status: }
-  end
-
-  def check(report, id)
-    report.fetch("checks").find { |entry| entry.fetch("id") == id }.tap do |entry|
-      refute_nil entry, "missing check #{id}"
-    end
-  end
 end
 
 class ExplicitBackendPrecedenceStackDoctorTest < Minitest::Test
-  ROOT = File.expand_path("..", __dir__)
-  BIN = File.join(ROOT, "bin", "agent-coord")
-  CLEAN_ENV = {
-    "AGENT_COORD_API_TOKEN" => nil,
-    "AGENT_COORD_API_URL" => nil,
-    "AGENT_COORD_BACKEND" => nil,
-    "AGENT_COORD_ENV_FILE" => nil,
-    "AGENT_COORD_STATE_ROOT" => nil,
-    "AGENT_COORD_STATUS_STATE_ROOT" => nil
-  }.freeze
+  include StackDoctorCliTestHarness
 
   def test_explicit_github_stack_selector_ignores_ambient_local_and_http_backends
     Dir.mktmpdir("agent-coord-stack-doctor") do |root|
@@ -603,57 +598,26 @@ class ExplicitBackendPrecedenceStackDoctorTest < Minitest::Test
       assert_nil details.fetch("state_root")
     end
   end
-
-  def run_doctor(*, env: {})
-    stdout, stderr, status = Open3.capture3(CLEAN_ENV.merge(env), RbConfig.ruby, BIN, "doctor", *)
-    { stdout:, stderr:, status: }
-  end
-
-  def check(report, id)
-    report.fetch("checks").find { |entry| entry.fetch("id") == id }.tap do |entry|
-      refute_nil entry, "missing check #{id}"
-    end
-  end
 end
 
 class StackDoctorOutputModeCliTest < Minitest::Test
-  ROOT = File.expand_path("..", __dir__)
-  BIN = File.join(ROOT, "bin", "agent-coord")
-  CLEAN_ENV = {
-    "AGENT_COORD_API_TOKEN" => nil,
-    "AGENT_COORD_API_URL" => nil,
-    "AGENT_COORD_BACKEND" => nil,
-    "AGENT_COORD_ENV_FILE" => nil,
-    "AGENT_COORD_STATE_ROOT" => nil,
-    "AGENT_COORD_STATUS_STATE_ROOT" => nil
-  }.freeze
+  include StackDoctorCliTestHarness
 
   def test_stack_report_rejects_legacy_json_output_flag
     [%w[--json --stack-json], %w[--stack-json --json]].each do |output_flags|
       Dir.mktmpdir("agent-coord-stack-doctor") do |state_root|
-        stdout, stderr, status = Open3.capture3(
-          CLEAN_ENV, RbConfig.ruby, BIN, "doctor", *output_flags, "--state-root", state_root
-        )
+        result = run_doctor(*output_flags, "--state-root", state_root)
 
-        assert_equal 64, status.exitstatus, output_flags.join(" ")
-        assert_empty stdout, output_flags.join(" ")
-        assert_equal "doctor --json and --stack-json are mutually exclusive\n", stderr
+        assert_equal 64, result.fetch(:status).exitstatus, output_flags.join(" ")
+        assert_empty result.fetch(:stdout), output_flags.join(" ")
+        assert_equal "doctor --json and --stack-json are mutually exclusive\n", result.fetch(:stderr)
       end
     end
   end
 end
 
 class StackDoctorCliTest < Minitest::Test
-  ROOT = File.expand_path("..", __dir__)
-  BIN = File.join(ROOT, "bin", "agent-coord")
-  CLEAN_ENV = {
-    "AGENT_COORD_API_TOKEN" => nil,
-    "AGENT_COORD_API_URL" => nil,
-    "AGENT_COORD_BACKEND" => nil,
-    "AGENT_COORD_ENV_FILE" => nil,
-    "AGENT_COORD_STATE_ROOT" => nil,
-    "AGENT_COORD_STATUS_STATE_ROOT" => nil
-  }.freeze
+  include StackDoctorCliTestHarness
 
   def test_shallow_stack_report_uses_uniform_healthy_contract
     Dir.mktmpdir("agent-coord-stack-doctor") do |state_root|
@@ -1310,17 +1274,6 @@ class StackDoctorCliTest < Minitest::Test
     TEXT
   end
 
-  def run_doctor(*, env: {})
-    stdout, stderr, status = Open3.capture3(
-      CLEAN_ENV.merge(env),
-      RbConfig.ruby,
-      BIN,
-      "doctor",
-      *
-    )
-    { stdout: stdout, stderr: stderr, status: status }
-  end
-
   def with_parent_env(name, value)
     original = ENV.fetch(name, nil)
     ENV[name] = value
@@ -1380,12 +1333,6 @@ class StackDoctorCliTest < Minitest::Test
       assert_kind_of String, entry.fetch("summary")
       assert_kind_of Hash, entry.fetch("details")
       assert(entry["guidance"].nil? || entry["guidance"].is_a?(String))
-    end
-  end
-
-  def check(report, id)
-    report.fetch("checks").find { |entry| entry.fetch("id") == id }.tap do |entry|
-      refute_nil entry, "missing check #{id}"
     end
   end
 end

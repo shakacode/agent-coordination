@@ -669,6 +669,7 @@ module AgentCoord
         opts.separator "Doctor modes:"
         opts.separator "    default  lightweight auth, ref, and layout checks without reading every JSON file"
         opts.separator "    --deep   parse every claim, heartbeat, and batch JSON file"
+        opts.separator "    --stack-json  emit the versioned component report for stack aggregators"
         opts.separator "Exit 2 means coordination state is UNKNOWN until backend access is fixed."
         opts.separator ""
       when "gc"
