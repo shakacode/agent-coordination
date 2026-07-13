@@ -85,6 +85,7 @@ module AgentCoord
   CLAIM_PRESERVED_FIELDS = (%w[batch_id branch] + STATUS_CLAIM_METADATA_FIELDS).uniq.freeze
   HEARTBEAT_PRESERVED_FIELDS = (HEARTBEAT_TARGET_FIELDS + STATUS_HEARTBEAT_METADATA_FIELDS).uniq.freeze
   EXIT_USAGE = 1
+  STACK_EXIT_USAGE = 64
   EXIT_OPERATIONAL = 2
   EXIT_CLAIM_REFUSED = 3
   EXIT_CODES = {
@@ -162,7 +163,7 @@ module AgentCoord
         @argv.shift if @argv.first == "show"
         render_config(parse_options(command, @argv))
       when "doctor"
-        doctor(parse_options(command, @argv))
+        run_doctor_command(command)
       when "bootstrap"
         bootstrap(parse_options(command, @argv))
       when "demo"
@@ -175,6 +176,39 @@ module AgentCoord
     end
 
     private
+
+    def run_doctor_command(command)
+      doctor_argv = @argv.dup
+      stack_json = stack_json_option_token?(doctor_argv)
+      doctor(parse_options(command, @argv))
+    rescue OptionParser::ParseError => e
+      raise Error.new(e.message, exit_code: stack_json ? STACK_EXIT_USAGE : EXIT_USAGE)
+    rescue Error => e
+      raise unless stack_json
+      return stack_doctor_startup_failure(e, deep: deep_option_token?(doctor_argv)) unless e.exit_code == EXIT_USAGE
+
+      raise Error.new(e.message, exit_code: STACK_EXIT_USAGE)
+    end
+
+    def stack_doctor_startup_failure(error, deep:)
+      checks = [
+        stack_check("cli.version", "healthy", "agent-coord CLI is ready", { "version" => VERSION }),
+        stack_check(
+          "backend.readability",
+          "failed",
+          "Coordination backend configuration is not usable",
+          { "backend" => "unresolved", "error" => error.message },
+          "Correct the backend configuration, then rerun the doctor."
+        ),
+        stack_check(
+          "resources.deep",
+          "skipped",
+          "Resource evidence was not collected because the backend is unavailable",
+          { "mode" => deep ? "deep" : "shallow", "reason" => "backend_unavailable" }
+        )
+      ]
+      emit_stack_report(checks)
+    end
 
     def print_help
       @stdout.puts <<~HELP
@@ -316,6 +350,9 @@ module AgentCoord
     def add_doctor_options(opts, options, command)
       return unless command == "doctor"
 
+      opts.on("--stack-json", "doctor only: emit the component stack-doctor contract") do
+        options[:stack_json] = true
+      end
       opts.on("--deep", "doctor only: parse every JSON state record") { options[:deep] = true }
       opts.on("--doctor-prefix PREFIX", "doctor only: HTTP readable prefix probe") do |value|
         options[:doctor_prefix] = value
@@ -1059,6 +1096,14 @@ module AgentCoord
     end
 
     def deep_option_token?(argv)
+      standalone_option_token?(argv, "--deep")
+    end
+
+    def stack_json_option_token?(argv)
+      standalone_option_token?(argv, "--stack-json")
+    end
+
+    def standalone_option_token?(argv, token)
       # Keep this in sync with value-taking opts.on definitions in parse_options.
       value_options = %w[
         --backend --ref --state-root --api-url --agent-id --repo --target --batch-id --branch
@@ -1066,6 +1111,7 @@ module AgentCoord
         --handoff-to --handoff-note --terminal --pr-state --evidence-url --workspace
         --ttl --status --type --lane --message --file --launch-prompt --install-dir
         --status-state-root --profile --hot-days --archive-days --synthetic-hot-days
+        --doctor-prefix --prefix
       ]
       skip_next = false
       argv.any? do |arg|
@@ -1076,7 +1122,7 @@ module AgentCoord
           skip_next = true
           false
         else
-          arg == "--deep"
+          arg == token
         end
       end
     end
@@ -1211,6 +1257,8 @@ module AgentCoord
     end
 
     def doctor(options)
+      return stack_doctor(options) if options[:stack_json]
+
       doctor_options = options.dup
       doctor_options[:state_root] ||= default_status_state_root unless doctor_options[:api_url]
       backend_kind = doctor_backend_kind(doctor_options)
@@ -1236,6 +1284,129 @@ module AgentCoord
       0
     ensure
       close_store(store)
+    end
+
+    def stack_doctor(options)
+      backend_kind = doctor_backend_kind(options)
+      checks = [
+        stack_check(
+          "cli.version",
+          "healthy",
+          "agent-coord CLI is ready",
+          { "version" => VERSION }
+        )
+      ]
+      store = verify_doctor_store(options, backend_kind, deep: options[:deep])
+      store.verify_layout!(STATE_PREFIXES)
+      checks << stack_check(
+        "backend.readability",
+        "healthy",
+        "Coordination backend is readable",
+        stack_backend_details(options, backend_kind)
+      )
+    rescue OperationalError, JSON::ParserError, SystemCallError => e
+      checks << stack_check(
+        "backend.readability",
+        "failed",
+        "Coordination backend is not readable",
+        stack_backend_details(options, backend_kind).merge("error" => e.message),
+        "Restore access to the configured coordination backend, then rerun the doctor."
+      )
+      checks << stack_check(
+        "resources.deep",
+        "skipped",
+        "Resource evidence was not collected because the backend is unavailable",
+        { "mode" => options[:deep] ? "deep" : "shallow", "reason" => "backend_unavailable" }
+      )
+      emit_stack_report(checks)
+    else
+      checks << stack_resource_check(store, backend_kind, options)
+      emit_stack_report(checks)
+    ensure
+      close_store(store)
+    end
+
+    def stack_check(id, status, summary, details, guidance = nil)
+      {
+        "id" => id,
+        "status" => status,
+        "summary" => summary,
+        "details" => details,
+        "guidance" => guidance
+      }
+    end
+
+    def stack_backend_details(options, backend_kind)
+      {
+        "backend" => backend_kind,
+        "backend_repo" => options.fetch(:backend),
+        "backend_url" => active_backend_url(options, backend_kind),
+        "state_root" => options[:state_root]
+      }
+    end
+
+    def stack_resource_check(store, backend_kind, options)
+      unless options[:deep]
+        return stack_check(
+          "resources.deep",
+          "skipped",
+          "Deep resource evidence was not requested",
+          { "mode" => "shallow" }
+        )
+      end
+
+      section_notes, resource_checks, identity = doctor_deep_results(store, backend_kind, options)
+      details = { "mode" => "deep", "prefixes" => STATE_PREFIXES }
+      details["resource_checks"] = resource_checks if resource_checks
+      details["identity"] = identity if identity
+      unless section_notes.empty?
+        details["notes"] = section_notes
+        return stack_check(
+          "resources.deep",
+          "degraded",
+          "Deep coordination resource evidence is incomplete",
+          details,
+          "Review the resource notes and backend capabilities before relying on unavailable evidence."
+        )
+      end
+
+      stack_check(
+        "resources.deep",
+        "healthy",
+        "Deep coordination resources are readable",
+        details
+      )
+    rescue OperationalError, JSON::ParserError, SystemCallError => e
+      error = e.is_a?(OperationalError) ? e.message : "state unreadable: #{e.message}"
+      stack_check(
+        "resources.deep",
+        "failed",
+        "Deep coordination resource evidence is unreadable",
+        { "mode" => "deep", "error" => error },
+        "Repair or restore the unreadable coordination state, then rerun the deep doctor."
+      )
+    end
+
+    def stack_report(checks)
+      status = if checks.any? { |check| check.fetch("status") == "failed" }
+                 "failed"
+               elsif checks.any? { |check| check.fetch("status") == "degraded" }
+                 "degraded"
+               else
+                 "healthy"
+               end
+      {
+        "schema_version" => 1,
+        "component" => "agent-coordination",
+        "status" => status,
+        "checks" => checks
+      }
+    end
+
+    def emit_stack_report(checks)
+      report = stack_report(checks)
+      @stdout.puts JSON.pretty_generate(report)
+      { "healthy" => 0, "degraded" => 1, "failed" => 2 }.fetch(report.fetch("status"))
     end
 
     def doctor_payload(options, backend_kind, deep)

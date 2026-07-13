@@ -264,6 +264,17 @@ backend access.
 For HTTP tokens scoped outside `claims`, pass a readable scope:
 `agent-coord doctor --doctor-prefix events/<batch-id>`.
 
+Stack aggregators should invoke `agent-coord doctor --stack-json --deep`. The
+explicit stack output is the component contract v1: it reports
+`agent-coordination` as `healthy`, `degraded`, or `failed`, with normalized
+checks for CLI version readiness, backend readability, and deep resource
+evidence. Exit codes are `0` for healthy, `1` for degraded, `2` for failed, and
+`64` for invalid usage. `--stack-json` is strictly read-only: it never creates
+the implicit local state root, and a missing configured or explicit root is a
+failed component report rather than a backend fallback. Omit `--deep` only when
+a shallow report with skipped resource evidence is intentional. Legacy text and
+`doctor --json` output remain unchanged.
+
 To override the default for a local smoke check, set `AGENT_COORD_STATE_ROOT` or
 pass `--state-root` to use a temporary filesystem state directory:
 
@@ -292,7 +303,7 @@ bin/agent-coord status --repo OWNER/REPO --target ISSUE_OR_PR [--json]
 bin/agent-coord status --batch-id ID [--json]
 bin/agent-coord version [--json]
 bin/agent-coord config [show] [--json]
-bin/agent-coord doctor [--json] [--deep] [--doctor-prefix PREFIX] [--state-root PATH]
+bin/agent-coord doctor [--json|--stack-json] [--deep] [--doctor-prefix PREFIX] [--state-root PATH]
 bin/agent-coord gc (--dry-run|--execute) [--json] [--hot-days DAYS] [--archive-days DAYS] [--synthetic-hot-days DAYS]
 bin/agent-coord bootstrap [--install-dir PATH] [--profile PATH] [--no-profile]
 bin/agent-coord demo
