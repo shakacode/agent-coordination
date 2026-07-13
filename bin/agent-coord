@@ -241,7 +241,7 @@ module AgentCoord
       raise Error.new(e.message, exit_code: stack_json ? STACK_EXIT_USAGE : EXIT_USAGE)
     rescue Error => e
       stack_json = parse_state[:stack_json] || stack_json_option_token?(doctor_argv)
-      raise unless stack_json
+      raise unless stack_json && e.exit_code == EXIT_USAGE
 
       raise Error.new(e.message, exit_code: STACK_EXIT_USAGE)
     end

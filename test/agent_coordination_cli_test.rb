@@ -1465,6 +1465,24 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     end
   end
 
+  def test_stack_doctor_preserves_escaping_operational_error_contract
+    stdout = StringIO.new
+    stderr = StringIO.new
+    failure = AgentCoord::OperationalError.new("escaped backend failure")
+    runner = AgentCoord::Runner.new(
+      ["doctor", "--stack-json", "--state-root", @state_root],
+      stdout:, stderr:
+    )
+    runner.define_singleton_method(:doctor) { |_options| raise failure }
+
+    raised = assert_raises(AgentCoord::OperationalError) { runner.run }
+
+    assert_same failure, raised
+    assert_equal AgentCoord::EXIT_OPERATIONAL, raised.exit_code
+    assert_empty stdout.string
+    assert_empty stderr.string
+  end
+
   def test_doctor_rejects_file_state_root
     state_root = File.join(@state_root, "state-root-file")
     File.write(state_root, "not a directory")
