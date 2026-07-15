@@ -23,6 +23,12 @@ class StateContractTest < Minitest::Test
     "lane_occupancy" => File.join(CAPACITY_CONTRACT_PATH, "lane-occupancy.schema.json"),
     "capacity_reservation" => File.join(CAPACITY_CONTRACT_PATH, "capacity-reservation.schema.json")
   }.freeze
+  CAPACITY_RESERVATION_REQUEST_FIELDS = %w[
+    reservation_id capacity_profile_id inbox_id batch_id planning_attempt_id owner_machine owner_id instance_id
+    ttl_seconds
+  ].freeze
+  CAPACITY_RESERVATION_CANONICAL_FIELDS = (CAPACITY_RESERVATION_REQUEST_FIELDS - ["reservation_id"]).freeze
+  DEFAULT_CAPACITY_RESERVATION_TTL_SECONDS = 900
 
   def test_lane_closed_fixture_conforms_to_published_v2_contract
     schema_document = JSON.parse(File.read(SCHEMA_PATH))
@@ -563,9 +569,9 @@ class StateContractTest < Minitest::Test
   end
 
   def canonical_reservation_request(request)
-    %w[
-      capacity_profile_id inbox_id batch_id planning_attempt_id owner_machine owner_id instance_id ttl_seconds
-    ].each_with_object({ "lane_refs" => request.fetch("lane_refs").sort }) do |field, payload|
+    canonical = { "lane_refs" => request.fetch("lane_refs").sort,
+                  "ttl_seconds" => request.fetch("ttl_seconds", DEFAULT_CAPACITY_RESERVATION_TTL_SECONDS) }
+    CAPACITY_RESERVATION_CANONICAL_FIELDS.each_with_object(canonical) do |field, payload|
       payload[field] = request[field] if request.key?(field)
     end
   end
@@ -693,9 +699,7 @@ class StateContractTest < Minitest::Test
 
   def capacity_request_outcome(replay, request, accepted_payloads, used_refs, capacity)
     return "RESERVATION_REFUSED" unless authoritative_capacity_inputs?(replay, request.fetch("inbox_id"))
-    if request.key?("batch_id") && !batch_lane_refs_match?(request.fetch("batch_id"), request.fetch("lane_refs"))
-      return "RESERVATION_REFUSED"
-    end
+    return "RESERVATION_REFUSED" unless capacity_reservation_request_valid?(replay, request)
 
     request_id = request.fetch("reservation_id")
     canonical_payload = canonical_reservation_request(request)
@@ -707,6 +711,29 @@ class StateContractTest < Minitest::Test
     accepted_payloads[request_id] = canonical_payload
     used_refs.concat(request.fetch("lane_refs"))
     "accepted"
+  end
+
+  def capacity_reservation_request_valid?(replay, request)
+    created_at = Time.iso8601(replay.fetch("as_of"))
+    ttl_seconds = request.fetch("ttl_seconds", DEFAULT_CAPACITY_RESERVATION_TTL_SECONDS)
+    reservation = CAPACITY_RESERVATION_REQUEST_FIELDS.each_with_object(
+      "schema_version" => 1,
+      "workspace" => replay.dig("capacity_profile", "workspace"),
+      "created_at" => created_at.utc.iso8601,
+      "expires_at" => (created_at + ttl_seconds).utc.iso8601,
+      "ttl_seconds" => ttl_seconds,
+      "lane_holds" => request.fetch("lane_refs").map { |lane_ref| { "lane_ref" => lane_ref, "state" => "active" } }
+    ) do |field, record|
+      record[field] = request[field] if request.key?(field)
+    end
+    expected_profile_id = replay.dig("capacity_profile", "capacity_profile_id")
+    return false unless reservation.fetch("capacity_profile_id") == expected_profile_id
+
+    schema = JSONSchemer.schema(JSON.parse(File.read(CAPACITY_SCHEMA_PATHS.fetch("capacity_reservation"))))
+    schema.validate(reservation).to_a.empty? &&
+      procedural_capacity_reservations_valid?([reservation], replay.fetch("as_of"))
+  rescue KeyError, NoMethodError, TypeError
+    false
   end
 
   def capacity_records_conform?(profile, inboxes, occupancies, reservations, as_of)

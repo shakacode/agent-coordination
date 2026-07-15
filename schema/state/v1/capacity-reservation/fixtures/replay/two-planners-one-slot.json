@@ -84,6 +84,43 @@
       "lane_refs": ["different-batch:lane-b"]
     },
     {
+      "attempt": "profile-mismatch-request",
+      "reservation_id": "reserve-profile-mismatch",
+      "capacity_profile_id": "different-profile",
+      "inbox_id": "ready-issues",
+      "batch_id": "batch-capacity",
+      "owner_machine": "build-mac-01",
+      "owner_id": "planner-profile-mismatch",
+      "instance_id": "planner-profile-mismatch-attempt-1",
+      "ttl_seconds": 900,
+      "lane_refs": ["batch-capacity:profile-mismatch"]
+    },
+    {
+      "attempt": "ttl-too-high-request",
+      "reservation_id": "reserve-ttl-too-high",
+      "capacity_profile_id": "codex-primary",
+      "inbox_id": "ready-issues",
+      "batch_id": "batch-capacity",
+      "owner_machine": "build-mac-01",
+      "owner_id": "planner-ttl-too-high",
+      "instance_id": "planner-ttl-too-high-attempt-1",
+      "ttl_seconds": 3601,
+      "lane_refs": ["batch-capacity:ttl-too-high"]
+    },
+    {
+      "attempt": "both-scopes-request",
+      "reservation_id": "reserve-both-scopes",
+      "capacity_profile_id": "codex-primary",
+      "inbox_id": "ready-issues",
+      "batch_id": "batch-capacity",
+      "planning_attempt_id": "planning-attempt-conflict",
+      "owner_machine": "build-mac-01",
+      "owner_id": "planner-both-scopes",
+      "instance_id": "planner-both-scopes-attempt-1",
+      "ttl_seconds": 900,
+      "lane_refs": ["batch-capacity:both-scopes"]
+    },
+    {
       "attempt": "planner-a",
       "reservation_id": "reserve-final-slot",
       "capacity_profile_id": "codex-primary",
@@ -93,6 +130,17 @@
       "owner_id": "planner-a",
       "instance_id": "planner-a-attempt-1",
       "ttl_seconds": 900,
+      "lane_refs": ["batch-capacity:lane-b"]
+    },
+    {
+      "attempt": "planner-a-default-ttl-retry",
+      "reservation_id": "reserve-final-slot",
+      "capacity_profile_id": "codex-primary",
+      "inbox_id": "ready-issues",
+      "batch_id": "batch-capacity",
+      "owner_machine": "build-mac-01",
+      "owner_id": "planner-a",
+      "instance_id": "planner-a-attempt-1",
       "lane_refs": ["batch-capacity:lane-b"]
     },
     {
@@ -147,7 +195,11 @@
   "expected": {
     "outcomes": {
       "foreign-batch-request": "RESERVATION_REFUSED",
+      "profile-mismatch-request": "RESERVATION_REFUSED",
+      "ttl-too-high-request": "RESERVATION_REFUSED",
+      "both-scopes-request": "RESERVATION_REFUSED",
       "planner-a": "accepted",
+      "planner-a-default-ttl-retry": "idempotent",
       "planner-b": "RESERVATION_REFUSED",
       "planner-a-retry": "idempotent",
       "planner-a-changed-payload": "RESERVATION_CONFLICT",
