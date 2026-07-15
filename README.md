@@ -264,6 +264,27 @@ backend access.
 For HTTP tokens scoped outside `claims`, pass a readable scope:
 `agent-coord doctor --doctor-prefix events/<batch-id>`.
 
+Stack aggregators should invoke `agent-coord doctor --stack-json --deep` with
+exactly one direct backend selector: `--state-root PATH`, `--api-url URL`, or
+`--backend OWNER/REPO`. Environment defaults still participate in normal backend
+resolution, but do not satisfy this machine-contract selector requirement. The
+explicit stack output is the component contract v1: it reports
+`agent-coordination` as `healthy`, `degraded`, or `failed`, with normalized
+checks for CLI version readiness, backend readability, and deep resource
+evidence. Exit codes are `0` for healthy, `1` for degraded, `2` for failed, and
+`64` for invalid usage. Usage errors emit no JSON. `--stack-json` is strictly
+read-only: it never creates a missing explicit local state root, and reports
+that missing root as a failed component rather than falling back. Omit `--deep`
+only when a shallow report with skipped resource evidence is intentional.
+Legacy text and `doctor --json` output remain unchanged.
+
+For `LocalStore`, the explicitly selected top-level state root is an
+operator-owned trust boundary and may itself be a symlink. Deep reads fail
+closed when a top-level state prefix such as `claims/`, or any directory or
+record below it, is a symlink. These are check-then-use guards for cooperative
+local state, not atomic filesystem traversal: another process able to rewrite
+the tree concurrently under the same local owner is inside that trust boundary.
+
 To override the default for a local smoke check, set `AGENT_COORD_STATE_ROOT` or
 pass `--state-root` to use a temporary filesystem state directory:
 
@@ -292,7 +313,7 @@ bin/agent-coord status --repo OWNER/REPO --target ISSUE_OR_PR [--json]
 bin/agent-coord status --batch-id ID [--json]
 bin/agent-coord version [--json]
 bin/agent-coord config [show] [--json]
-bin/agent-coord doctor [--json] [--deep] [--doctor-prefix PREFIX] [--state-root PATH]
+bin/agent-coord doctor [--json|--stack-json] [--deep] [--doctor-prefix PREFIX] [--state-root PATH|--api-url URL|--backend OWNER/REPO]
 bin/agent-coord gc (--dry-run|--execute) [--json] [--hot-days DAYS] [--archive-days DAYS] [--synthetic-hot-days DAYS]
 bin/agent-coord bootstrap [--install-dir PATH] [--profile PATH] [--no-profile]
 bin/agent-coord demo
@@ -480,13 +501,15 @@ JSON validation. For HTTP tokens whose read scope does not overlap `claims`, use
 `bootstrap` installs the `agent-coord` command used by public
 workflow docs.
 
-## CLI Contract And Exit Codes
+## Legacy / Non-Stack CLI Contract And Exit Codes
 
 Use `agent-coord version --json` and `agent-coord config show --json` as the
 stable contract for public workflow docs. Public repos should avoid copying
 private implementation defaults when they can point agents at these commands.
 
-Current exit code contract:
+The following exit code contract applies to legacy and non-stack commands. The
+`doctor --stack-json` component contract and its exit codes are documented in
+the doctor section above.
 
 | Exit | Meaning                                  | Agent behavior                                                                 |
 | ---- | ---------------------------------------- | ------------------------------------------------------------------------------ |

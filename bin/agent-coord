@@ -48,6 +48,18 @@ module AgentCoord
       events/[A-Za-z0-9_.:-]+/[A-Za-z0-9_.:-]+\.json
     ))
   )\z}x
+  STATE_DIRECTORY_PREFIX_PATTERN = %r{\A(?:
+    claims(?:/[A-Za-z0-9_.:-]+(?:/[A-Za-z0-9_.:-]+)?)? |
+    heartbeats |
+    batches |
+    events(?:/[A-Za-z0-9_.:-]+)? |
+    archive(?:/(?:
+      claims(?:/[A-Za-z0-9_.:-]+(?:/[A-Za-z0-9_.:-]+)?)? |
+      heartbeats |
+      batches |
+      events(?:/[A-Za-z0-9_.:-]+)?
+    ))?
+  )\z}x
   DEPENDENCY_DONE_STATUSES = %w[complete completed done merged ready].freeze
   STATUS_BATCH_METADATA_FIELDS = %w[
     repo objective instructions launch_prompt operator dashboard_url status updated_at registered_at completed_at
@@ -85,10 +97,12 @@ module AgentCoord
   CLAIM_PRESERVED_FIELDS = (%w[batch_id branch] + STATUS_CLAIM_METADATA_FIELDS).uniq.freeze
   HEARTBEAT_PRESERVED_FIELDS = (HEARTBEAT_TARGET_FIELDS + STATUS_HEARTBEAT_METADATA_FIELDS).uniq.freeze
   EXIT_USAGE = 1
+  STACK_EXIT_USAGE = 64
   EXIT_OPERATIONAL = 2
   EXIT_CLAIM_REFUSED = 3
   EXIT_CODES = {
     "usage" => EXIT_USAGE,
+    "stack_usage" => STACK_EXIT_USAGE,
     "operational" => EXIT_OPERATIONAL,
     "claim_refused" => EXIT_CLAIM_REFUSED
   }.freeze
@@ -118,6 +132,48 @@ module AgentCoord
   end
 
   class Conflict < OperationalError
+  end
+
+  # Records the long-option declaration shapes used by this CLI so pre-parse
+  # token detection can share its registered option names.
+  class OptionRegistry
+    attr_reader :value_options, :flag_options
+
+    def initialize(parser)
+      @parser = parser
+      @value_options = []
+      @flag_options = []
+    end
+
+    def on(*declarations, &)
+      @parser.on(*declarations, &)
+      # This is a narrow extractor, not a parser for every OptionParser declaration form.
+      # Before adding optional arguments or a non-first long switch, update this grammar
+      # and its token-detection tests together.
+      long_declaration = declarations.find { |declaration| declaration.is_a?(String) && declaration.start_with?("--") }
+      if long_declaration
+        option_name, argument = long_declaration.split(/\s+/, 2)
+        target = argument ? @value_options : @flag_options
+        target << option_name
+      end
+      @parser
+    end
+
+    def banner=(value)
+      @parser.banner = value
+    end
+
+    def separator(*)
+      @parser.separator(*)
+    end
+
+    def long_options
+      value_options + flag_options
+    end
+
+    def to_s
+      @parser.to_s
+    end
   end
 
   StoredJson = Struct.new(:path, :data, :sha, keyword_init: true)
@@ -162,7 +218,7 @@ module AgentCoord
         @argv.shift if @argv.first == "show"
         render_config(parse_options(command, @argv))
       when "doctor"
-        doctor(parse_options(command, @argv))
+        run_doctor_command(command)
       when "bootstrap"
         bootstrap(parse_options(command, @argv))
       when "demo"
@@ -175,6 +231,20 @@ module AgentCoord
     end
 
     private
+
+    def run_doctor_command(command)
+      doctor_argv = @argv.dup
+      parse_state = { stack_json: false, backend_selector_count: 0, empty_backend_selector: false }
+      doctor(parse_options(command, @argv, parse_state: parse_state))
+    rescue OptionParser::ParseError => e
+      stack_json = parse_state[:stack_json] || stack_json_option_token?(doctor_argv)
+      raise Error.new(e.message, exit_code: stack_json ? STACK_EXIT_USAGE : EXIT_USAGE)
+    rescue Error => e
+      stack_json = parse_state[:stack_json] || stack_json_option_token?(doctor_argv)
+      raise unless stack_json && e.exit_code == EXIT_USAGE
+
+      raise Error.new(e.message, exit_code: STACK_EXIT_USAGE)
+    end
 
     def print_help
       @stdout.puts <<~HELP
@@ -211,39 +281,75 @@ module AgentCoord
       ["-h", "--help", "help"].include?(value)
     end
 
-    def parse_options(command, argv)
+    def parse_options(command, argv, parse_state: nil)
       options = default_options
-
-      parser = OptionParser.new do |opts|
-        opts.banner = "Usage: agent-coord #{command} [options]"
-        add_command_help(opts, command)
-
-        add_backend_options(opts, options)
-        add_target_options(opts, options)
-        add_synthetic_options(opts, options)
-        add_release_options(opts, options, command)
-        add_event_options(opts, options)
-        add_register_batch_options(opts, options)
-        add_doctor_options(opts, options, command)
-        add_gc_options(opts, options, command)
-        add_status_options(opts, options, command)
-        add_bootstrap_options(opts, options)
-        add_help_option(opts)
-      end
-      raise Error, "--deep is only valid for doctor" if command != "doctor" && deep_option_token?(argv)
+      parse_state ||= { stack_json: false, backend_selector_count: 0, empty_backend_selector: false }
+      parser, = build_option_parser(command, options, parse_state)
+      raise Error, "--deep is only valid for doctor" if command != "doctor" && deep_option_token?(argv, command:)
 
       parser.parse!(argv)
+      raise Error, "doctor --json and --stack-json are mutually exclusive" if options[:json] && options[:stack_json]
+
+      validate_stack_json_backend_selector_count!(options, parse_state)
       raise Error, "unexpected arguments: #{argv.join(' ')}" unless argv.empty?
 
       finalize_options(command, options)
     end
 
-    def add_backend_options(opts, options)
-      opts.on("--backend OWNER/REPO", "backend repository") { |value| options[:backend] = value }
+    def build_option_parser(command, options, parse_state)
+      parser = OptionParser.new
+      opts = OptionRegistry.new(parser)
+      opts.banner = "Usage: agent-coord #{command} [options]"
+      add_command_help(opts, command)
+
+      add_backend_options(opts, options, parse_state)
+      add_target_options(opts, options)
+      add_synthetic_options(opts, options)
+      add_release_options(opts, options, command)
+      add_event_options(opts, options)
+      add_register_batch_options(opts, options)
+      add_doctor_options(opts, options, command, parse_state)
+      add_gc_options(opts, options, command)
+      add_status_options(opts, options, command)
+      add_bootstrap_options(opts, options)
+      add_help_option(opts)
+      [parser, opts]
+    end
+
+    def add_backend_options(opts, options, parse_state)
+      opts.on("--backend OWNER/REPO", "backend repository") do |value|
+        options[:backend] = value
+        options[:explicit_backend] = true
+        parse_state[:backend_selector_count] += 1
+        parse_state[:empty_backend_selector] = true if value.empty?
+      end
       opts.on("--ref REF", "backend branch/ref") { |value| options[:ref] = value }
-      opts.on("--state-root PATH", "use local files instead of GitHub API") { |value| options[:state_root] = value }
-      opts.on("--api-url URL", "use the HTTP backend at URL") { |value| options[:api_url] = value }
+      opts.on("--state-root PATH", "use local files instead of GitHub API") do |value|
+        options[:state_root] = value
+        parse_state[:backend_selector_count] += 1
+        parse_state[:empty_backend_selector] = true if value.empty?
+      end
+      opts.on("--api-url URL", "use the HTTP backend at URL") do |value|
+        options[:api_url] = value
+        parse_state[:backend_selector_count] += 1
+        parse_state[:empty_backend_selector] = true if value.empty?
+      end
       opts.on("--json", "emit JSON for supported commands") { options[:json] = true }
+    end
+
+    def validate_stack_json_backend_selector_count!(options, parse_state)
+      return unless options[:stack_json]
+
+      if parse_state[:backend_selector_count] == 1
+        raise Error, "doctor --stack-json backend selector requires a non-empty value" \
+          if parse_state[:empty_backend_selector]
+
+        AgentCoord.validate_repo!(options[:backend], "backend") if options[:explicit_backend]
+
+        return
+      end
+
+      raise Error, "doctor --stack-json requires exactly one of --state-root, --api-url, or --backend"
     end
 
     def add_target_options(opts, options)
@@ -313,11 +419,15 @@ module AgentCoord
       end
     end
 
-    def add_doctor_options(opts, options, command)
+    def add_doctor_options(opts, options, command, parse_state)
       return unless command == "doctor"
 
+      opts.on("--stack-json", "doctor only: emit the component stack-doctor contract") do
+        options[:stack_json] = true
+        parse_state[:stack_json] = true
+      end
       opts.on("--deep", "doctor only: parse every JSON state record") { options[:deep] = true }
-      opts.on("--doctor-prefix PREFIX", "doctor only: HTTP readable prefix probe") do |value|
+      opts.on("--doctor-prefix PREFIX", "doctor only: resource prefix or record probe") do |value|
         options[:doctor_prefix] = value
       end
     end
@@ -368,6 +478,7 @@ module AgentCoord
     end
 
     def finalize_options(command, options)
+      validate_doctor_prefix!(command, options)
       validate_closeout_option_usage!(command, options)
       validate_register_batch_option_usage!(command, options)
 
@@ -377,6 +488,21 @@ module AgentCoord
         warn_consumer_split_brain(command, options)
       end
       options
+    end
+
+    def validate_doctor_prefix!(command, options)
+      return unless command == "doctor" && doctor_prefix_supplied?(options)
+
+      prefix = options.fetch(:doctor_prefix)
+      AgentCoord.safe_path!(prefix)
+      raise PathValidationError, "unsafe state path: #{prefix}" if prefix.split("/").include?(".")
+      return unless options[:stack_json]
+
+      family = prefix.split("/", 2).first
+      raise PathValidationError, "unknown doctor prefix family: #{family}" unless STATE_PREFIXES.include?(family)
+      return if AgentCoord.state_directory_prefix?(prefix) || AgentCoord.state_record_path?(prefix)
+
+      raise PathValidationError, "invalid doctor prefix shape: #{prefix}"
     end
 
     def validate_register_batch_option_usage!(command, options)
@@ -421,6 +547,8 @@ module AgentCoord
     end
 
     def resolve_backend_env(options)
+      return if options[:stack_json] && options[:explicit_backend]
+
       cli_api = options[:api_url]
       env_api = ENV.fetch("AGENT_COORD_API_URL", nil)
       env_root = ENV.fetch("AGENT_COORD_STATE_ROOT", nil)
@@ -429,10 +557,12 @@ module AgentCoord
 
       if options[:state_root]
         if cli_api
-          emit_backend_conflict_warning("warning: --api-url and --state-root are both set; using the local backend.")
+          emit_backend_conflict_warning(
+            "warning: --api-url and --state-root are both set; using the local backend.", options:
+          )
         elsif env_api && !env_api.empty?
           emit_backend_conflict_warning(
-            "warning: AGENT_COORD_API_URL and --state-root are both set; using the local backend."
+            "warning: AGENT_COORD_API_URL and --state-root are both set; using the local backend.", options:
           )
         end
         return
@@ -444,7 +574,7 @@ module AgentCoord
           api_source = cli_api ? "--api-url" : "AGENT_COORD_API_URL"
           emit_backend_conflict_warning(
             "warning: #{api_source} and AGENT_COORD_STATE_ROOT are both set; " \
-            "using the HTTP backend. Pass --state-root to force local."
+            "using the HTTP backend. Pass --state-root to force local.", options:
           )
         end
         return
@@ -452,12 +582,15 @@ module AgentCoord
       options[:state_root] = env_root if env_root
     end
 
-    def emit_backend_conflict_warning(message)
+    def emit_backend_conflict_warning(message, options:)
+      return if options[:stack_json]
+
       @stderr.puts message if @backend_conflict_warnings
     end
 
     def warn_consumer_split_brain(command, options)
       return unless %w[status doctor].include?(command)
+      return if options[:stack_json]
       return unless options[:state_root] && !options[:api_url]
       return unless ENV.fetch("AGENT_COORD_API_URL", "").empty?
 
@@ -541,6 +674,7 @@ module AgentCoord
         opts.separator "Doctor modes:"
         opts.separator "    default  lightweight auth, ref, and layout checks without reading every JSON file"
         opts.separator "    --deep   parse every claim, heartbeat, and batch JSON file"
+        opts.separator "    --stack-json  emit the versioned component report for stack aggregators"
         opts.separator "Exit 2 means coordination state is UNKNOWN until backend access is fixed."
         opts.separator ""
       when "gc"
@@ -1058,27 +1192,65 @@ module AgentCoord
       "#{action.fetch('action')} #{source}#{destination} (#{action.fetch('reason')})"
     end
 
-    def deep_option_token?(argv)
-      # Keep this in sync with value-taking opts.on definitions in parse_options.
-      value_options = %w[
-        --backend --ref --state-root --api-url --agent-id --repo --target --batch-id --branch
-        --thread-handle --chat-handle --host --pr-url --dashboard-url --operator --phase --generation --instance-id
-        --handoff-to --handoff-note --terminal --pr-state --evidence-url --workspace
-        --ttl --status --type --lane --message --file --launch-prompt --install-dir
-        --status-state-root --profile --hot-days --archive-days --synthetic-hot-days
-      ]
+    def deep_option_token?(argv, command:)
+      standalone_option_token?(argv, "--deep", command:)
+    end
+
+    def stack_json_option_token?(argv)
+      standalone_option_token?(argv, "--stack-json", command: "doctor")
+    end
+
+    def standalone_option_token?(argv, token, command:)
+      standalone_option_token_count(argv, [token], command:).positive?
+    end
+
+    def standalone_option_token_count(argv, tokens, command:)
+      command_options = registered_options(command)
+      doctor_options = command == "doctor" ? command_options : registered_options("doctor")
+      value_options = command_options.value_options
       skip_next = false
-      argv.any? do |arg|
+      argv.count do |arg|
         if skip_next
           skip_next = false
-          false
-        elsif value_options.include?(arg)
+          next false
+        end
+
+        option_name, option_value = arg.split("=", 2)
+        resolved_option = resolve_standalone_option(option_name, command_options, doctor_options)
+        if option_value.nil? && value_options.include?(resolved_option)
           skip_next = true
           false
         else
-          arg == "--deep"
+          tokens.include?(resolved_option)
         end
       end
+    end
+
+    def resolve_standalone_option(option_name, command_options, target_options)
+      return unless option_name&.start_with?("--")
+
+      all_options = command_options.long_options | target_options.long_options
+      matches = all_options.select { |candidate| candidate.start_with?(option_name) }
+      command_matches = matches & command_options.long_options
+      command_option = exact_or_unique_long_option(option_name, command_matches)
+      return command_option if command_options.value_options.include?(command_option)
+
+      exact_or_unique_long_option(option_name, matches & target_options.long_options)
+    end
+
+    def exact_or_unique_long_option(option_name, matches)
+      return option_name if matches.include?(option_name)
+
+      matches.one? ? matches.first : nil
+    end
+
+    def registered_options(command)
+      _, registry = build_option_parser(
+        command,
+        default_options,
+        { stack_json: false, backend_selector_count: 0, empty_backend_selector: false }
+      )
+      registry
     end
 
     def claim(options)
@@ -1211,6 +1383,8 @@ module AgentCoord
     end
 
     def doctor(options)
+      return stack_doctor(options) if options[:stack_json]
+
       doctor_options = options.dup
       doctor_options[:state_root] ||= default_status_state_root unless doctor_options[:api_url]
       backend_kind = doctor_backend_kind(doctor_options)
@@ -1238,6 +1412,168 @@ module AgentCoord
       close_store(store)
     end
 
+    def stack_doctor(options)
+      backend_kind = doctor_backend_kind(options)
+      checks = [
+        stack_check(
+          "cli.version",
+          "healthy",
+          "agent-coord CLI is ready",
+          { "version" => VERSION }
+        )
+      ]
+      store = verify_doctor_store(options, backend_kind, deep: options[:deep], read_only: true)
+      store.verify_layout!(STATE_PREFIXES)
+      checks << stack_check(
+        "backend.readability",
+        "healthy",
+        "Coordination backend is readable",
+        stack_backend_details(options, backend_kind)
+      )
+    rescue OperationalError, JSON::ParserError, SystemCallError => e
+      emit_failed_stack_backend_report(checks, options, backend_kind, e.message)
+    rescue StandardError => e
+      emit_failed_stack_backend_report(
+        checks, options, backend_kind, "Unexpected backend-readability failure",
+        error_class: safe_stack_error_class(e)
+      )
+    else
+      checks << stack_resource_check(store, backend_kind, options)
+      emit_stack_report(checks)
+    ensure
+      close_store(store)
+    end
+
+    def emit_failed_stack_backend_report(checks, options, backend_kind, error, error_class: nil)
+      details = stack_backend_details(options, backend_kind).merge("error" => error)
+      details["error_class"] = error_class if error_class
+      checks << stack_check(
+        "backend.readability",
+        "failed",
+        "Coordination backend is not readable",
+        details,
+        "Restore access to the configured coordination backend, then rerun the doctor."
+      )
+      checks << stack_check(
+        "resources.deep",
+        "skipped",
+        "Resource evidence was not collected because the backend is unavailable",
+        { "mode" => options[:deep] ? "deep" : "shallow", "reason" => "backend_unavailable" }
+      )
+      emit_stack_report(checks)
+    end
+
+    def stack_check(id, status, summary, details, guidance = nil)
+      {
+        "id" => id,
+        "status" => status,
+        "summary" => summary,
+        "details" => details,
+        "guidance" => guidance
+      }
+    end
+
+    def stack_backend_details(options, backend_kind)
+      {
+        "backend" => backend_kind,
+        "backend_repo" => backend_kind == "github" ? options.fetch(:backend) : nil,
+        "backend_url" => active_backend_url(options, backend_kind),
+        "state_root" => backend_kind == "local" ? options[:state_root] : nil
+      }
+    end
+
+    def stack_resource_check(store, backend_kind, options)
+      unless options[:deep]
+        return stack_check(
+          "resources.deep",
+          "skipped",
+          "Deep resource evidence was not requested",
+          { "mode" => "shallow" }
+        )
+      end
+
+      section_notes, resource_checks, identity = doctor_deep_results(store, backend_kind, options)
+      details = stack_resource_scope_details(options)
+      details["resource_checks"] = resource_checks if resource_checks
+      details["identity"] = identity if identity
+      unless section_notes.empty?
+        details["notes"] = section_notes
+        return stack_check(
+          "resources.deep",
+          "degraded",
+          "Deep coordination resource evidence is incomplete",
+          details,
+          "Review the resource notes and backend capabilities before relying on unavailable evidence."
+        )
+      end
+
+      summary = if doctor_prefix_supplied?(options)
+                  "Requested coordination resource is readable"
+                else
+                  "Deep coordination resources are readable"
+                end
+      stack_check(
+        "resources.deep",
+        "healthy",
+        summary,
+        details
+      )
+    rescue OperationalError, JSON::ParserError, SystemCallError => e
+      error = e.is_a?(OperationalError) ? e.message : "state unreadable: #{e.message}"
+      failed_stack_resource_check(options, error)
+    rescue StandardError => e
+      failed_stack_resource_check(options, "Unexpected resource-check failure", error_class: safe_stack_error_class(e))
+    end
+
+    def failed_stack_resource_check(options, error, error_class: nil)
+      details = stack_resource_scope_details(options).merge("error" => error)
+      details["error_class"] = error_class if error_class
+      stack_check(
+        "resources.deep",
+        "failed",
+        "Deep coordination resource evidence is unreadable",
+        details,
+        "Repair or restore the unreadable coordination state, then rerun the deep doctor."
+      )
+    end
+
+    def safe_stack_error_class(error)
+      name = error.class.name.to_s
+      name.match?(/\A[A-Z]\w*(?:::[A-Z]\w*)*\z/) ? name : "StandardError"
+    end
+
+    def stack_resource_scope_details(options)
+      prefixes = doctor_prefix_supplied?(options) ? [doctor_read_prefix(options)] : STATE_PREFIXES
+      details = { "mode" => "deep", "prefixes" => prefixes }
+      if doctor_prefix_supplied?(options)
+        probed_families = prefixes.map { |prefix| prefix.split("/", 2).first }
+        details["unprobed_prefixes"] = STATE_PREFIXES - probed_families
+      end
+      details
+    end
+
+    def stack_report(checks)
+      status = if checks.any? { |check| check.fetch("status") == "failed" }
+                 "failed"
+               elsif checks.any? { |check| check.fetch("status") == "degraded" }
+                 "degraded"
+               else
+                 "healthy"
+               end
+      {
+        "schema_version" => 1,
+        "component" => "agent-coordination",
+        "status" => status,
+        "checks" => checks
+      }
+    end
+
+    def emit_stack_report(checks)
+      report = stack_report(checks)
+      @stdout.puts JSON.pretty_generate(report)
+      { "healthy" => 0, "degraded" => 1, "failed" => 2 }.fetch(report.fetch("status"))
+    end
+
     def doctor_payload(options, backend_kind, deep)
       payload = {
         "version" => VERSION,
@@ -1248,19 +1584,24 @@ module AgentCoord
         "deep" => !deep.nil?,
         "status" => "ok"
       }
-      payload["doctor_prefix"] = doctor_read_prefix(options) if backend_kind == "http"
+      if backend_kind == "http" || doctor_prefix_supplied?(options)
+        payload["doctor_prefix"] = doctor_read_prefix(options)
+      end
       payload
     end
 
     def doctor_deep_results(store, backend_kind, options)
       return [{}, nil, nil] unless options[:deep]
+
+      if doctor_prefix_supplied?(options) && (options[:stack_json] || backend_kind == "http")
+        prefix = doctor_read_prefix(options)
+        api_url = options[:api_url] if backend_kind == "http"
+        section_notes, resource_checks = check_custom_resource!(store, prefix, api_url:)
+        identity = store.whoami if backend_kind == "http"
+        return [section_notes, resource_checks, identity]
+      end
       return [check_state_readable!(store), nil, nil] unless backend_kind == "http"
 
-      if options[:doctor_prefix]
-        prefix = doctor_read_prefix(options)
-        section_notes, resource_checks = check_http_custom_resource!(store, prefix, api_url: options[:api_url])
-        return [section_notes, resource_checks, store.whoami]
-      end
       section_notes, resource_checks = check_http_resources!(store, api_url: options[:api_url])
       [section_notes, resource_checks, store.whoami]
     end
@@ -1301,7 +1642,7 @@ module AgentCoord
       "unconfigured"
     end
 
-    def verify_doctor_store(options, backend_kind, deep: false)
+    def verify_doctor_store(options, backend_kind, deep: false, read_only: false)
       store = nil
       case backend_kind
       when "http"
@@ -1309,7 +1650,7 @@ module AgentCoord
         store.verify_readable!(doctor_read_prefix(options)) unless deep
       when "local"
         store = LocalStore.new(options.fetch(:state_root))
-        store.verify_root!
+        read_only ? store.verify_readable_root! : store.verify_root!
       when "github"
         check_command!("gh", "auth", "status")
         check_command!("gh", "repo", "view", options.fetch(:backend))
@@ -1325,7 +1666,11 @@ module AgentCoord
     end
 
     def doctor_read_prefix(options)
-      options[:doctor_prefix] || JSON_PREFIXES.first
+      options.fetch(:doctor_prefix, JSON_PREFIXES.first)
+    end
+
+    def doctor_prefix_supplied?(options)
+      options.key?(:doctor_prefix)
     end
 
     def check_http_resources!(store, api_url: nil)
@@ -1340,12 +1685,12 @@ module AgentCoord
           checks[prefix] = "ok"
         end
       rescue OperationalError => e
-        if prefix == "events" && unsupported_event_listing?(e)
+        if prefix == "events" && unsupported_resource_listing?(e)
           checks[prefix] = "unsupported"
           section_notes[prefix] = "event state not supported by backend"
           next
         end
-        if prefix == "archive" && unsupported_event_listing?(e)
+        if prefix == "archive" && unsupported_resource_listing?(e)
           checks[prefix] = "unsupported"
           section_notes[prefix] = "archive state not supported by backend"
           next
@@ -1362,7 +1707,7 @@ module AgentCoord
       [section_notes, checks]
     end
 
-    def check_http_custom_resource!(store, prefix, api_url: nil)
+    def check_custom_resource!(store, prefix, api_url: nil)
       if AgentCoord.state_record_path?(prefix)
         entry = store.read_json(prefix)
         return [{ prefix => "#{prefix} does not exist" }, { prefix => "missing" }] unless entry
@@ -1375,12 +1720,16 @@ module AgentCoord
 
       [{ prefix => "#{prefix} filtered by scoped token" }, { prefix => "filtered" }]
     rescue OperationalError => e
+      raise unless api_url
       raise doctor_auth_recovery_error(prefix, e, api_url:) if e.message.match?(/ failed: 401 /)
       if e.message.match?(/ failed: 403 forbidden\z/)
         return [{ prefix => "#{prefix} not readable by scoped token" }, { prefix => "forbidden" }]
       end
-      if prefix.match?(%r{\Aevents(?:/|\z)}) && unsupported_event_listing?(e)
+      if prefix.match?(%r{\Aevents(?:/|\z)}) && unsupported_resource_listing?(e)
         return [{ prefix => "event state not supported by backend" }, { prefix => "unsupported" }]
+      end
+      if prefix.match?(%r{\Aarchive(?:/|\z)}) && unsupported_resource_listing?(e)
+        return [{ prefix => "archive state not supported by backend" }, { prefix => "unsupported" }]
       end
 
       raise
@@ -2545,7 +2894,7 @@ module AgentCoord
       section_notes["events"] = "events filtered by scoped token" if filtered_status_list?(store, prefix)
       entries
     rescue OperationalError => e
-      raise unless unsupported_event_listing?(e) || scoped_http_forbidden_listing?(e, prefix)
+      raise unless unsupported_resource_listing?(e) || scoped_http_forbidden_listing?(e, prefix)
 
       section_notes["events"] =
         if scoped_http_forbidden_listing?(e, prefix)
@@ -2564,8 +2913,8 @@ module AgentCoord
       error.message.match?(/\Ahttp backend list #{Regexp.escape(prefix)} failed: 403 forbidden\z/)
     end
 
-    def unsupported_event_listing?(error)
-      # Broadly detects pre-events backends until the protocol has a version handshake.
+    def unsupported_resource_listing?(error)
+      # Broadly detects older backends until the protocol has a version handshake.
       error.message.match?(/invalid_(prefix|path)|route_not_found/)
     end
 
@@ -3081,14 +3430,21 @@ module AgentCoord
     end
 
     def verify_root!
-      raise OperationalError, "state root does not exist: #{@root}" unless File.exist?(@root)
-      raise OperationalError, "state root is not a directory: #{@root}" unless Dir.exist?(@root)
+      verify_readable_root!
       raise OperationalError, "state root is not writable: #{@root}" unless File.writable?(@root)
     end
 
+    def verify_readable_root!
+      raise OperationalError, "state root does not exist: #{@root}" unless File.exist?(@root)
+      raise OperationalError, "state root is not a directory: #{@root}" unless Dir.exist?(@root)
+      return if File.readable?(@root) && File.executable?(@root)
+
+      raise OperationalError, "state root is not readable: #{@root}"
+    end
+
     def read_json(path)
-      file = expanded_path(path)
-      return nil unless File.file?(file)
+      file = readable_record_file(path)
+      return nil unless file
 
       StoredJson.new(path: path, data: JSON.parse(File.read(file)), sha: file_sha(file))
     end
@@ -3106,10 +3462,10 @@ module AgentCoord
     end
 
     def list_json(prefix)
-      directory = expanded_path(prefix)
-      return [] unless Dir.exist?(directory)
+      directory = readable_list_directory(prefix)
+      return [] unless directory
 
-      Dir.glob(File.join(directory, "**", "*.json"), sort: true).map do |file|
+      list_json_files(directory, prefix).map do |file|
         path = file.delete_prefix("#{@root}/")
         StoredJson.new(path: path, data: JSON.parse(File.read(file)), sha: file_sha(file))
       end
@@ -3129,14 +3485,134 @@ module AgentCoord
       prefixes.each do |prefix|
         directory = expanded_path(prefix)
         # Empty local roots are valid because writes create prefix directories on demand.
-        next unless File.exist?(directory)
-        next if Dir.exist?(directory)
+        entry = lstat_if_present(directory)
+        next unless entry
+        next if entry.directory?
 
         raise OperationalError, "state layout invalid: #{prefix} is not a directory"
       end
     end
 
     private
+
+    def readable_record_file(path)
+      file = expanded_path(path)
+      root_entry = configured_root_entry_if_present
+      return unless root_entry
+
+      current = @root
+      validate_record_directory!(current, root_entry, path)
+      segments = path.split("/")[0...-1]
+      index = 0
+      while index < segments.length
+        current = File.join(current, segments.fetch(index))
+        entry = lstat_if_present(current)
+        return unless entry
+
+        validate_record_directory!(current, entry, path)
+        index += 1
+      end
+
+      entry = lstat_if_present(file)
+      return unless entry
+      raise OperationalError, "state layout invalid: #{state_relative_path(file)} is a symlink" if entry.symlink?
+      unless entry.file?
+        raise OperationalError, "state layout invalid: #{state_relative_path(file)} is not a regular file"
+      end
+      return file if File.readable?(file)
+
+      raise OperationalError, "state record is not readable: #{path}"
+    end
+
+    def validate_record_directory!(directory, entry, path)
+      raise OperationalError, "state layout invalid: #{state_relative_path(directory)} is a symlink" if entry.symlink?
+      unless entry.directory?
+        raise OperationalError, "state layout invalid: #{state_relative_path(directory)} is not a directory"
+      end
+      return if File.readable?(directory) && File.executable?(directory)
+
+      raise OperationalError, "state record path is not readable or searchable: #{path}"
+    end
+
+    def readable_list_directory(prefix)
+      target = expanded_path(prefix)
+      return unless configured_root_entry_if_present
+
+      directory = @root
+      segments = prefix.split("/")
+      index = 0
+      while index < segments.length
+        validate_list_directory!(directory, prefix)
+
+        directory = File.join(directory, segments.fetch(index))
+        entry = lstat_if_present(directory)
+        return unless entry
+        raise OperationalError, "state layout invalid: #{state_relative_path(directory)} is a symlink" if entry.symlink?
+        raise OperationalError, "state layout invalid: #{prefix} is not a directory" unless entry.directory?
+
+        index += 1
+      end
+      validate_list_directory!(target, prefix)
+      target
+    end
+
+    def list_json_files(directory, prefix)
+      pending = [directory]
+      files = []
+      until pending.empty?
+        current = pending.pop
+        validate_list_directory!(current, prefix)
+        Dir.children(current).each do |name|
+          next if name.start_with?(".")
+
+          path = File.join(current, name)
+          entry = File.lstat(path)
+          if entry.symlink?
+            raise OperationalError, "state layout invalid: #{state_relative_path(path)} is a symlink"
+          elsif entry.directory?
+            pending << path
+          elsif entry.file? && name.end_with?(".json")
+            files << path
+          end
+        end
+      end
+      files.sort
+    rescue SystemCallError => e
+      raise OperationalError, "state prefix is not readable or searchable: #{prefix} (#{e.message})"
+    end
+
+    def validate_list_directory!(directory, prefix)
+      # The explicitly configured root defines the trust boundary and has
+      # historically been allowed to be a symlink. Descendants remain lstat'd
+      # so a link inside that boundary cannot redirect a scan outside it.
+      entry = directory == @root ? File.stat(directory) : File.lstat(directory)
+      unless entry.directory?
+        raise OperationalError, "state layout invalid: #{state_relative_path(directory)} is not a directory"
+      end
+      return if File.readable?(directory) && File.executable?(directory)
+
+      raise OperationalError, "state prefix is not readable or searchable: #{state_relative_path(directory)}"
+    rescue Errno::ENOENT
+      raise OperationalError, "state prefix disappeared while reading: #{prefix}"
+    end
+
+    def lstat_if_present(path)
+      File.lstat(path)
+    rescue Errno::ENOENT
+      nil
+    end
+
+    def configured_root_entry_if_present
+      File.stat(@root)
+    rescue Errno::ENOENT
+      nil
+    rescue SystemCallError => e
+      raise OperationalError, "state root is not accessible: #{@root} (#{e.message})"
+    end
+
+    def state_relative_path(path)
+      path == @root ? "." : path.delete_prefix("#{@root}/")
+    end
 
     def atomic_write_json(file, data)
       temporary = File.join(File.dirname(file), ".#{File.basename(file)}.tmp-#{Process.pid}-#{SecureRandom.hex(8)}")
@@ -3600,6 +4076,10 @@ module AgentCoord
 
   def self.state_record_path?(path)
     path.to_s.match?(STATE_PATH_PATTERN)
+  end
+
+  def self.state_directory_prefix?(path)
+    path.to_s.match?(STATE_DIRECTORY_PREFIX_PATTERN)
   end
 
   def self.validate_repo!(repo, field)

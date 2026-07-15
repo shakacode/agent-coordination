@@ -9,6 +9,11 @@ when releases begin.
 
 ### Added
 
+- `agent-coord doctor --stack-json`, a read-only schema v1 component report with
+  exits `0` healthy, `1` degraded, `2` failed, and `64` invalid usage; it
+  strictly requires exactly one direct `--state-root`, `--api-url`, or
+  `--backend` selector. The contract lives in the README's
+  [doctor setup section](README.md#setup).
 - A schema-first v1 host-limit record keyed by explicit `quota_host` and an
   additive optional status projection contract, with conformance, composite-key,
   and two-lane replay fixtures; runtime reporting and UI remain explicitly
@@ -39,6 +44,10 @@ when releases begin.
 
 - Token provisioning now requires explicit read/write scopes, with `--all-state`
   available only as an explicit opt-out for trusted single-operator deployments.
+- Documented the `LocalStore` symlink trust boundary: explicitly selected
+  top-level roots remain trusted, while deep reads fail closed on top-level
+  state-prefix and deeper descendant links using check-then-use guards rather
+  than atomic filesystem traversal.
 
 ### Fixed
 
