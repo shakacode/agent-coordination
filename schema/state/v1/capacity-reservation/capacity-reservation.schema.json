@@ -16,6 +16,7 @@
   },
   "x-lane-hold-unique-key": ["lane_ref"],
   "x-batch-lane-ref-match": "producer",
+  "x-expires-at-invariant": "producer derives expires_at exactly from created_at + ttl_seconds using server time",
   "x-aggregate-state": "derived from lane_holds; terminal lane holds never revive",
   "$ref": "#/$defs/capacity_reservation",
   "$defs": {
@@ -35,6 +36,12 @@
       "minLength": 3,
       "maxLength": 256,
       "pattern": "^[A-Za-z0-9_.:-]+:[A-Za-z0-9_.-]+$"
+    },
+    "batch_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 254,
+      "pattern": "^[A-Za-z0-9_.:-]+$"
     },
     "lane_hold": {
       "type": "object",
@@ -88,7 +95,7 @@
         "reservation_id": { "$ref": "#/$defs/canonical_id" },
         "capacity_profile_id": { "$ref": "#/$defs/canonical_id" },
         "inbox_id": { "$ref": "#/$defs/canonical_id" },
-        "batch_id": { "type": "string", "minLength": 1, "maxLength": 256 },
+        "batch_id": { "$ref": "#/$defs/batch_id" },
         "planning_attempt_id": { "type": "string", "minLength": 1, "maxLength": 256 },
         "owner_machine": { "type": "string", "minLength": 1, "maxLength": 256 },
         "owner_id": { "type": "string", "minLength": 1, "maxLength": 256 },

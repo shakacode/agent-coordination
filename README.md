@@ -447,8 +447,8 @@ all-or-nothing and fails closed when any capacity, inbox, occupancy, or
 reservation input is missing, malformed, disabled, cross-workspace, or
 mismatched. Host-limit records remain a separate eligibility gate. Reservation
 holds use the authenticated machine plus planner owner/instance tuple, expire on
-server time, and move monotonically from `active` to `consumed`, `released`, or
-`expired`.
+server time with `expires_at` derived exactly from `created_at + ttl_seconds`,
+and move monotonically from `active` to `consumed`, `released`, or `expired`.
 
 The replay fixtures cover final-slot contention, idempotent retry, payload
 conflict, workspace/profile matching, TTL boundaries, owner enforcement, and

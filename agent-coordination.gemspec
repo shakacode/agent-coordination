@@ -32,6 +32,8 @@ Gem::Specification.new do |spec|
     schema/state/v1/capacity-reservation/capacity-profile.schema.json
     schema/state/v1/capacity-reservation/capacity-reservation.schema.json
     schema/state/v1/capacity-reservation/fixtures/invalid/capacity-profile-zero.json
+    schema/state/v1/capacity-reservation/fixtures/invalid/capacity-reservation-batch-id-too-long.json
+    schema/state/v1/capacity-reservation/fixtures/invalid/capacity-reservation-batch-id-unrepresentable.json
     schema/state/v1/capacity-reservation/fixtures/invalid/capacity-reservation-both-attempt-scopes.json
     schema/state/v1/capacity-reservation/fixtures/invalid/capacity-reservation-consumed-no-at.json
     schema/state/v1/capacity-reservation/fixtures/invalid/capacity-reservation-ttl-too-low.json
@@ -39,6 +41,7 @@ Gem::Specification.new do |spec|
     schema/state/v1/capacity-reservation/fixtures/invalid/lane-occupancy-blocked-no-reason.json
     schema/state/v1/capacity-reservation/fixtures/procedural/reservation-batch-lane-mismatch.json
     schema/state/v1/capacity-reservation/fixtures/procedural/reservation-duplicate-lane-ref.json
+    schema/state/v1/capacity-reservation/fixtures/procedural/reservation-expiry-mismatch.json
     schema/state/v1/capacity-reservation/fixtures/procedural/reservations-duplicate-active-lane-ref.json
     schema/state/v1/capacity-reservation/fixtures/replay/exact-fit-and-one-over.json
     schema/state/v1/capacity-reservation/fixtures/replay/ownership-ttl-partial-release.json

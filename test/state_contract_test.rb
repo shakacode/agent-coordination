@@ -220,6 +220,9 @@ class StateContractTest < Minitest::Test
     assert_equal ["lane_ref"], reservation.fetch("x-lane-hold-unique-key")
     assert_equal "producer",
                  reservation.fetch("x-batch-lane-ref-match")
+    assert_equal "producer derives expires_at exactly from created_at + ttl_seconds using server time",
+                 reservation.fetch("x-expires-at-invariant")
+    assert_equal 254, reservation.dig("$defs", "batch_id", "maxLength")
   end
 
   def test_capacity_record_positive_and_negative_fixtures_conform
@@ -235,6 +238,8 @@ class StateContractTest < Minitest::Test
       "inbox-unknown-status.json" => "inbox",
       "lane-occupancy-blocked-no-reason.json" => "lane_occupancy",
       "capacity-reservation-both-attempt-scopes.json" => "capacity_reservation",
+      "capacity-reservation-batch-id-unrepresentable.json" => "capacity_reservation",
+      "capacity-reservation-batch-id-too-long.json" => "capacity_reservation",
       "capacity-reservation-ttl-too-low.json" => "capacity_reservation",
       "capacity-reservation-consumed-no-at.json" => "capacity_reservation"
     }
@@ -297,6 +302,9 @@ class StateContractTest < Minitest::Test
     batch_mismatch = read_fixture(
       File.join(CAPACITY_FIXTURES_PATH, "procedural", "reservation-batch-lane-mismatch.json")
     )
+    expiry_mismatch = read_fixture(
+      File.join(CAPACITY_FIXTURES_PATH, "procedural", "reservation-expiry-mismatch.json")
+    )
     duplicate_active_lanes = read_fixture(
       File.join(CAPACITY_FIXTURES_PATH, "procedural", "reservations-duplicate-active-lane-ref.json")
     )
@@ -322,6 +330,7 @@ class StateContractTest < Minitest::Test
       ),
       replay.merge("active_reservations" => [duplicate_holds]),
       replay.merge("active_reservations" => [batch_mismatch]),
+      replay.merge("active_reservations" => [expiry_mismatch]),
       replay.merge("active_reservations" => duplicate_active_lanes.fetch("active_reservations"))
     ]
 
@@ -351,6 +360,17 @@ class StateContractTest < Minitest::Test
     assert_empty schema.validate(fixture).to_a,
                  "JSON Schema validates lane syntax but cannot compare each lane prefix to batch_id"
     assert_raises(ArgumentError) { enforce_batch_lane_refs!(fixture) }
+  end
+
+  def test_capacity_reservation_procedurally_rejects_expiry_mismatch
+    fixture = read_fixture(
+      File.join(CAPACITY_FIXTURES_PATH, "procedural", "reservation-expiry-mismatch.json")
+    )
+    schema = JSONSchemer.schema(JSON.parse(File.read(CAPACITY_SCHEMA_PATHS.fetch("capacity_reservation"))))
+
+    assert_empty schema.validate(fixture).to_a,
+                 "JSON Schema validates timestamps but cannot derive expires_at from created_at and ttl_seconds"
+    assert_raises(ArgumentError) { enforce_reservation_ttl!(fixture) }
   end
 
   def test_capacity_snapshot_procedurally_rejects_duplicate_active_lane_refs_across_reservations
@@ -565,6 +585,15 @@ class StateContractTest < Minitest::Test
     raise ArgumentError, "reservation lane_ref must belong to batch_id" unless matches
   end
 
+  def enforce_reservation_ttl!(reservation)
+    created_at = Time.iso8601(reservation.fetch("created_at"))
+    expires_at = Time.iso8601(reservation.fetch("expires_at"))
+    expected_ttl = reservation.fetch("ttl_seconds")
+    return if expires_at - created_at == expected_ttl
+
+    raise ArgumentError, "reservation expires_at must equal created_at + ttl_seconds"
+  end
+
   def enforce_unique_active_lane_refs!(reservations, as_of)
     active_refs = reservations.flat_map do |reservation|
       active_lane_refs(reservation, as_of)
@@ -694,6 +723,7 @@ class StateContractTest < Minitest::Test
     reservations.each do |reservation|
       enforce_unique_lane_hold_refs!(reservation.fetch("lane_holds"))
       enforce_batch_lane_refs!(reservation)
+      enforce_reservation_ttl!(reservation)
     end
     enforce_unique_active_lane_refs!(reservations, as_of)
     true

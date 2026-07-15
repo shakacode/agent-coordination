@@ -76,17 +76,22 @@ The authenticated workspace/machine plus planner `owner_id` and per-attempt
 `instance_id` form the owner tuple. Only that tuple may consume or release.
 Cross-machine takeover and renewal are out of scope for v1.
 
-TTL defaults to 900 seconds and accepts 60 through 3600 seconds. `consume` is
-idempotent, requires an active matching hold before expiry, and requires the
-same lane to be observably occupied. `release` idempotently changes only the
-remaining active holds; already consumed or terminal holds remain unchanged.
-Expiry frees active capacity without requiring cleanup.
+TTL defaults to 900 seconds and accepts 60 through 3600 seconds. The producer
+uses server time for `created_at` and must derive `expires_at` exactly as
+`created_at + ttl_seconds`; readers fail closed when that invariant does not
+hold. `consume` is idempotent, requires an active matching hold before expiry,
+and requires the same lane to be observably occupied. `release` idempotently
+changes only the remaining active holds; already consumed or terminal holds
+remain unchanged. Expiry frees active capacity without requiring cleanup.
 
 The same reservation ID with the same canonical payload is idempotent. Reusing
 the ID with a changed payload is a conflict. The same active lane ref cannot be
 held by two reservations. For batch-scoped reservations, producers must verify
 that every lane ref belongs to `batch_id`; JSON Schema validates the shapes but
-cannot compare those values.
+cannot compare those values. `batch_id` uses the same representable prefix
+character set as lane refs: ASCII letters, digits, `_`, `.`, `:`, and `-`.
+It is capped at 254 characters so the 256-character lane ref still has room for
+the required delimiter and a non-empty lane name.
 
 Release and new-reservation writes serialize through the same atomic backend
 boundary. A new request ordered before release is refused while the old hold is
@@ -120,6 +125,7 @@ Checked-in positive, negative, and replay fixtures prove:
 - disabled, missing, or mismatched authoritative inputs fail closed;
 - blocked-without-heartbeat occupancy remains explicit;
 - TTL is active before expiry and inactive at the boundary;
+- mismatched `created_at`, `ttl_seconds`, and `expires_at` fail closed;
 - owner mismatch refuses consume/release;
 - partial consume followed by release preserves consumed holds and frees only
   the active remainder;
