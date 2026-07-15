@@ -578,10 +578,8 @@ class StateContractTest < Minitest::Test
   def enforce_batch_lane_refs!(reservation)
     return unless reservation.key?("batch_id")
 
-    expected_batch = reservation.fetch("batch_id")
-    matches = reservation.fetch("lane_holds").all? do |hold|
-      hold.fetch("lane_ref").rpartition(":").first == expected_batch
-    end
+    lane_refs = reservation.fetch("lane_holds").map { |hold| hold.fetch("lane_ref") }
+    matches = batch_lane_refs_match?(reservation.fetch("batch_id"), lane_refs)
     raise ArgumentError, "reservation lane_ref must belong to batch_id" unless matches
   end
 
@@ -695,6 +693,9 @@ class StateContractTest < Minitest::Test
 
   def capacity_request_outcome(replay, request, accepted_payloads, used_refs, capacity)
     return "RESERVATION_REFUSED" unless authoritative_capacity_inputs?(replay, request.fetch("inbox_id"))
+    if request.key?("batch_id") && !batch_lane_refs_match?(request.fetch("batch_id"), request.fetch("lane_refs"))
+      return "RESERVATION_REFUSED"
+    end
 
     request_id = request.fetch("reservation_id")
     canonical_payload = canonical_reservation_request(request)
@@ -738,5 +739,9 @@ class StateContractTest < Minitest::Test
   def record_matches_profile?(record, profile)
     record.fetch("workspace") == profile.fetch("workspace") &&
       record.fetch("capacity_profile_id") == profile.fetch("capacity_profile_id")
+  end
+
+  def batch_lane_refs_match?(batch_id, lane_refs)
+    lane_refs.all? { |lane_ref| lane_ref.rpartition(":").first == batch_id }
   end
 end

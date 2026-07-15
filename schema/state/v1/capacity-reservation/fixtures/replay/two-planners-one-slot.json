@@ -72,6 +72,18 @@
   ],
   "requests": [
     {
+      "attempt": "foreign-batch-request",
+      "reservation_id": "reserve-foreign-batch",
+      "capacity_profile_id": "codex-primary",
+      "inbox_id": "ready-issues",
+      "batch_id": "batch-capacity",
+      "owner_machine": "build-mac-01",
+      "owner_id": "planner-foreign",
+      "instance_id": "planner-foreign-attempt-1",
+      "ttl_seconds": 900,
+      "lane_refs": ["different-batch:lane-b"]
+    },
+    {
       "attempt": "planner-a",
       "reservation_id": "reserve-final-slot",
       "capacity_profile_id": "codex-primary",
@@ -134,6 +146,7 @@
   ],
   "expected": {
     "outcomes": {
+      "foreign-batch-request": "RESERVATION_REFUSED",
       "planner-a": "accepted",
       "planner-b": "RESERVATION_REFUSED",
       "planner-a-retry": "idempotent",
