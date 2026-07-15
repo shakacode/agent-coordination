@@ -5,8 +5,11 @@ require "json_schemer"
 require "minitest/autorun"
 require "digest"
 require "time"
+require_relative "support/capacity_contract_helpers"
 
 class StateContractTest < Minitest::Test
+  include CapacityContractHelpers
+
   ROOT = File.expand_path("..", __dir__)
   SCHEMA_PATH = File.join(ROOT, "contracts", "state-schema-v2.json")
   FIXTURE_PATH = File.join(ROOT, "contracts", "fixtures", "v2", "lane_closed.json")
@@ -287,8 +290,15 @@ class StateContractTest < Minitest::Test
     replay = read_fixture(File.join(CAPACITY_FIXTURES_PATH, "replay", "ownership-ttl-partial-release.json"))
     reservation = replay.fetch("reservation")
     schema = JSONSchemer.schema(JSON.parse(File.read(CAPACITY_SCHEMA_PATHS.fetch("capacity_reservation"))))
+    occupancy_schema = JSONSchemer.schema(JSON.parse(File.read(CAPACITY_SCHEMA_PATHS.fetch("lane_occupancy"))))
+    occupancies = replay.fetch("lane_occupancies")
 
     assert_empty schema.validate(reservation).to_a
+    occupancies.each { |occupancy| assert_empty occupancy_schema.validate(occupancy).to_a }
+    assert consumed_holds_have_occupancy?([reservation], occupancies)
+    refute consumed_holds_have_occupancy?(
+      [reservation], occupancies.reject { |occupancy| occupancy.fetch("lane_ref") == "batch-capacity:lane-a" }
+    )
     owner_tuple = %w[owner_machine owner_id instance_id].map { |field| reservation.fetch(field) }
     wrong_owner_tuple = %w[owner_machine owner_id instance_id].map do |field|
       replay.fetch("wrong_owner").fetch(field)
@@ -302,47 +312,10 @@ class StateContractTest < Minitest::Test
 
   def test_capacity_predicate_fails_closed_when_authoritative_inputs_are_unavailable
     replay = read_fixture(File.join(CAPACITY_FIXTURES_PATH, "replay", "two-planners-one-slot.json"))
-    duplicate_holds = read_fixture(
-      File.join(CAPACITY_FIXTURES_PATH, "procedural", "reservation-duplicate-lane-ref.json")
-    )
-    batch_mismatch = read_fixture(
-      File.join(CAPACITY_FIXTURES_PATH, "procedural", "reservation-batch-lane-mismatch.json")
-    )
-    expiry_mismatch = read_fixture(
-      File.join(CAPACITY_FIXTURES_PATH, "procedural", "reservation-expiry-mismatch.json")
-    )
-    duplicate_active_lanes = read_fixture(
-      File.join(CAPACITY_FIXTURES_PATH, "procedural", "reservations-duplicate-active-lane-ref.json")
-    )
-    variants = [
-      replay.merge("capacity_profile" => replay.fetch("capacity_profile").merge("status" => "disabled")),
-      replay.merge(
-        "inboxes" => replay.fetch("inboxes").map.with_index do |inbox, index|
-          index.zero? ? inbox.merge("status" => "disabled") : inbox
-        end
-      ),
-      replay.merge(
-        "inboxes" => replay.fetch("inboxes").map.with_index do |inbox, index|
-          index.zero? ? inbox.merge("capacity_profile_id" => "different-profile") : inbox
-        end
-      ),
-      replay.except("lane_occupancies"),
-      replay.except("active_reservations"),
-      replay.merge(
-        "lane_occupancies" => [replay.fetch("lane_occupancies").first.merge("state" => "mystery")]
-      ),
-      replay.merge(
-        "active_reservations" => [replay.fetch("active_reservations").first.merge("inbox_id" => "missing")]
-      ),
-      replay.merge("active_reservations" => [duplicate_holds]),
-      replay.merge("active_reservations" => [batch_mismatch]),
-      replay.merge("active_reservations" => [expiry_mismatch]),
-      replay.merge("active_reservations" => duplicate_active_lanes.fetch("active_reservations"))
-    ]
 
-    assert authoritative_capacity_inputs?(replay)
-    variants.each.with_index do |variant, index|
-      refute authoritative_capacity_inputs?(variant), "expected malformed variant #{index} to fail closed"
+    assert authoritative_capacity_inputs?(replay, "ready-issues")
+    malformed_capacity_snapshots(replay).each do |name, variant|
+      refute authoritative_capacity_inputs?(variant, "ready-issues"), "expected #{name} to fail closed"
     end
   end
 
@@ -698,8 +671,8 @@ class StateContractTest < Minitest::Test
   end
 
   def capacity_request_outcome(replay, request, accepted_payloads, used_refs, capacity)
-    return "RESERVATION_REFUSED" unless authoritative_capacity_inputs?(replay, request.fetch("inbox_id"))
     return "RESERVATION_REFUSED" unless capacity_reservation_request_valid?(replay, request)
+    return "RESERVATION_REFUSED" unless authoritative_capacity_inputs?(replay, request.fetch("inbox_id"))
 
     request_id = request.fetch("reservation_id")
     canonical_payload = canonical_reservation_request(request)
@@ -744,7 +717,23 @@ class StateContractTest < Minitest::Test
       inboxes.all? { |record| schemas.fetch("inbox").validate(record).to_a.empty? } &&
       occupancies.all? { |record| schemas.fetch("lane_occupancy").validate(record).to_a.empty? } &&
       reservations.all? { |record| schemas.fetch("capacity_reservation").validate(record).to_a.empty? } &&
-      procedural_capacity_reservations_valid?(reservations, as_of)
+      procedural_capacity_reservations_valid?(reservations, as_of) &&
+      consumed_holds_have_occupancy?(reservations, occupancies)
+  end
+
+  def consumed_holds_have_occupancy?(reservations, occupancies)
+    reservations.all? do |reservation|
+      reservation.fetch("lane_holds").all? do |hold|
+        next true unless hold.fetch("state") == "consumed"
+
+        occupancies.any? do |occupancy|
+          occupancy.fetch("workspace") == reservation.fetch("workspace") &&
+            occupancy.fetch("capacity_profile_id") == reservation.fetch("capacity_profile_id") &&
+            occupancy.fetch("inbox_id") == reservation.fetch("inbox_id") &&
+            occupancy.fetch("lane_ref") == hold.fetch("lane_ref") && occupancy.fetch("state") == "occupied"
+        end
+      end
+    end
   end
 
   def procedural_capacity_reservations_valid?(reservations, as_of)

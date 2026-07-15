@@ -12,6 +12,15 @@
     {
       "schema_version": 1,
       "workspace": "default",
+      "lane_ref": "batch-capacity:lane-a",
+      "capacity_profile_id": "codex-primary",
+      "inbox_id": "ready-issues",
+      "state": "occupied",
+      "updated_at": "2026-07-14T20:02:00Z"
+    },
+    {
+      "schema_version": 1,
+      "workspace": "default",
       "lane_ref": "batch-capacity:lane-b",
       "capacity_profile_id": "codex-primary",
       "inbox_id": "ready-issues",

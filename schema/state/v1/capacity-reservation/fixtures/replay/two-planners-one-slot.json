@@ -72,6 +72,17 @@
   ],
   "requests": [
     {
+      "attempt": "missing-inbox-request",
+      "reservation_id": "reserve-missing-inbox",
+      "capacity_profile_id": "codex-primary",
+      "batch_id": "batch-capacity",
+      "owner_machine": "build-mac-01",
+      "owner_id": "planner-missing-inbox",
+      "instance_id": "planner-missing-inbox-attempt-1",
+      "ttl_seconds": 900,
+      "lane_refs": ["batch-capacity:missing-inbox"]
+    },
+    {
       "attempt": "foreign-batch-request",
       "reservation_id": "reserve-foreign-batch",
       "capacity_profile_id": "codex-primary",
@@ -194,6 +205,7 @@
   ],
   "expected": {
     "outcomes": {
+      "missing-inbox-request": "RESERVATION_REFUSED",
       "foreign-batch-request": "RESERVATION_REFUSED",
       "profile-mismatch-request": "RESERVATION_REFUSED",
       "ttl-too-high-request": "RESERVATION_REFUSED",
