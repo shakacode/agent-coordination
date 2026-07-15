@@ -597,7 +597,12 @@ class StateContractTest < Minitest::Test
       case operation
       when "reserve"
         active_refs = active_lane_refs(reservation, replay.fetch("release_at"))
-        outcome = active_refs.include?(replay.fetch("requested_lane_ref")) ? "RESERVATION_REFUSED" : "accepted"
+        request_refs = [replay.fetch("requested_lane_ref")]
+        outcome = if capacity_request_fits?(request_refs, active_refs, replay.fetch("max_concurrency"))
+                    "accepted"
+                  else
+                    "RESERVATION_REFUSED"
+                  end
         outcomes << outcome
       when "release"
         reservation = release_active_lane_holds(
