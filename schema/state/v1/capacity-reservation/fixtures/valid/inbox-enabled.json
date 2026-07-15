@@ -1,0 +1,8 @@
+{
+  "schema_version": 1,
+  "workspace": "default",
+  "inbox_id": "ready-issues",
+  "capacity_profile_id": "codex-primary",
+  "status": "enabled",
+  "updated_at": "2026-07-14T20:00:00Z"
+}

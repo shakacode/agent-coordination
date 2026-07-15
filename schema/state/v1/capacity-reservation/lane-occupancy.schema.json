@@ -1,0 +1,71 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/shakacode/agent-coordination/blob/main/schema/state/v1/capacity-reservation/lane-occupancy.schema.json",
+  "title": "Agent Coordination Lane Occupancy v1",
+  "description": "Persisted capacity occupancy for a stable batch lane, including blocked lanes without a live heartbeat.",
+  "x-contract-version": 1,
+  "x-record-family": "lane_occupancy",
+  "x-logical-key": ["workspace", "lane_ref"],
+  "x-storage-key": {
+    "template": "lane_occupancies/{workspace}/{lane_ref}.json",
+    "segment_encoding": "UTF-8 bytes; leave ASCII alphanumeric, underscore, and hyphen; percent-encode every other byte with uppercase hexadecimal"
+  },
+  "x-counts-as-occupied": ["occupied", "blocked"],
+  "$ref": "#/$defs/lane_occupancy",
+  "$defs": {
+    "workspace": {
+      "type": "string",
+      "minLength": 1,
+      "default": "default"
+    },
+    "canonical_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^[a-z0-9](?:[a-z0-9._-]{0,126}[a-z0-9])?$"
+    },
+    "lane_ref": {
+      "type": "string",
+      "minLength": 3,
+      "maxLength": 256,
+      "pattern": "^[A-Za-z0-9_.:-]+:[A-Za-z0-9_.-]+$",
+      "description": "Stable <batch-id>:<lane-name> reference, split at the last colon."
+    },
+    "lane_occupancy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "workspace",
+        "lane_ref",
+        "capacity_profile_id",
+        "inbox_id",
+        "state",
+        "updated_at"
+      ],
+      "properties": {
+        "schema_version": { "const": 1 },
+        "workspace": { "$ref": "#/$defs/workspace" },
+        "lane_ref": { "$ref": "#/$defs/lane_ref" },
+        "capacity_profile_id": { "$ref": "#/$defs/canonical_id" },
+        "inbox_id": { "$ref": "#/$defs/canonical_id" },
+        "state": { "enum": ["occupied", "blocked", "terminal", "cancelled"] },
+        "blocked_reason": { "type": "string", "minLength": 1, "maxLength": 256 },
+        "updated_at": { "type": "string", "format": "date-time" },
+        "terminal_at": { "type": "string", "format": "date-time" }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "state": { "const": "blocked" } } },
+          "then": { "required": ["blocked_reason"] },
+          "else": { "not": { "required": ["blocked_reason"] } }
+        },
+        {
+          "if": { "properties": { "state": { "enum": ["terminal", "cancelled"] } } },
+          "then": { "required": ["terminal_at"] },
+          "else": { "not": { "required": ["terminal_at"] } }
+        }
+      ]
+    }
+  }
+}

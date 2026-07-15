@@ -1,0 +1,8 @@
+{
+  "schema_version": 1,
+  "workspace": "default",
+  "capacity_profile_id": "codex-primary",
+  "status": "enabled",
+  "max_concurrency": 3,
+  "updated_at": "2026-07-14T20:00:00Z"
+}

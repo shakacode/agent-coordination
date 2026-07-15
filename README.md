@@ -431,6 +431,32 @@ clear, or project these records, and provider message/probe facts remain
 canonical quota-host, reset, clear, workspace-key, composite uniqueness, and
 non-goal semantics.
 
+### Capacity reservation contract foundation
+
+The schema-first reservation contract lives under
+[`schema/state/v1/capacity-reservation/`](schema/state/v1/capacity-reservation/).
+It makes four protocol-plane inputs authoritative: numeric capacity profiles,
+enabled inboxes bound to those profiles, persisted lane occupancy (including
+blocked lanes without live heartbeats), and short-lived per-lane reservation
+holds. Product-plane planning, ranking, scheduling, and approval UI remain
+separate consumers of this protocol state.
+
+Capacity is the unique union of `occupied`/`blocked` lane refs and active
+reserved lane refs, so reservation-to-launch overlap counts once. Creation is
+all-or-nothing and fails closed when any capacity, inbox, occupancy, or
+reservation input is missing, malformed, disabled, cross-workspace, or
+mismatched. Host-limit records remain a separate eligibility gate. Reservation
+holds use the authenticated machine plus planner owner/instance tuple, expire on
+server time with `expires_at` derived exactly from `created_at + ttl_seconds`,
+and move monotonically from `active` to `consumed`, `released`, or `expired`.
+
+The replay fixtures cover final-slot contention, idempotent retry, payload
+conflict, workspace/profile matching, TTL boundaries, owner enforcement, and
+partial consume/release. Runtime CLI/Worker operations are intentionally not
+implemented here; a later additive CLI uses `RESERVATION_REFUSED` exit code 4
+rather than overloading `CLAIM_REFUSED`. See
+[ADR 0008](docs/adr/0008-capacity-reservation-state-contract.md).
+
 `gc` applies one retention plan to local, GitHub, and HTTP stores. Exactly one
 mode is required: `--dry-run` prints proposed actions without writing, while
 `--execute` copies eligible records into `archive/` with compare-and-swap
@@ -517,12 +543,17 @@ the doctor section above.
 | 1    | Usage error                               | Fix the command invocation before proceeding.                                  |
 | 2    | Operational failure                       | Report coordination state as `UNKNOWN`; use advisory fallback when safe.       |
 | 3    | `CLAIM_REFUSED` by live/stale/active hold | Hard stop for machine agents; report holder/liveness instead of competing.     |
+| 4    | Reserved future `RESERVATION_REFUSED`     | Stop admission without treating capacity contention as an operational failure. |
 
 A refused claim is intentionally different from a bootstrap/auth/network
 failure. A machine agent may not override exit 3 on its own. Exit 2 means the
 backend could not be trusted for that command, including storage-level compare
 and-swap contention; dependency-sensitive lanes should stop with `UNKNOWN` until
-the coordinator restores backend access.
+the coordinator restores backend access. Exit 4 is reserved by ADR 0008 but is
+not emitted or reported by `config show --json` until the separately sequenced
+capacity-reservation runtime commands exist. This additive reservation
+supersedes the 0-3 freeze only for that future boundary; the archived Backend v2
+Phase 1 plan remains historical guidance for its completed phase.
 
 ## Heartbeat Liveness
 

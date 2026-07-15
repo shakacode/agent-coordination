@@ -1,0 +1,134 @@
+{
+  "before_expiry": "2026-07-14T20:14:59Z",
+  "at_expiry": "2026-07-14T20:15:00Z",
+  "consume_at": "2026-07-14T20:05:00Z",
+  "release_at": "2026-07-14T20:10:00Z",
+  "wrong_owner": {
+    "owner_machine": "build-mac-01",
+    "owner_id": "planner-a",
+    "instance_id": "planner-a-attempt-other"
+  },
+  "lane_occupancies": [
+    {
+      "schema_version": 1,
+      "workspace": "default",
+      "lane_ref": "batch-capacity:lane-a",
+      "capacity_profile_id": "codex-primary",
+      "inbox_id": "ready-issues",
+      "state": "occupied",
+      "updated_at": "2026-07-14T20:02:00Z"
+    },
+    {
+      "schema_version": 1,
+      "workspace": "default",
+      "lane_ref": "batch-capacity:lane-b",
+      "capacity_profile_id": "codex-primary",
+      "inbox_id": "ready-issues",
+      "state": "occupied",
+      "updated_at": "2026-07-14T20:04:00Z"
+    }
+  ],
+  "reservation": {
+    "schema_version": 1,
+    "workspace": "default",
+    "reservation_id": "reserve-lifecycle-replay",
+    "capacity_profile_id": "codex-primary",
+    "inbox_id": "ready-issues",
+    "batch_id": "batch-capacity",
+    "owner_machine": "build-mac-01",
+    "owner_id": "planner-a",
+    "instance_id": "planner-a-attempt-1",
+    "created_at": "2026-07-14T20:00:00Z",
+    "expires_at": "2026-07-14T20:15:00Z",
+    "ttl_seconds": 900,
+    "lane_holds": [
+      {
+        "lane_ref": "batch-capacity:lane-a",
+        "state": "consumed",
+        "consumed_at": "2026-07-14T20:02:00Z"
+      },
+      {
+        "lane_ref": "batch-capacity:lane-b",
+        "state": "active"
+      }
+    ]
+  },
+  "expected_after_release": {
+    "schema_version": 1,
+    "workspace": "default",
+    "reservation_id": "reserve-lifecycle-replay",
+    "capacity_profile_id": "codex-primary",
+    "inbox_id": "ready-issues",
+    "batch_id": "batch-capacity",
+    "owner_machine": "build-mac-01",
+    "owner_id": "planner-a",
+    "instance_id": "planner-a-attempt-1",
+    "created_at": "2026-07-14T20:00:00Z",
+    "expires_at": "2026-07-14T20:15:00Z",
+    "ttl_seconds": 900,
+    "lane_holds": [
+      {
+        "lane_ref": "batch-capacity:lane-a",
+        "state": "consumed",
+        "consumed_at": "2026-07-14T20:02:00Z"
+      },
+      {
+        "lane_ref": "batch-capacity:lane-b",
+        "state": "released",
+        "released_at": "2026-07-14T20:10:00Z"
+      }
+    ]
+  },
+  "expected_after_consume": {
+    "schema_version": 1,
+    "workspace": "default",
+    "reservation_id": "reserve-lifecycle-replay",
+    "capacity_profile_id": "codex-primary",
+    "inbox_id": "ready-issues",
+    "batch_id": "batch-capacity",
+    "owner_machine": "build-mac-01",
+    "owner_id": "planner-a",
+    "instance_id": "planner-a-attempt-1",
+    "created_at": "2026-07-14T20:00:00Z",
+    "expires_at": "2026-07-14T20:15:00Z",
+    "ttl_seconds": 900,
+    "lane_holds": [
+      {
+        "lane_ref": "batch-capacity:lane-a",
+        "state": "consumed",
+        "consumed_at": "2026-07-14T20:02:00Z"
+      },
+      {
+        "lane_ref": "batch-capacity:lane-b",
+        "state": "consumed",
+        "consumed_at": "2026-07-14T20:05:00Z"
+      }
+    ]
+  },
+  "expected_after_expiry": {
+    "schema_version": 1,
+    "workspace": "default",
+    "reservation_id": "reserve-lifecycle-replay",
+    "capacity_profile_id": "codex-primary",
+    "inbox_id": "ready-issues",
+    "batch_id": "batch-capacity",
+    "owner_machine": "build-mac-01",
+    "owner_id": "planner-a",
+    "instance_id": "planner-a-attempt-1",
+    "created_at": "2026-07-14T20:00:00Z",
+    "expires_at": "2026-07-14T20:15:00Z",
+    "ttl_seconds": 900,
+    "lane_holds": [
+      {
+        "lane_ref": "batch-capacity:lane-a",
+        "state": "consumed",
+        "consumed_at": "2026-07-14T20:02:00Z"
+      },
+      {
+        "lane_ref": "batch-capacity:lane-b",
+        "state": "expired",
+        "expired_at": "2026-07-14T20:15:00Z"
+      }
+    ]
+  }
+}
