@@ -27,7 +27,31 @@ Gem::Specification.new do |spec|
     bin/agent-coord
     contracts/state-schema-v2.json
     docs/adr/0007-host-limit-state-contract.md
+    docs/adr/0008-capacity-reservation-state-contract.md
     docs/protocol-curl.md
+    schema/state/v1/capacity-reservation/capacity-profile.schema.json
+    schema/state/v1/capacity-reservation/capacity-reservation.schema.json
+    schema/state/v1/capacity-reservation/fixtures/invalid/capacity-profile-zero.json
+    schema/state/v1/capacity-reservation/fixtures/invalid/capacity-reservation-both-attempt-scopes.json
+    schema/state/v1/capacity-reservation/fixtures/invalid/capacity-reservation-consumed-no-at.json
+    schema/state/v1/capacity-reservation/fixtures/invalid/capacity-reservation-ttl-too-low.json
+    schema/state/v1/capacity-reservation/fixtures/invalid/inbox-unknown-status.json
+    schema/state/v1/capacity-reservation/fixtures/invalid/lane-occupancy-blocked-no-reason.json
+    schema/state/v1/capacity-reservation/fixtures/procedural/reservation-batch-lane-mismatch.json
+    schema/state/v1/capacity-reservation/fixtures/procedural/reservation-duplicate-lane-ref.json
+    schema/state/v1/capacity-reservation/fixtures/procedural/reservations-duplicate-active-lane-ref.json
+    schema/state/v1/capacity-reservation/fixtures/replay/exact-fit-and-one-over.json
+    schema/state/v1/capacity-reservation/fixtures/replay/ownership-ttl-partial-release.json
+    schema/state/v1/capacity-reservation/fixtures/replay/release-vs-new-reserve.json
+    schema/state/v1/capacity-reservation/fixtures/replay/ttl-capacity-boundary.json
+    schema/state/v1/capacity-reservation/fixtures/replay/two-planners-one-slot.json
+    schema/state/v1/capacity-reservation/fixtures/valid/capacity-profile-enabled.json
+    schema/state/v1/capacity-reservation/fixtures/valid/capacity-reservation-active.json
+    schema/state/v1/capacity-reservation/fixtures/valid/capacity-reservation-partial-consume.json
+    schema/state/v1/capacity-reservation/fixtures/valid/inbox-enabled.json
+    schema/state/v1/capacity-reservation/fixtures/valid/lane-occupancy-blocked.json
+    schema/state/v1/capacity-reservation/inbox.schema.json
+    schema/state/v1/capacity-reservation/lane-occupancy.schema.json
     schema/state/v1/fixtures/invalid/host-limit-active-with-cleared-at.json
     schema/state/v1/fixtures/invalid/host-limit-cleared-without-cleared-at.json
     schema/state/v1/fixtures/invalid/host-limit-malformed-observed-at.json

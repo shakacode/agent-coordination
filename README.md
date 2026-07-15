@@ -431,6 +431,32 @@ clear, or project these records, and provider message/probe facts remain
 canonical quota-host, reset, clear, workspace-key, composite uniqueness, and
 non-goal semantics.
 
+### Capacity reservation contract foundation
+
+The schema-first reservation contract lives under
+[`schema/state/v1/capacity-reservation/`](schema/state/v1/capacity-reservation/).
+It makes four protocol-plane inputs authoritative: numeric capacity profiles,
+enabled inboxes bound to those profiles, persisted lane occupancy (including
+blocked lanes without live heartbeats), and short-lived per-lane reservation
+holds. Product-plane planning, ranking, scheduling, and approval UI remain
+separate consumers of this protocol state.
+
+Capacity is the unique union of `occupied`/`blocked` lane refs and active
+reserved lane refs, so reservation-to-launch overlap counts once. Creation is
+all-or-nothing and fails closed when any capacity, inbox, occupancy, or
+reservation input is missing, malformed, disabled, cross-workspace, or
+mismatched. Host-limit records remain a separate eligibility gate. Reservation
+holds use the authenticated machine plus planner owner/instance tuple, expire on
+server time, and move monotonically from `active` to `consumed`, `released`, or
+`expired`.
+
+The replay fixtures cover final-slot contention, idempotent retry, payload
+conflict, workspace/profile matching, TTL boundaries, owner enforcement, and
+partial consume/release. Runtime CLI/Worker operations are intentionally not
+implemented here; a later additive CLI uses `RESERVATION_REFUSED` exit code 4
+rather than overloading `CLAIM_REFUSED`. See
+[ADR 0008](docs/adr/0008-capacity-reservation-state-contract.md).
+
 `gc` applies one retention plan to local, GitHub, and HTTP stores. Exactly one
 mode is required: `--dry-run` prints proposed actions without writing, while
 `--execute` copies eligible records into `archive/` with compare-and-swap

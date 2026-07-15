@@ -14,6 +14,10 @@ when releases begin.
   strictly requires exactly one direct `--state-root`, `--api-url`, or
   `--backend` selector. The contract lives in the README's
   [doctor setup section](README.md#setup).
+- A schema-first v1 capacity-reservation contract for authoritative capacity
+  profiles, enabled inboxes, persisted blocked-lane occupancy, and owner-fenced
+  per-lane holds, with fail-closed contention, TTL, idempotency, and partial
+  consume/release replay fixtures; runtime CLI/Worker operations remain deferred.
 - A schema-first v1 host-limit record keyed by explicit `quota_host` and an
   additive optional status projection contract, with conformance, composite-key,
   and two-lane replay fixtures; runtime reporting and UI remain explicitly

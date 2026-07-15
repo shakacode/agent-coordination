@@ -1,0 +1,35 @@
+{
+  "max_concurrency": 3,
+  "occupied_lane_refs": ["batch-capacity:lane-a"],
+  "scenarios": [
+    {
+      "name": "exact-fit",
+      "requested_lane_refs": [
+        "batch-capacity:lane-b",
+        "batch-capacity:lane-c"
+      ]
+    },
+    {
+      "name": "one-over",
+      "requested_lane_refs": [
+        "batch-capacity:lane-b",
+        "batch-capacity:lane-c",
+        "batch-capacity:lane-d"
+      ]
+    }
+  ],
+  "expected": {
+    "exact-fit": {
+      "outcome": "accepted",
+      "used_lane_refs_after": [
+        "batch-capacity:lane-a",
+        "batch-capacity:lane-b",
+        "batch-capacity:lane-c"
+      ]
+    },
+    "one-over": {
+      "outcome": "RESERVATION_REFUSED",
+      "used_lane_refs_after": ["batch-capacity:lane-a"]
+    }
+  }
+}

@@ -1,0 +1,10 @@
+{
+  "schema_version": 1,
+  "workspace": "default",
+  "lane_ref": "batch-capacity:blocked-lane",
+  "capacity_profile_id": "codex-primary",
+  "inbox_id": "ready-issues",
+  "state": "blocked",
+  "blocked_reason": "awaiting-maintainer-decision",
+  "updated_at": "2026-07-14T20:00:00Z"
+}
