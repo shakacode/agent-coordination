@@ -212,7 +212,7 @@ class StateContractTest < Minitest::Test
       assert_equal 1, schema_document.fetch("x-contract-version")
       assert_equal record_family, schema_document.fetch("x-record-family")
       assert_equal "default", schema_document.dig("$defs", "workspace", "default")
-      assert_match(%r{\A(?:capacity_profiles|inboxes|lane_occupancy|capacity_reservations)/\{workspace\}/},
+      assert_match(%r{\A(?:capacity_profiles|inboxes|lane_occupancies|capacity_reservations)/\{workspace\}/},
                    schema_document.dig("x-storage-key", "template"))
     end
 

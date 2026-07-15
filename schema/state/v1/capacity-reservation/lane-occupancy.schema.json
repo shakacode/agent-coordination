@@ -7,7 +7,7 @@
   "x-record-family": "lane_occupancy",
   "x-logical-key": ["workspace", "lane_ref"],
   "x-storage-key": {
-    "template": "lane_occupancy/{workspace}/{lane_ref}.json",
+    "template": "lane_occupancies/{workspace}/{lane_ref}.json",
     "segment_encoding": "UTF-8 bytes; leave ASCII alphanumeric, underscore, and hyphen; percent-encode every other byte with uppercase hexadecimal"
   },
   "x-counts-as-occupied": ["occupied", "blocked"],

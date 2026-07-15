@@ -107,7 +107,9 @@ The later runtime boundary may add `reserve`, `consume-reservation`, and
 `release-reservation` CLI commands and atomic Worker operations. Capacity
 refusal is additive `RESERVATION_REFUSED` exit code 4; it does not overload
 `CLAIM_REFUSED` exit code 3. Existing usage and operational exit codes remain
-unchanged.
+unchanged. This decision explicitly supersedes the archived Backend v2 Phase 1
+0-3 exit-code freeze only for the future capacity-reservation runtime boundary;
+the current CLI does not emit code 4 yet.
 
 Runtime authorization must derive workspace and owner machine from the bearer
 credential, use the narrow record prefixes required by each caller, and compare

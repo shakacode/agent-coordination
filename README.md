@@ -543,12 +543,17 @@ the doctor section above.
 | 1    | Usage error                               | Fix the command invocation before proceeding.                                  |
 | 2    | Operational failure                       | Report coordination state as `UNKNOWN`; use advisory fallback when safe.       |
 | 3    | `CLAIM_REFUSED` by live/stale/active hold | Hard stop for machine agents; report holder/liveness instead of competing.     |
+| 4    | Reserved future `RESERVATION_REFUSED`     | Stop admission without treating capacity contention as an operational failure. |
 
 A refused claim is intentionally different from a bootstrap/auth/network
 failure. A machine agent may not override exit 3 on its own. Exit 2 means the
 backend could not be trusted for that command, including storage-level compare
 and-swap contention; dependency-sensitive lanes should stop with `UNKNOWN` until
-the coordinator restores backend access.
+the coordinator restores backend access. Exit 4 is reserved by ADR 0008 but is
+not emitted or reported by `config show --json` until the separately sequenced
+capacity-reservation runtime commands exist. This additive reservation
+supersedes the 0-3 freeze only for that future boundary; the archived Backend v2
+Phase 1 plan remains historical guidance for its completed phase.
 
 ## Heartbeat Liveness
 
