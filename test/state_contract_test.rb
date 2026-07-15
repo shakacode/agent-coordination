@@ -449,7 +449,9 @@ class StateContractTest < Minitest::Test
     end
     used_refs = (occupied_refs + reserved_refs).uniq
     capacity = replay.dig("capacity_profile", "max_concurrency")
-    accepted_payloads = {}
+    accepted_payloads = replay.fetch("active_reservations").to_h do |reservation|
+      [reservation.fetch("reservation_id"), canonical_reservation_record(reservation)]
+    end
 
     outcomes = replay.fetch("requests").to_h do |request|
       outcome = capacity_request_outcome(replay, request, accepted_payloads, used_refs, capacity)
@@ -547,6 +549,13 @@ class StateContractTest < Minitest::Test
     CAPACITY_RESERVATION_CANONICAL_FIELDS.each_with_object(canonical) do |field, payload|
       payload[field] = request[field] if request.key?(field)
     end
+  end
+
+  def canonical_reservation_record(reservation)
+    request = reservation.slice(*CAPACITY_RESERVATION_REQUEST_FIELDS).merge(
+      "lane_refs" => reservation.fetch("lane_holds").map { |hold| hold.fetch("lane_ref") }
+    )
+    canonical_reservation_request(request)
   end
 
   def enforce_unique_lane_hold_refs!(lane_holds)

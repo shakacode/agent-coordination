@@ -44,7 +44,10 @@ decision publishes no daemon or scheduler.
 
 Every path segment uses the ADR 0007 rule: encode UTF-8 bytes, leave only ASCII
 letters, digits, `_`, and `-` literal, and percent-encode every other byte with
-uppercase hexadecimal. Self-hosted records use workspace `default`.
+uppercase hexadecimal. Canonical profile, inbox, and reservation IDs remain
+lowercase operator-defined identifiers; batch IDs and lane refs deliberately
+allow mixed case plus `.`, `:`, and `-` because external producers supply them.
+Self-hosted records use workspace `default`.
 
 ### Capacity predicate
 
@@ -58,6 +61,10 @@ available = enabled capacity_profile.max_concurrency
 accept only when the enabled inbox targets that profile
 and available >= count(requested new unique lane refs)
 ```
+
+The atomic lookup is scoped to the selected capacity profile. The replay
+harness uses single-profile snapshots for readability; a runtime query must not
+refuse merely because the workspace also contains records for another profile.
 
 `occupied` and `blocked` lane-occupancy records count. `terminal` and
 `cancelled` records do not. A lane appearing both as occupied and actively
