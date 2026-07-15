@@ -1,6 +1,7 @@
 {
   "release_at": "2026-07-14T00:05:00Z",
-  "requested_lane_ref": "batch-capacity:lane-a",
+  "max_concurrency": 1,
+  "requested_lane_ref": "batch-capacity:lane-b",
   "existing_reservation": {
     "schema_version": 1,
     "workspace": "default",

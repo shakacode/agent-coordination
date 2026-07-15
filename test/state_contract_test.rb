@@ -597,7 +597,9 @@ class StateContractTest < Minitest::Test
       case operation
       when "reserve"
         active_refs = active_lane_refs(reservation, replay.fetch("release_at"))
-        outcome = active_refs.include?(replay.fetch("requested_lane_ref")) ? "RESERVATION_REFUSED" : "accepted"
+        requested_refs = [replay.fetch("requested_lane_ref")]
+        fits = capacity_request_fits?(requested_refs, active_refs, replay.fetch("max_concurrency"))
+        outcome = fits ? "accepted" : "RESERVATION_REFUSED"
         outcomes << outcome
       when "release"
         reservation = release_active_lane_holds(
@@ -711,7 +713,7 @@ class StateContractTest < Minitest::Test
     expected_profile_id = replay.dig("capacity_profile", "capacity_profile_id")
     return false unless reservation.fetch("capacity_profile_id") == expected_profile_id
 
-    schema = JSONSchemer.schema(JSON.parse(File.read(CAPACITY_SCHEMA_PATHS.fetch("capacity_reservation"))))
+    schema = capacity_schemas.fetch("capacity_reservation")
     schema.validate(reservation).to_a.empty? &&
       procedural_capacity_reservations_valid?([reservation], replay.fetch("as_of"))
   rescue KeyError, NoMethodError, TypeError
@@ -719,13 +721,12 @@ class StateContractTest < Minitest::Test
   end
 
   def capacity_records_conform?(profile, inboxes, occupancies, reservations, as_of)
-    schemas = CAPACITY_SCHEMA_PATHS.transform_values do |path|
-      JSONSchemer.schema(JSON.parse(File.read(path)))
-    end
+    schemas = capacity_schemas
     schemas.fetch("capacity_profile").validate(profile).to_a.empty? &&
       inboxes.all? { |record| schemas.fetch("inbox").validate(record).to_a.empty? } &&
       occupancies.all? { |record| schemas.fetch("lane_occupancy").validate(record).to_a.empty? } &&
       reservations.all? { |record| schemas.fetch("capacity_reservation").validate(record).to_a.empty? } &&
+      capacity_logical_keys_unique?(inboxes, occupancies, reservations) &&
       procedural_capacity_reservations_valid?(reservations, as_of) &&
       consumed_holds_have_occupancy?(reservations, occupancies)
   end
