@@ -155,6 +155,18 @@ class PackagingTest < Minitest::Test
     assert_match(/demo.*does not write remote state/i, changelog)
   end
 
+  def test_unreleased_added_changelog_documents_terminal_closeout_and_launch_prompt
+    changelog = File.read(File.join(ROOT, "CHANGELOG.md"))
+    added = changelog[/^## \[Unreleased\].*?^### Added\n\n(.*?)(?=^### |\z)/m, 1]
+
+    refute_nil added
+    added = added.gsub(/\s+/, " ")
+    assert_match(/ordinary records remain v1.*`lane_closed`.*v2/i, added)
+    assert_match(/`release --terminal`.*claim reconciliation.*batch completion/i, added)
+    assert_match(/`register-batch --launch-prompt PATH\|-`.*files or stdin/i, added)
+    assert_match(/launch prompt.*invalid input.*no state write/i, added)
+  end
+
   def test_protocol_curl_walkthrough_uses_placeholders_and_worker_preconditions
     docs_path = File.join(ROOT, "docs/protocol-curl.md")
     flunk "docs/protocol-curl.md is missing" unless File.file?(docs_path)

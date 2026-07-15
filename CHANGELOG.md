@@ -16,6 +16,12 @@ when releases begin.
 - Archive-first state retention with `agent-coord gc`, explicit dry-run/execute
   modes, 7-day hot and 30-day archive defaults, synthetic-state markers,
   terminal event compaction, local/HTTP parity, and a graveyard replay harness.
+- Terminal lane closeout semantics where ordinary records remain v1 and
+  `lane_closed` events use v2, with atomic `release --terminal` claim
+  reconciliation and automatic batch completion.
+- `register-batch --launch-prompt PATH|-` support for exact launch prompt
+  capture from files or stdin, with controlled invalid input failures that
+  perform no state writes.
 - A clearly labeled zero-config local-store default for single-machine
   coordination; shared or multi-machine coordination still requires explicit
   HTTP configuration.
