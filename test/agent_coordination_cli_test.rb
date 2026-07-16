@@ -2101,6 +2101,283 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     assert_includes status.stdout, "3969"
   end
 
+  def test_heartbeat_records_environment_machine_and_codex_session_identity
+    secret = "secret-token-value-do-not-leak"
+    result = run_agent_coord(
+      "heartbeat", "--agent-id", "worker-identity", "--repo", "shakacode/react_on_rails", "--target", "62",
+      env: {
+        "AGENT_COORD_MACHINE_ID" => "m5",
+        "CODEX_THREAD_ID" => "codex-thread-42",
+        "AGENT_COORD_API_TOKEN" => secret
+      }
+    )
+
+    assert_equal 0, result.status.exitstatus, result.stderr
+    raw = File.read(File.join(@state_root, "heartbeats", "worker-identity.json"))
+    heartbeat = JSON.parse(raw)
+    assert_equal "m5", heartbeat.fetch("machine_id")
+    assert_equal "codex-thread-42", heartbeat.fetch("session_id")
+    assert_equal "codex_thread_id", heartbeat.fetch("session_source")
+    refute_includes raw, secret
+    refute_includes result.stdout + result.stderr, secret
+
+    status = run_agent_coord("status", "--json")
+    assert_equal 0, status.status.exitstatus, status.stderr
+    projected = JSON.parse(status.stdout).fetch("heartbeats").first
+    assert_equal "m5", projected.fetch("machine_id")
+    assert_equal "codex-thread-42", projected.fetch("session_id")
+    assert_equal "codex_thread_id", projected.fetch("session_source")
+  end
+
+  def test_heartbeat_prefers_explicit_session_id_over_codex_thread_id
+    result = run_agent_coord(
+      "heartbeat", "--agent-id", "worker-identity",
+      env: {
+        "AGENT_COORD_MACHINE_ID" => "m1-codex",
+        "AGENT_COORD_SESSION_ID" => "explicit-run-7",
+        "CODEX_THREAD_ID" => "codex-thread-42"
+      }
+    )
+
+    assert_equal 0, result.status.exitstatus, result.stderr
+    heartbeat = JSON.parse(File.read(File.join(@state_root, "heartbeats", "worker-identity.json")))
+    assert_equal "m1-codex", heartbeat.fetch("machine_id")
+    assert_equal "explicit-run-7", heartbeat.fetch("session_id")
+    assert_equal "agent_coord_session_id", heartbeat.fetch("session_source")
+  end
+
+  def test_heartbeat_without_identity_environment_omits_identity_fields
+    result = run_agent_coord(
+      "heartbeat", "--agent-id", "worker-identity",
+      env: { "AGENT_COORD_MACHINE_ID" => "  ", "AGENT_COORD_SESSION_ID" => "", "CODEX_THREAD_ID" => " " }
+    )
+
+    assert_equal 0, result.status.exitstatus, result.stderr
+    heartbeat = JSON.parse(File.read(File.join(@state_root, "heartbeats", "worker-identity.json")))
+    %w[machine_id session_id session_source].each do |field|
+      refute heartbeat.key?(field), "expected #{field} to be absent"
+    end
+  end
+
+  def test_heartbeat_renewal_preserves_identity_until_new_environment_overrides_it
+    first = run_agent_coord(
+      "heartbeat", "--agent-id", "worker-identity",
+      env: { "AGENT_COORD_MACHINE_ID" => "m5", "CODEX_THREAD_ID" => "codex-thread-42" }
+    )
+    assert_equal 0, first.status.exitstatus, first.stderr
+
+    renewal = run_agent_coord("heartbeat", "--agent-id", "worker-identity")
+    assert_equal 0, renewal.status.exitstatus, renewal.stderr
+    heartbeat = JSON.parse(File.read(File.join(@state_root, "heartbeats", "worker-identity.json")))
+    assert_equal "m5", heartbeat.fetch("machine_id")
+    assert_equal "codex-thread-42", heartbeat.fetch("session_id")
+    assert_equal "codex_thread_id", heartbeat.fetch("session_source")
+
+    takeover = run_agent_coord(
+      "heartbeat", "--agent-id", "worker-identity",
+      env: { "AGENT_COORD_MACHINE_ID" => "m1-codex", "AGENT_COORD_SESSION_ID" => "explicit-run-7" }
+    )
+    assert_equal 0, takeover.status.exitstatus, takeover.stderr
+    heartbeat = JSON.parse(File.read(File.join(@state_root, "heartbeats", "worker-identity.json")))
+    assert_equal "m1-codex", heartbeat.fetch("machine_id")
+    assert_equal "explicit-run-7", heartbeat.fetch("session_id")
+    assert_equal "agent_coord_session_id", heartbeat.fetch("session_source")
+  end
+
+  def test_claim_and_release_record_environment_identity
+    identity_env = { "AGENT_COORD_MACHINE_ID" => "m5", "CODEX_THREAD_ID" => "codex-thread-42" }
+    claim = run_agent_coord(
+      "claim", "--agent-id", "worker-identity", "--repo", "shakacode/react_on_rails", "--target", "62",
+      env: identity_env
+    )
+    assert_equal 0, claim.status.exitstatus, claim.stderr
+
+    claim_path = File.join(@state_root, "claims", "shakacode", "react_on_rails", "62.json")
+    claim_payload = JSON.parse(File.read(claim_path))
+    assert_equal "m5", claim_payload.fetch("machine_id")
+    assert_equal "codex-thread-42", claim_payload.fetch("session_id")
+    assert_equal "codex_thread_id", claim_payload.fetch("session_source")
+
+    status = run_agent_coord("status", "--repo", "shakacode/react_on_rails", "--target", "62", "--json")
+    assert_equal 0, status.status.exitstatus, status.stderr
+    projected = JSON.parse(status.stdout).fetch("claims").first
+    assert_equal "m5", projected.fetch("machine_id")
+    assert_equal "codex-thread-42", projected.fetch("session_id")
+
+    release = run_agent_coord(
+      "release", "--agent-id", "worker-identity", "--repo", "shakacode/react_on_rails", "--target", "62"
+    )
+    assert_equal 0, release.status.exitstatus, release.stderr
+    released_payload = JSON.parse(File.read(claim_path))
+    assert_equal "released", released_payload.fetch("status")
+    assert_equal "m5", released_payload.fetch("machine_id")
+    assert_equal "codex-thread-42", released_payload.fetch("session_id")
+  end
+
+  def test_terminal_release_uses_environment_machine_id_for_closed_by
+    write_batch(
+      "batch-identity",
+      lanes: [{ "name" => "code", "owner" => "worker-a", "targets" => ["62"] }]
+    )
+    identity_env = { "AGENT_COORD_MACHINE_ID" => "m5", "CODEX_THREAD_ID" => "codex-thread-42" }
+    claim = run_agent_coord(
+      "claim", "--agent-id", "worker-a", "--repo", "shakacode/react_on_rails", "--target", "62",
+      "--batch-id", "batch-identity", "--branch", "jg-codex/identity", "--host", "codex",
+      env: identity_env
+    )
+    assert_equal 0, claim.status.exitstatus, claim.stderr
+
+    release = run_agent_coord(
+      "release", "--agent-id", "worker-a", "--repo", "shakacode/react_on_rails", "--target", "62",
+      "--terminal", "done", "--pr-state", "merged",
+      env: identity_env
+    )
+    assert_equal 0, release.status.exitstatus, release.stderr
+
+    event_path = Dir.glob(File.join(@state_root, "events", "batch-identity", "*.json")).fetch(0)
+    event = JSON.parse(File.read(event_path))
+    assert_equal({ "agent_id" => "worker-a", "machine" => "m5" }, event.fetch("closed_by"))
+    assert_equal "m5", event.fetch("machine_id")
+    assert_equal "codex-thread-42", event.fetch("session_id")
+    assert_equal "codex_thread_id", event.fetch("session_source")
+    contract = JSONSchemer.schema(JSON.parse(File.read(File.join(ROOT, "contracts", "state-schema-v2.json"))))
+    assert_empty contract.validate(event).to_a
+
+    claim_payload = JSON.parse(File.read(File.join(@state_root, "claims", "shakacode", "react_on_rails", "62.json")))
+    assert_equal({ "agent_id" => "worker-a", "machine" => "m5" }, claim_payload.fetch("closed_by"))
+
+    status = run_agent_coord("status", "--batch-id", "batch-identity", "--json")
+    assert_equal 0, status.status.exitstatus, status.stderr
+    status_event = JSON.parse(status.stdout).fetch("events").first
+    assert_equal "m5", status_event.fetch("machine_id")
+    assert_equal "codex-thread-42", status_event.fetch("session_id")
+  end
+
+  def test_deep_doctor_reports_environment_identity_for_local_backend
+    identity_env = {
+      "AGENT_COORD_MACHINE_ID" => "m5",
+      "AGENT_COORD_SESSION_ID" => "explicit-run-7",
+      "AGENT_COORD_API_TOKEN" => "secret-token-value-do-not-leak"
+    }
+    json_result = run_agent_coord("doctor", "--deep", "--json", env: identity_env)
+
+    assert_equal 0, json_result.status.exitstatus, json_result.stderr
+    identity = JSON.parse(json_result.stdout).fetch("environment_identity")
+    assert_equal AgentCoord::VERSION, identity.fetch("client_version")
+    assert_equal "m5", identity.fetch("machine_id")
+    assert_equal "explicit-run-7", identity.fetch("session_id")
+    assert_equal "agent_coord_session_id", identity.fetch("session_source")
+    assert_nil identity.fetch("token_machine")
+    assert_equal "unverified", identity.fetch("machine_match")
+    refute_includes json_result.stdout + json_result.stderr, "secret-token-value-do-not-leak"
+
+    text_result = run_agent_coord("doctor", "--deep", env: identity_env)
+    assert_equal 0, text_result.status.exitstatus, text_result.stderr
+    assert_includes text_result.stdout, "machine_id: m5"
+    assert_includes text_result.stdout, "session_id: explicit-run-7"
+    assert_includes text_result.stdout, "session_source: agent_coord_session_id"
+    assert_includes text_result.stdout, "machine_match: unverified"
+    refute_includes text_result.stdout + text_result.stderr, "secret-token-value-do-not-leak"
+  end
+
+  def test_deep_doctor_without_identity_environment_reports_unset_session
+    result = run_agent_coord("doctor", "--deep", "--json")
+
+    assert_equal 0, result.status.exitstatus, result.stderr
+    identity = JSON.parse(result.stdout).fetch("environment_identity")
+    assert_nil identity.fetch("machine_id")
+    assert_nil identity.fetch("session_id")
+    assert_equal "unset", identity.fetch("session_source")
+    assert_equal "unverified", identity.fetch("machine_match")
+  end
+
+  def test_lightweight_doctor_omits_environment_identity_for_stable_output
+    result = run_agent_coord("doctor", "--json", env: { "AGENT_COORD_MACHINE_ID" => "m5" })
+
+    assert_equal 0, result.status.exitstatus, result.stderr
+    refute JSON.parse(result.stdout).key?("environment_identity")
+
+    text_result = run_agent_coord("doctor", env: { "AGENT_COORD_MACHINE_ID" => "m5" })
+    assert_equal 0, text_result.status.exitstatus, text_result.stderr
+    refute_includes text_result.stdout, "machine_id:"
+  end
+
+  def test_doctor_deep_http_reports_machine_match_and_token_identity
+    with_identity_env("AGENT_COORD_MACHINE_ID" => "m5", "CODEX_THREAD_ID" => "codex-thread-42") do
+      stdout = StringIO.new
+      runner = doctor_identity_runner(stdout, token_machine: "m5")
+
+      assert_equal 0, runner.run
+      payload = JSON.parse(stdout.string)
+      assert_equal "ok", payload.fetch("status")
+      assert_equal "m5", payload.dig("identity", "machine")
+      identity = payload.fetch("environment_identity")
+      assert_equal "m5", identity.fetch("machine_id")
+      assert_equal "codex-thread-42", identity.fetch("session_id")
+      assert_equal "codex_thread_id", identity.fetch("session_source")
+      assert_equal "m5", identity.fetch("token_machine")
+      assert_equal "match", identity.fetch("machine_match")
+    end
+  end
+
+  def test_doctor_deep_http_fails_on_machine_identity_mismatch
+    with_identity_env("AGENT_COORD_MACHINE_ID" => "m5") do
+      stdout = StringIO.new
+      runner = doctor_identity_runner(stdout, token_machine: "m1-codex")
+
+      error = assert_raises(AgentCoord::OperationalError) { runner.run }
+
+      assert_equal AgentCoord::EXIT_OPERATIONAL, error.exit_code
+      assert_includes error.message, "machine identity mismatch"
+      assert_includes error.message, "AGENT_COORD_MACHINE_ID=m5"
+      assert_includes error.message, "m1-codex"
+      payload = JSON.parse(stdout.string)
+      assert_equal "error", payload.fetch("status")
+      identity = payload.fetch("environment_identity")
+      assert_equal "mismatch", identity.fetch("machine_match")
+      assert_equal "m1-codex", identity.fetch("token_machine")
+    end
+  end
+
+  def test_doctor_deep_http_without_environment_machine_reports_unverified
+    with_identity_env({}) do
+      stdout = StringIO.new
+      runner = doctor_identity_runner(stdout, token_machine: "m5")
+
+      assert_equal 0, runner.run
+      identity = JSON.parse(stdout.string).fetch("environment_identity")
+      assert_nil identity.fetch("machine_id")
+      assert_equal "unset", identity.fetch("session_source")
+      assert_equal "m5", identity.fetch("token_machine")
+      assert_equal "unverified", identity.fetch("machine_match")
+    end
+  end
+
+  def doctor_identity_runner(stdout, token_machine:)
+    store = Class.new do
+      def initialize(machine)
+        @machine = machine
+      end
+
+      def verify_layout!(_prefixes); end
+
+      def list_json(_prefix)
+        []
+      end
+
+      def whoami
+        { "machine" => @machine, "read_prefixes" => ["*"], "write_prefixes" => ["*"] }
+      end
+    end.new(token_machine)
+    runner = AgentCoord::Runner.new(
+      ["doctor", "--deep", "--api-url", "https://coordination.invalid", "--json"],
+      stdout:, stderr: StringIO.new
+    )
+    runner.define_singleton_method(:build_store) { |_options| store }
+    runner.define_singleton_method(:close_store) { |_store| nil }
+    runner
+  end
+
   def test_status_classifies_heartbeat_liveness_from_timestamps
     now = Time.now.utc
     write_heartbeat(
@@ -4625,12 +4902,16 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
   end
 
   CommandResult = Struct.new(:stdout, :stderr, :status, keyword_init: true)
+  IDENTITY_ENV_KEYS = %w[AGENT_COORD_MACHINE_ID AGENT_COORD_SESSION_ID CODEX_THREAD_ID].freeze
   COMMAND_ENV = {
     "AGENT_COORD_API_TOKEN" => nil,
     "AGENT_COORD_API_URL" => nil,
     "AGENT_COORD_BACKEND" => nil,
+    "AGENT_COORD_MACHINE_ID" => nil,
+    "AGENT_COORD_SESSION_ID" => nil,
     "AGENT_COORD_STATE_ROOT" => nil,
-    "AGENT_COORD_STATUS_STATE_ROOT" => nil
+    "AGENT_COORD_STATUS_STATE_ROOT" => nil,
+    "CODEX_THREAD_ID" => nil
   }.freeze
 
   FixedClock = Struct.new(:time) do
@@ -5269,10 +5550,19 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     File.write(full_path, "#{JSON.pretty_generate(payload)}\n")
   end
 
-  def run_agent_coord(*, state_root: @state_root, stdin_data: nil)
-    env = {}
-    env["AGENT_COORD_STATE_ROOT"] = state_root if state_root
-    run_command(env, "ruby", BIN, *, stdin_data: stdin_data)
+  def run_agent_coord(*, state_root: @state_root, stdin_data: nil, env: {})
+    merged_env = {}
+    merged_env["AGENT_COORD_STATE_ROOT"] = state_root if state_root
+    run_command(merged_env.merge(env), "ruby", BIN, *, stdin_data: stdin_data)
+  end
+
+  def with_identity_env(values)
+    saved = IDENTITY_ENV_KEYS.to_h { |key| [key, ENV.fetch(key, nil)] }
+    IDENTITY_ENV_KEYS.each { |key| ENV.delete(key) }
+    values.each { |key, value| ENV[key] = value }
+    yield
+  ensure
+    saved.each { |key, value| value.nil? ? ENV.delete(key) : ENV[key] = value }
   end
 
   def run_command(*args, stdin_data: nil)

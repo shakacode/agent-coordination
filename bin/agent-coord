@@ -34,6 +34,15 @@ module AgentCoord
   DEFAULT_SYNTHETIC_HOT_DAYS = 1
   MAX_ARCHIVE_STATE_BYTES = 1024 * 1024
   STATUS_STATE_ROOT_ENV = "AGENT_COORD_STATUS_STATE_ROOT"
+  MACHINE_ID_ENV = "AGENT_COORD_MACHINE_ID"
+  SESSION_ID_ENV = "AGENT_COORD_SESSION_ID"
+  CODEX_THREAD_ID_ENV = "CODEX_THREAD_ID"
+  SESSION_SOURCE_AGENT_COORD = "agent_coord_session_id"
+  SESSION_SOURCE_CODEX = "codex_thread_id"
+  SESSION_SOURCE_UNSET = "unset"
+  MACHINE_MATCH_MATCH = "match"
+  MACHINE_MATCH_MISMATCH = "mismatch"
+  MACHINE_MATCH_UNVERIFIED = "unverified"
   JSON_PREFIXES = %w[claims heartbeats batches].freeze
   STATE_PREFIXES = (JSON_PREFIXES + %w[events archive]).freeze
   STATE_PATH_PATTERN = %r{\A(?:
@@ -70,15 +79,18 @@ module AgentCoord
     pr_state evidence_url
   ].freeze
   STATUS_CLAIM_METADATA_FIELDS = %w[
-    batch_id thread_handle chat_handle host pr_url dashboard_url operator phase generation instance_id
+    batch_id thread_handle chat_handle host machine_id session_id session_source pr_url dashboard_url operator
+    phase generation instance_id
     release_mode handoff_to handoff_note terminal pr_state evidence_url workspace closed_by synthetic synthetic_kind
   ].freeze
   STATUS_HEARTBEAT_METADATA_FIELDS = %w[
-    batch_id branch thread_handle chat_handle host pr_url dashboard_url operator phase generation instance_id
+    batch_id branch thread_handle chat_handle host machine_id session_id session_source pr_url dashboard_url
+    operator phase generation instance_id
     synthetic synthetic_kind
   ].freeze
   STATUS_EVENT_METADATA_FIELDS = %w[
-    event_id lane agent_id repo target branch status message thread_handle chat_handle host pr_url dashboard_url
+    event_id lane agent_id repo target branch status message thread_handle chat_handle host machine_id session_id
+    session_source pr_url dashboard_url
     operator phase generation instance_id release_mode handoff_to handoff_note terminal pr_state evidence_url
     workspace closed_by
     synthetic synthetic_kind
@@ -1284,6 +1296,7 @@ module AgentCoord
       payload = preserved_payload(existing, claim_preserved_fields(existing, options))
                 .merge(claim_updates)
                 .merge(metadata_payload(options))
+                .merge(environment_identity_payload)
                 .compact
 
       begin
@@ -1321,6 +1334,7 @@ module AgentCoord
         "expires_at" => timestamp(now)
       }
       payload = existing.data.merge(release_updates).merge(metadata_payload(options))
+                        .merge(environment_identity_payload)
       payload = without_handoff_payload(payload)
       payload = payload.merge(handoff_payload(options)) if handoff_release?(options)
       payload["branch"] = options[:branch] if options[:branch]
@@ -1400,6 +1414,11 @@ module AgentCoord
       payload = doctor_payload(doctor_options, backend_kind, options[:deep])
       payload["resource_checks"] = resource_checks if resource_checks
       payload["identity"] = identity if identity
+      environment_identity = options[:deep] ? environment_identity_report(identity) : nil
+      if environment_identity
+        payload["environment_identity"] = environment_identity
+        payload["status"] = "error" if machine_identity_mismatch?(environment_identity)
+      end
       unless section_notes.empty?
         payload["degraded"] = section_notes.values.uniq
         payload["section_notes"] = section_notes
@@ -1407,9 +1426,47 @@ module AgentCoord
       emit_payload(payload, options) do
         render_doctor_text(payload, doctor_options, section_notes)
       end
+      raise_machine_identity_mismatch!(environment_identity) if environment_identity
       0
     ensure
       close_store(store)
+    end
+
+    # Structured non-secret machine/session attribution for doctor consumers.
+    # token_machine comes from /v1/whoami when the deep HTTP doctor ran; the
+    # environment tuple is metadata only and never carries token values.
+    def environment_identity_report(token_identity)
+      session_id, session_source = AgentCoord.environment_session_identity
+      machine_id = AgentCoord.environment_machine_id
+      token_machine = token_identity && token_identity["machine"].to_s
+      token_machine = nil if token_machine.to_s.empty?
+      {
+        "client_version" => VERSION,
+        "machine_id" => machine_id,
+        "session_id" => session_id,
+        "session_source" => session_source,
+        "token_machine" => token_machine,
+        "machine_match" => machine_match_status(machine_id, token_machine)
+      }
+    end
+
+    def machine_match_status(machine_id, token_machine)
+      return MACHINE_MATCH_UNVERIFIED unless machine_id && token_machine
+
+      machine_id == token_machine ? MACHINE_MATCH_MATCH : MACHINE_MATCH_MISMATCH
+    end
+
+    def machine_identity_mismatch?(environment_identity)
+      environment_identity.fetch("machine_match") == MACHINE_MATCH_MISMATCH
+    end
+
+    def raise_machine_identity_mismatch!(environment_identity)
+      return unless machine_identity_mismatch?(environment_identity)
+
+      raise OperationalError,
+            "machine identity mismatch: #{MACHINE_ID_ENV}=#{environment_identity.fetch('machine_id')} does not " \
+            "match the authenticated backend token machine #{environment_identity.fetch('token_machine')}; " \
+            "the wrong machine token or #{MACHINE_ID_ENV} value may be installed on this machine"
     end
 
     def stack_doctor(options)
@@ -1613,8 +1670,9 @@ module AgentCoord
       @stdout.puts "doctor_prefix: #{payload.fetch('doctor_prefix')}" if payload["doctor_prefix"]
       @stdout.puts "state_root: #{options[:state_root] || '-'}"
       @stdout.puts "mode: #{payload.fetch('deep') ? 'deep' : 'lightweight'}"
-      @stdout.puts "status: ok"
+      @stdout.puts "status: #{payload.fetch('status')}"
       render_doctor_http_details(payload)
+      render_doctor_environment_identity(payload)
       return if section_notes.empty?
 
       @stdout.puts "degraded"
@@ -1632,6 +1690,16 @@ module AgentCoord
       @stdout.puts "machine: #{identity.fetch('machine')}"
       @stdout.puts "read_prefixes: #{format_scope_list(identity.fetch('read_prefixes'))}"
       @stdout.puts "write_prefixes: #{format_scope_list(identity.fetch('write_prefixes'))}"
+    end
+
+    def render_doctor_environment_identity(payload)
+      identity = payload["environment_identity"]
+      return unless identity
+
+      @stdout.puts "machine_id: #{identity.fetch('machine_id') || '-'}"
+      @stdout.puts "session_id: #{identity.fetch('session_id') || '-'}"
+      @stdout.puts "session_source: #{identity.fetch('session_source')}"
+      @stdout.puts "machine_match: #{identity.fetch('machine_match')}"
     end
 
     def doctor_backend_kind(options)
@@ -1910,6 +1978,7 @@ module AgentCoord
         preserved_payload(existing, heartbeat_preserved_fields(existing, options))
           .merge(payload)
           .merge(metadata_payload(options))
+          .merge(environment_identity_payload)
           .compact
       end
       @stdout.puts "heartbeat #{options[:agent_id]} #{timestamp(now)}"
@@ -1927,6 +1996,16 @@ module AgentCoord
         option_name = field.to_sym
         metadata[field] = options[option_name] if options.key?(option_name) && !options[option_name].nil?
       end
+    end
+
+    # Non-secret machine/session attribution resolved from the environment for
+    # every coordination write. Omitted fields leave any previously recorded
+    # attribution preserved by the metadata preservation lists.
+    def environment_identity_payload
+      session_id, session_source = AgentCoord.environment_session_identity
+      payload = { "machine_id" => AgentCoord.environment_machine_id, "session_id" => session_id }.compact
+      payload["session_source"] = session_source unless session_id.nil?
+      payload
     end
 
     def handoff_payload(options)
@@ -2187,6 +2266,7 @@ module AgentCoord
       payload["status"] = options[:status] if options[:status_given]
       payload.merge(metadata_payload(options))
              .merge(handoff_payload(options))
+             .merge(environment_identity_payload)
              .compact
     end
 
@@ -2250,7 +2330,7 @@ module AgentCoord
     def closed_by_payload(options)
       {
         "agent_id" => options[:agent_id] || options.fetch("agent_id"),
-        "machine" => options[:host] || options["host"] || "UNKNOWN"
+        "machine" => AgentCoord.environment_machine_id || options[:host] || options["host"] || "UNKNOWN"
       }
     end
 
@@ -4072,6 +4152,30 @@ module AgentCoord
     return unless path.to_s.empty? || path.include?("..") || path.start_with?("/") || path.split("/").any?(&:empty?)
 
     raise PathValidationError, "unsafe state path: #{path}"
+  end
+
+  # Machine/session identity is non-secret attribution metadata resolved from the
+  # environment at call time; machine-token authentication remains authoritative
+  # for access control.
+  def self.environment_machine_id
+    environment_identity_value(MACHINE_ID_ENV)
+  end
+
+  # Session resolution order: AGENT_COORD_SESSION_ID, then CODEX_THREAD_ID, then
+  # unset. Never reuses a persisted session id.
+  def self.environment_session_identity
+    explicit = environment_identity_value(SESSION_ID_ENV)
+    return [explicit, SESSION_SOURCE_AGENT_COORD] if explicit
+
+    codex = environment_identity_value(CODEX_THREAD_ID_ENV)
+    return [codex, SESSION_SOURCE_CODEX] if codex
+
+    [nil, SESSION_SOURCE_UNSET]
+  end
+
+  def self.environment_identity_value(name)
+    value = ENV.fetch(name, "").strip
+    value.empty? ? nil : value
   end
 
   def self.state_record_path?(path)
