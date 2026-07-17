@@ -103,6 +103,9 @@ module AgentCoord
   # statuses except abandoned/superseded (they end a lane without completing
   # it), plus legacy synonyms still present in rows written before write-time
   # status coercion existed.
+  # Legacy "released" rows stay excluded: a released claim can mean handoff
+  # without completion, and prematurely unblocking dependents is the riskier
+  # misread of an ambiguous historical row.
   DEPENDENCY_DONE_STATUSES = ((HEARTBEAT_TERMINAL_STATUSES - %w[abandoned superseded]) + %w[complete completed]).freeze
   STATUS_BATCH_METADATA_FIELDS = %w[
     repo objective instructions launch_prompt operator dashboard_url status updated_at registered_at completed_at
