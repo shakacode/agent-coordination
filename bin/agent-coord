@@ -2254,7 +2254,8 @@ module AgentCoord
     rescue Conflict
       existing = store.read_json(path)
       raise OperationalError, "terminal closeout reservation disappeared at #{path}" unless existing
-      unless terminal_payload_semantics(existing.data) == terminal_payload_semantics(requested)
+      unless terminal_conflict_semantics(terminal_payload_semantics(existing.data)) ==
+             terminal_conflict_semantics(terminal_payload_semantics(requested))
         raise Error, "conflicting terminal closeout for lane #{options[:lane]}; first closeout is authoritative"
       end
 
@@ -2521,7 +2522,10 @@ module AgentCoord
 
     def terminal_lane_replay?(lane, payload)
       return false unless lane["terminal"]
-      return true if terminal_lane_semantics(lane) == terminal_payload_semantics(payload)
+      if terminal_conflict_semantics(terminal_lane_semantics(lane)) ==
+         terminal_conflict_semantics(terminal_payload_semantics(payload))
+        return true
+      end
 
       raise Error, "conflicting terminal closeout for lane #{lane_name(lane)}; first closeout is authoritative"
     end
@@ -2546,6 +2550,21 @@ module AgentCoord
         "pr_state" => terminal_payload_value(payload, "pr_state"),
         "evidence_url" => terminal_payload_value(payload, "evidence_url")
       }
+    end
+
+    # Conflict view of the closeout semantics. Machine attribution never
+    # fences a terminal replay: the authoritative first closeout keeps its
+    # recorded machine while AGENT_COORD_MACHINE_ID or --host may appear,
+    # change, or disappear before a retry, so conflict detection compares the
+    # closing agent and the closeout facts only. Claim reconciliation keeps
+    # comparing full record semantics so a legacy claim missing closed_by is
+    # still repaired from the authoritative event.
+    def terminal_conflict_semantics(semantics)
+      semantics.merge("closed_by" => terminal_closer_semantics(semantics["closed_by"]))
+    end
+
+    def terminal_closer_semantics(closed_by)
+      closed_by.is_a?(Hash) ? closed_by.slice("agent_id") : closed_by
     end
 
     def terminal_batch_lane(store, payload, batch: nil)

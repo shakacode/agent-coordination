@@ -4228,7 +4228,6 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     conflicts = {
       "--terminal" => "abandoned",
       "--workspace" => "team-b",
-      "--host" => "claude-code",
       "--pr-url" => "https://github.com/shakacode/react_on_rails/pull/3990",
       "--pr-state" => "closed",
       "--evidence-url" => "https://example.test/evidence/different"
@@ -4242,6 +4241,65 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
       assert_equal 1, Dir.glob(event_glob).length
       assert_equal original_batch, File.read(batch_path)
     end
+
+    host_replay = args.dup
+    host_replay[host_replay.index("--host") + 1] = "claude-code"
+    replayed_from_other_host = run_agent_coord(*host_replay)
+    assert_equal 0, replayed_from_other_host.status.exitstatus, replayed_from_other_host.stderr
+    assert_includes replayed_from_other_host.stdout, "already closed"
+    assert_equal 1, Dir.glob(event_glob).length
+    assert_equal original_batch, File.read(batch_path)
+  end
+
+  def test_terminal_replay_stays_idempotent_when_machine_id_env_appears
+    write_batch(
+      "batch-machine-replay",
+      lanes: [{ "name" => "code", "owner" => "worker-a", "targets" => ["3995"] }]
+    )
+    args = [
+      "record-event", "--batch-id", "batch-machine-replay", "--type", "lane_closed",
+      "--lane", "code", "--agent-id", "worker-a", "--repo", "shakacode/react_on_rails",
+      "--target", "3995", "--host", "codex", "--terminal", "done",
+      "--pr-url", "https://github.com/shakacode/react_on_rails/pull/3995", "--pr-state", "merged"
+    ]
+    first = run_agent_coord(*args)
+    assert_equal 0, first.status.exitstatus, first.stderr
+    event_glob = File.join(@state_root, "events", "batch-machine-replay", "*.json")
+    batch_path = File.join(@state_root, "batches", "batch-machine-replay.json")
+    original_event = File.read(Dir.glob(event_glob).fetch(0))
+    original_batch = File.read(batch_path)
+    assert_equal "codex", JSON.parse(original_event).dig("closed_by", "machine")
+
+    replay = run_agent_coord(*args, env: { "AGENT_COORD_MACHINE_ID" => "m5" })
+
+    assert_equal 0, replay.status.exitstatus, replay.stderr
+    assert_includes replay.stdout, "already closed"
+    assert_equal original_event, File.read(Dir.glob(event_glob).fetch(0))
+    assert_equal original_batch, File.read(batch_path)
+  end
+
+  def test_terminal_replay_stays_idempotent_when_machine_id_env_disappears
+    write_batch(
+      "batch-machine-replay",
+      lanes: [{ "name" => "code", "owner" => "worker-a", "targets" => ["3995"] }]
+    )
+    args = [
+      "record-event", "--batch-id", "batch-machine-replay", "--type", "lane_closed",
+      "--lane", "code", "--agent-id", "worker-a", "--repo", "shakacode/react_on_rails",
+      "--target", "3995", "--host", "codex", "--terminal", "done",
+      "--pr-url", "https://github.com/shakacode/react_on_rails/pull/3995", "--pr-state", "merged"
+    ]
+    first = run_agent_coord(*args, env: { "AGENT_COORD_MACHINE_ID" => "m5" })
+    assert_equal 0, first.status.exitstatus, first.stderr
+    event_glob = File.join(@state_root, "events", "batch-machine-replay", "*.json")
+    original_event = File.read(Dir.glob(event_glob).fetch(0))
+    assert_equal "m5", JSON.parse(original_event).dig("closed_by", "machine")
+
+    replay = run_agent_coord(*args)
+
+    assert_equal 0, replay.status.exitstatus, replay.stderr
+    assert_includes replay.stdout, "already closed"
+    assert_equal original_event, File.read(Dir.glob(event_glob).fetch(0))
   end
 
   def test_terminal_release_replay_is_idempotent_and_keeps_first_closeout
