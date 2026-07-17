@@ -428,7 +428,10 @@ class HttpStoreWriteTest < HttpStoreTestCase
 end
 
 class HttpEnvTestCase < Minitest::Test
+  IDENTITY_ENV_KEYS = %w[AGENT_COORD_MACHINE_ID AGENT_COORD_SESSION_ID CODEX_THREAD_ID].freeze
+
   def with_env(pairs)
+    pairs = IDENTITY_ENV_KEYS.to_h { |key| [key, nil] }.merge(pairs)
     saved = pairs.keys.to_h { |key| [key, ENV.fetch(key, nil)] }
     pairs.each { |key, value| value.nil? ? ENV.delete(key) : ENV[key] = value }
     yield

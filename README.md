@@ -225,6 +225,59 @@ export AGENT_COORD_API_TOKEN=<machine-token>
 agent-coord doctor
 ```
 
+### Machine and session identity
+
+Each machine also exports one static, non-secret machine identifier so
+coordination writes carry machine/session attribution:
+
+```sh
+# M5
+export AGENT_COORD_MACHINE_ID=m5
+
+# M1
+export AGENT_COORD_MACHINE_ID=m1-codex
+```
+
+Session identity resolves in this order and is never reused from a stale
+persistent value:
+
+1. `AGENT_COORD_SESSION_ID` — explicit caller-supplied session or run id
+2. `CODEX_THREAD_ID` — supplied automatically by Codex sessions
+3. unset — writes omit session attribution rather than guessing
+
+Every `claim`, `release`, `heartbeat`, and `record-event` write stamps the
+resolved tuple into the record as `machine_id`, `session_id`, and
+`session_source` (`agent_coord_session_id` or `codex_thread_id`), and
+`status --json` projects the same fields back to consumers. Terminal closeouts
+use `AGENT_COORD_MACHINE_ID` for `closed_by.machine`, falling back to `--host`
+when the variable is unset. Blank values are treated as unset. The tuple is
+atomic per write, in both directions: when a write declares a machine id that
+differs from the record's last recorded machine and resolves no session, the
+stale session fields are cleared rather than paired with the new machine, and
+when a write resolves a session that differs from the record's last recorded
+session without declaring a machine, the stale machine id is cleared rather
+than paired with the new session.
+
+These variables are attribution metadata only: they must never contain token or
+secret values, and machine-token authentication remains authoritative for
+access control. Machine provisioning happens outside this repository — add
+`AGENT_COORD_MACHINE_ID` to each machine's shell profile and to the private
+launchd/systemd env file described below so launch templates propagate the
+tuple to background heartbeats.
+
+`agent-coord doctor --deep` (any backend) reports the resolved tuple in text
+output and under `environment_identity` in `doctor --deep --json`, including
+the session resolution source, the authenticated `token_machine` when the deep
+HTTP doctor ran, and a `machine_match` status of `match`, `mismatch`, or
+`unverified`. The lightweight doctor output is unchanged. When
+`agent-coord doctor --deep` runs against the HTTP backend and
+`AGENT_COORD_MACHINE_ID` does not match the `/v1/whoami` machine, doctor still
+emits its report, then fails with exit code `2`, because a mismatch usually
+means the wrong machine token or machine id is installed. The stack doctor
+carries the same tuple as an `identity.machine` component check: `failed` on a
+mismatch (driving exit `2`), `healthy` on a verified match, and `skipped` when
+no authenticated token machine is available to compare.
+
 Backend selection follows this rule:
 
 1. `--state-root` flag -> `LocalStore`
@@ -270,8 +323,10 @@ exactly one direct backend selector: `--state-root PATH`, `--api-url URL`, or
 resolution, but do not satisfy this machine-contract selector requirement. The
 explicit stack output is the component contract v1: it reports
 `agent-coordination` as `healthy`, `degraded`, or `failed`, with normalized
-checks for CLI version readiness, backend readability, and deep resource
-evidence. Exit codes are `0` for healthy, `1` for degraded, `2` for failed, and
+checks for CLI version readiness, backend readability, deep resource
+evidence, and machine identity (`identity.machine`, which fails on an
+environment-versus-token machine mismatch and is skipped when unverifiable).
+Exit codes are `0` for healthy, `1` for degraded, `2` for failed, and
 `64` for invalid usage. Usage errors emit no JSON. `--stack-json` is strictly
 read-only: it never creates a missing explicit local state root, and reports
 that missing root as a failed component rather than falling back. Omit `--deep`
@@ -593,6 +648,7 @@ install -m 600 /dev/null "$AGENT_COORD_ENV_FILE"
 cat > "$AGENT_COORD_ENV_FILE" <<'EOF'
 AGENT_COORD_API_URL=<worker-url>
 AGENT_COORD_API_TOKEN=<machine-token>
+AGENT_COORD_MACHINE_ID=<machine-id, e.g. m5>
 EOF
 perl -pe 's#__AGENT_ID__#$ENV{AGENT_ID}#g;
           s#__TARGET_REPO__#$ENV{TARGET_REPO}#g;
@@ -609,8 +665,11 @@ launchctl bootstrap "gui/$(id -u)" \
 
 You can also replace the `__PLACEHOLDER__` values manually. Keep the env file
 private (`chmod 600`) and never commit it. The checked-in template loads
-`AGENT_COORD_API_URL` and `AGENT_COORD_API_TOKEN` from that local file instead
-of storing token values in the repository.
+`AGENT_COORD_API_URL`, `AGENT_COORD_API_TOKEN`, and `AGENT_COORD_MACHINE_ID`
+from that local file instead of storing values in the repository. Background
+services read only this env file — a machine id exported solely in a shell
+profile does not reach them, so keep it in the env file for heartbeat
+attribution.
 
 ### Linux systemd --user
 
@@ -634,7 +693,7 @@ systemctl --user enable --now "agent-coord-heartbeat.${AGENT_ID}.service"
 ```
 
 The systemd template loads the same private env file for
-`AGENT_COORD_API_URL` and `AGENT_COORD_API_TOKEN`.
+`AGENT_COORD_API_URL`, `AGENT_COORD_API_TOKEN`, and `AGENT_COORD_MACHINE_ID`.
 
 ## State Layout
 
@@ -667,6 +726,9 @@ does not show fake work.
   "branch": "jg-codex/3969-agent-coord-backend",
   "thread_handle": "batch13-backend-quokka",
   "host": "codex",
+  "machine_id": "m5",
+  "session_id": "019a2f6c-codex-thread",
+  "session_source": "codex_thread_id",
   "operator": "justin",
   "phase": "claimed",
   "generation": 3,
@@ -691,10 +753,15 @@ remains useful for audit and as the fallback when the heartbeat is missing or
 invalid.
 
 Optional lane metadata fields on claims are `thread_handle`, `chat_handle`,
-`host`, `pr_url`, `dashboard_url`, `operator`, `phase`, `generation`, and
-`instance_id`. `release` preserves the existing claim record and the recorded
-holder may update the same metadata fields for terminal states, such as adding a
-final `pr_url` or `phase`.
+`host`, `machine_id`, `session_id`, `session_source`, `pr_url`,
+`dashboard_url`, `operator`, `phase`, `generation`, and `instance_id`.
+`release` preserves the existing claim record and the recorded holder may
+update the same metadata fields for terminal states, such as adding a final
+`pr_url` or `phase`. `machine_id`, `session_id`, and `session_source` come from
+the machine/session identity environment described in
+[Machine and session identity](#machine-and-session-identity); a write without
+that environment preserves the last recorded attribution, and a write that
+declares a different machine without a session clears the stale session fields.
 
 ## Heartbeat Schema
 
@@ -708,6 +775,9 @@ final `pr_url` or `phase`.
   "branch": "jg-codex/3969-agent-coord-backend",
   "thread_handle": "batch13-backend-quokka",
   "host": "codex",
+  "machine_id": "m5",
+  "session_id": "019a2f6c-codex-thread",
+  "session_source": "codex_thread_id",
   "pr_url": "https://github.com/shakacode/react_on_rails/pull/3969",
   "dashboard_url": "https://coord.example.test/batches/batch-2026-06-13/backend",
   "operator": "justin",
@@ -724,9 +794,13 @@ Required fields: `schema_version`, `agent_id`, `status`, `updated_at`,
 `expires_at`.
 
 Optional lane metadata fields on heartbeats are `thread_handle`, `chat_handle`,
-`host`, `pr_url`, `dashboard_url`, `operator`, `phase`, `generation`, and
-`instance_id`. Status readers should treat missing metadata as `UNKNOWN` rather
-than inferring it from branch names or handoff text.
+`host`, `machine_id`, `session_id`, `session_source`, `pr_url`,
+`dashboard_url`, `operator`, `phase`, `generation`, and `instance_id`. Status
+readers should treat missing metadata as `UNKNOWN` rather than inferring it
+from branch names or handoff text. `machine_id`, `session_id`, and
+`session_source` come from the machine/session identity environment; renewals
+without that environment preserve the last recorded attribution, and renewals
+declaring a different machine without a session clear the stale session fields.
 
 Claims and heartbeats may carry `synthetic: true` and a `synthetic_kind` such as
 `simulation` or `smoke`. These markers are protocol metadata: they let `gc`
@@ -782,6 +856,10 @@ an in-place append protocol.
 ```
 
 Required fields: `schema_version`, `event_id`, `batch_id`, `type`, and `at`.
+Events also carry the optional `machine_id`, `session_id`, and
+`session_source` attribution fields when the machine/session identity
+environment is set, and `lane_closed` events resolve `closed_by.machine` from
+`AGENT_COORD_MACHINE_ID` before falling back to `host`.
 Ordinary events retain schema version 1. The explicitly versioned
 `lane_closed` event uses schema version 2 and follows the published contract;
 `version --json` advertises both `schema_version` and
