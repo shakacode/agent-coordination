@@ -18,7 +18,9 @@ when releases begin.
   of pairing halves resolved on different writes; `status --json` projects the
   fields; terminal
   closeouts resolve `closed_by.machine` from the environment before the `--host`
-  fallback; `doctor --deep` reports an `environment_identity` block that
+  fallback, and machine attribution never fences an identical terminal replay
+  (the authoritative first closeout keeps its recorded machine while the
+  variable or `--host` may appear, change, or disappear before a retry); `doctor --deep` reports an `environment_identity` block that
   fails with exit `2` when the environment machine contradicts the
   authenticated `/v1/whoami` token machine; and `doctor --stack-json` carries
   the same comparison as an `identity.machine` component check that fails on a
