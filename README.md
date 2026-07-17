@@ -795,12 +795,72 @@ Required fields: `schema_version`, `agent_id`, `status`, `updated_at`,
 
 Optional lane metadata fields on heartbeats are `thread_handle`, `chat_handle`,
 `host`, `machine_id`, `session_id`, `session_source`, `pr_url`,
-`dashboard_url`, `operator`, `phase`, `generation`, and `instance_id`. Status
-readers should treat missing metadata as `UNKNOWN` rather than inferring it
-from branch names or handoff text. `machine_id`, `session_id`, and
-`session_source` come from the machine/session identity environment; renewals
-without that environment preserve the last recorded attribution, and renewals
-declaring a different machine without a session clear the stale session fields.
+`dashboard_url`, `operator`, `phase`, `generation`, `instance_id`, and
+`status_raw`. Status readers should treat missing metadata as `UNKNOWN` rather
+than inferring it from branch names or handoff text. `machine_id`,
+`session_id`, and `session_source` come from the machine/session identity
+environment; renewals without that environment preserve the last recorded
+attribution, and renewals declaring a different machine without a session
+clear the stale session fields.
+
+### Heartbeat status vocabulary
+
+Heartbeat and ordinary-event `status` values are a canonical enum, normalized
+by the CLI at write time. Multi-word values are snake_case. The machine-
+readable vocabulary, including the alias map, is published by
+`agent-coord config show --json` under `heartbeat_status_vocabulary`.
+
+Working statuses (the lane owner is active or the lane needs attention):
+
+| Status                        | Meaning                                             |
+| ----------------------------- | --------------------------------------------------- |
+| `in_progress`                 | Owner is actively working the lane                  |
+| `blocked`                     | Blocked on an unmet lane dependency                 |
+| `blocked_user_input`          | Blocked on an operator or user decision             |
+| `waiting_on_checks_or_review` | PR up; waiting on external checks or review         |
+| `external_gate_failing`       | An external gate (CI, review bot) is failing        |
+| `no_pr_evidence`              | Closeout audit found no PR evidence; needs triage   |
+| `failed`                      | Work attempt failed; lane needs attention           |
+
+Terminal statuses (the owner is finished and will not renew the heartbeat):
+
+| Status                      | Meaning                                          |
+| --------------------------- | ------------------------------------------------ |
+| `done`                      | Work completed                                   |
+| `merged`                    | PR merged                                        |
+| `ready`                     | Work complete and ready for pickup or merge      |
+| `ready_gates_clean`         | PR ready with gates green, awaiting merge        |
+| `ready_no_merge_authority`  | Work complete; worker lacks merge authority      |
+| `abandoned`                 | Lane abandoned without completing                |
+| `superseded`                | Lane superseded by other work                    |
+
+Write-time normalization first folds case and hyphens (`Done`,
+`waiting-on-checks-or-review`, and `In-Progress` fold to their snake_case
+forms), then applies the known-alias map:
+
+| Alias                                                            | Canonical     |
+| ---------------------------------------------------------------- | ------------- |
+| `complete`, `completed`, `released`                               | `done`        |
+| `ready_to_merge`, `ready_handoff`, `ready_for_coordinator`        | `ready`       |
+| `in_process`, `claimed`, `implementing`, `validating`, `pushing`  | `in_progress` |
+
+When coercion changes the caller's value, the original spelling is preserved
+in `status_raw`. Values that resolve to neither the vocabulary nor the alias
+map are preserved verbatim, copied to `status_raw`, and reported with a
+`warning:` line on stderr; the exit code of an otherwise-successful write does
+not change. `status --json` projects `status_raw` on heartbeats and events. A
+record whose `status` equals its `status_raw` was written with unrecognized
+vocabulary.
+
+Normalization applies where the CLI writes caller-supplied status values: the
+`heartbeat` command and ordinary `record-event` statuses. Claim `status`
+(`active`/`released`), lane-closure `terminal` reasons, and the `released`
+claim-status snapshot on handoff events are separate closed vocabularies
+written by the CLI itself and pass through unchanged. Rows written by older
+CLIs are normalized only when rewritten: dependency gating still accepts the
+legacy `complete`/`completed` synonyms, and `gc` continues to reclaim legacy
+non-canonical rows through dead-heartbeat classification while classifying
+canonical terminal statuses as `terminal_heartbeat`.
 
 Claims and heartbeats may carry `synthetic: true` and a `synthetic_kind` such as
 `simulation` or `smoke`. These markers are protocol metadata: they let `gc`
@@ -866,7 +926,13 @@ Ordinary events retain schema version 1. The explicitly versioned
 `lane_closed_schema_version` so producers do not mislabel unrelated records.
 Lane events should include `lane` and `agent_id` when available. Lane names
 follow the same rules as registered batch lanes: non-empty and no `:`
-characters, because dependency refs split on the last colon. Event ids are
+characters, because dependency refs split on the last colon. An ordinary
+event's optional `status` uses the
+[heartbeat status vocabulary](#heartbeat-status-vocabulary) and is normalized
+the same way at write time, with the caller's original spelling in
+`status_raw` when coercion changed it. Handoff events record the released
+claim's `status` snapshot (`released`) verbatim; that value is claim-status
+vocabulary, not a heartbeat status. Event ids are
 time-sortable and unique per write for ordinary append-only events. A
 `lane_closed` ID is instead stable per batch/lane and begins with
 `lane_closed-`; it is not a chronology key. Consumers should order mixed event
@@ -934,8 +1000,13 @@ Top-level batch metadata such as `repo`, `objective`, `instructions`, `launch_pr
 `operator`, `dashboard_url`, and lane metadata such as `thread_handle`, `chat_handle`,
 `host`, `pr_url`, `dashboard_url`, `operator`, and `phase` are preserved and
 included in JSON status output. A dependency is considered met when the
-referenced lane owner's heartbeat reports a terminal status such as `done`,
-`complete`, `completed`, `merged`, or `ready`. A released claim is preserved for
+referenced lane owner's heartbeat reports a dependency-satisfying terminal
+status: `done`, `merged`, `ready`, `ready_gates_clean`, or
+`ready_no_merge_authority` from the
+[heartbeat status vocabulary](#heartbeat-status-vocabulary), plus the legacy
+`complete`/`completed` synonyms still stored in rows written by older CLIs.
+Terminal `abandoned` and `superseded` heartbeats end a lane without completing
+it and do not unblock dependents. A released claim is preserved for
 auditability and does not unblock dependent lanes by itself. Unmet dependencies
 appear in the lane's `blocked_on` field:
 
