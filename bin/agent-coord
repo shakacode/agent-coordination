@@ -144,6 +144,12 @@ module AgentCoord
     handoff_to handoff_note
   ].freeze
   CLAIM_PRESERVED_FIELDS = (%w[batch_id branch] + STATUS_CLAIM_METADATA_FIELDS).uniq.freeze
+  # status_raw sits in STATUS_HEARTBEAT_METADATA_FIELDS for status --json
+  # projection only. Its resulting membership here is inert: heartbeat writes
+  # merge status_attribution_payload after the preserved payload, so the
+  # current write always decides status_raw and a preserved value never
+  # survives. Do not rely on status_raw preservation when reordering that
+  # merge chain.
   HEARTBEAT_PRESERVED_FIELDS = (HEARTBEAT_TARGET_FIELDS + STATUS_HEARTBEAT_METADATA_FIELDS).uniq.freeze
   EXIT_USAGE = 1
   STACK_EXIT_USAGE = 64
