@@ -2184,6 +2184,111 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     assert_equal "agent_coord_session_id", heartbeat.fetch("session_source")
   end
 
+  def test_cross_machine_heartbeat_renewal_clears_stale_session_identity
+    first = run_agent_coord(
+      "heartbeat", "--agent-id", "worker-identity",
+      env: { "AGENT_COORD_MACHINE_ID" => "m5", "CODEX_THREAD_ID" => "codex-thread-42" }
+    )
+    assert_equal 0, first.status.exitstatus, first.stderr
+
+    renewal = run_agent_coord(
+      "heartbeat", "--agent-id", "worker-identity",
+      env: { "AGENT_COORD_MACHINE_ID" => "m1-codex" }
+    )
+    assert_equal 0, renewal.status.exitstatus, renewal.stderr
+    heartbeat = JSON.parse(File.read(File.join(@state_root, "heartbeats", "worker-identity.json")))
+    assert_equal "m1-codex", heartbeat.fetch("machine_id")
+    %w[session_id session_source].each do |field|
+      refute heartbeat.key?(field), "expected stale #{field} to be cleared on a machine change"
+    end
+  end
+
+  def test_same_machine_heartbeat_renewal_preserves_session_identity
+    first = run_agent_coord(
+      "heartbeat", "--agent-id", "worker-identity",
+      env: { "AGENT_COORD_MACHINE_ID" => "m5", "CODEX_THREAD_ID" => "codex-thread-42" }
+    )
+    assert_equal 0, first.status.exitstatus, first.stderr
+
+    renewal = run_agent_coord(
+      "heartbeat", "--agent-id", "worker-identity",
+      env: { "AGENT_COORD_MACHINE_ID" => "m5" }
+    )
+    assert_equal 0, renewal.status.exitstatus, renewal.stderr
+    heartbeat = JSON.parse(File.read(File.join(@state_root, "heartbeats", "worker-identity.json")))
+    assert_equal "m5", heartbeat.fetch("machine_id")
+    assert_equal "codex-thread-42", heartbeat.fetch("session_id")
+    assert_equal "codex_thread_id", heartbeat.fetch("session_source")
+  end
+
+  def test_cross_machine_heartbeat_renewal_with_session_writes_the_new_tuple
+    first = run_agent_coord(
+      "heartbeat", "--agent-id", "worker-identity",
+      env: { "AGENT_COORD_MACHINE_ID" => "m5", "CODEX_THREAD_ID" => "codex-thread-42" }
+    )
+    assert_equal 0, first.status.exitstatus, first.stderr
+
+    renewal = run_agent_coord(
+      "heartbeat", "--agent-id", "worker-identity",
+      env: { "AGENT_COORD_MACHINE_ID" => "m1-codex", "AGENT_COORD_SESSION_ID" => "explicit-run-7" }
+    )
+    assert_equal 0, renewal.status.exitstatus, renewal.stderr
+    heartbeat = JSON.parse(File.read(File.join(@state_root, "heartbeats", "worker-identity.json")))
+    assert_equal "m1-codex", heartbeat.fetch("machine_id")
+    assert_equal "explicit-run-7", heartbeat.fetch("session_id")
+    assert_equal "agent_coord_session_id", heartbeat.fetch("session_source")
+  end
+
+  def test_cross_machine_claim_renewal_clears_stale_session_identity
+    claim = run_agent_coord(
+      "claim", "--agent-id", "worker-identity", "--repo", "shakacode/react_on_rails", "--target", "62",
+      env: { "AGENT_COORD_MACHINE_ID" => "m5", "CODEX_THREAD_ID" => "codex-thread-42" }
+    )
+    assert_equal 0, claim.status.exitstatus, claim.stderr
+
+    renewal = run_agent_coord(
+      "claim", "--agent-id", "worker-identity", "--repo", "shakacode/react_on_rails", "--target", "62",
+      env: { "AGENT_COORD_MACHINE_ID" => "m1-codex" }
+    )
+    assert_equal 0, renewal.status.exitstatus, renewal.stderr
+    claim_payload = JSON.parse(File.read(File.join(@state_root, "claims", "shakacode", "react_on_rails", "62.json")))
+    assert_equal "m1-codex", claim_payload.fetch("machine_id")
+    %w[session_id session_source].each do |field|
+      refute claim_payload.key?(field), "expected stale #{field} to be cleared on a machine change"
+    end
+  end
+
+  def test_cross_machine_terminal_release_keeps_claim_and_event_identity_consistent
+    write_batch(
+      "batch-identity",
+      lanes: [{ "name" => "code", "owner" => "worker-a", "targets" => ["62"] }]
+    )
+    claim = run_agent_coord(
+      "claim", "--agent-id", "worker-a", "--repo", "shakacode/react_on_rails", "--target", "62",
+      "--batch-id", "batch-identity", "--host", "codex",
+      env: { "AGENT_COORD_MACHINE_ID" => "m5", "CODEX_THREAD_ID" => "codex-thread-42" }
+    )
+    assert_equal 0, claim.status.exitstatus, claim.stderr
+
+    release = run_agent_coord(
+      "release", "--agent-id", "worker-a", "--repo", "shakacode/react_on_rails", "--target", "62",
+      "--terminal", "done", "--pr-state", "merged",
+      env: { "AGENT_COORD_MACHINE_ID" => "m1-codex" }
+    )
+    assert_equal 0, release.status.exitstatus, release.stderr
+
+    claim_payload = JSON.parse(File.read(File.join(@state_root, "claims", "shakacode", "react_on_rails", "62.json")))
+    event = JSON.parse(File.read(Dir.glob(File.join(@state_root, "events", "batch-identity", "*.json")).fetch(0)))
+    assert_equal "m1-codex", claim_payload.fetch("machine_id")
+    assert_equal "m1-codex", event.fetch("machine_id")
+    assert_equal({ "agent_id" => "worker-a", "machine" => "m1-codex" }, event.fetch("closed_by"))
+    assert_equal event.fetch("closed_by"), claim_payload.fetch("closed_by")
+    %w[session_id session_source].each do |field|
+      refute claim_payload.key?(field), "expected stale claim #{field} to be cleared on a machine change"
+      refute event.key?(field), "expected the lane_closed event to omit #{field} without session environment"
+    end
+  end
+
   def test_claim_and_release_record_environment_identity
     identity_env = { "AGENT_COORD_MACHINE_ID" => "m5", "CODEX_THREAD_ID" => "codex-thread-42" }
     claim = run_agent_coord(

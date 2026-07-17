@@ -12,11 +12,15 @@ when releases begin.
 - Non-secret machine/session attribution from `AGENT_COORD_MACHINE_ID` plus
   `AGENT_COORD_SESSION_ID` falling back to `CODEX_THREAD_ID`: coordination
   writes stamp `machine_id`, `session_id`, and `session_source` into claims,
-  heartbeats, and events; `status --json` projects the fields; terminal
+  heartbeats, and events; the tuple is atomic per write, so a machine change
+  without a resolved session clears stale session fields instead of pairing
+  them with the new machine; `status --json` projects the fields; terminal
   closeouts resolve `closed_by.machine` from the environment before the `--host`
-  fallback; and `doctor --deep` reports an `environment_identity` block that
+  fallback; `doctor --deep` reports an `environment_identity` block that
   fails with exit `2` when the environment machine contradicts the
-  authenticated `/v1/whoami` token machine.
+  authenticated `/v1/whoami` token machine; and `doctor --stack-json` carries
+  the same comparison as an `identity.machine` component check that fails on a
+  mismatch and is skipped when unverifiable.
 - `agent-coord doctor --stack-json`, a read-only schema v1 component report with
   exits `0` healthy, `1` degraded, `2` failed, and `64` invalid usage; it
   strictly requires exactly one direct `--state-root`, `--api-url`, or

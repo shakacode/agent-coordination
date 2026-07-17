@@ -7,6 +7,7 @@ require "open3"
 require "rbconfig"
 require "socket"
 require "tmpdir"
+require "webrick"
 
 module StackDoctorTestFixtures
   FAKE_GITHUB = <<~'RUBY'
@@ -50,8 +51,11 @@ module StackDoctorCliTestHarness
     "AGENT_COORD_API_URL" => nil,
     "AGENT_COORD_BACKEND" => nil,
     "AGENT_COORD_ENV_FILE" => nil,
+    "AGENT_COORD_MACHINE_ID" => nil,
+    "AGENT_COORD_SESSION_ID" => nil,
     "AGENT_COORD_STATE_ROOT" => nil,
-    "AGENT_COORD_STATUS_STATE_ROOT" => nil
+    "AGENT_COORD_STATUS_STATE_ROOT" => nil,
+    "CODEX_THREAD_ID" => nil
   }.freeze
 
   def run_doctor(*, env: {})
@@ -654,9 +658,10 @@ class StackDoctorCliTest < Minitest::Test
       assert_equal "agent-coordination", report.fetch("component")
       assert_equal "healthy", report.fetch("status")
       check_ids = report.fetch("checks").map { |entry| entry.fetch("id") }.sort
-      assert_equal %w[backend.readability cli.version resources.deep], check_ids
+      assert_equal %w[backend.readability cli.version identity.machine resources.deep], check_ids
       assert_uniform_checks(report.fetch("checks"))
       assert_equal "skipped", check(report, "resources.deep").fetch("status")
+      assert_equal "skipped", check(report, "identity.machine").fetch("status")
     end
   end
 
@@ -1367,5 +1372,117 @@ class StackDoctorCliTest < Minitest::Test
       assert_kind_of Hash, entry.fetch("details")
       assert(entry["guidance"].nil? || entry["guidance"].is_a?(String))
     end
+  end
+end
+
+class StackDoctorHttpBackendStub
+  def initialize(responses)
+    @responses = responses
+    @server = WEBrick::HTTPServer.new(Port: 0, Logger: WEBrick::Log.new(File::NULL), AccessLog: [])
+    @server.mount_proc("/") do |_req, res|
+      status, body = @responses.shift || [500, { "error" => "unexpected" }]
+      res.status = status
+      res.content_type = "application/json"
+      res.body = JSON.generate(body)
+    end
+    @thread = Thread.new { @server.start }
+  end
+
+  def base_url = "http://127.0.0.1:#{@server.config[:Port]}"
+  def shutdown = @server.shutdown && @thread.join
+end
+
+class MachineIdentityStackDoctorTest < Minitest::Test
+  include StackDoctorCliTestHarness
+
+  def test_deep_http_stack_doctor_fails_on_machine_identity_mismatch
+    stub = StackDoctorHttpBackendStub.new(deep_http_responses(token_machine: "m1-codex"))
+    result = run_doctor(
+      "--stack-json", "--deep", "--api-url", stub.base_url,
+      env: {
+        "AGENT_COORD_API_TOKEN" => "tok",
+        "AGENT_COORD_MACHINE_ID" => "m5",
+        "CODEX_THREAD_ID" => "codex-thread-42"
+      }
+    )
+
+    assert_equal 2, result.fetch(:status).exitstatus, result.fetch(:stderr)
+    report = JSON.parse(result.fetch(:stdout))
+    identity_check = check(report, "identity.machine")
+    assert_equal "failed", report.fetch("status")
+    assert_equal "failed", identity_check.fetch("status")
+    assert_equal "healthy", check(report, "resources.deep").fetch("status")
+    assert_equal "mismatch", identity_check.dig("details", "machine_match")
+    assert_equal "m5", identity_check.dig("details", "machine_id")
+    assert_equal "m1-codex", identity_check.dig("details", "token_machine")
+    assert_equal "codex-thread-42", identity_check.dig("details", "session_id")
+    assert_equal "codex_thread_id", identity_check.dig("details", "session_source")
+    assert_includes identity_check.fetch("guidance"), "AGENT_COORD_MACHINE_ID"
+  ensure
+    stub&.shutdown
+  end
+
+  def test_deep_http_stack_doctor_reports_machine_identity_match
+    stub = StackDoctorHttpBackendStub.new(deep_http_responses(token_machine: "m5"))
+    result = run_doctor(
+      "--stack-json", "--deep", "--api-url", stub.base_url,
+      env: { "AGENT_COORD_API_TOKEN" => "tok", "AGENT_COORD_MACHINE_ID" => "m5" }
+    )
+
+    assert_equal 0, result.fetch(:status).exitstatus, result.fetch(:stderr)
+    report = JSON.parse(result.fetch(:stdout))
+    identity_check = check(report, "identity.machine")
+    assert_equal "healthy", report.fetch("status")
+    assert_equal "healthy", identity_check.fetch("status")
+    assert_equal "match", identity_check.dig("details", "machine_match")
+    assert_equal "m5", identity_check.dig("details", "token_machine")
+    assert_nil identity_check.fetch("guidance")
+  ensure
+    stub&.shutdown
+  end
+
+  def test_deep_http_stack_doctor_without_environment_machine_skips_identity_verification
+    stub = StackDoctorHttpBackendStub.new(deep_http_responses(token_machine: "m5"))
+    result = run_doctor(
+      "--stack-json", "--deep", "--api-url", stub.base_url,
+      env: { "AGENT_COORD_API_TOKEN" => "tok" }
+    )
+
+    assert_equal 0, result.fetch(:status).exitstatus, result.fetch(:stderr)
+    report = JSON.parse(result.fetch(:stdout))
+    identity_check = check(report, "identity.machine")
+    assert_equal "healthy", report.fetch("status")
+    assert_equal "skipped", identity_check.fetch("status")
+    assert_equal "unverified", identity_check.dig("details", "machine_match")
+    assert_nil identity_check.dig("details", "machine_id")
+    assert_equal "m5", identity_check.dig("details", "token_machine")
+  ensure
+    stub&.shutdown
+  end
+
+  def test_local_stack_doctor_reports_unverified_identity_without_token_machine
+    Dir.mktmpdir("agent-coord-stack-doctor") do |state_root|
+      result = run_doctor(
+        "--stack-json", "--deep", "--state-root", state_root,
+        env: { "AGENT_COORD_MACHINE_ID" => "m5" }
+      )
+
+      assert_equal 0, result.fetch(:status).exitstatus, result.fetch(:stderr)
+      report = JSON.parse(result.fetch(:stdout))
+      identity_check = check(report, "identity.machine")
+      assert_equal "healthy", report.fetch("status")
+      assert_equal "skipped", identity_check.fetch("status")
+      assert_equal "unverified", identity_check.dig("details", "machine_match")
+      assert_equal "m5", identity_check.dig("details", "machine_id")
+      assert_nil identity_check.dig("details", "token_machine")
+    end
+  end
+
+  private
+
+  def deep_http_responses(token_machine:)
+    [[200, { "status" => "ok" }]] +
+      Array.new(5) { [200, { "entries" => [] }] } +
+      [[200, { "machine" => token_machine, "read_prefixes" => ["*"], "write_prefixes" => ["*"] }]]
   end
 end

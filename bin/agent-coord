@@ -1296,7 +1296,7 @@ module AgentCoord
       payload = preserved_payload(existing, claim_preserved_fields(existing, options))
                 .merge(claim_updates)
                 .merge(metadata_payload(options))
-                .merge(environment_identity_payload)
+                .merge(environment_identity_payload(existing&.data))
                 .compact
 
       begin
@@ -1334,7 +1334,7 @@ module AgentCoord
         "expires_at" => timestamp(now)
       }
       payload = existing.data.merge(release_updates).merge(metadata_payload(options))
-                        .merge(environment_identity_payload)
+                        .merge(environment_identity_payload(existing.data)).compact
       payload = without_handoff_payload(payload)
       payload = payload.merge(handoff_payload(options)) if handoff_release?(options)
       payload["branch"] = options[:branch] if options[:branch]
@@ -1495,7 +1495,9 @@ module AgentCoord
         error_class: safe_stack_error_class(e)
       )
     else
-      checks << stack_resource_check(store, backend_kind, options)
+      resource_check = stack_resource_check(store, backend_kind, options)
+      checks << resource_check
+      checks << stack_identity_check(resource_check.dig("details", "identity"))
       emit_stack_report(checks)
     ensure
       close_store(store)
@@ -1517,6 +1519,7 @@ module AgentCoord
         "Resource evidence was not collected because the backend is unavailable",
         { "mode" => options[:deep] ? "deep" : "shallow", "reason" => "backend_unavailable" }
       )
+      checks << stack_identity_check(nil)
       emit_stack_report(checks)
     end
 
@@ -1528,6 +1531,39 @@ module AgentCoord
         "details" => details,
         "guidance" => guidance
       }
+    end
+
+    # Machine identity provenance for stack aggregators. The environment tuple
+    # is non-secret attribution metadata; an environment machine id that
+    # contradicts the authenticated token machine is a failed component check
+    # because the wrong machine token may be installed.
+    def stack_identity_check(token_identity)
+      report = environment_identity_report(token_identity)
+      case report.fetch("machine_match")
+      when MACHINE_MATCH_MISMATCH
+        stack_check(
+          "identity.machine",
+          "failed",
+          "Environment machine id contradicts the authenticated backend token machine",
+          report,
+          "Install the machine token matching #{MACHINE_ID_ENV}, or correct the exported machine id, " \
+          "then rerun the deep doctor."
+        )
+      when MACHINE_MATCH_MATCH
+        stack_check(
+          "identity.machine",
+          "healthy",
+          "Environment machine id matches the authenticated backend token machine",
+          report
+        )
+      else
+        stack_check(
+          "identity.machine",
+          "skipped",
+          "Machine identity was not verified against an authenticated backend token machine",
+          report
+        )
+      end
     end
 
     def stack_backend_details(options, backend_kind)
@@ -1978,7 +2014,7 @@ module AgentCoord
         preserved_payload(existing, heartbeat_preserved_fields(existing, options))
           .merge(payload)
           .merge(metadata_payload(options))
-          .merge(environment_identity_payload)
+          .merge(environment_identity_payload(existing&.data))
           .compact
       end
       @stdout.puts "heartbeat #{options[:agent_id]} #{timestamp(now)}"
@@ -1999,13 +2035,28 @@ module AgentCoord
     end
 
     # Non-secret machine/session attribution resolved from the environment for
-    # every coordination write. Omitted fields leave any previously recorded
-    # attribution preserved by the metadata preservation lists.
-    def environment_identity_payload
+    # every coordination write. When the environment supplies no identity at
+    # all, previously recorded attribution stays preserved by the metadata
+    # preservation lists. When the environment declares a machine that differs
+    # from the record's last recorded machine without resolving a session, the
+    # stale session fields are explicitly cleared (nil then compacted away) so
+    # a record never pairs a machine with a session resolved on another one.
+    def environment_identity_payload(existing_data = nil)
       session_id, session_source = AgentCoord.environment_session_identity
-      payload = { "machine_id" => AgentCoord.environment_machine_id, "session_id" => session_id }.compact
+      machine_id = AgentCoord.environment_machine_id
+      payload = { "machine_id" => machine_id, "session_id" => session_id }.compact
       payload["session_source"] = session_source unless session_id.nil?
+      if session_id.nil? && cross_machine_write?(machine_id, existing_data)
+        payload["session_id"] = nil
+        payload["session_source"] = nil
+      end
       payload
+    end
+
+    def cross_machine_write?(machine_id, existing_data)
+      return false unless machine_id && existing_data.is_a?(Hash)
+
+      existing_data["machine_id"] != machine_id
     end
 
     def handoff_payload(options)

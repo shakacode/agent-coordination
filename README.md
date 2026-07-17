@@ -250,7 +250,10 @@ resolved tuple into the record as `machine_id`, `session_id`, and
 `session_source` (`agent_coord_session_id` or `codex_thread_id`), and
 `status --json` projects the same fields back to consumers. Terminal closeouts
 use `AGENT_COORD_MACHINE_ID` for `closed_by.machine`, falling back to `--host`
-when the variable is unset. Blank values are treated as unset.
+when the variable is unset. Blank values are treated as unset. The tuple is
+atomic per write: when a write declares a machine id that differs from the
+record's last recorded machine and resolves no session, the stale session
+fields are cleared rather than paired with the new machine.
 
 These variables are attribution metadata only: they must never contain token or
 secret values, and machine-token authentication remains authoritative for
@@ -267,7 +270,10 @@ HTTP doctor ran, and a `machine_match` status of `match`, `mismatch`, or
 `agent-coord doctor --deep` runs against the HTTP backend and
 `AGENT_COORD_MACHINE_ID` does not match the `/v1/whoami` machine, doctor still
 emits its report, then fails with exit code `2`, because a mismatch usually
-means the wrong machine token or machine id is installed.
+means the wrong machine token or machine id is installed. The stack doctor
+carries the same tuple as an `identity.machine` component check: `failed` on a
+mismatch (driving exit `2`), `healthy` on a verified match, and `skipped` when
+no authenticated token machine is available to compare.
 
 Backend selection follows this rule:
 
@@ -314,8 +320,10 @@ exactly one direct backend selector: `--state-root PATH`, `--api-url URL`, or
 resolution, but do not satisfy this machine-contract selector requirement. The
 explicit stack output is the component contract v1: it reports
 `agent-coordination` as `healthy`, `degraded`, or `failed`, with normalized
-checks for CLI version readiness, backend readability, and deep resource
-evidence. Exit codes are `0` for healthy, `1` for degraded, `2` for failed, and
+checks for CLI version readiness, backend readability, deep resource
+evidence, and machine identity (`identity.machine`, which fails on an
+environment-versus-token machine mismatch and is skipped when unverifiable).
+Exit codes are `0` for healthy, `1` for degraded, `2` for failed, and
 `64` for invalid usage. Usage errors emit no JSON. `--stack-json` is strictly
 read-only: it never creates a missing explicit local state root, and reports
 that missing root as a failed component rather than falling back. Omit `--deep`
@@ -745,7 +753,8 @@ update the same metadata fields for terminal states, such as adding a final
 `pr_url` or `phase`. `machine_id`, `session_id`, and `session_source` come from
 the machine/session identity environment described in
 [Machine and session identity](#machine-and-session-identity); a write without
-that environment preserves the last recorded attribution.
+that environment preserves the last recorded attribution, and a write that
+declares a different machine without a session clears the stale session fields.
 
 ## Heartbeat Schema
 
@@ -783,7 +792,8 @@ Optional lane metadata fields on heartbeats are `thread_handle`, `chat_handle`,
 readers should treat missing metadata as `UNKNOWN` rather than inferring it
 from branch names or handoff text. `machine_id`, `session_id`, and
 `session_source` come from the machine/session identity environment; renewals
-without that environment preserve the last recorded attribution.
+without that environment preserve the last recorded attribution, and renewals
+declaring a different machine without a session clear the stale session fields.
 
 Claims and heartbeats may carry `synthetic: true` and a `synthetic_kind` such as
 `simulation` or `smoke`. These markers are protocol metadata: they let `gc`
