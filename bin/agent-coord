@@ -372,7 +372,9 @@ module AgentCoord
       opts.on("--branch BRANCH", "branch for the target") { |value| options[:branch] = value }
       opts.on("--thread-handle HANDLE", "worker chat thread handle") { |value| options[:thread_handle] = value }
       opts.on("--chat-handle HANDLE", "host-specific chat handle") { |value| options[:chat_handle] = value }
-      opts.on("--host HOST", "host app or wrapper, e.g. codex or claude-code/conductor") do |value|
+      opts.on("--host HOST",
+              "host app or wrapper, e.g. codex or claude-code/conductor; " \
+              "terminal closed_by.machine prefers AGENT_COORD_MACHINE_ID over --host") do |value|
         options[:host] = value
       end
       opts.on("--pr-url URL", "pull request URL for the lane") { |value| options[:pr_url] = value }
@@ -2037,10 +2039,11 @@ module AgentCoord
     # Non-secret machine/session attribution resolved from the environment for
     # every coordination write. When the environment supplies no identity at
     # all, previously recorded attribution stays preserved by the metadata
-    # preservation lists. When the environment declares a machine that differs
-    # from the record's last recorded machine without resolving a session, the
-    # stale session fields are explicitly cleared (nil then compacted away) so
-    # a record never pairs a machine with a session resolved on another one.
+    # preservation lists. When the environment resolves only half the tuple and
+    # that half differs from the record's last recorded value, the stale other
+    # half is explicitly cleared (nil then compacted away) so a record never
+    # pairs a machine with a session resolved on another one, in either
+    # direction.
     def environment_identity_payload(existing_data = nil)
       session_id, session_source = AgentCoord.environment_session_identity
       machine_id = AgentCoord.environment_machine_id
@@ -2050,6 +2053,7 @@ module AgentCoord
         payload["session_id"] = nil
         payload["session_source"] = nil
       end
+      payload["machine_id"] = nil if machine_id.nil? && cross_session_write?(session_id, existing_data)
       payload
     end
 
@@ -2057,6 +2061,12 @@ module AgentCoord
       return false unless machine_id && existing_data.is_a?(Hash)
 
       existing_data["machine_id"] != machine_id
+    end
+
+    def cross_session_write?(session_id, existing_data)
+      return false unless session_id && existing_data.is_a?(Hash)
+
+      existing_data["session_id"] != session_id
     end
 
     def handoff_payload(options)
@@ -2385,6 +2395,17 @@ module AgentCoord
       }
     end
 
+    # Reconstructs closed_by for records written before closed_by existed.
+    # Reads only the record's own historical host — never the live environment
+    # and never an env-stamped machine_id — so idempotent-replay-versus-conflict
+    # comparisons describe the record, not the process replaying it.
+    def closed_by_from_record(record)
+      {
+        "agent_id" => terminal_payload_value(record, "agent_id"),
+        "machine" => terminal_payload_value(record, "host") || "UNKNOWN"
+      }
+    end
+
     def canonical_terminal_event_options(store, payload)
       batch_id = terminal_payload_value(payload, "batch_id")
       options = {
@@ -2485,7 +2506,7 @@ module AgentCoord
       lane["status"] = terminal
       lane["terminal"] = terminal
       lane["closed_at"] ||= timestamp(now)
-      lane["closed_by"] ||= payload["closed_by"] || closed_by_payload(payload)
+      lane["closed_by"] ||= payload["closed_by"] || closed_by_from_record(payload)
       lane["workspace"] ||= terminal_payload_value(payload, "workspace") || DEFAULT_WORKSPACE
       %w[pr_url pr_state evidence_url].each do |field|
         value = payload[field] || payload[field.to_sym]
@@ -2520,7 +2541,7 @@ module AgentCoord
       {
         "terminal" => terminal_payload_value(payload, "terminal"),
         "workspace" => terminal_payload_value(payload, "workspace") || DEFAULT_WORKSPACE,
-        "closed_by" => terminal_payload_value(payload, "closed_by") || closed_by_payload(payload),
+        "closed_by" => terminal_payload_value(payload, "closed_by") || closed_by_from_record(payload),
         "pr_url" => terminal_payload_value(payload, "pr_url"),
         "pr_state" => terminal_payload_value(payload, "pr_state"),
         "evidence_url" => terminal_payload_value(payload, "evidence_url")

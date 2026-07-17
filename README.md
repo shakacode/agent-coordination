@@ -251,9 +251,12 @@ resolved tuple into the record as `machine_id`, `session_id`, and
 `status --json` projects the same fields back to consumers. Terminal closeouts
 use `AGENT_COORD_MACHINE_ID` for `closed_by.machine`, falling back to `--host`
 when the variable is unset. Blank values are treated as unset. The tuple is
-atomic per write: when a write declares a machine id that differs from the
-record's last recorded machine and resolves no session, the stale session
-fields are cleared rather than paired with the new machine.
+atomic per write, in both directions: when a write declares a machine id that
+differs from the record's last recorded machine and resolves no session, the
+stale session fields are cleared rather than paired with the new machine, and
+when a write resolves a session that differs from the record's last recorded
+session without declaring a machine, the stale machine id is cleared rather
+than paired with the new session.
 
 These variables are attribution metadata only: they must never contain token or
 secret values, and machine-token authentication remains authoritative for
@@ -645,6 +648,7 @@ install -m 600 /dev/null "$AGENT_COORD_ENV_FILE"
 cat > "$AGENT_COORD_ENV_FILE" <<'EOF'
 AGENT_COORD_API_URL=<worker-url>
 AGENT_COORD_API_TOKEN=<machine-token>
+AGENT_COORD_MACHINE_ID=<machine-id, e.g. m5>
 EOF
 perl -pe 's#__AGENT_ID__#$ENV{AGENT_ID}#g;
           s#__TARGET_REPO__#$ENV{TARGET_REPO}#g;
@@ -661,8 +665,11 @@ launchctl bootstrap "gui/$(id -u)" \
 
 You can also replace the `__PLACEHOLDER__` values manually. Keep the env file
 private (`chmod 600`) and never commit it. The checked-in template loads
-`AGENT_COORD_API_URL` and `AGENT_COORD_API_TOKEN` from that local file instead
-of storing token values in the repository.
+`AGENT_COORD_API_URL`, `AGENT_COORD_API_TOKEN`, and `AGENT_COORD_MACHINE_ID`
+from that local file instead of storing values in the repository. Background
+services read only this env file — a machine id exported solely in a shell
+profile does not reach them, so keep it in the env file for heartbeat
+attribution.
 
 ### Linux systemd --user
 
@@ -686,7 +693,7 @@ systemctl --user enable --now "agent-coord-heartbeat.${AGENT_ID}.service"
 ```
 
 The systemd template loads the same private env file for
-`AGENT_COORD_API_URL` and `AGENT_COORD_API_TOKEN`.
+`AGENT_COORD_API_URL`, `AGENT_COORD_API_TOKEN`, and `AGENT_COORD_MACHINE_ID`.
 
 ## State Layout
 

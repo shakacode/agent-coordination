@@ -2258,6 +2258,60 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     end
   end
 
+  def test_cross_session_heartbeat_renewal_without_machine_clears_stale_machine_identity
+    first = run_agent_coord(
+      "heartbeat", "--agent-id", "worker-identity",
+      env: { "AGENT_COORD_MACHINE_ID" => "m5", "CODEX_THREAD_ID" => "codex-thread-42" }
+    )
+    assert_equal 0, first.status.exitstatus, first.stderr
+
+    renewal = run_agent_coord(
+      "heartbeat", "--agent-id", "worker-identity",
+      env: { "AGENT_COORD_SESSION_ID" => "explicit-run-7" }
+    )
+    assert_equal 0, renewal.status.exitstatus, renewal.stderr
+    heartbeat = JSON.parse(File.read(File.join(@state_root, "heartbeats", "worker-identity.json")))
+    assert_equal "explicit-run-7", heartbeat.fetch("session_id")
+    assert_equal "agent_coord_session_id", heartbeat.fetch("session_source")
+    refute heartbeat.key?("machine_id"), "expected the stale machine_id to be cleared on a session change"
+  end
+
+  def test_same_session_heartbeat_renewal_without_machine_preserves_machine_identity
+    first = run_agent_coord(
+      "heartbeat", "--agent-id", "worker-identity",
+      env: { "AGENT_COORD_MACHINE_ID" => "m5", "CODEX_THREAD_ID" => "codex-thread-42" }
+    )
+    assert_equal 0, first.status.exitstatus, first.stderr
+
+    renewal = run_agent_coord(
+      "heartbeat", "--agent-id", "worker-identity",
+      env: { "CODEX_THREAD_ID" => "codex-thread-42" }
+    )
+    assert_equal 0, renewal.status.exitstatus, renewal.stderr
+    heartbeat = JSON.parse(File.read(File.join(@state_root, "heartbeats", "worker-identity.json")))
+    assert_equal "m5", heartbeat.fetch("machine_id")
+    assert_equal "codex-thread-42", heartbeat.fetch("session_id")
+    assert_equal "codex_thread_id", heartbeat.fetch("session_source")
+  end
+
+  def test_session_only_renewal_after_machine_only_write_clears_the_stale_machine
+    first = run_agent_coord(
+      "heartbeat", "--agent-id", "worker-identity",
+      env: { "AGENT_COORD_MACHINE_ID" => "m5" }
+    )
+    assert_equal 0, first.status.exitstatus, first.stderr
+
+    renewal = run_agent_coord(
+      "heartbeat", "--agent-id", "worker-identity",
+      env: { "AGENT_COORD_SESSION_ID" => "explicit-run-7" }
+    )
+    assert_equal 0, renewal.status.exitstatus, renewal.stderr
+    heartbeat = JSON.parse(File.read(File.join(@state_root, "heartbeats", "worker-identity.json")))
+    assert_equal "explicit-run-7", heartbeat.fetch("session_id")
+    refute heartbeat.key?("machine_id"),
+           "expected the machine-only attribution to be cleared when a new session cannot attest it"
+  end
+
   def test_cross_machine_terminal_release_keeps_claim_and_event_identity_consistent
     write_batch(
       "batch-identity",
@@ -4228,6 +4282,45 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     assert_includes conflict.stderr, "conflicting terminal closeout"
     assert_equal 1, Dir.glob(event_glob).length
     assert_equal originals, [File.read(claim_path), File.read(batch_path)]
+  end
+
+  def test_terminal_release_replay_reconciles_legacy_claim_missing_closed_by
+    write_batch(
+      "batch-legacy-closed-by",
+      lanes: [{ "name" => "code", "owner" => "worker-a", "targets" => ["3995"] }]
+    )
+    identity_env = { "AGENT_COORD_MACHINE_ID" => "m5" }
+    claim = run_agent_coord(
+      "claim", "--agent-id", "worker-a", "--repo", "shakacode/react_on_rails",
+      "--target", "3995", "--batch-id", "batch-legacy-closed-by", "--host", "codex",
+      env: identity_env
+    )
+    assert_equal 0, claim.status.exitstatus, claim.stderr
+    args = [
+      "release", "--agent-id", "worker-a", "--repo", "shakacode/react_on_rails",
+      "--target", "3995", "--terminal", "done", "--pr-state", "merged"
+    ]
+    first = run_agent_coord(*args, env: identity_env)
+    assert_equal 0, first.status.exitstatus, first.stderr
+
+    claim_path = File.join(@state_root, "claims", "shakacode", "react_on_rails", "3995.json")
+    closed = JSON.parse(File.read(claim_path))
+    expected_closed_by = closed.fetch("closed_by")
+    assert_equal "m5", expected_closed_by.fetch("machine")
+    legacy = closed.except("closed_by", "machine_id", "session_id", "session_source")
+    File.write(claim_path, JSON.generate(legacy))
+
+    replay = run_agent_coord(*args, env: identity_env)
+    assert_equal 0, replay.status.exitstatus, replay.stderr
+    assert_includes replay.stdout, "released",
+                    "expected the legacy claim to be reconciled from the authoritative event, " \
+                    "not masked by live-environment reconstruction"
+    reconciled = JSON.parse(File.read(claim_path))
+    assert_equal expected_closed_by, reconciled.fetch("closed_by")
+
+    second_replay = run_agent_coord(*args, env: identity_env)
+    assert_equal 0, second_replay.status.exitstatus, second_replay.stderr
+    assert_includes second_replay.stdout, "already closed"
   end
 
   def test_terminal_release_reconciles_claim_from_existing_authoritative_event

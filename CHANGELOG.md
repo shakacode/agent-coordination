@@ -12,9 +12,11 @@ when releases begin.
 - Non-secret machine/session attribution from `AGENT_COORD_MACHINE_ID` plus
   `AGENT_COORD_SESSION_ID` falling back to `CODEX_THREAD_ID`: coordination
   writes stamp `machine_id`, `session_id`, and `session_source` into claims,
-  heartbeats, and events; the tuple is atomic per write, so a machine change
-  without a resolved session clears stale session fields instead of pairing
-  them with the new machine; `status --json` projects the fields; terminal
+  heartbeats, and events; the tuple is atomic per write in both directions, so
+  a machine change without a resolved session clears stale session fields and a
+  session change without a declared machine clears the stale machine id instead
+  of pairing halves resolved on different writes; `status --json` projects the
+  fields; terminal
   closeouts resolve `closed_by.machine` from the environment before the `--host`
   fallback; `doctor --deep` reports an `environment_identity` block that
   fails with exit `2` when the environment machine contradicts the
