@@ -840,11 +840,14 @@ forms), then applies the known-alias map:
 
 | Alias                                                            | Canonical     |
 | ---------------------------------------------------------------- | ------------- |
-| `complete`, `completed`, `released`                               | `done`        |
+| `complete`, `completed`                                           | `done`        |
 | `ready_to_merge`, `ready_handoff`, `ready_for_coordinator`        | `ready`       |
 | `in_process`, `claimed`, `implementing`, `validating`, `pushing`  | `in_progress` |
 
-When coercion changes the caller's value, the original spelling is preserved
+`released` is deliberately not an alias: a released heartbeat can mean a claim
+handoff rather than completion, so it takes the unknown-value path below and
+never satisfies dependencies. When coercion changes the caller's value, the
+original spelling is preserved
 in `status_raw`. Values that resolve to neither the vocabulary nor the alias
 map are preserved verbatim, copied to `status_raw`, and reported with a
 `warning:` line on stderr; the exit code of an otherwise-successful write does

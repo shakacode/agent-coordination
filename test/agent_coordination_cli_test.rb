@@ -1222,6 +1222,8 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     assert_equal AgentCoord::HEARTBEAT_TERMINAL_STATUSES, vocabulary.fetch("terminal")
     assert_equal "done", vocabulary.fetch("aliases").fetch("completed")
     assert_equal "in_progress", vocabulary.fetch("aliases").fetch("in_process")
+    refute vocabulary.fetch("aliases").key?("released"),
+           "released must not alias to a dependency-satisfying status; it can mean handoff"
     assert_equal 3, payload.fetch("exit_codes").fetch("claim_refused")
     assert_equal 2, payload.fetch("exit_codes").fetch("operational")
     assert_equal 64, payload.fetch("exit_codes").fetch("stack_usage")
@@ -2195,6 +2197,39 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     heartbeat = read_heartbeat("worker-vocab")
     assert_equal "merged_pr_94", heartbeat.fetch("status")
     assert_equal "merged_pr_94", heartbeat.fetch("status_raw")
+  end
+
+  def test_heartbeat_released_status_stays_verbatim_and_does_not_unblock_dependents
+    write_batch(
+      "batch-handoff-released",
+      lanes: [{ "name" => "backend", "owner" => "worker-handoff", "targets" => ["4210"] }]
+    )
+    write_batch(
+      "batch-handoff-consumer",
+      lanes: [
+        {
+          "name" => "docs",
+          "owner" => "worker-waiting",
+          "targets" => ["4211"],
+          "depends_on" => ["batch-handoff-released:backend"]
+        }
+      ]
+    )
+    released = run_agent_coord("heartbeat", "--agent-id", "worker-handoff", "--status", "released")
+    blocked = run_agent_coord("heartbeat", "--agent-id", "worker-waiting", "--status", "blocked")
+
+    assert_equal 0, released.status.exitstatus, released.stderr
+    assert_equal 0, blocked.status.exitstatus, blocked.stderr
+    assert_includes released.stderr, 'warning: status "released" is not in the canonical status vocabulary'
+    heartbeat = read_heartbeat("worker-handoff")
+    assert_equal "released", heartbeat.fetch("status")
+    assert_equal "released", heartbeat.fetch("status_raw")
+
+    status = run_agent_coord("status", "--batch-id", "batch-handoff-consumer", "--json")
+    assert_equal 0, status.status.exitstatus, status.stderr
+    consumer = JSON.parse(status.stdout).fetch("batches").first.fetch("lanes").first
+    assert_equal ["batch-handoff-released:backend"], consumer.fetch("blocked_on"),
+                 "expected a released heartbeat written through the CLI to stay non-completing"
   end
 
   def test_heartbeat_canonical_status_passes_through_without_status_raw_or_warning

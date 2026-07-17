@@ -86,10 +86,12 @@ module AgentCoord
   # case and hyphen/underscore folding. Values that resolve to neither the
   # canonical vocabulary nor this map warn on stderr and are preserved
   # verbatim alongside a status_raw copy.
+  # "released" is deliberately absent: a released heartbeat can mean a claim
+  # handoff rather than completion (see the released-dependency contract test),
+  # so it takes the warn-and-preserve path instead of coercing to done.
   HEARTBEAT_STATUS_ALIASES = {
     "complete" => "done",
     "completed" => "done",
-    "released" => "done",
     "ready_to_merge" => "ready",
     "ready_handoff" => "ready",
     "ready_for_coordinator" => "ready",

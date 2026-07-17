@@ -11,7 +11,7 @@ when releases begin.
 
 - A canonical heartbeat/event status vocabulary enforced at the CLI write
   path: snake_case working and terminal sets with a known-alias map (terminal
-  synonyms such as `completed`/`released`, hyphen/case twins such as
+  synonyms such as `completed`, hyphen/case twins such as
   `waiting-on-checks-or-review`, and spelling twins such as `in_process`) are
   coerced on `heartbeat` and ordinary `record-event` writes, keeping the
   caller's original spelling in `status_raw` when it differs; unknown values
@@ -19,7 +19,9 @@ when releases begin.
   changing exit codes. `status --json` projects `status_raw`,
   `config show --json` publishes the vocabulary and alias map under
   `heartbeat_status_vocabulary`, dependency gating accepts the canonical
-  dependency-satisfying statuses plus legacy `complete`/`completed` rows, and
+  dependency-satisfying statuses plus legacy `complete`/`completed` rows,
+  `released` deliberately stays un-aliased and non-dependency-satisfying
+  because it can mean a claim handoff rather than completion, and
   `gc` classifies all canonical terminal statuses as `terminal_heartbeat`
   while legacy non-canonical rows keep dead-heartbeat reclamation.
 - Non-secret machine/session attribution from `AGENT_COORD_MACHINE_ID` plus
