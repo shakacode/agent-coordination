@@ -1215,6 +1215,7 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     assert_includes payload.fetch("dependency_terminal_statuses"), "done"
     assert_includes payload.fetch("dependency_terminal_statuses"), "ready_gates_clean"
     assert_includes payload.fetch("dependency_terminal_statuses"), "completed"
+    refute_includes payload.fetch("dependency_terminal_statuses"), "released"
     refute_includes payload.fetch("dependency_terminal_statuses"), "abandoned"
     vocabulary = payload.fetch("heartbeat_status_vocabulary")
     assert_equal AgentCoord::HEARTBEAT_WORKING_STATUSES, vocabulary.fetch("working")

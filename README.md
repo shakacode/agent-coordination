@@ -1005,6 +1005,9 @@ status: `done`, `merged`, `ready`, `ready_gates_clean`, or
 `ready_no_merge_authority` from the
 [heartbeat status vocabulary](#heartbeat-status-vocabulary), plus the legacy
 `complete`/`completed` synonyms still stored in rows written by older CLIs.
+A stored legacy `released` row stays excluded: it can mean a handoff release
+rather than completion, so it does not unblock dependents (new `released`
+writes coerce to `done` at write time).
 Terminal `abandoned` and `superseded` heartbeats end a lane without completing
 it and do not unblock dependents. A released claim is preserved for
 auditability and does not unblock dependent lanes by itself. Unmet dependencies
