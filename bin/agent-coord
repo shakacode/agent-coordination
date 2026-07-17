@@ -69,7 +69,41 @@ module AgentCoord
       events(?:/[A-Za-z0-9_.:-]+)?
     ))?
   )\z}x
-  DEPENDENCY_DONE_STATUSES = %w[complete completed done merged ready].freeze
+  # Canonical heartbeat/event status vocabulary. Multi-word values are
+  # snake_case, matching the published in_progress schema example. Working
+  # statuses keep a lane hot and visible; terminal statuses mean the owner is
+  # finished with the lane and will not renew the heartbeat again. This is a
+  # different axis from the lane-closure TERMINAL_STATES reasons above, though
+  # the two stay coherent (done/abandoned/superseded appear in both).
+  HEARTBEAT_WORKING_STATUSES = %w[
+    in_progress blocked blocked_user_input waiting_on_checks_or_review external_gate_failing no_pr_evidence failed
+  ].freeze
+  HEARTBEAT_TERMINAL_STATUSES = %w[
+    done merged ready ready_gates_clean ready_no_merge_authority abandoned superseded
+  ].freeze
+  HEARTBEAT_STATUSES = (HEARTBEAT_WORKING_STATUSES + HEARTBEAT_TERMINAL_STATUSES).freeze
+  # Known synonyms coerced to canonical statuses at write time, applied after
+  # case and hyphen/underscore folding. Values that resolve to neither the
+  # canonical vocabulary nor this map warn on stderr and are preserved
+  # verbatim alongside a status_raw copy.
+  HEARTBEAT_STATUS_ALIASES = {
+    "complete" => "done",
+    "completed" => "done",
+    "released" => "done",
+    "ready_to_merge" => "ready",
+    "ready_handoff" => "ready",
+    "ready_for_coordinator" => "ready",
+    "in_process" => "in_progress",
+    "claimed" => "in_progress",
+    "implementing" => "in_progress",
+    "validating" => "in_progress",
+    "pushing" => "in_progress"
+  }.freeze
+  # Heartbeat statuses that satisfy a lane dependency: canonical terminal
+  # statuses except abandoned/superseded (they end a lane without completing
+  # it), plus legacy synonyms still present in rows written before write-time
+  # status coercion existed.
+  DEPENDENCY_DONE_STATUSES = ((HEARTBEAT_TERMINAL_STATUSES - %w[abandoned superseded]) + %w[complete completed]).freeze
   STATUS_BATCH_METADATA_FIELDS = %w[
     repo objective instructions launch_prompt operator dashboard_url status updated_at registered_at completed_at
     synthetic synthetic_kind
@@ -85,12 +119,12 @@ module AgentCoord
   ].freeze
   STATUS_HEARTBEAT_METADATA_FIELDS = %w[
     batch_id branch thread_handle chat_handle host machine_id session_id session_source pr_url dashboard_url
-    operator phase generation instance_id
+    operator phase generation instance_id status_raw
     synthetic synthetic_kind
   ].freeze
   STATUS_EVENT_METADATA_FIELDS = %w[
-    event_id lane agent_id repo target branch status message thread_handle chat_handle host machine_id session_id
-    session_source pr_url dashboard_url
+    event_id lane agent_id repo target branch status status_raw message thread_handle chat_handle host machine_id
+    session_id session_source pr_url dashboard_url
     operator phase generation instance_id release_mode handoff_to handoff_note terminal pr_state evidence_url
     workspace closed_by
     synthetic synthetic_kind
@@ -1157,7 +1191,7 @@ module AgentCoord
 
         ["terminal_claim", gc_record_time(data, nil, path)]
       when "heartbeats"
-        if TERMINAL_STATES.include?(data["status"])
+        if HEARTBEAT_TERMINAL_STATUSES.include?(data["status"])
           ["terminal_heartbeat", gc_record_time(data, nil, path)]
         elsif heartbeat_liveness(data, now) == "dead"
           ["dead_heartbeat", gc_heartbeat_dead_at(data, path)]
@@ -1389,6 +1423,8 @@ module AgentCoord
                      "archive=#{payload.dig('retention_policy', 'archive_days')}d," \
                      "synthetic_hot=#{payload.dig('retention_policy', 'synthetic_hot_days')}d"
         @stdout.puts "dependency_terminal_statuses: #{payload.fetch('dependency_terminal_statuses').join(',')}"
+        @stdout.puts "heartbeat_working_statuses: #{payload.dig('heartbeat_status_vocabulary', 'working').join(',')}"
+        @stdout.puts "heartbeat_terminal_statuses: #{payload.dig('heartbeat_status_vocabulary', 'terminal').join(',')}"
         @stdout.puts "exit_codes: #{payload.fetch('exit_codes').map { |name, code| "#{name}=#{code}" }.join(',')}"
       end
       0
@@ -1996,6 +2032,7 @@ module AgentCoord
 
     def heartbeat(options)
       require_options(options, :agent_id)
+      normalize_status_option!(options)
       ttl = positive_ttl(options[:ttl] || DEFAULT_HEARTBEAT_TTL)
       now = now_utc
       path = AgentCoord.heartbeat_path(options.fetch(:agent_id))
@@ -2017,6 +2054,7 @@ module AgentCoord
           .merge(payload)
           .merge(metadata_payload(options))
           .merge(environment_identity_payload(existing&.data))
+          .merge(status_attribution_payload(options))
           .compact
       end
       @stdout.puts "heartbeat #{options[:agent_id]} #{timestamp(now)}"
@@ -2034,6 +2072,40 @@ module AgentCoord
         option_name = field.to_sym
         metadata[field] = options[option_name] if options.key?(option_name) && !options[option_name].nil?
       end
+    end
+
+    # Write-time status vocabulary enforcement. Values that fold (case,
+    # hyphen/underscore) or alias to the canonical vocabulary are coerced,
+    # keeping the caller's original spelling in status_raw when it differs.
+    # Unknown values warn on stderr and are preserved verbatim with a
+    # status_raw copy so older emitters keep succeeding while consumers can
+    # detect unrecognized vocabulary. Never changes the exit code.
+    def normalize_status_option!(options)
+      raw = options[:status]
+      return if raw.nil?
+
+      canonical = AgentCoord.canonical_status(raw)
+      if canonical.nil?
+        warn_unknown_status(raw)
+        options[:status_raw] = raw
+        return
+      end
+
+      options[:status_raw] = canonical == raw ? nil : raw
+      options[:status] = canonical
+    end
+
+    def warn_unknown_status(raw)
+      @stderr.puts "warning: status #{raw.inspect} is not in the canonical status vocabulary; " \
+                   "preserving it verbatim with a status_raw copy. " \
+                   "Canonical statuses: #{HEARTBEAT_STATUSES.join(', ')}."
+    end
+
+    # status_raw always reflects the current write: an explicit nil overrides
+    # any status_raw preserved from a prior write and is then compacted away,
+    # so a canonical write clears stale raw attribution.
+    def status_attribution_payload(options)
+      { "status_raw" => options[:status_raw] }
     end
 
     # Non-secret machine/session attribution resolved from the environment for
@@ -2209,6 +2281,7 @@ module AgentCoord
         close_terminal_event(store, options, now, output: true)
         return 0
       end
+      normalize_status_option!(options) if options[:status_given]
       write_event_record(store, options, now, output: true)
       0
     ensure
@@ -2326,6 +2399,7 @@ module AgentCoord
         "at" => timestamp(now)
       }
       payload["status"] = options[:status] if options[:status_given]
+      payload["status_raw"] = options[:status_raw] if options[:status_given] && options[:status_raw]
       payload.merge(metadata_payload(options))
              .merge(handoff_payload(options))
              .merge(environment_identity_payload)
@@ -3488,6 +3562,11 @@ module AgentCoord
           "synthetic_hot_days" => DEFAULT_SYNTHETIC_HOT_DAYS
         },
         "dependency_terminal_statuses" => DEPENDENCY_DONE_STATUSES,
+        "heartbeat_status_vocabulary" => {
+          "working" => HEARTBEAT_WORKING_STATUSES,
+          "terminal" => HEARTBEAT_TERMINAL_STATUSES,
+          "aliases" => HEARTBEAT_STATUS_ALIASES
+        },
         "exit_codes" => EXIT_CODES
       }
     end
@@ -4243,6 +4322,16 @@ module AgentCoord
     return unless path.to_s.empty? || path.include?("..") || path.start_with?("/") || path.split("/").any?(&:empty?)
 
     raise PathValidationError, "unsafe state path: #{path}"
+  end
+
+  # Resolves a caller-supplied heartbeat/event status against the canonical
+  # vocabulary: case and hyphen/underscore folding first, then the known-alias
+  # map. Returns nil when the value is not recognized.
+  def self.canonical_status(value)
+    folded = value.to_s.strip.downcase.tr("-", "_")
+    return folded if HEARTBEAT_STATUSES.include?(folded)
+
+    HEARTBEAT_STATUS_ALIASES[folded]
   end
 
   # Machine/session identity is non-secret attribution metadata resolved from the

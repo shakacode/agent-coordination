@@ -172,6 +172,32 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     end
   end
 
+  def test_gc_classifies_canonical_terminal_heartbeats_and_keeps_legacy_synonyms_on_dead_path
+    now = Time.utc(2026, 7, 12, 12, 0, 0)
+    old = (now - (8 * 86_400)).iso8601
+    old_expiry = (now - (8 * 86_400) + 900).iso8601
+    write_state_record(
+      "heartbeats/canonical-terminal.json",
+      "schema_version" => 1, "agent_id" => "canonical-terminal", "status" => "merged",
+      "updated_at" => old, "expires_at" => old_expiry
+    )
+    write_state_record(
+      "heartbeats/legacy-synonym.json",
+      "schema_version" => 1, "agent_id" => "legacy-synonym", "status" => "completed",
+      "updated_at" => old, "expires_at" => old_expiry
+    )
+    stdout = StringIO.new
+    runner = AgentCoord::Runner.new([], stdout: stdout, clock: FixedClock.new(now))
+
+    assert_equal 0, runner.send(:gc, state_root: @state_root, dry_run: true, execute: false, json: true)
+
+    reasons = JSON.parse(stdout.string).fetch("actions").to_h do |action|
+      [action.fetch("source_path"), action.fetch("reason")]
+    end
+    assert_equal "terminal_heartbeat", reasons.fetch("heartbeats/canonical-terminal.json")
+    assert_equal "dead_heartbeat", reasons.fetch("heartbeats/legacy-synonym.json")
+  end
+
   def test_gc_reuses_identical_mirrors_defers_unexpired_conflicts_and_replaces_expired_conflicts
     now = Time.utc(2026, 7, 12, 12, 0, 0)
     old = (now - (8 * 86_400)).iso8601
@@ -1187,6 +1213,14 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
       payload.fetch("retention_policy")
     )
     assert_includes payload.fetch("dependency_terminal_statuses"), "done"
+    assert_includes payload.fetch("dependency_terminal_statuses"), "ready_gates_clean"
+    assert_includes payload.fetch("dependency_terminal_statuses"), "completed"
+    refute_includes payload.fetch("dependency_terminal_statuses"), "abandoned"
+    vocabulary = payload.fetch("heartbeat_status_vocabulary")
+    assert_equal AgentCoord::HEARTBEAT_WORKING_STATUSES, vocabulary.fetch("working")
+    assert_equal AgentCoord::HEARTBEAT_TERMINAL_STATUSES, vocabulary.fetch("terminal")
+    assert_equal "done", vocabulary.fetch("aliases").fetch("completed")
+    assert_equal "in_progress", vocabulary.fetch("aliases").fetch("in_process")
     assert_equal 3, payload.fetch("exit_codes").fetch("claim_refused")
     assert_equal 2, payload.fetch("exit_codes").fetch("operational")
     assert_equal 64, payload.fetch("exit_codes").fetch("stack_usage")
@@ -1804,6 +1838,20 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     refute_includes systemd_heartbeat, "AGENT_COORD_REF=state"
   end
 
+  def test_readme_documents_heartbeat_status_vocabulary
+    readme = File.read(File.join(ROOT, "README.md"))
+
+    assert_includes readme, "### Heartbeat status vocabulary"
+    AgentCoord::HEARTBEAT_STATUSES.each do |status|
+      assert_includes readme, "`#{status}`"
+    end
+    AgentCoord::HEARTBEAT_STATUS_ALIASES.each_key do |alias_value|
+      assert_includes readme, "`#{alias_value}`"
+    end
+    assert_includes readme, "`status_raw`"
+    assert_includes readme, "heartbeat_status_vocabulary"
+  end
+
   def test_readme_documents_local_first_run_and_team_http_setup
     readme = File.read(File.join(ROOT, "README.md"))
 
@@ -2099,6 +2147,76 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     assert_includes status.stdout, "heartbeats"
     assert_includes status.stdout, "worker-3969"
     assert_includes status.stdout, "3969"
+  end
+
+  def test_heartbeat_coerces_terminal_synonym_status_and_projects_status_raw
+    result = run_agent_coord("heartbeat", "--agent-id", "worker-vocab", "--status", "completed")
+
+    assert_equal 0, result.status.exitstatus, result.stderr
+    refute_includes result.stderr, "warning: status"
+    heartbeat = read_heartbeat("worker-vocab")
+    assert_equal "done", heartbeat.fetch("status")
+    assert_equal "completed", heartbeat.fetch("status_raw")
+
+    status = run_agent_coord("status", "--json")
+    assert_equal 0, status.status.exitstatus, status.stderr
+    projected = JSON.parse(status.stdout).fetch("heartbeats").first
+    assert_equal "done", projected.fetch("status")
+    assert_equal "completed", projected.fetch("status_raw")
+  end
+
+  def test_heartbeat_coerces_hyphen_and_case_twin_status_to_snake_case
+    result = run_agent_coord("heartbeat", "--agent-id", "worker-vocab", "--status", "Waiting-On-Checks-Or-Review")
+
+    assert_equal 0, result.status.exitstatus, result.stderr
+    refute_includes result.stderr, "warning: status"
+    heartbeat = read_heartbeat("worker-vocab")
+    assert_equal "waiting_on_checks_or_review", heartbeat.fetch("status")
+    assert_equal "Waiting-On-Checks-Or-Review", heartbeat.fetch("status_raw")
+  end
+
+  def test_heartbeat_coerces_spelling_twin_status
+    result = run_agent_coord("heartbeat", "--agent-id", "worker-vocab", "--status", "in_process")
+
+    assert_equal 0, result.status.exitstatus, result.stderr
+    refute_includes result.stderr, "warning: status"
+    heartbeat = read_heartbeat("worker-vocab")
+    assert_equal "in_progress", heartbeat.fetch("status")
+    assert_equal "in_process", heartbeat.fetch("status_raw")
+  end
+
+  def test_heartbeat_preserves_unknown_status_verbatim_with_warning
+    result = run_agent_coord("heartbeat", "--agent-id", "worker-vocab", "--status", "merged_pr_94")
+
+    assert_equal 0, result.status.exitstatus, result.stderr
+    assert_includes result.stdout, "heartbeat worker-vocab"
+    assert_includes result.stderr, 'warning: status "merged_pr_94" is not in the canonical status vocabulary'
+    heartbeat = read_heartbeat("worker-vocab")
+    assert_equal "merged_pr_94", heartbeat.fetch("status")
+    assert_equal "merged_pr_94", heartbeat.fetch("status_raw")
+  end
+
+  def test_heartbeat_canonical_status_passes_through_without_status_raw_or_warning
+    result = run_agent_coord("heartbeat", "--agent-id", "worker-vocab", "--status", "ready_gates_clean")
+
+    assert_equal 0, result.status.exitstatus, result.stderr
+    refute_includes result.stderr, "warning: status"
+    heartbeat = read_heartbeat("worker-vocab")
+    assert_equal "ready_gates_clean", heartbeat.fetch("status")
+    refute heartbeat.key?("status_raw"), "expected status_raw to be absent"
+  end
+
+  def test_heartbeat_renewal_with_canonical_status_clears_stale_status_raw
+    first = run_agent_coord("heartbeat", "--agent-id", "worker-vocab", "--status", "merged_pr_94")
+    assert_equal 0, first.status.exitstatus, first.stderr
+
+    renewal = run_agent_coord("heartbeat", "--agent-id", "worker-vocab", "--status", "done")
+
+    assert_equal 0, renewal.status.exitstatus, renewal.stderr
+    refute_includes renewal.stderr, "warning: status"
+    heartbeat = read_heartbeat("worker-vocab")
+    assert_equal "done", heartbeat.fetch("status")
+    refute heartbeat.key?("status_raw"), "expected stale status_raw to be cleared"
   end
 
   def test_heartbeat_records_environment_machine_and_codex_session_identity
@@ -3374,7 +3492,7 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
       "--agent-id", "worker-a",
       "--repo", "shakacode/agent-workflows",
       "--target", "76",
-      "--status", "validating"
+      "--status", "blocked"
     )
     assert_equal 0, retargeted.status.exitstatus, retargeted.stderr
 
@@ -3382,7 +3500,7 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     heartbeat_payload = JSON.parse(File.read(heartbeat_path))
     assert_equal "shakacode/agent-workflows", heartbeat_payload.fetch("repo")
     assert_equal "76", heartbeat_payload.fetch("target")
-    assert_equal "validating", heartbeat_payload.fetch("status")
+    assert_equal "blocked", heartbeat_payload.fetch("status")
     assert_absent_lane_metadata(heartbeat_payload, "batch_id", "branch")
   end
 
@@ -3404,7 +3522,7 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
       "--repo", "shakacode/react_on_rails",
       "--target", "3980",
       "--batch-id", "batch-2",
-      "--status", "validating"
+      "--status", "blocked"
     )
     assert_equal 0, retargeted.status.exitstatus, retargeted.stderr
 
@@ -3413,7 +3531,7 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     assert_equal "shakacode/react_on_rails", heartbeat_payload.fetch("repo")
     assert_equal "3980", heartbeat_payload.fetch("target")
     assert_equal "batch-2", heartbeat_payload.fetch("batch_id")
-    assert_equal "validating", heartbeat_payload.fetch("status")
+    assert_equal "blocked", heartbeat_payload.fetch("status")
     assert_absent_lane_metadata(heartbeat_payload, "branch")
   end
 
@@ -3433,7 +3551,7 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
       "heartbeat",
       "--agent-id", "worker-a",
       "--batch-id", "batch-2",
-      "--status", "validating"
+      "--status", "blocked"
     )
     assert_equal 0, retargeted.status.exitstatus, retargeted.stderr
 
@@ -3442,7 +3560,7 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     assert_equal "shakacode/react_on_rails", heartbeat_payload.fetch("repo")
     assert_equal "3982", heartbeat_payload.fetch("target")
     assert_equal "batch-2", heartbeat_payload.fetch("batch_id")
-    assert_equal "validating", heartbeat_payload.fetch("status")
+    assert_equal "blocked", heartbeat_payload.fetch("status")
     assert_absent_lane_metadata(heartbeat_payload, "branch")
   end
 
@@ -3462,7 +3580,7 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
       "heartbeat",
       "--agent-id", "worker-a",
       "--repo", "shakacode/agent-workflows",
-      "--status", "validating"
+      "--status", "blocked"
     )
     assert_equal 0, repo_only.status.exitstatus, repo_only.stderr
 
@@ -3470,7 +3588,7 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     heartbeat_payload = JSON.parse(File.read(heartbeat_path))
     assert_equal "shakacode/agent-workflows", heartbeat_payload.fetch("repo")
     refute heartbeat_payload.key?("target"), "expected target to be absent"
-    assert_equal "validating", heartbeat_payload.fetch("status")
+    assert_equal "blocked", heartbeat_payload.fetch("status")
     assert_absent_lane_metadata(heartbeat_payload, "batch_id", "branch")
   end
 
@@ -3490,7 +3608,7 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
       "heartbeat",
       "--agent-id", "worker-a",
       "--repo", "shakacode/react_on_rails",
-      "--status", "validating"
+      "--status", "blocked"
     )
     assert_equal 0, repo_only.status.exitstatus, repo_only.stderr
 
@@ -3498,7 +3616,7 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     heartbeat_payload = JSON.parse(File.read(heartbeat_path))
     assert_equal "shakacode/react_on_rails", heartbeat_payload.fetch("repo")
     refute heartbeat_payload.key?("target"), "expected target to be absent"
-    assert_equal "validating", heartbeat_payload.fetch("status")
+    assert_equal "blocked", heartbeat_payload.fetch("status")
     assert_absent_lane_metadata(heartbeat_payload, "batch_id", "branch")
   end
 
@@ -3518,7 +3636,7 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
       "--agent-id", "worker-a",
       "--repo", "shakacode/react_on_rails",
       "--target", "3985",
-      "--status", "validating"
+      "--status", "blocked"
     )
     assert_equal 0, target_specific.status.exitstatus, target_specific.stderr
 
@@ -3526,7 +3644,7 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     heartbeat_payload = JSON.parse(File.read(heartbeat_path))
     assert_equal "shakacode/react_on_rails", heartbeat_payload.fetch("repo")
     assert_equal "3985", heartbeat_payload.fetch("target")
-    assert_equal "validating", heartbeat_payload.fetch("status")
+    assert_equal "blocked", heartbeat_payload.fetch("status")
     assert_absent_lane_metadata(heartbeat_payload, "batch_id", "branch")
   end
 
@@ -4137,6 +4255,62 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     assert_equal "phase", status_event.fetch("type")
     assert_equal "validating", status_event.fetch("phase")
     assert_equal "running tests", status_event.fetch("message")
+  end
+
+  def test_record_event_coerces_alias_status_and_projects_status_raw
+    write_batch("batch-vocab", lanes: [{ "name" => "code", "owner" => "worker-a", "targets" => ["3990"] }])
+
+    result = run_agent_coord(
+      "record-event", "--batch-id", "batch-vocab", "--type", "phase",
+      "--agent-id", "worker-a", "--status", "ready-to-merge"
+    )
+
+    assert_equal 0, result.status.exitstatus, result.stderr
+    refute_includes result.stderr, "warning: status"
+    event_files = Dir.glob(File.join(@state_root, "events", "batch-vocab", "*.json"))
+    assert_equal 1, event_files.length
+    event = JSON.parse(File.read(event_files.first))
+    assert_equal "ready", event.fetch("status")
+    assert_equal "ready-to-merge", event.fetch("status_raw")
+
+    status = run_agent_coord("status", "--batch-id", "batch-vocab", "--json")
+    assert_equal 0, status.status.exitstatus, status.stderr
+    status_event = JSON.parse(status.stdout).fetch("events").first
+    assert_equal "ready", status_event.fetch("status")
+    assert_equal "ready-to-merge", status_event.fetch("status_raw")
+  end
+
+  def test_record_event_preserves_unknown_status_verbatim_with_warning
+    write_batch("batch-vocab", lanes: [{ "name" => "code", "owner" => "worker-a", "targets" => ["3990"] }])
+
+    result = run_agent_coord(
+      "record-event", "--batch-id", "batch-vocab", "--type", "phase",
+      "--agent-id", "worker-a", "--status", "pushed_review_fix_6"
+    )
+
+    assert_equal 0, result.status.exitstatus, result.stderr
+    assert_includes result.stdout, "recorded event batch-vocab"
+    assert_includes result.stderr, 'warning: status "pushed_review_fix_6" is not in the canonical status vocabulary'
+    event_files = Dir.glob(File.join(@state_root, "events", "batch-vocab", "*.json"))
+    assert_equal 1, event_files.length
+    event = JSON.parse(File.read(event_files.first))
+    assert_equal "pushed_review_fix_6", event.fetch("status")
+    assert_equal "pushed_review_fix_6", event.fetch("status_raw")
+  end
+
+  def test_record_event_canonical_status_writes_without_status_raw
+    write_batch("batch-vocab", lanes: [{ "name" => "code", "owner" => "worker-a", "targets" => ["3990"] }])
+
+    result = run_agent_coord(
+      "record-event", "--batch-id", "batch-vocab", "--type", "phase",
+      "--agent-id", "worker-a", "--status", "external_gate_failing"
+    )
+
+    assert_equal 0, result.status.exitstatus, result.stderr
+    refute_includes result.stderr, "warning: status"
+    event = JSON.parse(File.read(Dir.glob(File.join(@state_root, "events", "batch-vocab", "*.json")).first))
+    assert_equal "external_gate_failing", event.fetch("status")
+    refute event.key?("status_raw"), "expected status_raw to be absent"
   end
 
   def test_lane_closed_events_complete_batch_only_after_every_lane_is_terminal
@@ -4818,6 +4992,58 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     assert_includes status.stdout, "deps - blocked_on -"
     assert_includes status.stdout, "lane docs owner worker-docs targets 3972 status blocked live"
     assert_includes status.stdout, "deps batch-1:backend blocked_on batch-1:backend"
+  end
+
+  def test_dependency_gating_accepts_canonical_and_legacy_terminal_statuses
+    now = Time.now.utc
+    write_batch(
+      "batch-vocab-deps",
+      lanes: [
+        { "name" => "legacy", "owner" => "worker-legacy", "targets" => ["4201"] },
+        { "name" => "canonical", "owner" => "worker-canonical", "targets" => ["4202"] },
+        {
+          "name" => "consumer",
+          "owner" => "worker-consumer",
+          "targets" => ["4203"],
+          "depends_on" => ["batch-vocab-deps:legacy", "batch-vocab-deps:canonical"]
+        }
+      ]
+    )
+    write_heartbeat("worker-legacy", status: "completed", updated_at: now - 60, expires_at: now + 600)
+    write_heartbeat("worker-canonical", status: "ready_gates_clean", updated_at: now - 60, expires_at: now + 600)
+    write_heartbeat("worker-consumer", status: "blocked", updated_at: now - 60, expires_at: now + 600)
+
+    status = run_agent_coord("status", "--batch-id", "batch-vocab-deps", "--json")
+
+    assert_equal 0, status.status.exitstatus, status.stderr
+    lanes = JSON.parse(status.stdout).fetch("batches").first.fetch("lanes")
+    consumer = lanes.find { |lane| lane.fetch("name") == "consumer" }
+    assert_empty consumer.fetch("blocked_on"), "expected legacy and canonical terminal statuses to satisfy deps"
+  end
+
+  def test_dependency_gating_keeps_abandoned_lane_blocking_dependents
+    now = Time.now.utc
+    write_batch(
+      "batch-vocab-abandoned",
+      lanes: [
+        { "name" => "base", "owner" => "worker-base", "targets" => ["4204"] },
+        {
+          "name" => "consumer",
+          "owner" => "worker-consumer",
+          "targets" => ["4205"],
+          "depends_on" => ["batch-vocab-abandoned:base"]
+        }
+      ]
+    )
+    write_heartbeat("worker-base", status: "abandoned", updated_at: now - 60, expires_at: now + 600)
+    write_heartbeat("worker-consumer", status: "blocked", updated_at: now - 60, expires_at: now + 600)
+
+    status = run_agent_coord("status", "--batch-id", "batch-vocab-abandoned", "--json")
+
+    assert_equal 0, status.status.exitstatus, status.stderr
+    lanes = JSON.parse(status.stdout).fetch("batches").first.fetch("lanes")
+    consumer = lanes.find { |lane| lane.fetch("name") == "consumer" }
+    assert_equal ["batch-vocab-abandoned:base"], consumer.fetch("blocked_on")
   end
 
   def test_status_resolves_dependencies_across_batches
@@ -5767,6 +5993,10 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     )
   end
 
+  def read_heartbeat(agent_id)
+    JSON.parse(File.read(File.join(@state_root, "heartbeats", "#{agent_id}.json")))
+  end
+
   def write_batch(batch_id, lanes:)
     FileUtils.mkdir_p(File.join(@state_root, "batches"))
     File.write(
@@ -5928,6 +6158,7 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
       "handoff_to" => "claude-code/conductor",
       "message" => "Continue from the failing docs spec."
     }.each { |key, value| assert_equal value, event.fetch(key) }
+    refute event.key?("status_raw"), "expected the claim-status snapshot to bypass status coercion"
   end
 
   def assert_handoff_status_event(status_event, event_id)
