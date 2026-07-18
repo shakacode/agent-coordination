@@ -4461,6 +4461,45 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     assert_equal original_batch, File.read(batch_path)
   end
 
+  def test_terminal_replay_rejects_foreign_agent_after_lane_owner_is_rewritten
+    write_batch(
+      "batch-cross-agent-terminal-replay",
+      lanes: [{ "name" => "code", "owner" => "worker-a", "targets" => ["3993"] }]
+    )
+    args = [
+      "record-event", "--batch-id", "batch-cross-agent-terminal-replay", "--type", "lane_closed",
+      "--lane", "code", "--agent-id", "worker-a", "--repo", "shakacode/react_on_rails",
+      "--target", "3993", "--host", "codex", "--terminal", "done",
+      "--pr-url", "https://github.com/shakacode/react_on_rails/pull/3993", "--pr-state", "merged"
+    ]
+    first = run_agent_coord(*args)
+    assert_equal 0, first.status.exitstatus, first.stderr
+
+    event_glob = File.join(@state_root, "events", "batch-cross-agent-terminal-replay", "*.json")
+    batch_path = File.join(@state_root, "batches", "batch-cross-agent-terminal-replay.json")
+    original_event = File.read(Dir.glob(event_glob).fetch(0))
+
+    foreign_replay = args.dup
+    foreign_replay[foreign_replay.index("--agent-id") + 1] = "worker-b"
+    foreign_env = { "AGENT_COORD_MACHINE_ID" => "m5" }
+    rejected_by_identity = run_agent_coord(*foreign_replay, env: foreign_env)
+    assert_equal 1, rejected_by_identity.status.exitstatus
+    assert_includes rejected_by_identity.stderr, "terminal closeout agent does not match lane"
+
+    rewritten_batch = JSON.parse(File.read(batch_path))
+    rewritten_batch.fetch("lanes").fetch(0)["owner"] = "worker-b"
+    File.write(batch_path, JSON.pretty_generate(rewritten_batch))
+    original_rewritten_batch = File.read(batch_path)
+
+    rejected_by_terminal_conflict = run_agent_coord(*foreign_replay, env: foreign_env)
+
+    assert_equal 1, rejected_by_terminal_conflict.status.exitstatus
+    assert_includes rejected_by_terminal_conflict.stderr, "conflicting terminal closeout"
+    assert_equal 1, Dir.glob(event_glob).length
+    assert_equal original_event, File.read(Dir.glob(event_glob).fetch(0))
+    assert_equal original_rewritten_batch, File.read(batch_path)
+  end
+
   def test_terminal_replay_stays_idempotent_when_machine_id_env_appears
     write_batch(
       "batch-machine-replay",
