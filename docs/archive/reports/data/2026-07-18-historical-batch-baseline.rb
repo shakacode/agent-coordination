@@ -17,6 +17,13 @@ claims = source.fetch("coordination").fetch("claims")
 events = source.fetch("coordination").fetch("events")
 github_prs = source.fetch("github").fetch("pull_requests").to_h { |pr| [pr.fetch("url"), pr] }
 
+targetless_prose_statuses = events.select do |event|
+  target = event["target"]
+  status = event["status"]
+  (target.nil? || target.empty?) && status.is_a?(String) && status.match?(/[[:space:]]/)
+end
+abort "targetless coordination event status contains free-form prose" unless targetless_prose_statuses.empty?
+
 class TargetScorer
   def initialize(claim_groups:, event_groups:, github_prs:, terminal_statuses:, terminal_markers:)
     @claim_groups = claim_groups

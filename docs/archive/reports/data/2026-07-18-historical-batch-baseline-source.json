@@ -19420,7 +19420,7 @@
         "target": null,
         "lane": "issue379",
         "type": "external-gate-failing",
-        "status": "PR 414 RSpec (Fast) fails 13 pre-existing live specs (info/open/maintenance_set_page/setup_app); identical failure set on PR 413 run 29492232103; shared-org degradation owned by cpf-slow-suite-20260715-2057 lane",
+        "status": null,
         "terminal": null,
         "pr_url": null
       },
@@ -19792,7 +19792,7 @@
         "target": null,
         "lane": "batch-qa",
         "type": "env-maintenance",
-        "status": "Deleting 13 orphaned dummy-test-* GVCs from shakacode-heroku-to-control-plane-ci (gvcs quota 20/20 maxed, fails all PR CI); no CI runs active; evidence: PR 414/415 CI logs",
+        "status": null,
         "terminal": null,
         "pr_url": null
       },
@@ -19852,7 +19852,7 @@
         "target": null,
         "lane": "batch-qa",
         "type": "env-maintenance-complete",
-        "status": "All 13 orphaned dummy-test GVCs deleted (2 required workload+volumeset removal first); org gvcs quota now 0/20; maintainer approved deletion in-session; re-running PR 414/415 fast suites",
+        "status": null,
         "terminal": null,
         "pr_url": null
       },
@@ -19924,7 +19924,7 @@
         "target": null,
         "lane": "issue383",
         "type": "flake-triage",
-        "status": "PR 416 fast suite 683/1 fail: delete_spec pre-deletion-hook SETUP binding flake (cpln CLI eventual-consistency, seed 58967); not in the PR's changed code path; also first observed instance of the 382 no-retry-on-CLI-exit trade; rerunning failed job",
+        "status": null,
         "terminal": null,
         "pr_url": null
       },
@@ -19972,7 +19972,7 @@
         "target": null,
         "lane": "batch-qa",
         "type": "batch-complete",
-        "status": "All 3 targets merged (414/415/416); handoff posted on epic 387; QA evidence replayed after each merge; follow-up 417 filed",
+        "status": null,
         "terminal": null,
         "pr_url": null
       },

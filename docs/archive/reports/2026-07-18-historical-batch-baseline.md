@@ -49,7 +49,8 @@ Its raw 1,987,195-byte response has SHA-256
 `6a99cedbc64d88ba5b92c5021b7a022631aa81591684f1314299aaeda613dee0`.
 The committed source is a minimized projection that removes batch objectives,
 instructions, launch prompts, messages, handoff notes, actor/session identity,
-and unrelated payload fields.
+and unrelated payload fields. It also nulls free-form status prose on targetless
+operational events.
 
 | Snapshot section | Rows |
 | --- | ---: |
