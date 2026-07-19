@@ -13,6 +13,8 @@ The frozen source and generated results are:
 - [all 100 batch scores](data/2026-07-18-historical-batch-baseline-batches.tsv)
 - [all 392 target-unit results](data/2026-07-18-historical-batch-baseline-targets.tsv)
 - [one-off replay generator](data/2026-07-18-historical-batch-baseline.rb)
+- [sanitized marker collector](data/2026-07-18-historical-batch-baseline-marker-collector.rb)
+- [archived shared review-finding validator](data/2026-07-18-historical-batch-review-finding-validator.rb.source)
 
 ## Result
 
@@ -35,6 +37,146 @@ unfinished work.
 The four score numerators reconcile to `351 + 272 + 290 + 137 = 1,050`.
 The denominator is three coordination gates for every target unit plus one
 GitHub gate only for PR-bearing units: `(392 x 3) + 156 = 1,332`.
+
+## Outcome Scorecard
+
+The outcome scorecard below answers issue #75 separately from the evidence-
+coverage score. Its unit is the same 392 aggregated target units. Final-state
+classification uses explicit evidence in this order: a currently merged,
+resolved, non-mismatched PR; an exceptional lane status (`blocked-user-input`,
+`no-pr-evidence`, `failed`, `abandoned`, or `superseded`); an eligible currently
+open or closed PR; then one unambiguous normalized lane status. Compatible
+`done + merged` lane-role observations resolve to the more specific `merged`.
+Invalid, unresolved, non-PR, and explicit cross-repository PR evidence cannot
+override coordination state. Missing evidence stays `UNKNOWN`, and incompatible
+explicit statuses remain `conflicting-observations`.
+
+| Final state | Target units | Denominator | Rate |
+| --- | ---: | ---: | ---: |
+| `merged` | 145 | 392 | 37.0% |
+| `done` | 119 | 392 | 30.4% |
+| `UNKNOWN` | 57 | 392 | 14.5% |
+| `blocked` | 17 | 392 | 4.3% |
+| `in-progress` | 16 | 392 | 4.1% |
+| `open-pr` | 14 | 392 | 3.6% |
+| `conflicting-observations` | 3 | 392 | 0.8% |
+| `closed-unmerged` | 6 | 392 | 1.5% |
+| `superseded` | 4 | 392 | 1.0% |
+| `abandoned` | 3 | 392 | 0.8% |
+| `waiting` | 3 | 392 | 0.8% |
+| `failed` | 2 | 392 | 0.5% |
+| `blocked-user-input` | 1 | 392 | 0.3% |
+| `no-pr-evidence` | 1 | 392 | 0.3% |
+| `ready` | 1 | 392 | 0.3% |
+
+The counts sum to 392. Of the 145 `merged` classifications, 126 come from an
+eligible resolved merged PR and 19 come only from explicit coordination lane status.
+The latter are not promoted into the GitHub merge-rate numerator.
+
+### Merge Rate
+
+PRs and target units are different populations. The defensible same-repository
+rates and the broader lower-bound observed share are reported separately:
+
+| Measure | Unit | Merged numerator | Denominator | Rate/share |
+| --- | --- | ---: | ---: | ---: |
+| PR merge rate | Resolved unique GitHub PR | 107 | 134 | 79.9% |
+| Same-repo target-unit merge rate | PR-bearing target unit with resolved same-repo PR evidence | 117 | 137 | 85.4% |
+| Observed current merged share (lower bound) | PR-bearing target unit | 126 | 156 | 80.8% |
+
+The 156-unit denominator includes every target unit that records `pr_url`
+evidence; it does not presuppose merge. Its mutually exclusive evidence
+distribution is 126 merged, 15 open, 7 closed without merge, and 8 `UNKNOWN`:
+6 have invalid or unresolved evidence and 2 explicitly point across repository
+boundaries. Unavailable evidence stays in this denominator, making 126 / 156 a
+lower-bound observed current merged share rather than a complete historical
+merge rate. The PR-level denominator counts each resolved URL once even when
+more than one historical target unit records it.
+
+### Claim-To-Merge Duration
+
+Exact duration is reconstructable for **1 / 107 merged unique PRs**. The sole
+sample joins an exact `type=claim` event timestamp to the same
+`batch_id + repo + target` current claim carrying the PR URL, then to that
+exact PR's `merged_at`. It is **17,532 seconds (4:52:12)**, so minimum, median,
+maximum, and mean are all 17,532 seconds.
+
+The other **106 / 107 are `UNKNOWN`**. Current claim rows do not carry claim-
+acquisition time, and only one retained event has `type=claim`; neither batch
+registration time, PR creation time, claim expiry, nor first unrelated event
+is substituted for the missing timestamp.
+
+### Interventions
+
+Interventions are counted only from an explicit allowlist of structured
+`events[].type` values. This yields **16 / 1,011 events** across **7 / 100
+batches**: 13 replacements or takeovers, 2 model escalations, and 1 collision
+block. Eleven intervention events have a complete target join key; five are
+targetless and cannot be attributed to a target unit.
+
+| Structured event type | Events |
+| --- | ---: |
+| `dispatch-replaced` | 6 |
+| `replacement` | 5 |
+| `MODEL_ESCALATION_REQUEST` | 1 |
+| `model-escalation` | 1 |
+| `worker-replacement` | 1 |
+| `lane-takeover` | 1 |
+| `collision-blocked` | 1 |
+
+Free-form status, lane names, comments, and absence of progress are not used to
+invent interventions.
+
+### Findings By Severity
+
+The minimized GitHub scan covers all 134 resolved PRs across PR bodies, issue
+comments, review bodies, and inline review comments. It accepts
+`review-finding-v0` only from an exact `json review-findings` fenced document
+that passes the archived shared `agent-workflows` validator from commit
+`10c2eeb9a599704290a22e01b9093057a416f7f3`, followed by the collector's exact
+repository/PR target binding. The other named markers count only within exact
+multiline HTML comment headers and envelopes; prose mentions do not count. The
+collector checks pagination and commits no body, comment, review, finding
+title, or finding text. The scan found six exact
+`completed-batch-audit v1` marker candidates, which do not carry severity, and
+zero valid severity-bearing `review-finding-v0` blocks. No scan error,
+truncated surface, or malformed severity candidate remained.
+
+The sanitized provenance records 36 GraphQL requests and row counts of 134 PR
+bodies, 1,522 issue comments, 2,765 reviews, and 2,816 inline review comments.
+Five review collections crossed the first 100 rows and completed through REST
+pagination. The committed collector replays fixture and projection validation
+without network access. The capture collector hash and archived collector hash
+both equal the committed collector file's SHA-256, and the separately recorded
+validator SHA-256 equals the byte-identical archived shared validator. All 134
+per-PR evidence URLs are unique and exactly match the frozen GitHub PR
+population; the source stores their canonical sorted-set digest plus per-PR row
+counts, pagination flags, surface digests, and query/response digests only.
+`pagination_complete` is `true`, and no real review prose is committed.
+
+| Severity | Observed in accepted marker subset | Population result |
+| --- | ---: | --- |
+| P0 | 0 / 0 accepted findings | `UNKNOWN` |
+| P1 | 0 / 0 accepted findings | `UNKNOWN` |
+| P2 | 0 / 0 accepted findings | `UNKNOWN` |
+| P3 | 0 / 0 accepted findings | `UNKNOWN` |
+| INFO | 0 / 0 accepted findings | `UNKNOWN` |
+
+These are not population zeroes. With no severity-bearing receipt, findings by
+severity remain `UNKNOWN` for all 134 PRs; prose review text is never parsed as
+a substitute.
+
+### Metric Gaps
+
+| Rank | Missing telemetry | Unavailable | Denominator | Blocked metric |
+| ---: | --- | ---: | ---: | --- |
+| 1 | Structured severity-bearing finding marker | 134 | 134 resolved PRs | Findings by severity |
+| 2 | Claim-acquired timestamp bound to PR | 106 | 107 merged PRs | Claim-to-merge duration |
+| 3 | Defensible final-state evidence | 57 | 392 target units | Final-state distribution |
+| 4 | Complete target key on intervention | 5 | 16 intervention events | Per-target intervention attribution |
+
+The first two gaps are the highest-priority emission inputs for follow-on
+instrumentation: they block nearly the whole applicable metric population.
 
 ## Population
 
@@ -186,6 +328,15 @@ Across the 134 resolved PRs, current metadata reports 107 `MERGED`, 11 `CLOSED`,
 and 16 `OPEN`. Present-head check rollups report 109 `SUCCESS`, 4 `FAILURE`, 18
 `PENDING`, and 3 `UNKNOWN`.
 
+At `2026-07-20T23:55:25Z`, a second bounded read scanned the four structured-
+marker surfaces named in the outcome scorecard. Five review collections that
+exceeded 100 rows were paginated before the sanitized projection was written.
+The committed projection contains only marker type, PR URL, source kind,
+severity when valid, aggregate scan status, URL-set/query/response digests, and
+per-PR counts, pagination flags, and surface digests; raw GitHub text stayed
+temporary and is not replay input. The capture and archived collector hashes
+both identify the exact committed fail-closed collector used for this read.
+
 Those check rollups are explicitly **not historical CI evidence**. They describe
 the PR's current head at query time, not necessarily the SHA or checks observed
 when a coordination event was recorded or a PR merged. No retained event field
@@ -217,6 +368,8 @@ Confidence is intentionally limited for historical outcome completeness:
   batches with missing or mismatched batch repo cannot be repaired from a PR URL
   without changing the join contract.
 - Current GitHub state cannot prove state at coordination-event time.
+- Structured finding severity is absent from the retained marker projection;
+  review prose cannot fill that typed gap.
 - Absent events, checks, PRs, or terminal markers remain absent. This report
   does not treat absence as success, failure, cancellation, or no-PR evidence.
 
@@ -238,6 +391,14 @@ cmp "$tmp_dir/batches.tsv" \
   docs/archive/reports/data/2026-07-18-historical-batch-baseline-batches.tsv
 cmp "$tmp_dir/targets.tsv" \
   docs/archive/reports/data/2026-07-18-historical-batch-baseline-targets.tsv
+
+ruby docs/archive/reports/data/2026-07-18-historical-batch-baseline-marker-collector.rb \
+  validate \
+  docs/archive/reports/data/2026-07-18-historical-batch-baseline-source.json
+ruby docs/archive/reports/data/2026-07-18-historical-batch-baseline-marker-collector.rb \
+  fixture \
+  test/fixtures/historical-batch-marker-surfaces.json \
+  "$tmp_dir/marker-projection.json"
 ```
 
 Headline reconciliation:
@@ -248,7 +409,7 @@ jq '.headline, .reconstruction_gap_ranking, .join_validation' \
 
 awk -F '\t' 'NR > 1 {
   targets += $5; reconstructed += $6; observed += $7; unknown += $8;
-  numerator += $9; denominator += $10
+  numerator += $15; denominator += $16
 } END {
   print targets, reconstructed, observed, unknown, numerator, denominator
 }' docs/archive/reports/data/2026-07-18-historical-batch-baseline-batches.tsv

@@ -1,101 +1,101 @@
-batch_id	repo	batch_status	synthetic	target_units	reconstructable	observed_only	unknown	score_numerator	score_denominator	score_percent
-HC-A-foundation-kite	shakacode/hichee	completed	false	4	4	0	0	15	15	100.0
-ac-a-0712-0107	shakacode/agent-coordination	completed	false	4	4	0	0	15	15	100.0
-ac-a-coord-cinder	shakacode/agent-coordination		false	2	2	0	0	6	6	100.0
-ac-b-0712-0107	shakacode/agent-coordination	completed	false	3	3	0	0	11	11	100.0
-ac-datafix-20260716-1555	shakacode/agent-coordination	completed	false	3	3	0	0	11	11	100.0
-aca-20260709-1753	shakacode/agent-coordination		false	4	4	0	0	12	12	100.0
-acd-a-0711-1813	shakacode/agent-coordination-dashboard	complete	false	3	3	0	0	9	9	100.0
-acd-b-0712-0107	shakacode/agent-coordination-dashboard	complete	false	3	3	0	0	9	9	100.0
-acd-c-0712-0107	shakacode/agent-coordination-dashboard	completed	false	4	4	0	0	14	14	100.0
-acd-c-pr61-followup-0714	shakacode/agent-coordination-dashboard	completed	false	1	1	0	0	4	4	100.0
-acd-datafix-20260715-2339	shakacode/agent-coordination-dashboard		false	3	3	0	0	12	12	100.0
-acda-operator-ux	shakacode/agent-coordination-dashboard	completed	false	6	6	0	0	23	23	100.0
-aw-ce-pov-orbit	shakacode/agent-workflows		false	8	8	0	0	25	25	100.0
-aw-closeout-20260715-2057	shakacode/agent-workflows	complete	false	6	6	0	0	23	23	100.0
-awfa-20260709-1753-docs-adoption	shakacode/agent-workflows	completed	false	7	7	0	0	21	21	100.0
-awfb-20260709-1753	shakacode/agent-workflows		false	5	5	0	0	15	15	100.0
-batch-shakacode-control-plane-flow-2vl3ja	shakacode/control-plane-flow		false	1	1	0	0	4	4	100.0
-cpor-0710-docs-spawn	shakacode/cypress-playwright-on-rails	completed	false	2	2	0	0	8	8	100.0
-hichee-07-13-1342-readonly-db	shakacode/hichee	active	false	1	1	0	0	3	3	100.0
-hichee-07-14-1718-pr9768	shakacode/hichee	completed	false	1	1	0	0	4	4	100.0
-hichee-2026-07-17-deploy-verification-wave1	shakacode/hichee	completed	false	5	5	0	0	20	20	100.0
-hichee-20260716-home-search-focus	shakacode/hichee	completed	false	2	2	0	0	6	6	100.0
-hichee-pr9701-20260714	shakacode/hichee	completed	false	1	1	0	0	4	4	100.0
-hichee-pr9815-20260718	shakacode/hichee	completed	false	1	1	0	0	4	4	100.0
-hichee-pr9817-spring-opt-in-20260716	shakacode/hichee		false	1	1	0	0	4	4	100.0
-hichee-prs-9824-9825-20260717	shakacode/hichee		false	2	2	0	0	8	8	100.0
-hichee0715-koa	shakacode/hichee	completed	false	9	9	0	0	27	27	100.0
-private-dotfiles-20260717-all-open-prs	justin808/private-dotfiles	completed	false	3	3	0	0	12	12	100.0
-ror-17-0-0-rsc187-disposition-20260717	shakacode/react_on_rails_rsc	completed	false	1	1	0	0	3	3	100.0
-ror-17-0-1-rsc419-investigation-20260717	shakacode/react_on_rails	completed	false	1	1	0	0	3	3	100.0
-ror-4568-20260710	shakacode/react_on_rails	done	false	5	5	0	0	15	15	100.0
-ror-4620-main-cache-identity-20260716	shakacode/react_on_rails	completed	false	1	1	0	0	4	4	100.0
-ror-4626-closeout-20260712	shakacode/react_on_rails		false	3	3	0	0	12	12	100.0
-ror-4653-demo-smoke-20260714-0910-hst	shakacode/react_on_rails	completed	false	3	3	0	0	12	12	100.0
-ror-a-ci-fleet-lifecycle-20260718	shakacode/react_on_rails	completed	false	4	4	0	0	16	16	100.0
-ror-a-pr4552-cedar	shakacode/react_on_rails		false	1	1	0	0	4	4	100.0
-ror-a-stalled-prs-20260712	shakacode/react_on_rails	complete	false	4	4	0	0	16	16	100.0
-ror-b-4501-20260709-1733	shakacode/react_on_rails		false	1	1	0	0	3	3	100.0
-ror-b-pro-ember-20260713-1528	shakacode/react_on_rails		false	4	4	0	0	15	15	100.0
-ror-backport-main-to-release-20260715	shakacode/react_on_rails	completed	false	7	7	0	0	27	27	100.0
-ror-c-20260716-1543-pro-node-residuals	shakacode/react_on_rails		false	5	5	0	0	19	19	100.0
-ror-c-security-tests-20260712	shakacode/react_on_rails	completed	false	6	6	0	0	23	23	100.0
-ror-d-20260716-1543-rspack-adoption-recovery	shakacode/react_on_rails	completed	false	3	3	0	0	12	12	100.0
-ror-pr4564-20260710-1813	shakacode/react_on_rails	complete	false	1	1	0	0	3	3	100.0
-ror-release-20260713	shakacode/react_on_rails	completed	false	4	4	0	0	16	16	100.0
-ror-unblock-20260717	shakacode/react_on_rails	completed	false	3	3	0	0	12	12	100.0
-ror17-fleet-b-20260717	shakacode/react-on-rails-demo-marketplace-rsc	completed	false	2	2	0	0	8	8	100.0
-rsc-0710-2115-parity-discover	shakacode/react-on-rails-demo-gumroad-rsc	completed	false	2	2	0	0	8	8	100.0
-shakapacker-1219-20260714T183711Z	shakacode/shakapacker	completed	false	1	1	0	0	4	4	100.0
-sim-task_one	sim/local		true	1	1	0	0	3	3	100.0
-ss-open-20260712-b	shakacode/shakastack-com	completed	false	2	2	0	0	8	8	100.0
-tr-07-13-1224-pr14	shakacode/team-reports	completed	false	1	1	0	0	4	4	100.0
-ror-17-0-0-rc12-demo-fleet-0715-hst	shakacode/react_on_rails	completed	false	14	13	1	0	42	43	97.7
-acda-2026-07-09-1753	shakacode/agent-coordination-dashboard	complete	false	4	3	1	0	13	14	92.9
-cpflowA-release-0709-reef	shakacode/control-plane-flow		false	4	3	0	1	12	13	92.3
-ror-c-pro-rsc-20260715	shakacode/react_on_rails	active	false	6	5	0	1	20	22	90.9
-marketplace-e2e-20260718	shakacode/react-on-rails-demo-marketplace-rsc		false	8	6	0	2	26	29	89.7
-ror-d-roadmap-evidence-20260715	shakacode/react_on_rails	blocked	false	6	5	0	1	16	18	88.9
-hichee-a-20260718-1022	shakacode/hichee		false	8	5	0	3	23	26	88.5
-ror-4627-workflow-exercise-20260714	shakacode/react_on_rails		false	4	2	2	0	14	16	87.5
-cpf-b-20260716-1543	shakacode/control-plane-flow		false	4	3	0	1	13	15	86.7
-ror-b-ci-workflows-20260715	shakacode/react_on_rails		false	6	4	0	2	16	19	84.2
-awr-a-20260716-1535	shakacode/agent-coordination		false	3	2	1	0	10	12	83.3
-ror-17-0-0-rc13-security-20260717	shakacode/react_on_rails	in_progress	false	2	1	0	1	5	6	83.3
-ror-d-adoption-proof-20260712	shakacode/react_on_rails		false	6	3	3	0	15	18	83.3
-ss-open-20260712	shakacode/shakastack-com	completed	false	5	1	4	0	16	20	80.0
-ror-4641-rc10-20260713	shakacode/react_on_rails	active	false	3	1	0	2	7	9	77.8
-ror-a-open-pr-closeout-20260715	shakacode/react_on_rails		false	5	2	0	3	14	18	77.8
-aca	shakacode/agent-coordination	in_progress	false	1	0	1	0	3	4	75.0
-cpf-slow-suite-20260715-2057	shakacode/control-plane-flow	in_progress	false	1	0	0	1	3	4	75.0
-qa-http-20260712T145459Z-57140	qa/ac-a-20260712T145459Z-57140	completed	false	2	0	2	0	6	8	75.0
-qa-http-stdin-20260712T145459Z-57140	qa/ac-a-20260712T145459Z-57140	completed	false	1	0	1	0	3	4	75.0
-ror-release-backports-20260711	shakacode/react_on_rails		false	4	2	0	2	9	12	75.0
-stack-rollout-20260708-m5-b	shakacode/agent-coordination		false	1	0	1	0	3	4	75.0
-hichee-b-20260718-1022	shakacode/hichee		false	8	0	0	8	19	27	70.4
-ror-b-demo-fleet-health-20260718	shakacode/react_on_rails	in_progress	false	3	1	1	1	7	10	70.0
-hichee-c-20260718-1022	shakacode/hichee	active	false	10	0	0	10	22	32	68.8
-ac-c-0712-0107	shakacode/agent-coordination		false	2	0	2	0	4	6	66.7
-acb	shakacode/agent-coordination		false	3	0	3	0	6	9	66.7
-stack-rollout-20260708-actions-parity	shakacode/agent-workflows		false	1	0	0	1	2	3	66.7
-stack-rollout-20260708-wave-b	shakacode/agent-coordination		false	1	0	0	1	2	3	66.7
-ror-b-release-rsc-20260712	shakacode/react_on_rails		false	5	1	0	4	10	16	62.5
-acd-actionable-20260715-2057	shakacode/agent-coordination-dashboard	in_progress	false	5	2	0	3	9	15	60.0
-hichee-d-20260718-1022	shakacode/hichee		false	7	1	0	6	11	21	52.4
-hichee-2026-07-18-deploy-verification-wave2	shakacode/hichee		false	2	0	0	2	3	6	50.0
-HC-staging-release-qa-20260715-1157	shakacode/hichee		false	4	0	0	4	6	13	46.2
-awr-b-0716-1535		completed	false	10	0	10	0	10	30	33.3
-qa-pr57-http-path-20260712T150640Z-75520	qa/pr57-http-20260712T150640Z-75520		false	1	0	0	1	1	3	33.3
-qa-pr57-http-stdin-20260712T150640Z-75520	qa/pr57-http-20260712T150640Z-75520		false	1	0	0	1	1	3	33.3
-ror-bugs-20260717	shakacode/react_on_rails		false	5	0	0	5	5	15	33.3
-ror-ci-20260717	shakacode/react_on_rails		false	3	0	0	3	3	9	33.3
-ror-docs1-20260717	shakacode/react_on_rails		false	10	0	0	10	10	30	33.3
-ror-docs2-20260717	shakacode/react_on_rails		false	4	0	0	4	4	12	33.3
-ror-pro-20260717	shakacode/react_on_rails		false	5	0	0	5	5	15	33.3
-ror-rsc-20260717	shakacode/react_on_rails		false	6	0	0	6	6	18	33.3
-ror-wave2-20260717	shakacode/react_on_rails		false	5	0	0	5	5	15	33.3
-ror-17-0-0-rc10-demo-fleet-0713-1420-hst			false	21	0	21	0	21	69	30.4
-tr-07-13-1344-plugin-split		completed	false	3	0	3	0	3	11	27.3
-batch-b	shakacode/react_on_rails		false	1	0	0	1	1	4	25.0
-ror17-fleet-c-20260717		active	false	7	0	6	1	6	24	25.0
+batch_id	repo	batch_status	synthetic	target_units	reconstructable	observed_only	unknown	final_states	pr_bearing_target_units	merged_target_units	interventions	claim_to_merge_reconstructable	findings_by_severity	score_numerator	score_denominator	score_percent
+HC-A-foundation-kite	shakacode/hichee	completed	false	4	4	0	0	done=1|merged=3	3	3	0	0	UNKNOWN	15	15	100.0
+ac-a-0712-0107	shakacode/agent-coordination	completed	false	4	4	0	0	done=1|merged=3	3	3	0	0	UNKNOWN	15	15	100.0
+ac-a-coord-cinder	shakacode/agent-coordination		false	2	2	0	0	done=2	0	0	0	0	UNKNOWN	6	6	100.0
+ac-b-0712-0107	shakacode/agent-coordination	completed	false	3	3	0	0	done=1|merged=2	2	2	0	0	UNKNOWN	11	11	100.0
+ac-datafix-20260716-1555	shakacode/agent-coordination	completed	false	3	3	0	0	done=1|merged=2	2	2	0	0	UNKNOWN	11	11	100.0
+aca-20260709-1753	shakacode/agent-coordination		false	4	4	0	0	done=1|merged=3	0	0	0	0	UNKNOWN	12	12	100.0
+acd-a-0711-1813	shakacode/agent-coordination-dashboard	complete	false	3	3	0	0	done=1|merged=2	0	0	0	0	UNKNOWN	9	9	100.0
+acd-b-0712-0107	shakacode/agent-coordination-dashboard	complete	false	3	3	0	0	done=3	0	0	1	0	UNKNOWN	9	9	100.0
+acd-c-0712-0107	shakacode/agent-coordination-dashboard	completed	false	4	4	0	0	done=2|merged=2	2	2	0	1	UNKNOWN	14	14	100.0
+acd-c-pr61-followup-0714	shakacode/agent-coordination-dashboard	completed	false	1	1	0	0	merged=1	1	1	0	0	UNKNOWN	4	4	100.0
+acd-datafix-20260715-2339	shakacode/agent-coordination-dashboard		false	3	3	0	0	merged=3	3	3	1	0	UNKNOWN	12	12	100.0
+acda-operator-ux	shakacode/agent-coordination-dashboard	completed	false	6	6	0	0	done=1|merged=5	5	5	0	0	UNKNOWN	23	23	100.0
+aw-ce-pov-orbit	shakacode/agent-workflows		false	8	8	0	0	done=4|merged=4	1	1	0	0	UNKNOWN	25	25	100.0
+aw-closeout-20260715-2057	shakacode/agent-workflows	complete	false	6	6	0	0	done=1|merged=5	5	5	6	0	UNKNOWN	23	23	100.0
+awfa-20260709-1753-docs-adoption	shakacode/agent-workflows	completed	false	7	7	0	0	done=1|merged=6	0	0	0	0	UNKNOWN	21	21	100.0
+awfb-20260709-1753	shakacode/agent-workflows		false	5	5	0	0	done=5	0	0	0	0	UNKNOWN	15	15	100.0
+batch-shakacode-control-plane-flow-2vl3ja	shakacode/control-plane-flow		false	1	1	0	0	merged=1	1	1	0	0	UNKNOWN	4	4	100.0
+cpor-0710-docs-spawn	shakacode/cypress-playwright-on-rails	completed	false	2	2	0	0	merged=2	2	2	0	0	UNKNOWN	8	8	100.0
+hichee-07-13-1342-readonly-db	shakacode/hichee	active	false	1	1	0	0	done=1	0	0	0	0	UNKNOWN	3	3	100.0
+hichee-07-14-1718-pr9768	shakacode/hichee	completed	false	1	1	0	0	merged=1	1	1	0	0	UNKNOWN	4	4	100.0
+hichee-2026-07-17-deploy-verification-wave1	shakacode/hichee	completed	false	5	5	0	0	merged=5	5	5	0	0	UNKNOWN	20	20	100.0
+hichee-20260716-home-search-focus	shakacode/hichee	completed	false	2	2	0	0	done=2	0	0	0	0	UNKNOWN	6	6	100.0
+hichee-pr9701-20260714	shakacode/hichee	completed	false	1	1	0	0	merged=1	1	1	0	0	UNKNOWN	4	4	100.0
+hichee-pr9815-20260718	shakacode/hichee	completed	false	1	1	0	0	merged=1	1	1	0	0	UNKNOWN	4	4	100.0
+hichee-pr9817-spring-opt-in-20260716	shakacode/hichee		false	1	1	0	0	merged=1	1	1	0	0	UNKNOWN	4	4	100.0
+hichee-prs-9824-9825-20260717	shakacode/hichee		false	2	2	0	0	merged=2	2	2	0	0	UNKNOWN	8	8	100.0
+hichee0715-koa	shakacode/hichee	completed	false	9	9	0	0	abandoned=1|done=8	0	0	0	0	UNKNOWN	27	27	100.0
+private-dotfiles-20260717-all-open-prs	justin808/private-dotfiles	completed	false	3	3	0	0	merged=2|superseded=1	3	2	0	0	UNKNOWN	12	12	100.0
+ror-17-0-0-rsc187-disposition-20260717	shakacode/react_on_rails_rsc	completed	false	1	1	0	0	done=1	0	0	0	0	UNKNOWN	3	3	100.0
+ror-17-0-1-rsc419-investigation-20260717	shakacode/react_on_rails	completed	false	1	1	0	0	done=1	0	0	0	0	UNKNOWN	3	3	100.0
+ror-4568-20260710	shakacode/react_on_rails	done	false	5	5	0	0	done=5	0	0	0	0	UNKNOWN	15	15	100.0
+ror-4620-main-cache-identity-20260716	shakacode/react_on_rails	completed	false	1	1	0	0	merged=1	1	1	0	0	UNKNOWN	4	4	100.0
+ror-4626-closeout-20260712	shakacode/react_on_rails		false	3	3	0	0	merged=3	3	3	0	0	UNKNOWN	12	12	100.0
+ror-4653-demo-smoke-20260714-0910-hst	shakacode/react_on_rails	completed	false	3	3	0	0	merged=3	3	3	0	0	UNKNOWN	12	12	100.0
+ror-a-ci-fleet-lifecycle-20260718	shakacode/react_on_rails	completed	false	4	4	0	0	closed-unmerged=1|merged=3	4	3	1	0	UNKNOWN	16	16	100.0
+ror-a-pr4552-cedar	shakacode/react_on_rails		false	1	1	0	0	merged=1	1	1	0	0	UNKNOWN	4	4	100.0
+ror-a-stalled-prs-20260712	shakacode/react_on_rails	complete	false	4	4	0	0	closed-unmerged=1|merged=3	4	3	0	0	UNKNOWN	16	16	100.0
+ror-b-4501-20260709-1733	shakacode/react_on_rails		false	1	1	0	0	done=1	0	0	0	0	UNKNOWN	3	3	100.0
+ror-b-pro-ember-20260713-1528	shakacode/react_on_rails		false	4	4	0	0	done=1|merged=3	3	3	0	0	UNKNOWN	15	15	100.0
+ror-backport-main-to-release-20260715	shakacode/react_on_rails	completed	false	7	7	0	0	done=1|merged=6	6	6	0	0	UNKNOWN	27	27	100.0
+ror-c-20260716-1543-pro-node-residuals	shakacode/react_on_rails		false	5	5	0	0	done=1|merged=4	4	4	0	0	UNKNOWN	19	19	100.0
+ror-c-security-tests-20260712	shakacode/react_on_rails	completed	false	6	6	0	0	done=1|merged=5	5	5	0	0	UNKNOWN	23	23	100.0
+ror-d-20260716-1543-rspack-adoption-recovery	shakacode/react_on_rails	completed	false	3	3	0	0	merged=3	3	3	0	0	UNKNOWN	12	12	100.0
+ror-pr4564-20260710-1813	shakacode/react_on_rails	complete	false	1	1	0	0	merged=1	0	0	0	0	UNKNOWN	3	3	100.0
+ror-release-20260713	shakacode/react_on_rails	completed	false	4	4	0	0	merged=4	4	4	0	0	UNKNOWN	16	16	100.0
+ror-unblock-20260717	shakacode/react_on_rails	completed	false	3	3	0	0	merged=3	3	3	0	0	UNKNOWN	12	12	100.0
+ror17-fleet-b-20260717	shakacode/react-on-rails-demo-marketplace-rsc	completed	false	2	2	0	0	merged=2	2	2	0	0	UNKNOWN	8	8	100.0
+rsc-0710-2115-parity-discover	shakacode/react-on-rails-demo-gumroad-rsc	completed	false	2	2	0	0	merged=2	2	2	0	0	UNKNOWN	8	8	100.0
+shakapacker-1219-20260714T183711Z	shakacode/shakapacker	completed	false	1	1	0	0	merged=1	1	1	0	0	UNKNOWN	4	4	100.0
+sim-task_one	sim/local		true	1	1	0	0	failed=1	0	0	0	0	UNKNOWN	3	3	100.0
+ss-open-20260712-b	shakacode/shakastack-com	completed	false	2	2	0	0	merged=2	2	2	0	0	UNKNOWN	8	8	100.0
+tr-07-13-1224-pr14	shakacode/team-reports	completed	false	1	1	0	0	merged=1	1	1	0	0	UNKNOWN	4	4	100.0
+ror-17-0-0-rc12-demo-fleet-0715-hst	shakacode/react_on_rails	completed	false	14	13	1	0	done=14	1	0	5	0	UNKNOWN	42	43	97.7
+acda-2026-07-09-1753	shakacode/agent-coordination-dashboard	complete	false	4	3	1	0	done=2|merged=2	2	2	0	0	UNKNOWN	13	14	92.9
+cpflowA-release-0709-reef	shakacode/control-plane-flow		false	4	3	0	1	closed-unmerged=1|merged=3	1	0	0	0	UNKNOWN	12	13	92.3
+ror-c-pro-rsc-20260715	shakacode/react_on_rails	active	false	6	5	0	1	blocked=1|done=1|merged=4	4	4	0	0	UNKNOWN	20	22	90.9
+marketplace-e2e-20260718	shakacode/react-on-rails-demo-marketplace-rsc		false	8	6	0	2	UNKNOWN=1|done=1|in-progress=1|open-pr=5	5	0	0	0	UNKNOWN	26	29	89.7
+ror-d-roadmap-evidence-20260715	shakacode/react_on_rails	blocked	false	6	5	0	1	abandoned=1|blocked=1|done=4	0	0	0	0	UNKNOWN	16	18	88.9
+hichee-a-20260718-1022	shakacode/hichee		false	8	5	0	3	blocked=1|blocked-user-input=1|conflicting-observations=3|done=1|no-pr-evidence=1|open-pr=1	2	0	0	0	UNKNOWN	23	26	88.5
+ror-4627-workflow-exercise-20260714	shakacode/react_on_rails		false	4	2	2	0	closed-unmerged=2|done=2	4	0	0	0	UNKNOWN	14	16	87.5
+cpf-b-20260716-1543	shakacode/control-plane-flow		false	4	3	0	1	UNKNOWN=1|merged=3	3	3	0	0	UNKNOWN	13	15	86.7
+ror-b-ci-workflows-20260715	shakacode/react_on_rails		false	6	4	0	2	UNKNOWN=1|blocked=1|done=1|merged=1|waiting=2	1	1	0	0	UNKNOWN	16	19	84.2
+awr-a-20260716-1535	shakacode/agent-coordination		false	3	2	1	0	done=1|merged=2	3	2	0	0	UNKNOWN	10	12	83.3
+ror-17-0-0-rc13-security-20260717	shakacode/react_on_rails	in_progress	false	2	1	0	1	blocked=1|ready=1	0	0	0	0	UNKNOWN	5	6	83.3
+ror-d-adoption-proof-20260712	shakacode/react_on_rails		false	6	3	3	0	done=6	0	0	0	0	UNKNOWN	15	18	83.3
+ss-open-20260712	shakacode/shakastack-com	completed	false	5	1	4	0	merged=5	5	5	1	0	UNKNOWN	16	20	80.0
+ror-4641-rc10-20260713	shakacode/react_on_rails	active	false	3	1	0	2	in-progress=3	0	0	0	0	UNKNOWN	7	9	77.8
+ror-a-open-pr-closeout-20260715	shakacode/react_on_rails		false	5	2	0	3	UNKNOWN=1|done=1|merged=2|open-pr=1	3	2	0	0	UNKNOWN	14	18	77.8
+aca	shakacode/agent-coordination	in_progress	false	1	0	1	0	merged=1	1	1	0	0	UNKNOWN	3	4	75.0
+cpf-slow-suite-20260715-2057	shakacode/control-plane-flow	in_progress	false	1	0	0	1	open-pr=1	1	0	1	0	UNKNOWN	3	4	75.0
+qa-http-20260712T145459Z-57140	qa/ac-a-20260712T145459Z-57140	completed	false	2	0	2	0	done=1|superseded=1	2	0	0	0	UNKNOWN	6	8	75.0
+qa-http-stdin-20260712T145459Z-57140	qa/ac-a-20260712T145459Z-57140	completed	false	1	0	1	0	abandoned=1	1	0	0	0	UNKNOWN	3	4	75.0
+ror-release-backports-20260711	shakacode/react_on_rails		false	4	2	0	2	UNKNOWN=1|done=1|in-progress=1|merged=1	0	0	0	0	UNKNOWN	9	12	75.0
+stack-rollout-20260708-m5-b	shakacode/agent-coordination		false	1	0	1	0	merged=1	1	1	0	0	UNKNOWN	3	4	75.0
+hichee-b-20260718-1022	shakacode/hichee		false	8	0	0	8	in-progress=4|open-pr=3|waiting=1	3	0	0	0	UNKNOWN	19	27	70.4
+ror-b-demo-fleet-health-20260718	shakacode/react_on_rails	in_progress	false	3	1	1	1	blocked=1|done=1|merged=1	1	1	0	0	UNKNOWN	7	10	70.0
+hichee-c-20260718-1022	shakacode/hichee	active	false	10	0	0	10	UNKNOWN=7|blocked=1|open-pr=2	2	0	0	0	UNKNOWN	22	32	68.8
+ac-c-0712-0107	shakacode/agent-coordination		false	2	0	2	0	done=2	0	0	0	0	UNKNOWN	4	6	66.7
+acb	shakacode/agent-coordination		false	3	0	3	0	done=3	0	0	0	0	UNKNOWN	6	9	66.7
+stack-rollout-20260708-actions-parity	shakacode/agent-workflows		false	1	0	0	1	UNKNOWN=1	0	0	0	0	UNKNOWN	2	3	66.7
+stack-rollout-20260708-wave-b	shakacode/agent-coordination		false	1	0	0	1	blocked=1	0	0	0	0	UNKNOWN	2	3	66.7
+ror-b-release-rsc-20260712	shakacode/react_on_rails		false	5	1	0	4	blocked=4|merged=1	1	1	0	0	UNKNOWN	10	16	62.5
+acd-actionable-20260715-2057	shakacode/agent-coordination-dashboard	in_progress	false	5	2	0	3	blocked=3|done=1|failed=1	0	0	0	0	UNKNOWN	9	15	60.0
+hichee-d-20260718-1022	shakacode/hichee		false	7	1	0	6	UNKNOWN=5|blocked=1|done=1	0	0	0	0	UNKNOWN	11	21	52.4
+hichee-2026-07-18-deploy-verification-wave2	shakacode/hichee		false	2	0	0	2	UNKNOWN=1|blocked=1	0	0	0	0	UNKNOWN	3	6	50.0
+HC-staging-release-qa-20260715-1157	shakacode/hichee		false	4	0	0	4	UNKNOWN=3|merged=1	1	1	0	0	UNKNOWN	6	13	46.2
+awr-b-0716-1535		completed	false	10	0	10	0	done=10	0	0	0	0	UNKNOWN	10	30	33.3
+qa-pr57-http-path-20260712T150640Z-75520	qa/pr57-http-20260712T150640Z-75520		false	1	0	0	1	UNKNOWN=1	0	0	0	0	UNKNOWN	1	3	33.3
+qa-pr57-http-stdin-20260712T150640Z-75520	qa/pr57-http-20260712T150640Z-75520		false	1	0	0	1	UNKNOWN=1	0	0	0	0	UNKNOWN	1	3	33.3
+ror-bugs-20260717	shakacode/react_on_rails		false	5	0	0	5	UNKNOWN=5	0	0	0	0	UNKNOWN	5	15	33.3
+ror-ci-20260717	shakacode/react_on_rails		false	3	0	0	3	UNKNOWN=3	0	0	0	0	UNKNOWN	3	9	33.3
+ror-docs1-20260717	shakacode/react_on_rails		false	10	0	0	10	UNKNOWN=10	0	0	0	0	UNKNOWN	10	30	33.3
+ror-docs2-20260717	shakacode/react_on_rails		false	4	0	0	4	in-progress=4	0	0	0	0	UNKNOWN	4	12	33.3
+ror-pro-20260717	shakacode/react_on_rails		false	5	0	0	5	UNKNOWN=3|in-progress=2	0	0	0	0	UNKNOWN	5	15	33.3
+ror-rsc-20260717	shakacode/react_on_rails		false	6	0	0	6	UNKNOWN=6	0	0	0	0	UNKNOWN	6	18	33.3
+ror-wave2-20260717	shakacode/react_on_rails		false	5	0	0	5	UNKNOWN=5	0	0	0	0	UNKNOWN	5	15	33.3
+ror-17-0-0-rc10-demo-fleet-0713-1420-hst			false	21	0	21	0	done=15|merged=6	6	6	0	0	UNKNOWN	21	69	30.4
+tr-07-13-1344-plugin-split		completed	false	3	0	3	0	done=1|merged=2	2	2	0	0	UNKNOWN	3	11	27.3
+batch-b	shakacode/react_on_rails		false	1	0	0	1	UNKNOWN=1	1	0	0	0	UNKNOWN	1	4	25.0
+ror17-fleet-c-20260717		active	false	7	0	6	1	closed-unmerged=1|done=1|in-progress=1|merged=1|open-pr=1|superseded=2	3	1	0	0	UNKNOWN	6	24	25.0

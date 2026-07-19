@@ -1,6 +1,6 @@
 {
   "contract": "historical-batch-baseline",
-  "version": 1,
+  "version": 2,
   "captured_at": "2026-07-19T05:27:48Z",
   "provenance": {
     "coordination_command": "bin/agent-coord status --json --include-archived",
@@ -24,6 +24,24 @@
       "reconstructable": "complete key + exact claim/event + terminal observation + passing/not-applicable GitHub gate",
       "observed_only": "terminal outcome is directly observed but at least one reconstruction gate fails",
       "UNKNOWN": "no recognized terminal outcome is directly observed"
+    },
+    "final_state": {
+      "unit": "unique batch_id + repo + target after lane-role aggregation",
+      "precedence": [
+        "eligible resolved MERGED PR (invalid, unresolved, and cross-repository evidence excluded)",
+        "explicit exceptional lane status",
+        "eligible resolved OPEN or CLOSED PR",
+        "one unambiguous normalized lane status or compatible done + merged success observations",
+        "UNKNOWN or conflicting-observations"
+      ],
+      "exceptional_lane_statuses": [
+        "blocked-user-input",
+        "no-pr-evidence",
+        "failed",
+        "abandoned",
+        "superseded"
+      ],
+      "absence_policy": "missing evidence is never promoted to a final state"
     }
   },
   "headline": {
@@ -44,6 +62,188 @@
     "batch_score_numerator": 1050,
     "batch_score_denominator": 1332,
     "overall_score_percent": 78.8
+  },
+  "outcome_scorecard": {
+    "final_state_distribution": {
+      "unit": "target unit",
+      "denominator": 392,
+      "counts": {
+        "UNKNOWN": 57,
+        "abandoned": 3,
+        "blocked": 17,
+        "blocked-user-input": 1,
+        "closed-unmerged": 6,
+        "conflicting-observations": 3,
+        "done": 119,
+        "failed": 2,
+        "in-progress": 16,
+        "merged": 145,
+        "no-pr-evidence": 1,
+        "open-pr": 14,
+        "ready": 1,
+        "superseded": 4,
+        "waiting": 3
+      },
+      "source_counts": {
+        "coordination": 245,
+        "github": 146,
+        "github-unavailable": 1
+      }
+    },
+    "merge_rate": {
+      "pr_level": {
+        "unit": "resolved unique GitHub PR",
+        "numerator": 107,
+        "denominator": 134,
+        "rate_percent": 79.9
+      },
+      "resolved_same_repo_target_unit": {
+        "unit": "PR-bearing target unit with resolved same-repo PR evidence",
+        "numerator_definition": "target unit with at least one currently merged resolved same-repo PR",
+        "numerator": 117,
+        "denominator": 137,
+        "rate_percent": 85.4
+      },
+      "target_unit_observed_merged_share": {
+        "unit": "PR-bearing target unit",
+        "numerator_definition": "target unit with at least one currently merged resolved PR after excluding explicit invalid, unresolved, and cross-repository evidence",
+        "numerator": 126,
+        "denominator": 156,
+        "rate_percent": 80.8,
+        "interpretation": "lower-bound observed current merged share; unavailable evidence remains in the denominator, so this is not a complete historical merge rate",
+        "state_counts": {
+          "UNKNOWN": 8,
+          "closed-unmerged": 7,
+          "merged": 126,
+          "open": 15
+        },
+        "unavailable_evidence": {
+          "invalid_or_unresolved_target_units": 6,
+          "github_repo_mismatch_target_units": 2
+        }
+      }
+    },
+    "claim_to_merge_duration": {
+      "unit": "merged unique GitHub PR",
+      "denominator": 107,
+      "reconstructable": 1,
+      "UNKNOWN": 106,
+      "join": "exact type=claim event timestamp + exact batch_id/repo/target current claim carrying PR URL + that same PR's merged_at",
+      "seconds": {
+        "minimum": 17532,
+        "median": 17532,
+        "maximum": 17532,
+        "mean": 17532.0
+      }
+    },
+    "interventions": {
+      "unit": "coordination event with an allowlisted structured type",
+      "numerator": 16,
+      "denominator": 1011,
+      "batches_with_intervention": 7,
+      "batch_denominator": 100,
+      "complete_target_key": 11,
+      "targetless": 5,
+      "by_class": {
+        "collision-blocked": 1,
+        "model-escalation": 2,
+        "replacement": 13
+      },
+      "by_type": {
+        "MODEL_ESCALATION_REQUEST": 1,
+        "collision-blocked": 1,
+        "dispatch-replaced": 6,
+        "lane-takeover": 1,
+        "model-escalation": 1,
+        "replacement": 5,
+        "worker-replacement": 1
+      }
+    },
+    "findings_by_severity": {
+      "unit": "strict review-finding-v0 finding",
+      "pr_population": 134,
+      "accepted_findings": 0,
+      "observed_counts": {
+        "P0": 0,
+        "P1": 0,
+        "P2": 0,
+        "P3": 0,
+        "INFO": 0
+      },
+      "counts": {
+        "P0": "UNKNOWN",
+        "P1": "UNKNOWN",
+        "P2": "UNKNOWN",
+        "P3": "UNKNOWN",
+        "INFO": "UNKNOWN"
+      },
+      "UNKNOWN_prs": 134,
+      "non_severity_marker_prs": 6,
+      "scan": {
+        "captured_at": "2026-07-20T23:55:25Z",
+        "surfaces": [
+          "body",
+          "comments",
+          "reviews",
+          "review_thread_comments"
+        ],
+        "collection_provenance": {
+          "collector_contract": "historical-batch-marker-collector-v1",
+          "capture_collector_sha256": "518ec3fd5df41f986529dcb6ffeb943ccbf3a2aaabca117ac9304d7b2096122b",
+          "archived_collector_sha256": "518ec3fd5df41f986529dcb6ffeb943ccbf3a2aaabca117ac9304d7b2096122b",
+          "query_evidence_sha256": "726c21fc7b13d0c90f426b1ce22b8876181a704fb0ef680fd8787cc38ec50906",
+          "response_evidence_sha256": "f64c8471f03aff63d6f25a471803b08b815a9a158a98877bbd86616114690467",
+          "review_finding_validator_sha256": "afebfc7d2b126f2ea97139511f00598fd2a11ebff164518c6015e12121869740",
+          "scope_pr_url_set_sha256": "1226b3b9afa3a586cf50bed20e26ff5a620c0b82c70b084fed5cc2758884975a",
+          "graphql_requests": 36,
+          "surface_row_counts": {
+            "body": 134,
+            "comments": 1522,
+            "reviews": 2765,
+            "review_thread_comments": 2816
+          },
+          "pagination_requests": {
+            "body": 0,
+            "comments": 0,
+            "reviews": 5,
+            "review_thread_comments": 0
+          },
+          "pagination_complete": true,
+          "per_pr_evidence_count": 134
+        }
+      },
+      "disposition": "UNKNOWN: no severity-bearing structured finding block was present in scanned PR bodies, issue comments, review bodies, or inline review comments; absence is not zero findings"
+    },
+    "metric_gap_ranking": [
+      {
+        "gap": "structured_severity_finding_marker_absent",
+        "unavailable_units": 134,
+        "denominator": 134,
+        "unit": "resolved unique GitHub PR",
+        "metric": "findings by severity"
+      },
+      {
+        "gap": "claim_acquired_at_bound_to_pr_absent",
+        "unavailable_units": 106,
+        "denominator": 107,
+        "unit": "merged unique GitHub PR",
+        "metric": "claim-to-merge duration"
+      },
+      {
+        "gap": "final_state_unavailable",
+        "unavailable_units": 57,
+        "denominator": 392,
+        "unit": "target unit",
+        "metric": "final-state distribution"
+      },
+      {
+        "gap": "intervention_target_key_absent",
+        "unavailable_units": 5,
+        "denominator": 16,
+        "unit": "strictly classified intervention event",
+        "metric": "per-target intervention attribution"
+      }
+    ]
   },
   "join_validation": {
     "repo_target_keys_spanning_batches": 20,
@@ -239,6 +439,9 @@
         "github_states": [
           "MERGED"
         ],
+        "target_pr_state": "merged",
+        "final_state": "merged",
+        "final_state_source": "github",
         "present_head_check_rollups": [
           "SUCCESS"
         ],
@@ -271,6 +474,9 @@
         "github_states": [
           "MERGED"
         ],
+        "target_pr_state": "merged",
+        "final_state": "merged",
+        "final_state_source": "github",
         "present_head_check_rollups": [
           "SUCCESS"
         ],
@@ -299,6 +505,9 @@
         "pr_urls": [],
         "github_gate": "not_applicable",
         "github_states": [],
+        "target_pr_state": "UNKNOWN",
+        "final_state": "done",
+        "final_state_source": "coordination",
         "present_head_check_rollups": [],
         "reconstruction": "observed_only",
         "score_numerator": 2,
@@ -328,6 +537,9 @@
         "pr_urls": [],
         "github_gate": "not_applicable",
         "github_states": [],
+        "target_pr_state": "UNKNOWN",
+        "final_state": "done",
+        "final_state_source": "coordination",
         "present_head_check_rollups": [],
         "reconstruction": "reconstructable",
         "score_numerator": 3,
@@ -354,6 +566,9 @@
         "pr_urls": [],
         "github_gate": "not_applicable",
         "github_states": [],
+        "target_pr_state": "UNKNOWN",
+        "final_state": "done",
+        "final_state_source": "coordination",
         "present_head_check_rollups": [],
         "reconstruction": "observed_only",
         "score_numerator": 1,
@@ -443,6 +658,15 @@
       "reconstructable": 4,
       "observed_only": 0,
       "unknown": 0,
+      "final_states": {
+        "done": 1,
+        "merged": 3
+      },
+      "pr_bearing_target_units": 3,
+      "merged_target_units": 3,
+      "interventions": 0,
+      "claim_to_merge_reconstructable": 0,
+      "findings_by_severity": "UNKNOWN",
       "score_numerator": 15,
       "score_denominator": 15,
       "score_percent": 100.0
@@ -456,6 +680,15 @@
       "reconstructable": 4,
       "observed_only": 0,
       "unknown": 0,
+      "final_states": {
+        "done": 1,
+        "merged": 3
+      },
+      "pr_bearing_target_units": 3,
+      "merged_target_units": 3,
+      "interventions": 0,
+      "claim_to_merge_reconstructable": 0,
+      "findings_by_severity": "UNKNOWN",
       "score_numerator": 15,
       "score_denominator": 15,
       "score_percent": 100.0
@@ -469,6 +702,14 @@
       "reconstructable": 2,
       "observed_only": 0,
       "unknown": 0,
+      "final_states": {
+        "done": 2
+      },
+      "pr_bearing_target_units": 0,
+      "merged_target_units": 0,
+      "interventions": 0,
+      "claim_to_merge_reconstructable": 0,
+      "findings_by_severity": "UNKNOWN",
       "score_numerator": 6,
       "score_denominator": 6,
       "score_percent": 100.0
@@ -482,6 +723,15 @@
       "reconstructable": 3,
       "observed_only": 0,
       "unknown": 0,
+      "final_states": {
+        "done": 1,
+        "merged": 2
+      },
+      "pr_bearing_target_units": 2,
+      "merged_target_units": 2,
+      "interventions": 0,
+      "claim_to_merge_reconstructable": 0,
+      "findings_by_severity": "UNKNOWN",
       "score_numerator": 11,
       "score_denominator": 11,
       "score_percent": 100.0
@@ -495,6 +745,15 @@
       "reconstructable": 3,
       "observed_only": 0,
       "unknown": 0,
+      "final_states": {
+        "done": 1,
+        "merged": 2
+      },
+      "pr_bearing_target_units": 2,
+      "merged_target_units": 2,
+      "interventions": 0,
+      "claim_to_merge_reconstructable": 0,
+      "findings_by_severity": "UNKNOWN",
       "score_numerator": 11,
       "score_denominator": 11,
       "score_percent": 100.0
@@ -508,6 +767,15 @@
       "reconstructable": 4,
       "observed_only": 0,
       "unknown": 0,
+      "final_states": {
+        "done": 1,
+        "merged": 3
+      },
+      "pr_bearing_target_units": 0,
+      "merged_target_units": 0,
+      "interventions": 0,
+      "claim_to_merge_reconstructable": 0,
+      "findings_by_severity": "UNKNOWN",
       "score_numerator": 12,
       "score_denominator": 12,
       "score_percent": 100.0
@@ -521,6 +789,15 @@
       "reconstructable": 3,
       "observed_only": 0,
       "unknown": 0,
+      "final_states": {
+        "done": 1,
+        "merged": 2
+      },
+      "pr_bearing_target_units": 0,
+      "merged_target_units": 0,
+      "interventions": 0,
+      "claim_to_merge_reconstructable": 0,
+      "findings_by_severity": "UNKNOWN",
       "score_numerator": 9,
       "score_denominator": 9,
       "score_percent": 100.0
@@ -534,6 +811,14 @@
       "reconstructable": 3,
       "observed_only": 0,
       "unknown": 0,
+      "final_states": {
+        "done": 3
+      },
+      "pr_bearing_target_units": 0,
+      "merged_target_units": 0,
+      "interventions": 1,
+      "claim_to_merge_reconstructable": 0,
+      "findings_by_severity": "UNKNOWN",
       "score_numerator": 9,
       "score_denominator": 9,
       "score_percent": 100.0
@@ -547,6 +832,15 @@
       "reconstructable": 4,
       "observed_only": 0,
       "unknown": 0,
+      "final_states": {
+        "done": 2,
+        "merged": 2
+      },
+      "pr_bearing_target_units": 2,
+      "merged_target_units": 2,
+      "interventions": 0,
+      "claim_to_merge_reconstructable": 1,
+      "findings_by_severity": "UNKNOWN",
       "score_numerator": 14,
       "score_denominator": 14,
       "score_percent": 100.0
@@ -560,6 +854,14 @@
       "reconstructable": 1,
       "observed_only": 0,
       "unknown": 0,
+      "final_states": {
+        "merged": 1
+      },
+      "pr_bearing_target_units": 1,
+      "merged_target_units": 1,
+      "interventions": 0,
+      "claim_to_merge_reconstructable": 0,
+      "findings_by_severity": "UNKNOWN",
       "score_numerator": 4,
       "score_denominator": 4,
       "score_percent": 100.0
@@ -573,6 +875,14 @@
       "reconstructable": 3,
       "observed_only": 0,
       "unknown": 0,
+      "final_states": {
+        "merged": 3
+      },
+      "pr_bearing_target_units": 3,
+      "merged_target_units": 3,
+      "interventions": 1,
+      "claim_to_merge_reconstructable": 0,
+      "findings_by_severity": "UNKNOWN",
       "score_numerator": 12,
       "score_denominator": 12,
       "score_percent": 100.0
@@ -586,6 +896,15 @@
       "reconstructable": 6,
       "observed_only": 0,
       "unknown": 0,
+      "final_states": {
+        "done": 1,
+        "merged": 5
+      },
+      "pr_bearing_target_units": 5,
+      "merged_target_units": 5,
+      "interventions": 0,
+      "claim_to_merge_reconstructable": 0,
+      "findings_by_severity": "UNKNOWN",
       "score_numerator": 23,
       "score_denominator": 23,
       "score_percent": 100.0
@@ -599,6 +918,15 @@
       "reconstructable": 8,
       "observed_only": 0,
       "unknown": 0,
+      "final_states": {
+        "done": 4,
+        "merged": 4
+      },
+      "pr_bearing_target_units": 1,
+      "merged_target_units": 1,
+      "interventions": 0,
+      "claim_to_merge_reconstructable": 0,
+      "findings_by_severity": "UNKNOWN",
       "score_numerator": 25,
       "score_denominator": 25,
       "score_percent": 100.0
@@ -612,6 +940,15 @@
       "reconstructable": 6,
       "observed_only": 0,
       "unknown": 0,
+      "final_states": {
+        "done": 1,
+        "merged": 5
+      },
+      "pr_bearing_target_units": 5,
+      "merged_target_units": 5,
+      "interventions": 6,
+      "claim_to_merge_reconstructable": 0,
+      "findings_by_severity": "UNKNOWN",
       "score_numerator": 23,
       "score_denominator": 23,
       "score_percent": 100.0
@@ -625,6 +962,15 @@
       "reconstructable": 7,
       "observed_only": 0,
       "unknown": 0,
+      "final_states": {
+        "done": 1,
+        "merged": 6
+      },
+      "pr_bearing_target_units": 0,
+      "merged_target_units": 0,
+      "interventions": 0,
+      "claim_to_merge_reconstructable": 0,
+      "findings_by_severity": "UNKNOWN",
       "score_numerator": 21,
       "score_denominator": 21,
       "score_percent": 100.0
@@ -638,6 +984,14 @@
       "reconstructable": 5,
       "observed_only": 0,
       "unknown": 0,
+      "final_states": {
+        "done": 5
+      },
+      "pr_bearing_target_units": 0,
+      "merged_target_units": 0,
+      "interventions": 0,
+      "claim_to_merge_reconstructable": 0,
+      "findings_by_severity": "UNKNOWN",
       "score_numerator": 15,
       "score_denominator": 15,
       "score_percent": 100.0
@@ -651,6 +1005,14 @@
       "reconstructable": 1,
       "observed_only": 0,
       "unknown": 0,
+      "final_states": {
+        "merged": 1
+      },
+      "pr_bearing_target_units": 1,
+      "merged_target_units": 1,
+      "interventions": 0,
+      "claim_to_merge_reconstructable": 0,
+      "findings_by_severity": "UNKNOWN",
       "score_numerator": 4,
       "score_denominator": 4,
       "score_percent": 100.0
@@ -664,6 +1026,14 @@
       "reconstructable": 2,
       "observed_only": 0,
       "unknown": 0,
+      "final_states": {
+        "merged": 2
+      },
+      "pr_bearing_target_units": 2,
+      "merged_target_units": 2,
+      "interventions": 0,
+      "claim_to_merge_reconstructable": 0,
+      "findings_by_severity": "UNKNOWN",
       "score_numerator": 8,
       "score_denominator": 8,
       "score_percent": 100.0
@@ -677,6 +1047,14 @@
       "reconstructable": 1,
       "observed_only": 0,
       "unknown": 0,
+      "final_states": {
+        "done": 1
+      },
+      "pr_bearing_target_units": 0,
+      "merged_target_units": 0,
+      "interventions": 0,
+      "claim_to_merge_reconstructable": 0,
+      "findings_by_severity": "UNKNOWN",
       "score_numerator": 3,
       "score_denominator": 3,
       "score_percent": 100.0
@@ -690,6 +1068,14 @@
       "reconstructable": 1,
       "observed_only": 0,
       "unknown": 0,
+      "final_states": {
+        "merged": 1
+      },
+      "pr_bearing_target_units": 1,
+      "merged_target_units": 1,
+      "interventions": 0,
+      "claim_to_merge_reconstructable": 0,
+      "findings_by_severity": "UNKNOWN",
       "score_numerator": 4,
       "score_denominator": 4,
       "score_percent": 100.0
@@ -703,6 +1089,14 @@
       "reconstructable": 5,
       "observed_only": 0,
       "unknown": 0,
+      "final_states": {
+        "merged": 5
+      },
+      "pr_bearing_target_units": 5,
+      "merged_target_units": 5,
+      "interventions": 0,
+      "claim_to_merge_reconstructable": 0,
+      "findings_by_severity": "UNKNOWN",
       "score_numerator": 20,
       "score_denominator": 20,
       "score_percent": 100.0
@@ -716,6 +1110,14 @@
       "reconstructable": 2,
       "observed_only": 0,
       "unknown": 0,
+      "final_states": {
+        "done": 2
+      },
+      "pr_bearing_target_units": 0,
+      "merged_target_units": 0,
+      "interventions": 0,
+      "claim_to_merge_reconstructable": 0,
+      "findings_by_severity": "UNKNOWN",
       "score_numerator": 6,
       "score_denominator": 6,
       "score_percent": 100.0
@@ -729,6 +1131,14 @@
       "reconstructable": 1,
       "observed_only": 0,
       "unknown": 0,
+      "final_states": {
+        "merged": 1
+      },
+      "pr_bearing_target_units": 1,
+      "merged_target_units": 1,
+      "interventions": 0,
+      "claim_to_merge_reconstructable": 0,
+      "findings_by_severity": "UNKNOWN",
       "score_numerator": 4,
       "score_denominator": 4,
       "score_percent": 100.0
@@ -742,6 +1152,14 @@
       "reconstructable": 1,
       "observed_only": 0,
       "unknown": 0,
+      "final_states": {
+        "merged": 1
+      },
+      "pr_bearing_target_units": 1,
+      "merged_target_units": 1,
+      "interventions": 0,
+      "claim_to_merge_reconstructable": 0,
+      "findings_by_severity": "UNKNOWN",
       "score_numerator": 4,
       "score_denominator": 4,
       "score_percent": 100.0
@@ -755,6 +1173,14 @@
       "reconstructable": 1,
       "observed_only": 0,
       "unknown": 0,
+      "final_states": {
+        "merged": 1
+      },
+      "pr_bearing_target_units": 1,
+      "merged_target_units": 1,
+      "interventions": 0,
+      "claim_to_merge_reconstructable": 0,
+      "findings_by_severity": "UNKNOWN",
       "score_numerator": 4,
       "score_denominator": 4,
       "score_percent": 100.0
@@ -768,6 +1194,14 @@
       "reconstructable": 2,
       "observed_only": 0,
       "unknown": 0,
+      "final_states": {
+        "merged": 2
+      },
+      "pr_bearing_target_units": 2,
+      "merged_target_units": 2,
+      "interventions": 0,
+      "claim_to_merge_reconstructable": 0,
+      "findings_by_severity": "UNKNOWN",
       "score_numerator": 8,
       "score_denominator": 8,
       "score_percent": 100.0
@@ -781,6 +1215,15 @@
       "reconstructable": 9,
       "observed_only": 0,
       "unknown": 0,
+      "final_states": {
+        "abandoned": 1,
+        "done": 8
+      },
+      "pr_bearing_target_units": 0,
+      "merged_target_units": 0,
+      "interventions": 0,
+      "claim_to_merge_reconstructable": 0,
+      "findings_by_severity": "UNKNOWN",
       "score_numerator": 27,
       "score_denominator": 27,
       "score_percent": 100.0
@@ -794,6 +1237,15 @@
       "reconstructable": 3,
       "observed_only": 0,
       "unknown": 0,
+      "final_states": {
+        "merged": 2,
+        "superseded": 1
+      },
+      "pr_bearing_target_units": 3,
+      "merged_target_units": 2,
+      "interventions": 0,
+      "claim_to_merge_reconstructable": 0,
+      "findings_by_severity": "UNKNOWN",
       "score_numerator": 12,
       "score_denominator": 12,
       "score_percent": 100.0
@@ -807,6 +1259,14 @@
       "reconstructable": 1,
       "observed_only": 0,
       "unknown": 0,
+      "final_states": {
+        "done": 1
+      },
+      "pr_bearing_target_units": 0,
+      "merged_target_units": 0,
+      "interventions": 0,
+      "claim_to_merge_reconstructable": 0,
+      "findings_by_severity": "UNKNOWN",
       "score_numerator": 3,
       "score_denominator": 3,
       "score_percent": 100.0
@@ -820,6 +1280,14 @@
       "reconstructable": 1,
       "observed_only": 0,
       "unknown": 0,
+      "final_states": {
+        "done": 1
+      },
+      "pr_bearing_target_units": 0,
+      "merged_target_units": 0,
+      "interventions": 0,
+      "claim_to_merge_reconstructable": 0,
+      "findings_by_severity": "UNKNOWN",
       "score_numerator": 3,
       "score_denominator": 3,
       "score_percent": 100.0
@@ -833,6 +1301,14 @@
       "reconstructable": 5,
       "observed_only": 0,
       "unknown": 0,
+      "final_states": {
+        "done": 5
+      },
+      "pr_bearing_target_units": 0,
+      "merged_target_units": 0,
+      "interventions": 0,
+      "claim_to_merge_reconstructable": 0,
+      "findings_by_severity": "UNKNOWN",
       "score_numerator": 15,
       "score_denominator": 15,
       "score_percent": 100.0
@@ -846,6 +1322,14 @@
       "reconstructable": 1,
       "observed_only": 0,
       "unknown": 0,
+      "final_states": {
+        "merged": 1
+      },
+      "pr_bearing_target_units": 1,
+      "merged_target_units": 1,
+      "interventions": 0,
+      "claim_to_merge_reconstructable": 0,
+      "findings_by_severity": "UNKNOWN",
       "score_numerator": 4,
       "score_denominator": 4,
       "score_percent": 100.0
@@ -859,6 +1343,14 @@
       "reconstructable": 3,
       "observed_only": 0,
       "unknown": 0,
+      "final_states": {
+        "merged": 3
+      },
+      "pr_bearing_target_units": 3,
+      "merged_target_units": 3,
+      "interventions": 0,
+      "claim_to_merge_reconstructable": 0,
+      "findings_by_severity": "UNKNOWN",
       "score_numerator": 12,
       "score_denominator": 12,
       "score_percent": 100.0
@@ -872,6 +1364,14 @@
       "reconstructable": 3,
       "observed_only": 0,
       "unknown": 0,
+      "final_states": {
+        "merged": 3
+      },
+      "pr_bearing_target_units": 3,
+      "merged_target_units": 3,
+      "interventions": 0,
+      "claim_to_merge_reconstructable": 0,
+      "findings_by_severity": "UNKNOWN",
       "score_numerator": 12,
       "score_denominator": 12,
       "score_percent": 100.0
@@ -885,6 +1385,15 @@
       "reconstructable": 4,
       "observed_only": 0,
       "unknown": 0,
+      "final_states": {
+        "closed-unmerged": 1,
+        "merged": 3
+      },
+      "pr_bearing_target_units": 4,
+      "merged_target_units": 3,
+      "interventions": 1,
+      "claim_to_merge_reconstructable": 0,
+      "findings_by_severity": "UNKNOWN",
       "score_numerator": 16,
       "score_denominator": 16,
       "score_percent": 100.0
@@ -898,6 +1407,14 @@
       "reconstructable": 1,
       "observed_only": 0,
       "unknown": 0,
+      "final_states": {
+        "merged": 1
+      },
+      "pr_bearing_target_units": 1,
+      "merged_target_units": 1,
+      "interventions": 0,
+      "claim_to_merge_reconstructable": 0,
+      "findings_by_severity": "UNKNOWN",
       "score_numerator": 4,
       "score_denominator": 4,
       "score_percent": 100.0
@@ -911,6 +1428,15 @@
       "reconstructable": 4,
       "observed_only": 0,
       "unknown": 0,
+      "final_states": {
+        "closed-unmerged": 1,
+        "merged": 3
+      },
+      "pr_bearing_target_units": 4,
+      "merged_target_units": 3,
+      "interventions": 0,
+      "claim_to_merge_reconstructable": 0,
+      "findings_by_severity": "UNKNOWN",
       "score_numerator": 16,
       "score_denominator": 16,
       "score_percent": 100.0
@@ -924,6 +1450,14 @@
       "reconstructable": 1,
       "observed_only": 0,
       "unknown": 0,
+      "final_states": {
+        "done": 1
+      },
+      "pr_bearing_target_units": 0,
+      "merged_target_units": 0,
+      "interventions": 0,
+      "claim_to_merge_reconstructable": 0,
+      "findings_by_severity": "UNKNOWN",
       "score_numerator": 3,
       "score_denominator": 3,
       "score_percent": 100.0
@@ -937,6 +1471,15 @@
       "reconstructable": 4,
       "observed_only": 0,
       "unknown": 0,
+      "final_states": {
+        "done": 1,
+        "merged": 3
+      },
+      "pr_bearing_target_units": 3,
+      "merged_target_units": 3,
+      "interventions": 0,
+      "claim_to_merge_reconstructable": 0,
+      "findings_by_severity": "UNKNOWN",
       "score_numerator": 15,
       "score_denominator": 15,
       "score_percent": 100.0
@@ -950,6 +1493,15 @@
       "reconstructable": 7,
       "observed_only": 0,
       "unknown": 0,
+      "final_states": {
+        "done": 1,
+        "merged": 6
+      },
+      "pr_bearing_target_units": 6,
+      "merged_target_units": 6,
+      "interventions": 0,
+      "claim_to_merge_reconstructable": 0,
+      "findings_by_severity": "UNKNOWN",
       "score_numerator": 27,
       "score_denominator": 27,
       "score_percent": 100.0
@@ -963,6 +1515,15 @@
       "reconstructable": 5,
       "observed_only": 0,
       "unknown": 0,
+      "final_states": {
+        "done": 1,
+        "merged": 4
+      },
+      "pr_bearing_target_units": 4,
+      "merged_target_units": 4,
+      "interventions": 0,
+      "claim_to_merge_reconstructable": 0,
+      "findings_by_severity": "UNKNOWN",
       "score_numerator": 19,
       "score_denominator": 19,
       "score_percent": 100.0
@@ -976,6 +1537,15 @@
       "reconstructable": 6,
       "observed_only": 0,
       "unknown": 0,
+      "final_states": {
+        "done": 1,
+        "merged": 5
+      },
+      "pr_bearing_target_units": 5,
+      "merged_target_units": 5,
+      "interventions": 0,
+      "claim_to_merge_reconstructable": 0,
+      "findings_by_severity": "UNKNOWN",
       "score_numerator": 23,
       "score_denominator": 23,
       "score_percent": 100.0
@@ -989,6 +1559,14 @@
       "reconstructable": 3,
       "observed_only": 0,
       "unknown": 0,
+      "final_states": {
+        "merged": 3
+      },
+      "pr_bearing_target_units": 3,
+      "merged_target_units": 3,
+      "interventions": 0,
+      "claim_to_merge_reconstructable": 0,
+      "findings_by_severity": "UNKNOWN",
       "score_numerator": 12,
       "score_denominator": 12,
       "score_percent": 100.0
@@ -1002,6 +1580,14 @@
       "reconstructable": 1,
       "observed_only": 0,
       "unknown": 0,
+      "final_states": {
+        "merged": 1
+      },
+      "pr_bearing_target_units": 0,
+      "merged_target_units": 0,
+      "interventions": 0,
+      "claim_to_merge_reconstructable": 0,
+      "findings_by_severity": "UNKNOWN",
       "score_numerator": 3,
       "score_denominator": 3,
       "score_percent": 100.0
@@ -1015,6 +1601,14 @@
       "reconstructable": 4,
       "observed_only": 0,
       "unknown": 0,
+      "final_states": {
+        "merged": 4
+      },
+      "pr_bearing_target_units": 4,
+      "merged_target_units": 4,
+      "interventions": 0,
+      "claim_to_merge_reconstructable": 0,
+      "findings_by_severity": "UNKNOWN",
       "score_numerator": 16,
       "score_denominator": 16,
       "score_percent": 100.0
@@ -1028,6 +1622,14 @@
       "reconstructable": 3,
       "observed_only": 0,
       "unknown": 0,
+      "final_states": {
+        "merged": 3
+      },
+      "pr_bearing_target_units": 3,
+      "merged_target_units": 3,
+      "interventions": 0,
+      "claim_to_merge_reconstructable": 0,
+      "findings_by_severity": "UNKNOWN",
       "score_numerator": 12,
       "score_denominator": 12,
       "score_percent": 100.0
@@ -1041,6 +1643,14 @@
       "reconstructable": 2,
       "observed_only": 0,
       "unknown": 0,
+      "final_states": {
+        "merged": 2
+      },
+      "pr_bearing_target_units": 2,
+      "merged_target_units": 2,
+      "interventions": 0,
+      "claim_to_merge_reconstructable": 0,
+      "findings_by_severity": "UNKNOWN",
       "score_numerator": 8,
       "score_denominator": 8,
       "score_percent": 100.0
@@ -1054,6 +1664,14 @@
       "reconstructable": 2,
       "observed_only": 0,
       "unknown": 0,
+      "final_states": {
+        "merged": 2
+      },
+      "pr_bearing_target_units": 2,
+      "merged_target_units": 2,
+      "interventions": 0,
+      "claim_to_merge_reconstructable": 0,
+      "findings_by_severity": "UNKNOWN",
       "score_numerator": 8,
       "score_denominator": 8,
       "score_percent": 100.0
@@ -1067,6 +1685,14 @@
       "reconstructable": 1,
       "observed_only": 0,
       "unknown": 0,
+      "final_states": {
+        "merged": 1
+      },
+      "pr_bearing_target_units": 1,
+      "merged_target_units": 1,
+      "interventions": 0,
+      "claim_to_merge_reconstructable": 0,
+      "findings_by_severity": "UNKNOWN",
       "score_numerator": 4,
       "score_denominator": 4,
       "score_percent": 100.0
@@ -1080,6 +1706,14 @@
       "reconstructable": 1,
       "observed_only": 0,
       "unknown": 0,
+      "final_states": {
+        "failed": 1
+      },
+      "pr_bearing_target_units": 0,
+      "merged_target_units": 0,
+      "interventions": 0,
+      "claim_to_merge_reconstructable": 0,
+      "findings_by_severity": "UNKNOWN",
       "score_numerator": 3,
       "score_denominator": 3,
       "score_percent": 100.0
@@ -1093,6 +1727,14 @@
       "reconstructable": 2,
       "observed_only": 0,
       "unknown": 0,
+      "final_states": {
+        "merged": 2
+      },
+      "pr_bearing_target_units": 2,
+      "merged_target_units": 2,
+      "interventions": 0,
+      "claim_to_merge_reconstructable": 0,
+      "findings_by_severity": "UNKNOWN",
       "score_numerator": 8,
       "score_denominator": 8,
       "score_percent": 100.0
@@ -1106,6 +1748,14 @@
       "reconstructable": 1,
       "observed_only": 0,
       "unknown": 0,
+      "final_states": {
+        "merged": 1
+      },
+      "pr_bearing_target_units": 1,
+      "merged_target_units": 1,
+      "interventions": 0,
+      "claim_to_merge_reconstructable": 0,
+      "findings_by_severity": "UNKNOWN",
       "score_numerator": 4,
       "score_denominator": 4,
       "score_percent": 100.0
@@ -1119,6 +1769,14 @@
       "reconstructable": 13,
       "observed_only": 1,
       "unknown": 0,
+      "final_states": {
+        "done": 14
+      },
+      "pr_bearing_target_units": 1,
+      "merged_target_units": 0,
+      "interventions": 5,
+      "claim_to_merge_reconstructable": 0,
+      "findings_by_severity": "UNKNOWN",
       "score_numerator": 42,
       "score_denominator": 43,
       "score_percent": 97.7
@@ -1132,6 +1790,15 @@
       "reconstructable": 3,
       "observed_only": 1,
       "unknown": 0,
+      "final_states": {
+        "done": 2,
+        "merged": 2
+      },
+      "pr_bearing_target_units": 2,
+      "merged_target_units": 2,
+      "interventions": 0,
+      "claim_to_merge_reconstructable": 0,
+      "findings_by_severity": "UNKNOWN",
       "score_numerator": 13,
       "score_denominator": 14,
       "score_percent": 92.9
@@ -1145,6 +1812,15 @@
       "reconstructable": 3,
       "observed_only": 0,
       "unknown": 1,
+      "final_states": {
+        "closed-unmerged": 1,
+        "merged": 3
+      },
+      "pr_bearing_target_units": 1,
+      "merged_target_units": 0,
+      "interventions": 0,
+      "claim_to_merge_reconstructable": 0,
+      "findings_by_severity": "UNKNOWN",
       "score_numerator": 12,
       "score_denominator": 13,
       "score_percent": 92.3
@@ -1158,6 +1834,16 @@
       "reconstructable": 5,
       "observed_only": 0,
       "unknown": 1,
+      "final_states": {
+        "blocked": 1,
+        "done": 1,
+        "merged": 4
+      },
+      "pr_bearing_target_units": 4,
+      "merged_target_units": 4,
+      "interventions": 0,
+      "claim_to_merge_reconstructable": 0,
+      "findings_by_severity": "UNKNOWN",
       "score_numerator": 20,
       "score_denominator": 22,
       "score_percent": 90.9
@@ -1171,6 +1857,17 @@
       "reconstructable": 6,
       "observed_only": 0,
       "unknown": 2,
+      "final_states": {
+        "UNKNOWN": 1,
+        "done": 1,
+        "in-progress": 1,
+        "open-pr": 5
+      },
+      "pr_bearing_target_units": 5,
+      "merged_target_units": 0,
+      "interventions": 0,
+      "claim_to_merge_reconstructable": 0,
+      "findings_by_severity": "UNKNOWN",
       "score_numerator": 26,
       "score_denominator": 29,
       "score_percent": 89.7
@@ -1184,6 +1881,16 @@
       "reconstructable": 5,
       "observed_only": 0,
       "unknown": 1,
+      "final_states": {
+        "abandoned": 1,
+        "blocked": 1,
+        "done": 4
+      },
+      "pr_bearing_target_units": 0,
+      "merged_target_units": 0,
+      "interventions": 0,
+      "claim_to_merge_reconstructable": 0,
+      "findings_by_severity": "UNKNOWN",
       "score_numerator": 16,
       "score_denominator": 18,
       "score_percent": 88.9
@@ -1197,6 +1904,19 @@
       "reconstructable": 5,
       "observed_only": 0,
       "unknown": 3,
+      "final_states": {
+        "blocked": 1,
+        "blocked-user-input": 1,
+        "conflicting-observations": 3,
+        "done": 1,
+        "no-pr-evidence": 1,
+        "open-pr": 1
+      },
+      "pr_bearing_target_units": 2,
+      "merged_target_units": 0,
+      "interventions": 0,
+      "claim_to_merge_reconstructable": 0,
+      "findings_by_severity": "UNKNOWN",
       "score_numerator": 23,
       "score_denominator": 26,
       "score_percent": 88.5
@@ -1210,6 +1930,15 @@
       "reconstructable": 2,
       "observed_only": 2,
       "unknown": 0,
+      "final_states": {
+        "closed-unmerged": 2,
+        "done": 2
+      },
+      "pr_bearing_target_units": 4,
+      "merged_target_units": 0,
+      "interventions": 0,
+      "claim_to_merge_reconstructable": 0,
+      "findings_by_severity": "UNKNOWN",
       "score_numerator": 14,
       "score_denominator": 16,
       "score_percent": 87.5
@@ -1223,6 +1952,15 @@
       "reconstructable": 3,
       "observed_only": 0,
       "unknown": 1,
+      "final_states": {
+        "UNKNOWN": 1,
+        "merged": 3
+      },
+      "pr_bearing_target_units": 3,
+      "merged_target_units": 3,
+      "interventions": 0,
+      "claim_to_merge_reconstructable": 0,
+      "findings_by_severity": "UNKNOWN",
       "score_numerator": 13,
       "score_denominator": 15,
       "score_percent": 86.7
@@ -1236,6 +1974,18 @@
       "reconstructable": 4,
       "observed_only": 0,
       "unknown": 2,
+      "final_states": {
+        "UNKNOWN": 1,
+        "blocked": 1,
+        "done": 1,
+        "merged": 1,
+        "waiting": 2
+      },
+      "pr_bearing_target_units": 1,
+      "merged_target_units": 1,
+      "interventions": 0,
+      "claim_to_merge_reconstructable": 0,
+      "findings_by_severity": "UNKNOWN",
       "score_numerator": 16,
       "score_denominator": 19,
       "score_percent": 84.2
@@ -1249,6 +1999,15 @@
       "reconstructable": 2,
       "observed_only": 1,
       "unknown": 0,
+      "final_states": {
+        "done": 1,
+        "merged": 2
+      },
+      "pr_bearing_target_units": 3,
+      "merged_target_units": 2,
+      "interventions": 0,
+      "claim_to_merge_reconstructable": 0,
+      "findings_by_severity": "UNKNOWN",
       "score_numerator": 10,
       "score_denominator": 12,
       "score_percent": 83.3
@@ -1262,6 +2021,15 @@
       "reconstructable": 1,
       "observed_only": 0,
       "unknown": 1,
+      "final_states": {
+        "blocked": 1,
+        "ready": 1
+      },
+      "pr_bearing_target_units": 0,
+      "merged_target_units": 0,
+      "interventions": 0,
+      "claim_to_merge_reconstructable": 0,
+      "findings_by_severity": "UNKNOWN",
       "score_numerator": 5,
       "score_denominator": 6,
       "score_percent": 83.3
@@ -1275,6 +2043,14 @@
       "reconstructable": 3,
       "observed_only": 3,
       "unknown": 0,
+      "final_states": {
+        "done": 6
+      },
+      "pr_bearing_target_units": 0,
+      "merged_target_units": 0,
+      "interventions": 0,
+      "claim_to_merge_reconstructable": 0,
+      "findings_by_severity": "UNKNOWN",
       "score_numerator": 15,
       "score_denominator": 18,
       "score_percent": 83.3
@@ -1288,6 +2064,14 @@
       "reconstructable": 1,
       "observed_only": 4,
       "unknown": 0,
+      "final_states": {
+        "merged": 5
+      },
+      "pr_bearing_target_units": 5,
+      "merged_target_units": 5,
+      "interventions": 1,
+      "claim_to_merge_reconstructable": 0,
+      "findings_by_severity": "UNKNOWN",
       "score_numerator": 16,
       "score_denominator": 20,
       "score_percent": 80.0
@@ -1301,6 +2085,14 @@
       "reconstructable": 1,
       "observed_only": 0,
       "unknown": 2,
+      "final_states": {
+        "in-progress": 3
+      },
+      "pr_bearing_target_units": 0,
+      "merged_target_units": 0,
+      "interventions": 0,
+      "claim_to_merge_reconstructable": 0,
+      "findings_by_severity": "UNKNOWN",
       "score_numerator": 7,
       "score_denominator": 9,
       "score_percent": 77.8
@@ -1314,6 +2106,17 @@
       "reconstructable": 2,
       "observed_only": 0,
       "unknown": 3,
+      "final_states": {
+        "UNKNOWN": 1,
+        "done": 1,
+        "merged": 2,
+        "open-pr": 1
+      },
+      "pr_bearing_target_units": 3,
+      "merged_target_units": 2,
+      "interventions": 0,
+      "claim_to_merge_reconstructable": 0,
+      "findings_by_severity": "UNKNOWN",
       "score_numerator": 14,
       "score_denominator": 18,
       "score_percent": 77.8
@@ -1327,6 +2130,14 @@
       "reconstructable": 0,
       "observed_only": 1,
       "unknown": 0,
+      "final_states": {
+        "merged": 1
+      },
+      "pr_bearing_target_units": 1,
+      "merged_target_units": 1,
+      "interventions": 0,
+      "claim_to_merge_reconstructable": 0,
+      "findings_by_severity": "UNKNOWN",
       "score_numerator": 3,
       "score_denominator": 4,
       "score_percent": 75.0
@@ -1340,6 +2151,14 @@
       "reconstructable": 0,
       "observed_only": 0,
       "unknown": 1,
+      "final_states": {
+        "open-pr": 1
+      },
+      "pr_bearing_target_units": 1,
+      "merged_target_units": 0,
+      "interventions": 1,
+      "claim_to_merge_reconstructable": 0,
+      "findings_by_severity": "UNKNOWN",
       "score_numerator": 3,
       "score_denominator": 4,
       "score_percent": 75.0
@@ -1353,6 +2172,15 @@
       "reconstructable": 0,
       "observed_only": 2,
       "unknown": 0,
+      "final_states": {
+        "done": 1,
+        "superseded": 1
+      },
+      "pr_bearing_target_units": 2,
+      "merged_target_units": 0,
+      "interventions": 0,
+      "claim_to_merge_reconstructable": 0,
+      "findings_by_severity": "UNKNOWN",
       "score_numerator": 6,
       "score_denominator": 8,
       "score_percent": 75.0
@@ -1366,6 +2194,14 @@
       "reconstructable": 0,
       "observed_only": 1,
       "unknown": 0,
+      "final_states": {
+        "abandoned": 1
+      },
+      "pr_bearing_target_units": 1,
+      "merged_target_units": 0,
+      "interventions": 0,
+      "claim_to_merge_reconstructable": 0,
+      "findings_by_severity": "UNKNOWN",
       "score_numerator": 3,
       "score_denominator": 4,
       "score_percent": 75.0
@@ -1379,6 +2215,17 @@
       "reconstructable": 2,
       "observed_only": 0,
       "unknown": 2,
+      "final_states": {
+        "UNKNOWN": 1,
+        "done": 1,
+        "in-progress": 1,
+        "merged": 1
+      },
+      "pr_bearing_target_units": 0,
+      "merged_target_units": 0,
+      "interventions": 0,
+      "claim_to_merge_reconstructable": 0,
+      "findings_by_severity": "UNKNOWN",
       "score_numerator": 9,
       "score_denominator": 12,
       "score_percent": 75.0
@@ -1392,6 +2239,14 @@
       "reconstructable": 0,
       "observed_only": 1,
       "unknown": 0,
+      "final_states": {
+        "merged": 1
+      },
+      "pr_bearing_target_units": 1,
+      "merged_target_units": 1,
+      "interventions": 0,
+      "claim_to_merge_reconstructable": 0,
+      "findings_by_severity": "UNKNOWN",
       "score_numerator": 3,
       "score_denominator": 4,
       "score_percent": 75.0
@@ -1405,6 +2260,16 @@
       "reconstructable": 0,
       "observed_only": 0,
       "unknown": 8,
+      "final_states": {
+        "in-progress": 4,
+        "open-pr": 3,
+        "waiting": 1
+      },
+      "pr_bearing_target_units": 3,
+      "merged_target_units": 0,
+      "interventions": 0,
+      "claim_to_merge_reconstructable": 0,
+      "findings_by_severity": "UNKNOWN",
       "score_numerator": 19,
       "score_denominator": 27,
       "score_percent": 70.4
@@ -1418,6 +2283,16 @@
       "reconstructable": 1,
       "observed_only": 1,
       "unknown": 1,
+      "final_states": {
+        "blocked": 1,
+        "done": 1,
+        "merged": 1
+      },
+      "pr_bearing_target_units": 1,
+      "merged_target_units": 1,
+      "interventions": 0,
+      "claim_to_merge_reconstructable": 0,
+      "findings_by_severity": "UNKNOWN",
       "score_numerator": 7,
       "score_denominator": 10,
       "score_percent": 70.0
@@ -1431,6 +2306,16 @@
       "reconstructable": 0,
       "observed_only": 0,
       "unknown": 10,
+      "final_states": {
+        "UNKNOWN": 7,
+        "blocked": 1,
+        "open-pr": 2
+      },
+      "pr_bearing_target_units": 2,
+      "merged_target_units": 0,
+      "interventions": 0,
+      "claim_to_merge_reconstructable": 0,
+      "findings_by_severity": "UNKNOWN",
       "score_numerator": 22,
       "score_denominator": 32,
       "score_percent": 68.8
@@ -1444,6 +2329,14 @@
       "reconstructable": 0,
       "observed_only": 2,
       "unknown": 0,
+      "final_states": {
+        "done": 2
+      },
+      "pr_bearing_target_units": 0,
+      "merged_target_units": 0,
+      "interventions": 0,
+      "claim_to_merge_reconstructable": 0,
+      "findings_by_severity": "UNKNOWN",
       "score_numerator": 4,
       "score_denominator": 6,
       "score_percent": 66.7
@@ -1457,6 +2350,14 @@
       "reconstructable": 0,
       "observed_only": 3,
       "unknown": 0,
+      "final_states": {
+        "done": 3
+      },
+      "pr_bearing_target_units": 0,
+      "merged_target_units": 0,
+      "interventions": 0,
+      "claim_to_merge_reconstructable": 0,
+      "findings_by_severity": "UNKNOWN",
       "score_numerator": 6,
       "score_denominator": 9,
       "score_percent": 66.7
@@ -1470,6 +2371,14 @@
       "reconstructable": 0,
       "observed_only": 0,
       "unknown": 1,
+      "final_states": {
+        "UNKNOWN": 1
+      },
+      "pr_bearing_target_units": 0,
+      "merged_target_units": 0,
+      "interventions": 0,
+      "claim_to_merge_reconstructable": 0,
+      "findings_by_severity": "UNKNOWN",
       "score_numerator": 2,
       "score_denominator": 3,
       "score_percent": 66.7
@@ -1483,6 +2392,14 @@
       "reconstructable": 0,
       "observed_only": 0,
       "unknown": 1,
+      "final_states": {
+        "blocked": 1
+      },
+      "pr_bearing_target_units": 0,
+      "merged_target_units": 0,
+      "interventions": 0,
+      "claim_to_merge_reconstructable": 0,
+      "findings_by_severity": "UNKNOWN",
       "score_numerator": 2,
       "score_denominator": 3,
       "score_percent": 66.7
@@ -1496,6 +2413,15 @@
       "reconstructable": 1,
       "observed_only": 0,
       "unknown": 4,
+      "final_states": {
+        "blocked": 4,
+        "merged": 1
+      },
+      "pr_bearing_target_units": 1,
+      "merged_target_units": 1,
+      "interventions": 0,
+      "claim_to_merge_reconstructable": 0,
+      "findings_by_severity": "UNKNOWN",
       "score_numerator": 10,
       "score_denominator": 16,
       "score_percent": 62.5
@@ -1509,6 +2435,16 @@
       "reconstructable": 2,
       "observed_only": 0,
       "unknown": 3,
+      "final_states": {
+        "blocked": 3,
+        "done": 1,
+        "failed": 1
+      },
+      "pr_bearing_target_units": 0,
+      "merged_target_units": 0,
+      "interventions": 0,
+      "claim_to_merge_reconstructable": 0,
+      "findings_by_severity": "UNKNOWN",
       "score_numerator": 9,
       "score_denominator": 15,
       "score_percent": 60.0
@@ -1522,6 +2458,16 @@
       "reconstructable": 1,
       "observed_only": 0,
       "unknown": 6,
+      "final_states": {
+        "UNKNOWN": 5,
+        "blocked": 1,
+        "done": 1
+      },
+      "pr_bearing_target_units": 0,
+      "merged_target_units": 0,
+      "interventions": 0,
+      "claim_to_merge_reconstructable": 0,
+      "findings_by_severity": "UNKNOWN",
       "score_numerator": 11,
       "score_denominator": 21,
       "score_percent": 52.4
@@ -1535,6 +2481,15 @@
       "reconstructable": 0,
       "observed_only": 0,
       "unknown": 2,
+      "final_states": {
+        "UNKNOWN": 1,
+        "blocked": 1
+      },
+      "pr_bearing_target_units": 0,
+      "merged_target_units": 0,
+      "interventions": 0,
+      "claim_to_merge_reconstructable": 0,
+      "findings_by_severity": "UNKNOWN",
       "score_numerator": 3,
       "score_denominator": 6,
       "score_percent": 50.0
@@ -1548,6 +2503,15 @@
       "reconstructable": 0,
       "observed_only": 0,
       "unknown": 4,
+      "final_states": {
+        "UNKNOWN": 3,
+        "merged": 1
+      },
+      "pr_bearing_target_units": 1,
+      "merged_target_units": 1,
+      "interventions": 0,
+      "claim_to_merge_reconstructable": 0,
+      "findings_by_severity": "UNKNOWN",
       "score_numerator": 6,
       "score_denominator": 13,
       "score_percent": 46.2
@@ -1561,6 +2525,14 @@
       "reconstructable": 0,
       "observed_only": 10,
       "unknown": 0,
+      "final_states": {
+        "done": 10
+      },
+      "pr_bearing_target_units": 0,
+      "merged_target_units": 0,
+      "interventions": 0,
+      "claim_to_merge_reconstructable": 0,
+      "findings_by_severity": "UNKNOWN",
       "score_numerator": 10,
       "score_denominator": 30,
       "score_percent": 33.3
@@ -1574,6 +2546,14 @@
       "reconstructable": 0,
       "observed_only": 0,
       "unknown": 1,
+      "final_states": {
+        "UNKNOWN": 1
+      },
+      "pr_bearing_target_units": 0,
+      "merged_target_units": 0,
+      "interventions": 0,
+      "claim_to_merge_reconstructable": 0,
+      "findings_by_severity": "UNKNOWN",
       "score_numerator": 1,
       "score_denominator": 3,
       "score_percent": 33.3
@@ -1587,6 +2567,14 @@
       "reconstructable": 0,
       "observed_only": 0,
       "unknown": 1,
+      "final_states": {
+        "UNKNOWN": 1
+      },
+      "pr_bearing_target_units": 0,
+      "merged_target_units": 0,
+      "interventions": 0,
+      "claim_to_merge_reconstructable": 0,
+      "findings_by_severity": "UNKNOWN",
       "score_numerator": 1,
       "score_denominator": 3,
       "score_percent": 33.3
@@ -1600,6 +2588,14 @@
       "reconstructable": 0,
       "observed_only": 0,
       "unknown": 5,
+      "final_states": {
+        "UNKNOWN": 5
+      },
+      "pr_bearing_target_units": 0,
+      "merged_target_units": 0,
+      "interventions": 0,
+      "claim_to_merge_reconstructable": 0,
+      "findings_by_severity": "UNKNOWN",
       "score_numerator": 5,
       "score_denominator": 15,
       "score_percent": 33.3
@@ -1613,6 +2609,14 @@
       "reconstructable": 0,
       "observed_only": 0,
       "unknown": 3,
+      "final_states": {
+        "UNKNOWN": 3
+      },
+      "pr_bearing_target_units": 0,
+      "merged_target_units": 0,
+      "interventions": 0,
+      "claim_to_merge_reconstructable": 0,
+      "findings_by_severity": "UNKNOWN",
       "score_numerator": 3,
       "score_denominator": 9,
       "score_percent": 33.3
@@ -1626,6 +2630,14 @@
       "reconstructable": 0,
       "observed_only": 0,
       "unknown": 10,
+      "final_states": {
+        "UNKNOWN": 10
+      },
+      "pr_bearing_target_units": 0,
+      "merged_target_units": 0,
+      "interventions": 0,
+      "claim_to_merge_reconstructable": 0,
+      "findings_by_severity": "UNKNOWN",
       "score_numerator": 10,
       "score_denominator": 30,
       "score_percent": 33.3
@@ -1639,6 +2651,14 @@
       "reconstructable": 0,
       "observed_only": 0,
       "unknown": 4,
+      "final_states": {
+        "in-progress": 4
+      },
+      "pr_bearing_target_units": 0,
+      "merged_target_units": 0,
+      "interventions": 0,
+      "claim_to_merge_reconstructable": 0,
+      "findings_by_severity": "UNKNOWN",
       "score_numerator": 4,
       "score_denominator": 12,
       "score_percent": 33.3
@@ -1652,6 +2672,15 @@
       "reconstructable": 0,
       "observed_only": 0,
       "unknown": 5,
+      "final_states": {
+        "UNKNOWN": 3,
+        "in-progress": 2
+      },
+      "pr_bearing_target_units": 0,
+      "merged_target_units": 0,
+      "interventions": 0,
+      "claim_to_merge_reconstructable": 0,
+      "findings_by_severity": "UNKNOWN",
       "score_numerator": 5,
       "score_denominator": 15,
       "score_percent": 33.3
@@ -1665,6 +2694,14 @@
       "reconstructable": 0,
       "observed_only": 0,
       "unknown": 6,
+      "final_states": {
+        "UNKNOWN": 6
+      },
+      "pr_bearing_target_units": 0,
+      "merged_target_units": 0,
+      "interventions": 0,
+      "claim_to_merge_reconstructable": 0,
+      "findings_by_severity": "UNKNOWN",
       "score_numerator": 6,
       "score_denominator": 18,
       "score_percent": 33.3
@@ -1678,6 +2715,14 @@
       "reconstructable": 0,
       "observed_only": 0,
       "unknown": 5,
+      "final_states": {
+        "UNKNOWN": 5
+      },
+      "pr_bearing_target_units": 0,
+      "merged_target_units": 0,
+      "interventions": 0,
+      "claim_to_merge_reconstructable": 0,
+      "findings_by_severity": "UNKNOWN",
       "score_numerator": 5,
       "score_denominator": 15,
       "score_percent": 33.3
@@ -1691,6 +2736,15 @@
       "reconstructable": 0,
       "observed_only": 21,
       "unknown": 0,
+      "final_states": {
+        "done": 15,
+        "merged": 6
+      },
+      "pr_bearing_target_units": 6,
+      "merged_target_units": 6,
+      "interventions": 0,
+      "claim_to_merge_reconstructable": 0,
+      "findings_by_severity": "UNKNOWN",
       "score_numerator": 21,
       "score_denominator": 69,
       "score_percent": 30.4
@@ -1704,6 +2758,15 @@
       "reconstructable": 0,
       "observed_only": 3,
       "unknown": 0,
+      "final_states": {
+        "done": 1,
+        "merged": 2
+      },
+      "pr_bearing_target_units": 2,
+      "merged_target_units": 2,
+      "interventions": 0,
+      "claim_to_merge_reconstructable": 0,
+      "findings_by_severity": "UNKNOWN",
       "score_numerator": 3,
       "score_denominator": 11,
       "score_percent": 27.3
@@ -1717,6 +2780,14 @@
       "reconstructable": 0,
       "observed_only": 0,
       "unknown": 1,
+      "final_states": {
+        "UNKNOWN": 1
+      },
+      "pr_bearing_target_units": 1,
+      "merged_target_units": 0,
+      "interventions": 0,
+      "claim_to_merge_reconstructable": 0,
+      "findings_by_severity": "UNKNOWN",
       "score_numerator": 1,
       "score_denominator": 4,
       "score_percent": 25.0
@@ -1730,6 +2801,19 @@
       "reconstructable": 0,
       "observed_only": 6,
       "unknown": 1,
+      "final_states": {
+        "closed-unmerged": 1,
+        "done": 1,
+        "in-progress": 1,
+        "merged": 1,
+        "open-pr": 1,
+        "superseded": 2
+      },
+      "pr_bearing_target_units": 3,
+      "merged_target_units": 1,
+      "interventions": 0,
+      "claim_to_merge_reconstructable": 0,
+      "findings_by_severity": "UNKNOWN",
       "score_numerator": 6,
       "score_denominator": 24,
       "score_percent": 25.0
