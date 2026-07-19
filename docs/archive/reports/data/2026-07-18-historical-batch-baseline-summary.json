@@ -1,0 +1,1738 @@
+{
+  "contract": "historical-batch-baseline",
+  "version": 1,
+  "captured_at": "2026-07-19T05:27:48Z",
+  "provenance": {
+    "coordination_command": "bin/agent-coord status --json --include-archived",
+    "coordination_exit": 0,
+    "coordination_captured_at": "2026-07-19T05:22:04Z",
+    "coordination_raw_sha256": "6a99cedbc64d88ba5b92c5021b7a022631aa81591684f1314299aaeda613dee0",
+    "coordination_raw_bytes": 1987195,
+    "github_command": "gh api graphql -f query=\"$(< /tmp/ac75-pr-metadata-query.graphql)\"",
+    "github_exit": 1,
+    "github_captured_at": "2026-07-19T05:27:48Z",
+    "github_query_sha256": "e051cabfcc094cef89535f1ff18a43da6e08261b3ce1277a4b0130b764f0dd76",
+    "github_response_sha256": "bba6066395bdd08ee9cc8ded31dbdaf7681f10d17e046b6de251e9d690b2423f",
+    "github_note": "Partial GraphQL response retained; one explicit PR URL did not resolve."
+  },
+  "method": {
+    "population": "all batch manifests in one successful unscoped status --include-archived snapshot",
+    "unit": "unique batch_id + repo + target after exploding and aggregating lane target arrays",
+    "score": "one point each for complete join key, exact claim/event match, observed terminal outcome, and resolved same-repo GitHub PR when a PR URL is recorded",
+    "score_denominator": "3 per target unit plus 1 only when that target unit records a PR URL",
+    "classification": {
+      "reconstructable": "complete key + exact claim/event + terminal observation + passing/not-applicable GitHub gate",
+      "observed_only": "terminal outcome is directly observed but at least one reconstruction gate fails",
+      "UNKNOWN": "no recognized terminal outcome is directly observed"
+    }
+  },
+  "headline": {
+    "batches": 100,
+    "synthetic_batches": 1,
+    "lane_rows": 421,
+    "exploded_target_rows": 503,
+    "target_units": 392,
+    "target_units_complete_key": 351,
+    "target_units_exact_coordination": 272,
+    "target_units_terminal_observed": 290,
+    "target_units_with_pr_url": 156,
+    "classification": {
+      "reconstructable": 227,
+      "observed_only": 63,
+      "UNKNOWN": 102
+    },
+    "batch_score_numerator": 1050,
+    "batch_score_denominator": 1332,
+    "overall_score_percent": 78.8
+  },
+  "join_validation": {
+    "repo_target_keys_spanning_batches": 20,
+    "full_keys_with_multiple_lane_rows": 82,
+    "extra_lane_rows_collapsed": 111,
+    "conclusion": "batch_id prevents observed cross-batch repo+target collisions; the triple is a target-level join key only after lane-role aggregation",
+    "reduced_key_collisions": [
+      {
+        "repo": "qa/pr57-http-20260712T150640Z-75520",
+        "target": "target",
+        "batch_ids": [
+          "qa-pr57-http-path-20260712T150640Z-75520",
+          "qa-pr57-http-stdin-20260712T150640Z-75520"
+        ]
+      },
+      {
+        "repo": "shakacode/agent-coordination",
+        "target": "4",
+        "batch_ids": [
+          "stack-rollout-20260708-m5-b",
+          "stack-rollout-20260708-wave-b"
+        ]
+      },
+      {
+        "repo": "shakacode/agent-coordination",
+        "target": "5",
+        "batch_ids": [
+          "ac-c-0712-0107",
+          "acb"
+        ]
+      },
+      {
+        "repo": "shakacode/agent-coordination",
+        "target": "6",
+        "batch_ids": [
+          "ac-c-0712-0107",
+          "acb"
+        ]
+      },
+      {
+        "repo": "shakacode/agent-coordination",
+        "target": "7",
+        "batch_ids": [
+          "aca",
+          "aca-20260709-1753"
+        ]
+      },
+      {
+        "repo": "shakacode/agent-coordination",
+        "target": "8",
+        "batch_ids": [
+          "ac-b-0712-0107",
+          "acb"
+        ]
+      },
+      {
+        "repo": "shakacode/agent-coordination-dashboard",
+        "target": "29",
+        "batch_ids": [
+          "acd-c-0712-0107",
+          "acda-2026-07-09-1753"
+        ]
+      },
+      {
+        "repo": "shakacode/react-on-rails-demo-marketplace-rsc",
+        "target": "86",
+        "batch_ids": [
+          "marketplace-e2e-20260718",
+          "ror17-fleet-b-20260717"
+        ]
+      },
+      {
+        "repo": "shakacode/react_on_rails",
+        "target": "4506",
+        "batch_ids": [
+          "ror-c-20260716-1543-pro-node-residuals",
+          "ror-c-pro-rsc-20260715"
+        ]
+      },
+      {
+        "repo": "shakacode/react_on_rails",
+        "target": "4557",
+        "batch_ids": [
+          "ror-b-release-rsc-20260712",
+          "ror-c-pro-rsc-20260715"
+        ]
+      },
+      {
+        "repo": "shakacode/react_on_rails",
+        "target": "4561",
+        "batch_ids": [
+          "ror-b-release-rsc-20260712",
+          "ror-c-pro-rsc-20260715"
+        ]
+      },
+      {
+        "repo": "shakacode/react_on_rails",
+        "target": "4569",
+        "batch_ids": [
+          "ror-4641-rc10-20260713",
+          "ror-b-release-rsc-20260712",
+          "ror-c-pro-rsc-20260715"
+        ]
+      },
+      {
+        "repo": "shakacode/react_on_rails",
+        "target": "4600",
+        "batch_ids": [
+          "ror-d-20260716-1543-rspack-adoption-recovery",
+          "ror-d-adoption-proof-20260712"
+        ]
+      },
+      {
+        "repo": "shakacode/react_on_rails",
+        "target": "4601",
+        "batch_ids": [
+          "ror-d-20260716-1543-rspack-adoption-recovery",
+          "ror-d-adoption-proof-20260712"
+        ]
+      },
+      {
+        "repo": "shakacode/react_on_rails",
+        "target": "4603",
+        "batch_ids": [
+          "ror-d-20260716-1543-rspack-adoption-recovery",
+          "ror-d-adoption-proof-20260712"
+        ]
+      },
+      {
+        "repo": "shakacode/react_on_rails",
+        "target": "4620",
+        "batch_ids": [
+          "ror-4620-main-cache-identity-20260716",
+          "ror-c-pro-rsc-20260715",
+          "ror-pro-20260717"
+        ]
+      },
+      {
+        "repo": "shakacode/react_on_rails",
+        "target": "4629",
+        "batch_ids": [
+          "ror-17-0-0-rc13-security-20260717",
+          "ror-rsc-20260717"
+        ]
+      },
+      {
+        "repo": "shakacode/react_on_rails",
+        "target": "4682",
+        "batch_ids": [
+          "ror-a-ci-fleet-lifecycle-20260718",
+          "ror-b-ci-workflows-20260715"
+        ]
+      },
+      {
+        "repo": "shakacode/react_on_rails",
+        "target": "4683",
+        "batch_ids": [
+          "ror-a-ci-fleet-lifecycle-20260718",
+          "ror-b-ci-workflows-20260715"
+        ]
+      },
+      {
+        "repo": "shakacode/react_on_rails",
+        "target": "4712",
+        "batch_ids": [
+          "ror-17-0-1-rsc419-investigation-20260717",
+          "ror-bugs-20260717"
+        ]
+      }
+    ],
+    "representative_rows": [
+      {
+        "batch_id": "ac-a-0712-0107",
+        "repo": "shakacode/agent-coordination",
+        "target": "51",
+        "lane_count": 1,
+        "lanes": [
+          "ac-a-i51"
+        ],
+        "lane_statuses": [
+          "done"
+        ],
+        "key_complete": true,
+        "exact_claim_count": 1,
+        "exact_event_count": 1,
+        "coordination_exact": true,
+        "terminal_observed": true,
+        "pr_url_count": 1,
+        "pr_urls": [
+          "https://github.com/shakacode/agent-coordination/pull/56"
+        ],
+        "github_gate": "pass",
+        "github_states": [
+          "MERGED"
+        ],
+        "present_head_check_rollups": [
+          "SUCCESS"
+        ],
+        "reconstruction": "reconstructable",
+        "score_numerator": 4,
+        "score_denominator": 4,
+        "gaps": []
+      },
+      {
+        "batch_id": "ac-b-0712-0107",
+        "repo": "shakacode/agent-coordination",
+        "target": "8",
+        "lane_count": 1,
+        "lanes": [
+          "ac-b-i8"
+        ],
+        "lane_statuses": [
+          "done"
+        ],
+        "key_complete": true,
+        "exact_claim_count": 0,
+        "exact_event_count": 1,
+        "coordination_exact": true,
+        "terminal_observed": true,
+        "pr_url_count": 1,
+        "pr_urls": [
+          "https://github.com/shakacode/agent-coordination/pull/61"
+        ],
+        "github_gate": "pass",
+        "github_states": [
+          "MERGED"
+        ],
+        "present_head_check_rollups": [
+          "SUCCESS"
+        ],
+        "reconstruction": "reconstructable",
+        "score_numerator": 4,
+        "score_denominator": 4,
+        "gaps": []
+      },
+      {
+        "batch_id": "acb",
+        "repo": "shakacode/agent-coordination",
+        "target": "8",
+        "lane_count": 1,
+        "lanes": [
+          "host-limits-contract"
+        ],
+        "lane_statuses": [
+          "complete"
+        ],
+        "key_complete": true,
+        "exact_claim_count": 0,
+        "exact_event_count": 0,
+        "coordination_exact": false,
+        "terminal_observed": true,
+        "pr_url_count": 0,
+        "pr_urls": [],
+        "github_gate": "not_applicable",
+        "github_states": [],
+        "present_head_check_rollups": [],
+        "reconstruction": "observed_only",
+        "score_numerator": 2,
+        "score_denominator": 3,
+        "gaps": [
+          "no_exact_coordination_match"
+        ]
+      },
+      {
+        "batch_id": "ac-a-coord-cinder",
+        "repo": "shakacode/agent-coordination",
+        "target": "54",
+        "lane_count": 2,
+        "lanes": [
+          "ac-a-pr54",
+          "ac-a-qa"
+        ],
+        "lane_statuses": [
+          "done"
+        ],
+        "key_complete": true,
+        "exact_claim_count": 1,
+        "exact_event_count": 2,
+        "coordination_exact": true,
+        "terminal_observed": true,
+        "pr_url_count": 0,
+        "pr_urls": [],
+        "github_gate": "not_applicable",
+        "github_states": [],
+        "present_head_check_rollups": [],
+        "reconstruction": "reconstructable",
+        "score_numerator": 3,
+        "score_denominator": 3,
+        "gaps": []
+      },
+      {
+        "batch_id": "awr-b-0716-1535",
+        "repo": null,
+        "target": "151",
+        "lane_count": 1,
+        "lanes": [
+          "b3"
+        ],
+        "lane_statuses": [
+          "done"
+        ],
+        "key_complete": false,
+        "exact_claim_count": 0,
+        "exact_event_count": 0,
+        "coordination_exact": false,
+        "terminal_observed": true,
+        "pr_url_count": 0,
+        "pr_urls": [],
+        "github_gate": "not_applicable",
+        "github_states": [],
+        "present_head_check_rollups": [],
+        "reconstruction": "observed_only",
+        "score_numerator": 1,
+        "score_denominator": 3,
+        "gaps": [
+          "missing_repo_join_component",
+          "no_exact_coordination_match"
+        ]
+      }
+    ]
+  },
+  "reconstruction_gap_ranking": [
+    {
+      "gap": "historical_ci_at_event_time_absent",
+      "blocked_target_units": 156,
+      "denominator": 156,
+      "scope": "historical CI reconstruction; current-head rollup is not a substitute",
+      "score_blocking": false
+    },
+    {
+      "gap": "no_exact_coordination_match",
+      "blocked_target_units": 120,
+      "denominator": 392,
+      "scope": "outcome evidence score",
+      "score_blocking": true
+    },
+    {
+      "gap": "no_terminal_outcome_observed",
+      "blocked_target_units": 102,
+      "denominator": 392,
+      "scope": "outcome evidence score",
+      "score_blocking": true
+    },
+    {
+      "gap": "missing_repo_join_component",
+      "blocked_target_units": 41,
+      "denominator": 392,
+      "scope": "outcome evidence score",
+      "score_blocking": true
+    },
+    {
+      "gap": "github_pr_url_invalid_or_unresolved",
+      "blocked_target_units": 6,
+      "denominator": 156,
+      "scope": "outcome evidence score",
+      "score_blocking": true
+    },
+    {
+      "gap": "github_repo_mismatch",
+      "blocked_target_units": 2,
+      "denominator": 156,
+      "scope": "outcome evidence score",
+      "score_blocking": true
+    }
+  ],
+  "platform_caveats": {
+    "archive_records": 0,
+    "pr_bearing_target_units_without_historical_ci_at_event_time": 156,
+    "github_pr_metadata": {
+      "CLOSED": 11,
+      "MERGED": 107,
+      "OPEN": 16
+    },
+    "present_head_check_rollups": {
+      "UNKNOWN": 3,
+      "SUCCESS": 109,
+      "PENDING": 18,
+      "FAILURE": 4
+    },
+    "github_graphql_errors": [
+      {
+        "error": "Could not resolve to a PullRequest with the number of 3972.",
+        "path": [
+          "r13",
+          "p0"
+        ]
+      }
+    ]
+  },
+  "batch_scores": [
+    {
+      "batch_id": "HC-A-foundation-kite",
+      "repo": "shakacode/hichee",
+      "batch_status": "completed",
+      "synthetic": false,
+      "target_units": 4,
+      "reconstructable": 4,
+      "observed_only": 0,
+      "unknown": 0,
+      "score_numerator": 15,
+      "score_denominator": 15,
+      "score_percent": 100.0
+    },
+    {
+      "batch_id": "ac-a-0712-0107",
+      "repo": "shakacode/agent-coordination",
+      "batch_status": "completed",
+      "synthetic": false,
+      "target_units": 4,
+      "reconstructable": 4,
+      "observed_only": 0,
+      "unknown": 0,
+      "score_numerator": 15,
+      "score_denominator": 15,
+      "score_percent": 100.0
+    },
+    {
+      "batch_id": "ac-a-coord-cinder",
+      "repo": "shakacode/agent-coordination",
+      "batch_status": null,
+      "synthetic": false,
+      "target_units": 2,
+      "reconstructable": 2,
+      "observed_only": 0,
+      "unknown": 0,
+      "score_numerator": 6,
+      "score_denominator": 6,
+      "score_percent": 100.0
+    },
+    {
+      "batch_id": "ac-b-0712-0107",
+      "repo": "shakacode/agent-coordination",
+      "batch_status": "completed",
+      "synthetic": false,
+      "target_units": 3,
+      "reconstructable": 3,
+      "observed_only": 0,
+      "unknown": 0,
+      "score_numerator": 11,
+      "score_denominator": 11,
+      "score_percent": 100.0
+    },
+    {
+      "batch_id": "ac-datafix-20260716-1555",
+      "repo": "shakacode/agent-coordination",
+      "batch_status": "completed",
+      "synthetic": false,
+      "target_units": 3,
+      "reconstructable": 3,
+      "observed_only": 0,
+      "unknown": 0,
+      "score_numerator": 11,
+      "score_denominator": 11,
+      "score_percent": 100.0
+    },
+    {
+      "batch_id": "aca-20260709-1753",
+      "repo": "shakacode/agent-coordination",
+      "batch_status": null,
+      "synthetic": false,
+      "target_units": 4,
+      "reconstructable": 4,
+      "observed_only": 0,
+      "unknown": 0,
+      "score_numerator": 12,
+      "score_denominator": 12,
+      "score_percent": 100.0
+    },
+    {
+      "batch_id": "acd-a-0711-1813",
+      "repo": "shakacode/agent-coordination-dashboard",
+      "batch_status": "complete",
+      "synthetic": false,
+      "target_units": 3,
+      "reconstructable": 3,
+      "observed_only": 0,
+      "unknown": 0,
+      "score_numerator": 9,
+      "score_denominator": 9,
+      "score_percent": 100.0
+    },
+    {
+      "batch_id": "acd-b-0712-0107",
+      "repo": "shakacode/agent-coordination-dashboard",
+      "batch_status": "complete",
+      "synthetic": false,
+      "target_units": 3,
+      "reconstructable": 3,
+      "observed_only": 0,
+      "unknown": 0,
+      "score_numerator": 9,
+      "score_denominator": 9,
+      "score_percent": 100.0
+    },
+    {
+      "batch_id": "acd-c-0712-0107",
+      "repo": "shakacode/agent-coordination-dashboard",
+      "batch_status": "completed",
+      "synthetic": false,
+      "target_units": 4,
+      "reconstructable": 4,
+      "observed_only": 0,
+      "unknown": 0,
+      "score_numerator": 14,
+      "score_denominator": 14,
+      "score_percent": 100.0
+    },
+    {
+      "batch_id": "acd-c-pr61-followup-0714",
+      "repo": "shakacode/agent-coordination-dashboard",
+      "batch_status": "completed",
+      "synthetic": false,
+      "target_units": 1,
+      "reconstructable": 1,
+      "observed_only": 0,
+      "unknown": 0,
+      "score_numerator": 4,
+      "score_denominator": 4,
+      "score_percent": 100.0
+    },
+    {
+      "batch_id": "acd-datafix-20260715-2339",
+      "repo": "shakacode/agent-coordination-dashboard",
+      "batch_status": null,
+      "synthetic": false,
+      "target_units": 3,
+      "reconstructable": 3,
+      "observed_only": 0,
+      "unknown": 0,
+      "score_numerator": 12,
+      "score_denominator": 12,
+      "score_percent": 100.0
+    },
+    {
+      "batch_id": "acda-operator-ux",
+      "repo": "shakacode/agent-coordination-dashboard",
+      "batch_status": "completed",
+      "synthetic": false,
+      "target_units": 6,
+      "reconstructable": 6,
+      "observed_only": 0,
+      "unknown": 0,
+      "score_numerator": 23,
+      "score_denominator": 23,
+      "score_percent": 100.0
+    },
+    {
+      "batch_id": "aw-ce-pov-orbit",
+      "repo": "shakacode/agent-workflows",
+      "batch_status": null,
+      "synthetic": false,
+      "target_units": 8,
+      "reconstructable": 8,
+      "observed_only": 0,
+      "unknown": 0,
+      "score_numerator": 25,
+      "score_denominator": 25,
+      "score_percent": 100.0
+    },
+    {
+      "batch_id": "aw-closeout-20260715-2057",
+      "repo": "shakacode/agent-workflows",
+      "batch_status": "complete",
+      "synthetic": false,
+      "target_units": 6,
+      "reconstructable": 6,
+      "observed_only": 0,
+      "unknown": 0,
+      "score_numerator": 23,
+      "score_denominator": 23,
+      "score_percent": 100.0
+    },
+    {
+      "batch_id": "awfa-20260709-1753-docs-adoption",
+      "repo": "shakacode/agent-workflows",
+      "batch_status": "completed",
+      "synthetic": false,
+      "target_units": 7,
+      "reconstructable": 7,
+      "observed_only": 0,
+      "unknown": 0,
+      "score_numerator": 21,
+      "score_denominator": 21,
+      "score_percent": 100.0
+    },
+    {
+      "batch_id": "awfb-20260709-1753",
+      "repo": "shakacode/agent-workflows",
+      "batch_status": null,
+      "synthetic": false,
+      "target_units": 5,
+      "reconstructable": 5,
+      "observed_only": 0,
+      "unknown": 0,
+      "score_numerator": 15,
+      "score_denominator": 15,
+      "score_percent": 100.0
+    },
+    {
+      "batch_id": "batch-shakacode-control-plane-flow-2vl3ja",
+      "repo": "shakacode/control-plane-flow",
+      "batch_status": null,
+      "synthetic": false,
+      "target_units": 1,
+      "reconstructable": 1,
+      "observed_only": 0,
+      "unknown": 0,
+      "score_numerator": 4,
+      "score_denominator": 4,
+      "score_percent": 100.0
+    },
+    {
+      "batch_id": "cpor-0710-docs-spawn",
+      "repo": "shakacode/cypress-playwright-on-rails",
+      "batch_status": "completed",
+      "synthetic": false,
+      "target_units": 2,
+      "reconstructable": 2,
+      "observed_only": 0,
+      "unknown": 0,
+      "score_numerator": 8,
+      "score_denominator": 8,
+      "score_percent": 100.0
+    },
+    {
+      "batch_id": "hichee-07-13-1342-readonly-db",
+      "repo": "shakacode/hichee",
+      "batch_status": "active",
+      "synthetic": false,
+      "target_units": 1,
+      "reconstructable": 1,
+      "observed_only": 0,
+      "unknown": 0,
+      "score_numerator": 3,
+      "score_denominator": 3,
+      "score_percent": 100.0
+    },
+    {
+      "batch_id": "hichee-07-14-1718-pr9768",
+      "repo": "shakacode/hichee",
+      "batch_status": "completed",
+      "synthetic": false,
+      "target_units": 1,
+      "reconstructable": 1,
+      "observed_only": 0,
+      "unknown": 0,
+      "score_numerator": 4,
+      "score_denominator": 4,
+      "score_percent": 100.0
+    },
+    {
+      "batch_id": "hichee-2026-07-17-deploy-verification-wave1",
+      "repo": "shakacode/hichee",
+      "batch_status": "completed",
+      "synthetic": false,
+      "target_units": 5,
+      "reconstructable": 5,
+      "observed_only": 0,
+      "unknown": 0,
+      "score_numerator": 20,
+      "score_denominator": 20,
+      "score_percent": 100.0
+    },
+    {
+      "batch_id": "hichee-20260716-home-search-focus",
+      "repo": "shakacode/hichee",
+      "batch_status": "completed",
+      "synthetic": false,
+      "target_units": 2,
+      "reconstructable": 2,
+      "observed_only": 0,
+      "unknown": 0,
+      "score_numerator": 6,
+      "score_denominator": 6,
+      "score_percent": 100.0
+    },
+    {
+      "batch_id": "hichee-pr9701-20260714",
+      "repo": "shakacode/hichee",
+      "batch_status": "completed",
+      "synthetic": false,
+      "target_units": 1,
+      "reconstructable": 1,
+      "observed_only": 0,
+      "unknown": 0,
+      "score_numerator": 4,
+      "score_denominator": 4,
+      "score_percent": 100.0
+    },
+    {
+      "batch_id": "hichee-pr9815-20260718",
+      "repo": "shakacode/hichee",
+      "batch_status": "completed",
+      "synthetic": false,
+      "target_units": 1,
+      "reconstructable": 1,
+      "observed_only": 0,
+      "unknown": 0,
+      "score_numerator": 4,
+      "score_denominator": 4,
+      "score_percent": 100.0
+    },
+    {
+      "batch_id": "hichee-pr9817-spring-opt-in-20260716",
+      "repo": "shakacode/hichee",
+      "batch_status": null,
+      "synthetic": false,
+      "target_units": 1,
+      "reconstructable": 1,
+      "observed_only": 0,
+      "unknown": 0,
+      "score_numerator": 4,
+      "score_denominator": 4,
+      "score_percent": 100.0
+    },
+    {
+      "batch_id": "hichee-prs-9824-9825-20260717",
+      "repo": "shakacode/hichee",
+      "batch_status": null,
+      "synthetic": false,
+      "target_units": 2,
+      "reconstructable": 2,
+      "observed_only": 0,
+      "unknown": 0,
+      "score_numerator": 8,
+      "score_denominator": 8,
+      "score_percent": 100.0
+    },
+    {
+      "batch_id": "hichee0715-koa",
+      "repo": "shakacode/hichee",
+      "batch_status": "completed",
+      "synthetic": false,
+      "target_units": 9,
+      "reconstructable": 9,
+      "observed_only": 0,
+      "unknown": 0,
+      "score_numerator": 27,
+      "score_denominator": 27,
+      "score_percent": 100.0
+    },
+    {
+      "batch_id": "private-dotfiles-20260717-all-open-prs",
+      "repo": "justin808/private-dotfiles",
+      "batch_status": "completed",
+      "synthetic": false,
+      "target_units": 3,
+      "reconstructable": 3,
+      "observed_only": 0,
+      "unknown": 0,
+      "score_numerator": 12,
+      "score_denominator": 12,
+      "score_percent": 100.0
+    },
+    {
+      "batch_id": "ror-17-0-0-rsc187-disposition-20260717",
+      "repo": "shakacode/react_on_rails_rsc",
+      "batch_status": "completed",
+      "synthetic": false,
+      "target_units": 1,
+      "reconstructable": 1,
+      "observed_only": 0,
+      "unknown": 0,
+      "score_numerator": 3,
+      "score_denominator": 3,
+      "score_percent": 100.0
+    },
+    {
+      "batch_id": "ror-17-0-1-rsc419-investigation-20260717",
+      "repo": "shakacode/react_on_rails",
+      "batch_status": "completed",
+      "synthetic": false,
+      "target_units": 1,
+      "reconstructable": 1,
+      "observed_only": 0,
+      "unknown": 0,
+      "score_numerator": 3,
+      "score_denominator": 3,
+      "score_percent": 100.0
+    },
+    {
+      "batch_id": "ror-4568-20260710",
+      "repo": "shakacode/react_on_rails",
+      "batch_status": "done",
+      "synthetic": false,
+      "target_units": 5,
+      "reconstructable": 5,
+      "observed_only": 0,
+      "unknown": 0,
+      "score_numerator": 15,
+      "score_denominator": 15,
+      "score_percent": 100.0
+    },
+    {
+      "batch_id": "ror-4620-main-cache-identity-20260716",
+      "repo": "shakacode/react_on_rails",
+      "batch_status": "completed",
+      "synthetic": false,
+      "target_units": 1,
+      "reconstructable": 1,
+      "observed_only": 0,
+      "unknown": 0,
+      "score_numerator": 4,
+      "score_denominator": 4,
+      "score_percent": 100.0
+    },
+    {
+      "batch_id": "ror-4626-closeout-20260712",
+      "repo": "shakacode/react_on_rails",
+      "batch_status": null,
+      "synthetic": false,
+      "target_units": 3,
+      "reconstructable": 3,
+      "observed_only": 0,
+      "unknown": 0,
+      "score_numerator": 12,
+      "score_denominator": 12,
+      "score_percent": 100.0
+    },
+    {
+      "batch_id": "ror-4653-demo-smoke-20260714-0910-hst",
+      "repo": "shakacode/react_on_rails",
+      "batch_status": "completed",
+      "synthetic": false,
+      "target_units": 3,
+      "reconstructable": 3,
+      "observed_only": 0,
+      "unknown": 0,
+      "score_numerator": 12,
+      "score_denominator": 12,
+      "score_percent": 100.0
+    },
+    {
+      "batch_id": "ror-a-ci-fleet-lifecycle-20260718",
+      "repo": "shakacode/react_on_rails",
+      "batch_status": "completed",
+      "synthetic": false,
+      "target_units": 4,
+      "reconstructable": 4,
+      "observed_only": 0,
+      "unknown": 0,
+      "score_numerator": 16,
+      "score_denominator": 16,
+      "score_percent": 100.0
+    },
+    {
+      "batch_id": "ror-a-pr4552-cedar",
+      "repo": "shakacode/react_on_rails",
+      "batch_status": null,
+      "synthetic": false,
+      "target_units": 1,
+      "reconstructable": 1,
+      "observed_only": 0,
+      "unknown": 0,
+      "score_numerator": 4,
+      "score_denominator": 4,
+      "score_percent": 100.0
+    },
+    {
+      "batch_id": "ror-a-stalled-prs-20260712",
+      "repo": "shakacode/react_on_rails",
+      "batch_status": "complete",
+      "synthetic": false,
+      "target_units": 4,
+      "reconstructable": 4,
+      "observed_only": 0,
+      "unknown": 0,
+      "score_numerator": 16,
+      "score_denominator": 16,
+      "score_percent": 100.0
+    },
+    {
+      "batch_id": "ror-b-4501-20260709-1733",
+      "repo": "shakacode/react_on_rails",
+      "batch_status": null,
+      "synthetic": false,
+      "target_units": 1,
+      "reconstructable": 1,
+      "observed_only": 0,
+      "unknown": 0,
+      "score_numerator": 3,
+      "score_denominator": 3,
+      "score_percent": 100.0
+    },
+    {
+      "batch_id": "ror-b-pro-ember-20260713-1528",
+      "repo": "shakacode/react_on_rails",
+      "batch_status": null,
+      "synthetic": false,
+      "target_units": 4,
+      "reconstructable": 4,
+      "observed_only": 0,
+      "unknown": 0,
+      "score_numerator": 15,
+      "score_denominator": 15,
+      "score_percent": 100.0
+    },
+    {
+      "batch_id": "ror-backport-main-to-release-20260715",
+      "repo": "shakacode/react_on_rails",
+      "batch_status": "completed",
+      "synthetic": false,
+      "target_units": 7,
+      "reconstructable": 7,
+      "observed_only": 0,
+      "unknown": 0,
+      "score_numerator": 27,
+      "score_denominator": 27,
+      "score_percent": 100.0
+    },
+    {
+      "batch_id": "ror-c-20260716-1543-pro-node-residuals",
+      "repo": "shakacode/react_on_rails",
+      "batch_status": null,
+      "synthetic": false,
+      "target_units": 5,
+      "reconstructable": 5,
+      "observed_only": 0,
+      "unknown": 0,
+      "score_numerator": 19,
+      "score_denominator": 19,
+      "score_percent": 100.0
+    },
+    {
+      "batch_id": "ror-c-security-tests-20260712",
+      "repo": "shakacode/react_on_rails",
+      "batch_status": "completed",
+      "synthetic": false,
+      "target_units": 6,
+      "reconstructable": 6,
+      "observed_only": 0,
+      "unknown": 0,
+      "score_numerator": 23,
+      "score_denominator": 23,
+      "score_percent": 100.0
+    },
+    {
+      "batch_id": "ror-d-20260716-1543-rspack-adoption-recovery",
+      "repo": "shakacode/react_on_rails",
+      "batch_status": "completed",
+      "synthetic": false,
+      "target_units": 3,
+      "reconstructable": 3,
+      "observed_only": 0,
+      "unknown": 0,
+      "score_numerator": 12,
+      "score_denominator": 12,
+      "score_percent": 100.0
+    },
+    {
+      "batch_id": "ror-pr4564-20260710-1813",
+      "repo": "shakacode/react_on_rails",
+      "batch_status": "complete",
+      "synthetic": false,
+      "target_units": 1,
+      "reconstructable": 1,
+      "observed_only": 0,
+      "unknown": 0,
+      "score_numerator": 3,
+      "score_denominator": 3,
+      "score_percent": 100.0
+    },
+    {
+      "batch_id": "ror-release-20260713",
+      "repo": "shakacode/react_on_rails",
+      "batch_status": "completed",
+      "synthetic": false,
+      "target_units": 4,
+      "reconstructable": 4,
+      "observed_only": 0,
+      "unknown": 0,
+      "score_numerator": 16,
+      "score_denominator": 16,
+      "score_percent": 100.0
+    },
+    {
+      "batch_id": "ror-unblock-20260717",
+      "repo": "shakacode/react_on_rails",
+      "batch_status": "completed",
+      "synthetic": false,
+      "target_units": 3,
+      "reconstructable": 3,
+      "observed_only": 0,
+      "unknown": 0,
+      "score_numerator": 12,
+      "score_denominator": 12,
+      "score_percent": 100.0
+    },
+    {
+      "batch_id": "ror17-fleet-b-20260717",
+      "repo": "shakacode/react-on-rails-demo-marketplace-rsc",
+      "batch_status": "completed",
+      "synthetic": false,
+      "target_units": 2,
+      "reconstructable": 2,
+      "observed_only": 0,
+      "unknown": 0,
+      "score_numerator": 8,
+      "score_denominator": 8,
+      "score_percent": 100.0
+    },
+    {
+      "batch_id": "rsc-0710-2115-parity-discover",
+      "repo": "shakacode/react-on-rails-demo-gumroad-rsc",
+      "batch_status": "completed",
+      "synthetic": false,
+      "target_units": 2,
+      "reconstructable": 2,
+      "observed_only": 0,
+      "unknown": 0,
+      "score_numerator": 8,
+      "score_denominator": 8,
+      "score_percent": 100.0
+    },
+    {
+      "batch_id": "shakapacker-1219-20260714T183711Z",
+      "repo": "shakacode/shakapacker",
+      "batch_status": "completed",
+      "synthetic": false,
+      "target_units": 1,
+      "reconstructable": 1,
+      "observed_only": 0,
+      "unknown": 0,
+      "score_numerator": 4,
+      "score_denominator": 4,
+      "score_percent": 100.0
+    },
+    {
+      "batch_id": "sim-task_one",
+      "repo": "sim/local",
+      "batch_status": null,
+      "synthetic": true,
+      "target_units": 1,
+      "reconstructable": 1,
+      "observed_only": 0,
+      "unknown": 0,
+      "score_numerator": 3,
+      "score_denominator": 3,
+      "score_percent": 100.0
+    },
+    {
+      "batch_id": "ss-open-20260712-b",
+      "repo": "shakacode/shakastack-com",
+      "batch_status": "completed",
+      "synthetic": false,
+      "target_units": 2,
+      "reconstructable": 2,
+      "observed_only": 0,
+      "unknown": 0,
+      "score_numerator": 8,
+      "score_denominator": 8,
+      "score_percent": 100.0
+    },
+    {
+      "batch_id": "tr-07-13-1224-pr14",
+      "repo": "shakacode/team-reports",
+      "batch_status": "completed",
+      "synthetic": false,
+      "target_units": 1,
+      "reconstructable": 1,
+      "observed_only": 0,
+      "unknown": 0,
+      "score_numerator": 4,
+      "score_denominator": 4,
+      "score_percent": 100.0
+    },
+    {
+      "batch_id": "ror-17-0-0-rc12-demo-fleet-0715-hst",
+      "repo": "shakacode/react_on_rails",
+      "batch_status": "completed",
+      "synthetic": false,
+      "target_units": 14,
+      "reconstructable": 13,
+      "observed_only": 1,
+      "unknown": 0,
+      "score_numerator": 42,
+      "score_denominator": 43,
+      "score_percent": 97.7
+    },
+    {
+      "batch_id": "acda-2026-07-09-1753",
+      "repo": "shakacode/agent-coordination-dashboard",
+      "batch_status": "complete",
+      "synthetic": false,
+      "target_units": 4,
+      "reconstructable": 3,
+      "observed_only": 1,
+      "unknown": 0,
+      "score_numerator": 13,
+      "score_denominator": 14,
+      "score_percent": 92.9
+    },
+    {
+      "batch_id": "cpflowA-release-0709-reef",
+      "repo": "shakacode/control-plane-flow",
+      "batch_status": null,
+      "synthetic": false,
+      "target_units": 4,
+      "reconstructable": 3,
+      "observed_only": 0,
+      "unknown": 1,
+      "score_numerator": 12,
+      "score_denominator": 13,
+      "score_percent": 92.3
+    },
+    {
+      "batch_id": "ror-c-pro-rsc-20260715",
+      "repo": "shakacode/react_on_rails",
+      "batch_status": "active",
+      "synthetic": false,
+      "target_units": 6,
+      "reconstructable": 5,
+      "observed_only": 0,
+      "unknown": 1,
+      "score_numerator": 20,
+      "score_denominator": 22,
+      "score_percent": 90.9
+    },
+    {
+      "batch_id": "marketplace-e2e-20260718",
+      "repo": "shakacode/react-on-rails-demo-marketplace-rsc",
+      "batch_status": null,
+      "synthetic": false,
+      "target_units": 8,
+      "reconstructable": 6,
+      "observed_only": 0,
+      "unknown": 2,
+      "score_numerator": 26,
+      "score_denominator": 29,
+      "score_percent": 89.7
+    },
+    {
+      "batch_id": "ror-d-roadmap-evidence-20260715",
+      "repo": "shakacode/react_on_rails",
+      "batch_status": "blocked",
+      "synthetic": false,
+      "target_units": 6,
+      "reconstructable": 5,
+      "observed_only": 0,
+      "unknown": 1,
+      "score_numerator": 16,
+      "score_denominator": 18,
+      "score_percent": 88.9
+    },
+    {
+      "batch_id": "hichee-a-20260718-1022",
+      "repo": "shakacode/hichee",
+      "batch_status": null,
+      "synthetic": false,
+      "target_units": 8,
+      "reconstructable": 5,
+      "observed_only": 0,
+      "unknown": 3,
+      "score_numerator": 23,
+      "score_denominator": 26,
+      "score_percent": 88.5
+    },
+    {
+      "batch_id": "ror-4627-workflow-exercise-20260714",
+      "repo": "shakacode/react_on_rails",
+      "batch_status": null,
+      "synthetic": false,
+      "target_units": 4,
+      "reconstructable": 2,
+      "observed_only": 2,
+      "unknown": 0,
+      "score_numerator": 14,
+      "score_denominator": 16,
+      "score_percent": 87.5
+    },
+    {
+      "batch_id": "cpf-b-20260716-1543",
+      "repo": "shakacode/control-plane-flow",
+      "batch_status": null,
+      "synthetic": false,
+      "target_units": 4,
+      "reconstructable": 3,
+      "observed_only": 0,
+      "unknown": 1,
+      "score_numerator": 13,
+      "score_denominator": 15,
+      "score_percent": 86.7
+    },
+    {
+      "batch_id": "ror-b-ci-workflows-20260715",
+      "repo": "shakacode/react_on_rails",
+      "batch_status": null,
+      "synthetic": false,
+      "target_units": 6,
+      "reconstructable": 4,
+      "observed_only": 0,
+      "unknown": 2,
+      "score_numerator": 16,
+      "score_denominator": 19,
+      "score_percent": 84.2
+    },
+    {
+      "batch_id": "awr-a-20260716-1535",
+      "repo": "shakacode/agent-coordination",
+      "batch_status": null,
+      "synthetic": false,
+      "target_units": 3,
+      "reconstructable": 2,
+      "observed_only": 1,
+      "unknown": 0,
+      "score_numerator": 10,
+      "score_denominator": 12,
+      "score_percent": 83.3
+    },
+    {
+      "batch_id": "ror-17-0-0-rc13-security-20260717",
+      "repo": "shakacode/react_on_rails",
+      "batch_status": "in_progress",
+      "synthetic": false,
+      "target_units": 2,
+      "reconstructable": 1,
+      "observed_only": 0,
+      "unknown": 1,
+      "score_numerator": 5,
+      "score_denominator": 6,
+      "score_percent": 83.3
+    },
+    {
+      "batch_id": "ror-d-adoption-proof-20260712",
+      "repo": "shakacode/react_on_rails",
+      "batch_status": null,
+      "synthetic": false,
+      "target_units": 6,
+      "reconstructable": 3,
+      "observed_only": 3,
+      "unknown": 0,
+      "score_numerator": 15,
+      "score_denominator": 18,
+      "score_percent": 83.3
+    },
+    {
+      "batch_id": "ss-open-20260712",
+      "repo": "shakacode/shakastack-com",
+      "batch_status": "completed",
+      "synthetic": false,
+      "target_units": 5,
+      "reconstructable": 1,
+      "observed_only": 4,
+      "unknown": 0,
+      "score_numerator": 16,
+      "score_denominator": 20,
+      "score_percent": 80.0
+    },
+    {
+      "batch_id": "ror-4641-rc10-20260713",
+      "repo": "shakacode/react_on_rails",
+      "batch_status": "active",
+      "synthetic": false,
+      "target_units": 3,
+      "reconstructable": 1,
+      "observed_only": 0,
+      "unknown": 2,
+      "score_numerator": 7,
+      "score_denominator": 9,
+      "score_percent": 77.8
+    },
+    {
+      "batch_id": "ror-a-open-pr-closeout-20260715",
+      "repo": "shakacode/react_on_rails",
+      "batch_status": null,
+      "synthetic": false,
+      "target_units": 5,
+      "reconstructable": 2,
+      "observed_only": 0,
+      "unknown": 3,
+      "score_numerator": 14,
+      "score_denominator": 18,
+      "score_percent": 77.8
+    },
+    {
+      "batch_id": "aca",
+      "repo": "shakacode/agent-coordination",
+      "batch_status": "in_progress",
+      "synthetic": false,
+      "target_units": 1,
+      "reconstructable": 0,
+      "observed_only": 1,
+      "unknown": 0,
+      "score_numerator": 3,
+      "score_denominator": 4,
+      "score_percent": 75.0
+    },
+    {
+      "batch_id": "cpf-slow-suite-20260715-2057",
+      "repo": "shakacode/control-plane-flow",
+      "batch_status": "in_progress",
+      "synthetic": false,
+      "target_units": 1,
+      "reconstructable": 0,
+      "observed_only": 0,
+      "unknown": 1,
+      "score_numerator": 3,
+      "score_denominator": 4,
+      "score_percent": 75.0
+    },
+    {
+      "batch_id": "qa-http-20260712T145459Z-57140",
+      "repo": "qa/ac-a-20260712T145459Z-57140",
+      "batch_status": "completed",
+      "synthetic": false,
+      "target_units": 2,
+      "reconstructable": 0,
+      "observed_only": 2,
+      "unknown": 0,
+      "score_numerator": 6,
+      "score_denominator": 8,
+      "score_percent": 75.0
+    },
+    {
+      "batch_id": "qa-http-stdin-20260712T145459Z-57140",
+      "repo": "qa/ac-a-20260712T145459Z-57140",
+      "batch_status": "completed",
+      "synthetic": false,
+      "target_units": 1,
+      "reconstructable": 0,
+      "observed_only": 1,
+      "unknown": 0,
+      "score_numerator": 3,
+      "score_denominator": 4,
+      "score_percent": 75.0
+    },
+    {
+      "batch_id": "ror-release-backports-20260711",
+      "repo": "shakacode/react_on_rails",
+      "batch_status": null,
+      "synthetic": false,
+      "target_units": 4,
+      "reconstructable": 2,
+      "observed_only": 0,
+      "unknown": 2,
+      "score_numerator": 9,
+      "score_denominator": 12,
+      "score_percent": 75.0
+    },
+    {
+      "batch_id": "stack-rollout-20260708-m5-b",
+      "repo": "shakacode/agent-coordination",
+      "batch_status": null,
+      "synthetic": false,
+      "target_units": 1,
+      "reconstructable": 0,
+      "observed_only": 1,
+      "unknown": 0,
+      "score_numerator": 3,
+      "score_denominator": 4,
+      "score_percent": 75.0
+    },
+    {
+      "batch_id": "hichee-b-20260718-1022",
+      "repo": "shakacode/hichee",
+      "batch_status": null,
+      "synthetic": false,
+      "target_units": 8,
+      "reconstructable": 0,
+      "observed_only": 0,
+      "unknown": 8,
+      "score_numerator": 19,
+      "score_denominator": 27,
+      "score_percent": 70.4
+    },
+    {
+      "batch_id": "ror-b-demo-fleet-health-20260718",
+      "repo": "shakacode/react_on_rails",
+      "batch_status": "in_progress",
+      "synthetic": false,
+      "target_units": 3,
+      "reconstructable": 1,
+      "observed_only": 1,
+      "unknown": 1,
+      "score_numerator": 7,
+      "score_denominator": 10,
+      "score_percent": 70.0
+    },
+    {
+      "batch_id": "hichee-c-20260718-1022",
+      "repo": "shakacode/hichee",
+      "batch_status": "active",
+      "synthetic": false,
+      "target_units": 10,
+      "reconstructable": 0,
+      "observed_only": 0,
+      "unknown": 10,
+      "score_numerator": 22,
+      "score_denominator": 32,
+      "score_percent": 68.8
+    },
+    {
+      "batch_id": "ac-c-0712-0107",
+      "repo": "shakacode/agent-coordination",
+      "batch_status": null,
+      "synthetic": false,
+      "target_units": 2,
+      "reconstructable": 0,
+      "observed_only": 2,
+      "unknown": 0,
+      "score_numerator": 4,
+      "score_denominator": 6,
+      "score_percent": 66.7
+    },
+    {
+      "batch_id": "acb",
+      "repo": "shakacode/agent-coordination",
+      "batch_status": null,
+      "synthetic": false,
+      "target_units": 3,
+      "reconstructable": 0,
+      "observed_only": 3,
+      "unknown": 0,
+      "score_numerator": 6,
+      "score_denominator": 9,
+      "score_percent": 66.7
+    },
+    {
+      "batch_id": "stack-rollout-20260708-actions-parity",
+      "repo": "shakacode/agent-workflows",
+      "batch_status": null,
+      "synthetic": false,
+      "target_units": 1,
+      "reconstructable": 0,
+      "observed_only": 0,
+      "unknown": 1,
+      "score_numerator": 2,
+      "score_denominator": 3,
+      "score_percent": 66.7
+    },
+    {
+      "batch_id": "stack-rollout-20260708-wave-b",
+      "repo": "shakacode/agent-coordination",
+      "batch_status": null,
+      "synthetic": false,
+      "target_units": 1,
+      "reconstructable": 0,
+      "observed_only": 0,
+      "unknown": 1,
+      "score_numerator": 2,
+      "score_denominator": 3,
+      "score_percent": 66.7
+    },
+    {
+      "batch_id": "ror-b-release-rsc-20260712",
+      "repo": "shakacode/react_on_rails",
+      "batch_status": null,
+      "synthetic": false,
+      "target_units": 5,
+      "reconstructable": 1,
+      "observed_only": 0,
+      "unknown": 4,
+      "score_numerator": 10,
+      "score_denominator": 16,
+      "score_percent": 62.5
+    },
+    {
+      "batch_id": "acd-actionable-20260715-2057",
+      "repo": "shakacode/agent-coordination-dashboard",
+      "batch_status": "in_progress",
+      "synthetic": false,
+      "target_units": 5,
+      "reconstructable": 2,
+      "observed_only": 0,
+      "unknown": 3,
+      "score_numerator": 9,
+      "score_denominator": 15,
+      "score_percent": 60.0
+    },
+    {
+      "batch_id": "hichee-d-20260718-1022",
+      "repo": "shakacode/hichee",
+      "batch_status": null,
+      "synthetic": false,
+      "target_units": 7,
+      "reconstructable": 1,
+      "observed_only": 0,
+      "unknown": 6,
+      "score_numerator": 11,
+      "score_denominator": 21,
+      "score_percent": 52.4
+    },
+    {
+      "batch_id": "hichee-2026-07-18-deploy-verification-wave2",
+      "repo": "shakacode/hichee",
+      "batch_status": null,
+      "synthetic": false,
+      "target_units": 2,
+      "reconstructable": 0,
+      "observed_only": 0,
+      "unknown": 2,
+      "score_numerator": 3,
+      "score_denominator": 6,
+      "score_percent": 50.0
+    },
+    {
+      "batch_id": "HC-staging-release-qa-20260715-1157",
+      "repo": "shakacode/hichee",
+      "batch_status": null,
+      "synthetic": false,
+      "target_units": 4,
+      "reconstructable": 0,
+      "observed_only": 0,
+      "unknown": 4,
+      "score_numerator": 6,
+      "score_denominator": 13,
+      "score_percent": 46.2
+    },
+    {
+      "batch_id": "awr-b-0716-1535",
+      "repo": null,
+      "batch_status": "completed",
+      "synthetic": false,
+      "target_units": 10,
+      "reconstructable": 0,
+      "observed_only": 10,
+      "unknown": 0,
+      "score_numerator": 10,
+      "score_denominator": 30,
+      "score_percent": 33.3
+    },
+    {
+      "batch_id": "qa-pr57-http-path-20260712T150640Z-75520",
+      "repo": "qa/pr57-http-20260712T150640Z-75520",
+      "batch_status": null,
+      "synthetic": false,
+      "target_units": 1,
+      "reconstructable": 0,
+      "observed_only": 0,
+      "unknown": 1,
+      "score_numerator": 1,
+      "score_denominator": 3,
+      "score_percent": 33.3
+    },
+    {
+      "batch_id": "qa-pr57-http-stdin-20260712T150640Z-75520",
+      "repo": "qa/pr57-http-20260712T150640Z-75520",
+      "batch_status": null,
+      "synthetic": false,
+      "target_units": 1,
+      "reconstructable": 0,
+      "observed_only": 0,
+      "unknown": 1,
+      "score_numerator": 1,
+      "score_denominator": 3,
+      "score_percent": 33.3
+    },
+    {
+      "batch_id": "ror-bugs-20260717",
+      "repo": "shakacode/react_on_rails",
+      "batch_status": null,
+      "synthetic": false,
+      "target_units": 5,
+      "reconstructable": 0,
+      "observed_only": 0,
+      "unknown": 5,
+      "score_numerator": 5,
+      "score_denominator": 15,
+      "score_percent": 33.3
+    },
+    {
+      "batch_id": "ror-ci-20260717",
+      "repo": "shakacode/react_on_rails",
+      "batch_status": null,
+      "synthetic": false,
+      "target_units": 3,
+      "reconstructable": 0,
+      "observed_only": 0,
+      "unknown": 3,
+      "score_numerator": 3,
+      "score_denominator": 9,
+      "score_percent": 33.3
+    },
+    {
+      "batch_id": "ror-docs1-20260717",
+      "repo": "shakacode/react_on_rails",
+      "batch_status": null,
+      "synthetic": false,
+      "target_units": 10,
+      "reconstructable": 0,
+      "observed_only": 0,
+      "unknown": 10,
+      "score_numerator": 10,
+      "score_denominator": 30,
+      "score_percent": 33.3
+    },
+    {
+      "batch_id": "ror-docs2-20260717",
+      "repo": "shakacode/react_on_rails",
+      "batch_status": null,
+      "synthetic": false,
+      "target_units": 4,
+      "reconstructable": 0,
+      "observed_only": 0,
+      "unknown": 4,
+      "score_numerator": 4,
+      "score_denominator": 12,
+      "score_percent": 33.3
+    },
+    {
+      "batch_id": "ror-pro-20260717",
+      "repo": "shakacode/react_on_rails",
+      "batch_status": null,
+      "synthetic": false,
+      "target_units": 5,
+      "reconstructable": 0,
+      "observed_only": 0,
+      "unknown": 5,
+      "score_numerator": 5,
+      "score_denominator": 15,
+      "score_percent": 33.3
+    },
+    {
+      "batch_id": "ror-rsc-20260717",
+      "repo": "shakacode/react_on_rails",
+      "batch_status": null,
+      "synthetic": false,
+      "target_units": 6,
+      "reconstructable": 0,
+      "observed_only": 0,
+      "unknown": 6,
+      "score_numerator": 6,
+      "score_denominator": 18,
+      "score_percent": 33.3
+    },
+    {
+      "batch_id": "ror-wave2-20260717",
+      "repo": "shakacode/react_on_rails",
+      "batch_status": null,
+      "synthetic": false,
+      "target_units": 5,
+      "reconstructable": 0,
+      "observed_only": 0,
+      "unknown": 5,
+      "score_numerator": 5,
+      "score_denominator": 15,
+      "score_percent": 33.3
+    },
+    {
+      "batch_id": "ror-17-0-0-rc10-demo-fleet-0713-1420-hst",
+      "repo": null,
+      "batch_status": null,
+      "synthetic": false,
+      "target_units": 21,
+      "reconstructable": 0,
+      "observed_only": 21,
+      "unknown": 0,
+      "score_numerator": 21,
+      "score_denominator": 69,
+      "score_percent": 30.4
+    },
+    {
+      "batch_id": "tr-07-13-1344-plugin-split",
+      "repo": null,
+      "batch_status": "completed",
+      "synthetic": false,
+      "target_units": 3,
+      "reconstructable": 0,
+      "observed_only": 3,
+      "unknown": 0,
+      "score_numerator": 3,
+      "score_denominator": 11,
+      "score_percent": 27.3
+    },
+    {
+      "batch_id": "batch-b",
+      "repo": "shakacode/react_on_rails",
+      "batch_status": null,
+      "synthetic": false,
+      "target_units": 1,
+      "reconstructable": 0,
+      "observed_only": 0,
+      "unknown": 1,
+      "score_numerator": 1,
+      "score_denominator": 4,
+      "score_percent": 25.0
+    },
+    {
+      "batch_id": "ror17-fleet-c-20260717",
+      "repo": null,
+      "batch_status": "active",
+      "synthetic": false,
+      "target_units": 7,
+      "reconstructable": 0,
+      "observed_only": 6,
+      "unknown": 1,
+      "score_numerator": 6,
+      "score_denominator": 24,
+      "score_percent": 25.0
+    }
+  ]
+}
