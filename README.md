@@ -304,7 +304,9 @@ export PATH="$HOME/.local/bin:$PATH"
 Run `agent-coord doctor` after setup. The default doctor is intentionally
 lightweight: it verifies backend access and the expected state layout without
 downloading and parsing every JSON record. On an unconfigured first run it
-initializes and verifies the zero-config local root. Run
+initializes and verifies the zero-config local root. For an explicitly selected
+legacy GitHub backend, it also rejects an archived repository because archived
+repositories remain readable but cannot accept coordination writes. Run
 `agent-coord doctor --deep` for a full audit. On the HTTP backend it reports a
 separate result for claims, heartbeats, batches, and events plus the authenticated
 machine and its scopes. A stale or unknown token names the failing resource and

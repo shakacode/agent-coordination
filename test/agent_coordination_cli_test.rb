@@ -1613,6 +1613,63 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     FileUtils.remove_entry(fake_bin) if fake_bin && Dir.exist?(fake_bin)
   end
 
+  def test_doctor_rejects_archived_github_backend_before_reporting_healthy
+    fake_bin = Dir.mktmpdir("agent-coord-gh-archived")
+    write_fake_gh(fake_bin, archived: true)
+
+    with_agent_coord_without_source_state do |bin|
+      result = run_command(
+        {
+          "AGENT_COORD_STATE_ROOT" => nil,
+          "AGENT_COORD_STATUS_STATE_ROOT" => nil,
+          "PATH" => [fake_bin, File.dirname(RbConfig.ruby)].join(File::PATH_SEPARATOR)
+        },
+        RbConfig.ruby,
+        bin,
+        "doctor",
+        "--backend",
+        "shakacode/agent-coordination-state"
+      )
+
+      assert_equal 2, result.status.exitstatus
+      assert_includes result.stderr, "is archived and read-only"
+      assert_includes result.stderr, "AGENT_COORD_API_URL"
+      assert_includes result.stderr, "AGENT_COORD_API_TOKEN"
+      refute_includes result.stdout, "status: ok"
+    end
+  ensure
+    FileUtils.remove_entry(fake_bin) if fake_bin && Dir.exist?(fake_bin)
+  end
+
+  def test_stack_doctor_rejects_archived_github_backend
+    fake_bin = Dir.mktmpdir("agent-coord-gh-archived-stack")
+    write_fake_gh(fake_bin, archived: true)
+
+    with_agent_coord_without_source_state do |bin|
+      stack_result = run_command(
+        {
+          "AGENT_COORD_STATE_ROOT" => nil,
+          "AGENT_COORD_STATUS_STATE_ROOT" => nil,
+          "PATH" => [fake_bin, File.dirname(RbConfig.ruby)].join(File::PATH_SEPARATOR)
+        },
+        RbConfig.ruby,
+        bin,
+        "doctor",
+        "--stack-json",
+        "--backend",
+        "shakacode/agent-coordination-state"
+      )
+      assert_equal 2, stack_result.status.exitstatus
+      assert_empty stack_result.stderr
+      stack_report = JSON.parse(stack_result.stdout)
+      assert_equal "failed", stack_report.fetch("status")
+      backend_check = stack_report.fetch("checks").find { |check| check.fetch("id") == "backend.readability" }
+      assert_includes backend_check.dig("details", "error"), "is archived and read-only"
+    end
+  ensure
+    FileUtils.remove_entry(fake_bin) if fake_bin && Dir.exist?(fake_bin)
+  end
+
   def test_deep_option_is_doctor_only
     result = run_agent_coord("status", "--deep")
 
@@ -6342,20 +6399,26 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     %w[shasum bundle npx].each { |name| FileUtils.chmod(0o755, File.join(fake_bin, name)) }
   end
 
-  def write_fake_gh(fake_bin)
+  def write_fake_gh(fake_bin, archived: false)
     File.write(
       File.join(fake_bin, "gh"),
-      <<~'RUBY'
+      <<~RUBY
         #!/usr/bin/env ruby
+        require "json"
         command = ARGV.join(" ")
         case command
-        when "auth status", /\Arepo view /
+        when "auth status"
           exit 0
-        when %r{\Aapi repos/.+/git/trees/missing-ref\?recursive=1\z}
+        when /^repo view /
+          exit 0
+        when %r{^api repos/[^/]+/[^/]+$}
+          puts JSON.generate("archived" => #{archived})
+          exit 0
+        when ->(value) { value.include?("git/trees/missing-ref") }
           warn "Not Found"
           exit 1
         else
-          warn "unexpected gh command: #{command}"
+          warn "unexpected gh command: \#{command}"
           exit 1
         end
       RUBY

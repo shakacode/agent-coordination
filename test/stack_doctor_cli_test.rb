@@ -20,6 +20,8 @@ module StackDoctorTestFixtures
     case command
     when "auth status", /\Arepo view /
       exit 0
+    when "api repos/example/coordination"
+      puts JSON.generate("archived" => false)
     when %r{\Aapi repos/example/coordination/git/trees/state\?recursive=1\z}
       puts JSON.generate(
         "tree" => [

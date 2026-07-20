@@ -86,6 +86,10 @@ when releases begin.
 
 ### Fixed
 
+- Lightweight and stack doctor checks now reject an archived legacy GitHub
+  backend instead of reporting its readable but permanently read-only state as
+  healthy, with guidance to configure the HTTP backend or another writable
+  repository.
 - Batch status JSON now includes persisted launch prompts.
 - Local doctor/status now warn when a configured consumer API environment would
   otherwise leave the CLI and dashboard on different backends.
