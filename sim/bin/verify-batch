@@ -7,17 +7,26 @@ require "open3"
 args = ARGV.dup
 repo_slug = nil
 live = false
+telemetry_ledger = nil
+telemetry_batch_id = nil
 while (arg = args.shift)
   case arg
   when "--repo-slug"
     repo_slug = args.shift
   when "--live"
     live = true
+  when "--telemetry-ledger"
+    telemetry_ledger = args.shift
+  when "--batch-id"
+    telemetry_batch_id = args.shift
   else
     abort "unknown arg: #{arg}"
   end
 end
-abort "usage: verify-batch --repo-slug OWNER/REPO [--live]" unless repo_slug
+unless repo_slug && (!telemetry_ledger.nil? == !telemetry_batch_id.nil?)
+  abort "usage: verify-batch --repo-slug OWNER/REPO [--live] " \
+        "[--telemetry-ledger PATH --batch-id ID]"
+end
 
 sim_root = File.expand_path("..", __dir__)
 cli = File.join(sim_root, "..", "bin", "agent-coord")
@@ -27,6 +36,26 @@ stdout, stderr, status = Open3.capture3("ruby", cli, "status", "--json")
 abort "agent-coord status failed: #{stderr}" unless status.success?
 
 claims = JSON.parse(stdout).fetch("claims")
+
+if telemetry_ledger
+  telemetry_cli = File.join(sim_root, "..", "bin", "agent-coord-harvest")
+  telemetry_out, _telemetry_err, telemetry_status = Open3.capture3(
+    telemetry_cli, "scorecard", "--ledger", telemetry_ledger,
+    "--batch-id", telemetry_batch_id
+  )
+  abort "telemetry scorecard failed" unless telemetry_status.success?
+
+  begin
+    scorecard = JSON.parse(telemetry_out)
+    target_units = scorecard.fetch("outcomes").values.sum
+    costs = scorecard.fetch("costs")
+    puts "TELEMETRY batch=#{scorecard.fetch('batch_id')} target_units=#{target_units} " \
+         "cost_microusd=#{costs.fetch('known_cost_microusd')} " \
+         "unknown_cost_sessions=#{costs.fetch('unknown_cost_sessions')}"
+  rescue JSON::ParserError, KeyError, NoMethodError
+    abort "telemetry scorecard invalid"
+  end
+end
 
 class BatchVerifier
   def initialize(repo_slug:, live:, manifest:, claims:)

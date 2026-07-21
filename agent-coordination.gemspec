@@ -9,7 +9,7 @@ Gem::Specification.new do |spec|
   spec.version = version_match[1]
   spec.authors = ["ShakaCode"]
   spec.summary = "Coordinate concurrent agent work from the command line"
-  spec.description = "The agent-coord CLI for local and HTTP-backed claims, heartbeats, batches, and events."
+  spec.description = "Coordination and aggregate telemetry CLIs for local and HTTP-backed agent workflows."
   spec.homepage = "https://github.com/shakacode/agent-coordination"
   spec.license = "MIT"
   spec.required_ruby_version = ">= 3.2"
@@ -26,6 +26,7 @@ Gem::Specification.new do |spec|
     README.md
     bin/agent-coord
     bin/agent-coord-harvest
+    config/telemetry-pricing-v1.json
     contracts/state-schema-v2.json
     docs/adr/0007-host-limit-state-contract.md
     docs/adr/0008-capacity-reservation-state-contract.md
@@ -69,6 +70,7 @@ Gem::Specification.new do |spec|
     schema/state/v1/batch-completion/fixtures/valid/completion-minimal-archive-ready.json
     schema/state/v1/batch-completion/fixtures/valid/completion-outcomes-plain-text.json
     schema/state/v1/batch-completion/fixtures/valid/completion-verdict-findings.json
+    docs/telemetry-ledger.md
     schema/state/v1/capacity-reservation/capacity-profile.schema.json
     schema/state/v1/capacity-reservation/capacity-reservation.schema.json
     schema/state/v1/capacity-reservation/fixtures/invalid/capacity-profile-zero.json
@@ -145,10 +147,15 @@ Gem::Specification.new do |spec|
     schema/state/v1/usage/usage-record.schema.json
     schema/telemetry-ledger/0001_initial.sql
     lib/agent_coordination/harvester.rb
+    lib/agent_coordination/host_adapters.rb
     lib/agent_coordination/ledger.rb
+    lib/agent_coordination/pricing.rb
+    lib/agent_coordination/scorecards.rb
+    schema/telemetry-ledger/0002_host_usage.sql
+    schema/telemetry-ledger/0003_pricing_scorecards.sql
   ]
   spec.bindir = "bin"
-  spec.executables = ["agent-coord", "agent-coord-harvest"]
+  spec.executables = %w[agent-coord agent-coord-harvest]
 
   spec.add_dependency "base64", ">= 0.1.1", "< 1.0"
   spec.add_dependency "sqlite3", ">= 2.9.5", "< 3.0"

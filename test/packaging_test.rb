@@ -16,6 +16,8 @@ class PackagingTest < Minitest::Test
     LICENSE
     README.md
     bin/agent-coord
+    bin/agent-coord-harvest
+    config/telemetry-pricing-v1.json
     contracts/state-schema-v2.json
     docs/adr/0007-host-limit-state-contract.md
     docs/adr/0008-capacity-reservation-state-contract.md
@@ -59,6 +61,12 @@ class PackagingTest < Minitest::Test
     schema/state/v1/batch-completion/fixtures/valid/completion-minimal-archive-ready.json
     schema/state/v1/batch-completion/fixtures/valid/completion-outcomes-plain-text.json
     schema/state/v1/batch-completion/fixtures/valid/completion-verdict-findings.json
+    docs/telemetry-ledger.md
+    lib/agent_coordination/harvester.rb
+    lib/agent_coordination/host_adapters.rb
+    lib/agent_coordination/ledger.rb
+    lib/agent_coordination/pricing.rb
+    lib/agent_coordination/scorecards.rb
     schema/state/v1/capacity-reservation/capacity-profile.schema.json
     schema/state/v1/capacity-reservation/capacity-reservation.schema.json
     schema/state/v1/capacity-reservation/fixtures/invalid/capacity-profile-zero.json
@@ -133,6 +141,9 @@ class PackagingTest < Minitest::Test
     schema/state/v1/usage/fixtures/valid/usage-known.json
     schema/state/v1/usage/fixtures/valid/usage-unknown-metrics.json
     schema/state/v1/usage/usage-record.schema.json
+    schema/telemetry-ledger/0001_initial.sql
+    schema/telemetry-ledger/0002_host_usage.sql
+    schema/telemetry-ledger/0003_pricing_scorecards.sql
   ].freeze
 
   def gem_command
@@ -188,7 +199,10 @@ class PackagingTest < Minitest::Test
     assert_equal Gem::Version.new("0.1.0"), spec.version
     assert_equal "MIT", spec.license
     assert_equal Gem::Requirement.new(">= 3.2"), spec.required_ruby_version
-    assert_equal ["base64"], spec.runtime_dependencies.map(&:name)
+    assert_equal %w[base64 sqlite3], spec.runtime_dependencies.map(&:name).sort
+    sqlite = spec.runtime_dependencies.find { |dependency| dependency.name == "sqlite3" }
+    assert sqlite.requirement.satisfied_by?(Gem::Version.new("2.9.5"))
+    refute sqlite.requirement.satisfied_by?(Gem::Version.new("3.0.0"))
   end
 
   def test_gem_command_uses_the_selected_ruby_runtime

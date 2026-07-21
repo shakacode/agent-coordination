@@ -1,0 +1,2 @@
+{"type":"assistant","sessionId":"claude-fixture-session","timestamp":"2026-07-18T01:30:00Z","cwd":"/redacted/worktrees/ac-d-78-harvester","pricing_profile":"standard","message":{"model":"claude-opus-4-6","effort":"high","usage":{"input_tokens":500,"cache_read_input_tokens":300,"cache_creation_input_tokens":200,"output_tokens":100,"total_tokens":1100}}}
+{"type":"user","sessionId":"claude-fixture-session","message":{"usage":{"input_tokens":999999,"output_tokens":999999}}}

@@ -59,8 +59,9 @@ full RuboCop check on every pull request.
 The CLI supports Ruby 3.2 or newer. This repository pins a current Ruby version
 for development and CI also runs the Ruby suite on the supported floor.
 
-The `agent-coordination` RubyGem installs only the `agent-coord` CLI and its
-public documentation; the Worker deployment remains source-only. The gem has not been published.
+The `agent-coordination` RubyGem installs the `agent-coord` coordination CLI,
+the local aggregate-only `agent-coord-harvest` telemetry CLI, and their public
+documentation; the Worker deployment remains source-only. The gem has not been published.
 Build and install it locally to verify the distribution without changing a
 registry, tag, or release:
 
@@ -73,13 +74,15 @@ Replace `VERSION` with the version in the filename printed by `gem build`.
 ```bash
 gem install --local ./agent-coordination-VERSION.gem
 agent-coord version --json
+agent-coord-harvest scorecard --ledger ./telemetry.sqlite3 --batch-id batch-example
 rm ./agent-coordination-VERSION.gem
 ```
 
 Generated `.gem` files are local artifacts and should not be committed. See the
 [Changelog](CHANGELOG.md) for release-facing changes and the
 [Worker state protocol with `curl`](docs/protocol-curl.md) for placeholder-only
-HTTP examples.
+HTTP examples. See the [local telemetry ledger](docs/telemetry-ledger.md) for
+fixture-backed harvesting, privacy boundaries, pricing, and scorecard queries.
 
 ## Zero-config local first run
 

@@ -1,0 +1,26 @@
+{
+  "pull_requests": [
+    {
+      "batch_id": "batch-fixture",
+      "repo": "shakacode/agent-coordination",
+      "target": "78",
+      "number": 178,
+      "url": "https://github.com/shakacode/agent-coordination/pull/178",
+      "state": "merged",
+      "created_at": "2026-07-18T01:10:00Z",
+      "merged_at": "2026-07-18T02:10:00Z",
+      "reviews": []
+    },
+    {
+      "batch_id": "batch-fixture",
+      "repo": "shakacode/agent-coordination",
+      "target": "79",
+      "number": 179,
+      "url": "https://github.com/shakacode/agent-coordination/pull/179",
+      "state": "open",
+      "created_at": "2026-07-18T01:20:00Z",
+      "merged_at": null,
+      "reviews": []
+    }
+  ]
+}
