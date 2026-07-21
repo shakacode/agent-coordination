@@ -1,393 +1,393 @@
-batch_id	repo	target	lanes	lane_statuses	key_complete	exact_claim_count	exact_event_count	coordination_exact	terminal_observed	pr_url_count	github_gate	github_states	present_head_check_rollups	reconstruction	score_numerator	score_denominator	gaps
-HC-A-foundation-kite	shakacode/hichee	9716	export	done	true	1	14	true	true	1	pass	MERGED	PENDING	reconstructable	4	4	""
-HC-A-foundation-kite	shakacode/hichee	9717	parity	done	true	1	7	true	true	1	pass	MERGED	PENDING	reconstructable	4	4	""
-HC-A-foundation-kite	shakacode/hichee	9718	sitemap	done	true	1	5	true	true	1	pass	MERGED	PENDING	reconstructable	4	4	""
-HC-A-foundation-kite	shakacode/hichee	qa-foundation	qa-foundation	done	true	1	2	true	true	0	not_applicable	""	""	reconstructable	3	3	""
-HC-staging-release-qa-20260715-1157	shakacode/hichee	adhoc:20260715-release-notifications	notifications	unknown	true	0	0	false	false	0	not_applicable	""	""	UNKNOWN	1	3	no_exact_coordination_match|no_terminal_outcome_observed
-HC-staging-release-qa-20260715-1157	shakacode/hichee	adhoc:20260715-release-qa-ledger	ledger	unknown	true	0	0	false	false	0	not_applicable	""	""	UNKNOWN	1	3	no_exact_coordination_match|no_terminal_outcome_observed
-HC-staging-release-qa-20260715-1157	shakacode/hichee	adhoc:20260715-staging-release-qa-automation	qa	unknown	true	0	0	false	false	0	not_applicable	""	""	UNKNOWN	1	3	no_exact_coordination_match|no_terminal_outcome_observed
-HC-staging-release-qa-20260715-1157	shakacode/hichee	adhoc:20260715-staging-smoke-orchestrator	smoke	heartbeat	true	1	0	true	false	1	pass	MERGED	PENDING	UNKNOWN	3	4	no_terminal_outcome_observed
-ac-a-0712-0107	shakacode/agent-coordination	44	ac-a-i44	done	true	1	1	true	true	1	pass	MERGED	SUCCESS	reconstructable	4	4	""
-ac-a-0712-0107	shakacode/agent-coordination	48	ac-a-i48	done	true	1	1	true	true	1	pass	MERGED	SUCCESS	reconstructable	4	4	""
-ac-a-0712-0107	shakacode/agent-coordination	51	ac-a-i51	done	true	1	1	true	true	1	pass	MERGED	SUCCESS	reconstructable	4	4	""
-ac-a-0712-0107	shakacode/agent-coordination	qa-51-44-48	ac-a-qa	done	true	1	1	true	true	0	not_applicable	""	""	reconstructable	3	3	""
-ac-a-coord-cinder	shakacode/agent-coordination	54	ac-a-pr54|ac-a-qa	done	true	1	2	true	true	0	not_applicable	""	""	reconstructable	3	3	""
-ac-a-coord-cinder	shakacode/agent-coordination	55	ac-a-pr55|ac-a-qa	done	true	1	1	true	true	0	not_applicable	""	""	reconstructable	3	3	""
-ac-b-0712-0107	shakacode/agent-coordination	52	ac-b-i52	done	true	1	1	true	true	1	pass	MERGED	SUCCESS	reconstructable	4	4	""
-ac-b-0712-0107	shakacode/agent-coordination	8	ac-b-i8	done	true	0	1	true	true	1	pass	MERGED	SUCCESS	reconstructable	4	4	""
-ac-b-0712-0107	shakacode/agent-coordination	qa-52-8	ac-b-qa	done	true	1	1	true	true	0	not_applicable	""	""	reconstructable	3	3	""
-ac-c-0712-0107	shakacode/agent-coordination	5	ac-c-i5	complete	true	0	0	false	true	0	not_applicable	""	""	observed_only	2	3	no_exact_coordination_match
-ac-c-0712-0107	shakacode/agent-coordination	6	ac-c-i6	complete	true	0	0	false	true	0	not_applicable	""	""	observed_only	2	3	no_exact_coordination_match
-ac-datafix-20260716-1555	shakacode/agent-coordination	62	protocol	done	true	1	1	true	true	1	pass	MERGED	SUCCESS	reconstructable	4	4	""
-ac-datafix-20260716-1555	shakacode/agent-coordination	66	protocol	done	true	1	1	true	true	1	pass	MERGED	SUCCESS	reconstructable	4	4	""
-ac-datafix-20260716-1555	shakacode/agent-coordination	adhoc:20260716-qa-acb	qa	done	true	0	1	true	true	0	not_applicable	""	""	reconstructable	3	3	""
-aca	shakacode/agent-coordination	7	license-contract	merged	true	0	0	false	true	1	pass	MERGED	SUCCESS	observed_only	3	4	no_exact_coordination_match
-aca-20260709-1753	shakacode/agent-coordination	38	issue38|qa-core	done|merged	true	1	0	true	true	0	not_applicable	""	""	reconstructable	3	3	""
-aca-20260709-1753	shakacode/agent-coordination	39	issue39|qa-core	done|merged	true	1	0	true	true	0	not_applicable	""	""	reconstructable	3	3	""
-aca-20260709-1753	shakacode/agent-coordination	40	issue40|qa-core	done|merged	true	1	0	true	true	0	not_applicable	""	""	reconstructable	3	3	""
-aca-20260709-1753	shakacode/agent-coordination	7	issue7	done	true	1	0	true	true	0	not_applicable	""	""	reconstructable	3	3	""
-acb	shakacode/agent-coordination	5	launcher	complete	true	0	0	false	true	0	not_applicable	""	""	observed_only	2	3	no_exact_coordination_match
-acb	shakacode/agent-coordination	6	reservations	complete	true	0	0	false	true	0	not_applicable	""	""	observed_only	2	3	no_exact_coordination_match
-acb	shakacode/agent-coordination	8	host-limits-contract	complete	true	0	0	false	true	0	not_applicable	""	""	observed_only	2	3	no_exact_coordination_match
-acd-a-0711-1813	shakacode/agent-coordination-dashboard	44	acd-a-i44|acd-a-i44-overflow	merged	true	1	9	true	true	0	not_applicable	""	""	reconstructable	3	3	""
-acd-a-0711-1813	shakacode/agent-coordination-dashboard	51	acd-a-pr51	merged	true	1	1	true	true	0	not_applicable	""	""	reconstructable	3	3	""
-acd-a-0711-1813	shakacode/agent-coordination-dashboard	qa-51-44	acd-a-qa	done	true	1	4	true	true	0	not_applicable	""	""	reconstructable	3	3	""
-acd-actionable-20260715-2057	shakacode/agent-coordination-dashboard	63	issue63-lifecycle	done	true	1	9	true	true	0	not_applicable	""	""	reconstructable	3	3	""
-acd-actionable-20260715-2057	shakacode/agent-coordination-dashboard	65	issue65-recommendations	blocked	true	0	0	false	false	0	not_applicable	""	""	UNKNOWN	1	3	no_exact_coordination_match|no_terminal_outcome_observed
-acd-actionable-20260715-2057	shakacode/agent-coordination-dashboard	adhoc:20260715-completed-audit	completed-audit	blocked	true	0	0	false	false	0	not_applicable	""	""	UNKNOWN	1	3	no_exact_coordination_match|no_terminal_outcome_observed
-acd-actionable-20260715-2057	shakacode/agent-coordination-dashboard	adhoc:20260715-qa-63	qa63-lifecycle	failed	true	1	30	true	true	0	not_applicable	""	""	reconstructable	3	3	""
-acd-actionable-20260715-2057	shakacode/agent-coordination-dashboard	adhoc:20260715-qa-65	qa65-recommendations	blocked	true	0	0	false	false	0	not_applicable	""	""	UNKNOWN	1	3	no_exact_coordination_match|no_terminal_outcome_observed
-acd-b-0712-0107	shakacode/agent-coordination-dashboard	43	acd-b-i43	completed	true	1	16	true	true	0	not_applicable	""	""	reconstructable	3	3	""
-acd-b-0712-0107	shakacode/agent-coordination-dashboard	45	acd-b-i45	completed	true	1	16	true	true	0	not_applicable	""	""	reconstructable	3	3	""
-acd-b-0712-0107	shakacode/agent-coordination-dashboard	qa-43-45	acd-b-qa	completed	true	1	3	true	true	0	not_applicable	""	""	reconstructable	3	3	""
-acd-c-0712-0107	shakacode/agent-coordination-dashboard	29	acd-c-i29	done	true	0	2	true	true	0	not_applicable	""	""	reconstructable	3	3	""
-acd-c-0712-0107	shakacode/agent-coordination-dashboard	46	acd-c-i46	done	true	1	19	true	true	1	pass	MERGED	SUCCESS	reconstructable	4	4	""
-acd-c-0712-0107	shakacode/agent-coordination-dashboard	47	acd-c-i47	done	true	1	1	true	true	1	pass	MERGED	SUCCESS	reconstructable	4	4	""
-acd-c-0712-0107	shakacode/agent-coordination-dashboard	qa-46-47	acd-c-qa	done	true	0	1	true	true	0	not_applicable	""	""	reconstructable	3	3	""
-acd-c-pr61-followup-0714	shakacode/agent-coordination-dashboard	61	acd-c-pr61-stale-actions	done	true	1	1	true	true	1	pass	MERGED	SUCCESS	reconstructable	4	4	""
-acd-datafix-20260715-2339	shakacode/agent-coordination-dashboard	66	qa|ui	done	true	1	1	true	true	1	pass	MERGED	SUCCESS	reconstructable	4	4	""
-acd-datafix-20260715-2339	shakacode/agent-coordination-dashboard	67	qa|ui	done	true	1	1	true	true	1	pass	MERGED	SUCCESS	reconstructable	4	4	""
-acd-datafix-20260715-2339	shakacode/agent-coordination-dashboard	68	qa|server	active|done	true	1	0	true	true	1	pass	MERGED	SUCCESS	reconstructable	4	4	""
-acda-2026-07-09-1753	shakacode/agent-coordination-dashboard	27	demo|qa-demo	complete|merged	true	1	0	true	true	1	pass	MERGED	SUCCESS	reconstructable	4	4	""
-acda-2026-07-09-1753	shakacode/agent-coordination-dashboard	28	publish-prep|qa-demo	complete|merged	true	1	0	true	true	1	pass	MERGED	SUCCESS	reconstructable	4	4	""
-acda-2026-07-09-1753	shakacode/agent-coordination-dashboard	29	operator-split	complete	true	1	0	true	true	0	not_applicable	""	""	reconstructable	3	3	""
-acda-2026-07-09-1753	shakacode/agent-coordination-dashboard	7	license-check	complete	true	0	0	false	true	0	not_applicable	""	""	observed_only	2	3	no_exact_coordination_match
-acda-operator-ux	shakacode/agent-coordination-dashboard	33	closeout-33|impl-33|qa-33	completed	true	1	24	true	true	1	pass	MERGED	SUCCESS	reconstructable	4	4	""
-acda-operator-ux	shakacode/agent-coordination-dashboard	34	closeout-34|impl-34|qa-34	completed	true	1	10	true	true	1	pass	MERGED	SUCCESS	reconstructable	4	4	""
-acda-operator-ux	shakacode/agent-coordination-dashboard	35	closeout-35|impl-35|qa-35	completed	true	1	15	true	true	1	pass	MERGED	SUCCESS	reconstructable	4	4	""
-acda-operator-ux	shakacode/agent-coordination-dashboard	36	decision-36	completed	true	0	2	true	true	0	not_applicable	""	""	reconstructable	3	3	""
-acda-operator-ux	shakacode/agent-coordination-dashboard	37	closeout-37|impl-37|qa-37	completed	true	1	8	true	true	1	pass	MERGED	SUCCESS	reconstructable	4	4	""
-acda-operator-ux	shakacode/agent-coordination-dashboard	49	audit-fix-49|closeout-audit-fix-49|qa-audit-fix-49	completed	true	1	6	true	true	1	pass	MERGED	SUCCESS	reconstructable	4	4	""
-aw-ce-pov-orbit	shakacode/agent-workflows	126	issue-126	merged	true	1	0	true	true	0	not_applicable	""	""	reconstructable	3	3	""
-aw-ce-pov-orbit	shakacode/agent-workflows	127	issue-127	merged	true	1	0	true	true	0	not_applicable	""	""	reconstructable	3	3	""
-aw-ce-pov-orbit	shakacode/agent-workflows	128	issue-128	done	true	1	0	true	true	0	not_applicable	""	""	reconstructable	3	3	""
-aw-ce-pov-orbit	shakacode/agent-workflows	129	issue-129	done	true	1	0	true	true	0	not_applicable	""	""	reconstructable	3	3	""
-aw-ce-pov-orbit	shakacode/agent-workflows	130	issue-130	done	true	1	1	true	true	1	pass	MERGED	SUCCESS	reconstructable	4	4	""
-aw-ce-pov-orbit	shakacode/agent-workflows	131	issue-131	merged	true	1	0	true	true	0	not_applicable	""	""	reconstructable	3	3	""
-aw-ce-pov-orbit	shakacode/agent-workflows	132	issue-132	done	true	1	0	true	true	0	not_applicable	""	""	reconstructable	3	3	""
-aw-ce-pov-orbit	shakacode/agent-workflows	qa-ce	qa-ce	done	true	1	0	true	true	0	not_applicable	""	""	reconstructable	3	3	""
-aw-closeout-20260715-2057	shakacode/agent-workflows	152	audit|pr152-post-merge-fix|pr152-recovery|qa	complete|done	true	1	3	true	true	2	pass	MERGED	SUCCESS	reconstructable	4	4	""
-aw-closeout-20260715-2057	shakacode/agent-workflows	165	audit|pr165-disposition|qa	done	true	1	1	true	true	1	pass	MERGED	SUCCESS	reconstructable	4	4	""
-aw-closeout-20260715-2057	shakacode/agent-workflows	170	audit|pr170-closeout|qa	done	true	1	0	true	true	1	pass	MERGED	SUCCESS	reconstructable	4	4	""
-aw-closeout-20260715-2057	shakacode/agent-workflows	178	audit|pr178-closeout|qa	done	true	1	0	true	true	1	pass	MERGED	SUCCESS	reconstructable	4	4	""
-aw-closeout-20260715-2057	shakacode/agent-workflows	182	audit|pr182-closeout|qa	done	true	1	0	true	true	1	pass	MERGED	SUCCESS	reconstructable	4	4	""
-aw-closeout-20260715-2057	shakacode/agent-workflows	185	audit|qa	done	true	1	1	true	true	0	not_applicable	""	""	reconstructable	3	3	""
-awfa-20260709-1753-docs-adoption	shakacode/agent-workflows	100	maintainer-boundary	merged	true	1	0	true	true	0	not_applicable	""	""	reconstructable	3	3	""
-awfa-20260709-1753-docs-adoption	shakacode/agent-workflows	101	topology-amend	merged	true	1	0	true	true	0	not_applicable	""	""	reconstructable	3	3	""
-awfa-20260709-1753-docs-adoption	shakacode/agent-workflows	112	seam-init-corrective	merged	true	1	1	true	true	0	not_applicable	""	""	reconstructable	3	3	""
-awfa-20260709-1753-docs-adoption	shakacode/agent-workflows	119	changelog-audit-followup|qa-seam-init	done|merged	true	1	3	true	true	0	not_applicable	""	""	reconstructable	3	3	""
-awfa-20260709-1753-docs-adoption	shakacode/agent-workflows	80	changelog-followups	merged	true	1	0	true	true	0	not_applicable	""	""	reconstructable	3	3	""
-awfa-20260709-1753-docs-adoption	shakacode/agent-workflows	84	changelog-followups	merged	true	1	0	true	true	0	not_applicable	""	""	reconstructable	3	3	""
-awfa-20260709-1753-docs-adoption	shakacode/agent-workflows	99	seam-init	done	true	1	0	true	true	0	not_applicable	""	""	reconstructable	3	3	""
-awfb-20260709-1753	shakacode/agent-workflows	27	deep-review-eval	done	true	1	0	true	true	0	not_applicable	""	""	reconstructable	3	3	""
-awfb-20260709-1753	shakacode/agent-workflows	46	actions-exercise	done	true	1	0	true	true	0	not_applicable	""	""	reconstructable	3	3	""
-awfb-20260709-1753	shakacode/agent-workflows	59	host-output-check	done	true	1	0	true	true	0	not_applicable	""	""	reconstructable	3	3	""
-awfb-20260709-1753	shakacode/agent-workflows	81	final-head-qa|qa-workflow	done	true	1	0	true	true	0	not_applicable	""	""	reconstructable	3	3	""
-awfb-20260709-1753	shakacode/agent-workflows	82	host-validator|qa-workflow	done	true	1	0	true	true	0	not_applicable	""	""	reconstructable	3	3	""
-awr-a-20260716-1535	shakacode/agent-coordination	67	a2	done	true	1	1	true	true	1	pass	MERGED	SUCCESS	reconstructable	4	4	""
-awr-a-20260716-1535	shakacode/agent-coordination	68	a1|qa	done	true	1	4	true	true	1	pass	MERGED	SUCCESS	reconstructable	4	4	""
-awr-a-20260716-1535	shakacode/agent-coordination	75	a3|qa	done|unknown	true	0	0	false	true	1	fail	OPEN	SUCCESS	observed_only	2	4	no_exact_coordination_match|github_repo_mismatch
-awr-b-0716-1535		151	b3	done	false	0	0	false	true	0	not_applicable	""	""	observed_only	1	3	missing_repo_join_component|no_exact_coordination_match
-awr-b-0716-1535		154	b3	done	false	0	0	false	true	0	not_applicable	""	""	observed_only	1	3	missing_repo_join_component|no_exact_coordination_match
-awr-b-0716-1535		171	b3	done	false	0	0	false	true	0	not_applicable	""	""	observed_only	1	3	missing_repo_join_component|no_exact_coordination_match
-awr-b-0716-1535		175	b3	done	false	0	0	false	true	0	not_applicable	""	""	observed_only	1	3	missing_repo_join_component|no_exact_coordination_match
-awr-b-0716-1535		177	b4	done	false	0	0	false	true	0	not_applicable	""	""	observed_only	1	3	missing_repo_join_component|no_exact_coordination_match
-awr-b-0716-1535		23	b5	done	false	0	0	false	true	0	not_applicable	""	""	observed_only	1	3	missing_repo_join_component|no_exact_coordination_match
-awr-b-0716-1535		5	b1	done	false	0	0	false	true	0	not_applicable	""	""	observed_only	1	3	missing_repo_join_component|no_exact_coordination_match
-awr-b-0716-1535		6	b1	done	false	0	0	false	true	0	not_applicable	""	""	observed_only	1	3	missing_repo_join_component|no_exact_coordination_match
-awr-b-0716-1535		65	b2	done	false	0	0	false	true	0	not_applicable	""	""	observed_only	1	3	missing_repo_join_component|no_exact_coordination_match
-awr-b-0716-1535		8	b1	done	false	0	0	false	true	0	not_applicable	""	""	observed_only	1	3	missing_repo_join_component|no_exact_coordination_match
-batch-b	shakacode/react_on_rails	3972	docs	unknown	true	0	0	false	false	1	fail	""	""	UNKNOWN	1	4	no_exact_coordination_match|no_terminal_outcome_observed|github_pr_url_invalid_or_unresolved
-batch-shakacode-control-plane-flow-2vl3ja	shakacode/control-plane-flow	pr:395	lane-pr-395|qa-pr-395	done|merged	true	1	24	true	true	1	pass	MERGED	SUCCESS	reconstructable	4	4	""
-cpf-b-20260716-1543	shakacode/control-plane-flow	379	issue379	done	true	1	1	true	true	1	pass	MERGED	SUCCESS	reconstructable	4	4	""
-cpf-b-20260716-1543	shakacode/control-plane-flow	382	issue382	done	true	1	1	true	true	1	pass	MERGED	SUCCESS	reconstructable	4	4	""
-cpf-b-20260716-1543	shakacode/control-plane-flow	383	issue383	done	true	1	1	true	true	1	pass	MERGED	SUCCESS	reconstructable	4	4	""
-cpf-b-20260716-1543	shakacode/control-plane-flow	387	batch-qa	unknown	true	0	0	false	false	0	not_applicable	""	""	UNKNOWN	1	3	no_exact_coordination_match|no_terminal_outcome_observed
-cpf-slow-suite-20260715-2057	shakacode/control-plane-flow	409	issue409-slow-suite	waiting_on_checks_or_review	true	1	21	true	false	1	pass	OPEN	SUCCESS	UNKNOWN	3	4	no_terminal_outcome_observed
-cpflowA-release-0709-reef	shakacode/control-plane-flow	373	offline-tests|release-qa	merged|unknown	true	1	0	true	true	0	not_applicable	""	""	reconstructable	3	3	""
-cpflowA-release-0709-reef	shakacode/control-plane-flow	374	release-qa|slow-ci	merged|unknown	true	1	0	true	true	0	not_applicable	""	""	reconstructable	3	3	""
-cpflowA-release-0709-reef	shakacode/control-plane-flow	378	coverage|release-qa	merged|unknown	true	1	0	true	true	0	not_applicable	""	""	reconstructable	3	3	""
-cpflowA-release-0709-reef	shakacode/control-plane-flow	398	release-qa|utf8	blocked|unknown	true	1	0	true	false	1	pass	CLOSED	SUCCESS	UNKNOWN	3	4	no_terminal_outcome_observed
-cpor-0710-docs-spawn	shakacode/cypress-playwright-on-rails	185	qa|spawn	done	true	1	1	true	true	1	pass	MERGED	SUCCESS	reconstructable	4	4	""
-cpor-0710-docs-spawn	shakacode/cypress-playwright-on-rails	236	docs|qa	done	true	1	2	true	true	1	pass	MERGED	SUCCESS	reconstructable	4	4	""
-hichee-07-13-1342-readonly-db	shakacode/hichee	9756	issue-9756|qa-9756	done	true	1	2	true	true	0	not_applicable	""	""	reconstructable	3	3	""
-hichee-07-14-1718-pr9768	shakacode/hichee	9768	pr-9768-closeout	done	true	1	1	true	true	1	pass	MERGED	FAILURE	reconstructable	4	4	""
-hichee-2026-07-17-deploy-verification-wave1	shakacode/hichee	9846	guard	done	true	1	1	true	true	1	pass	MERGED	PENDING	reconstructable	4	4	""
-hichee-2026-07-17-deploy-verification-wave1	shakacode/hichee	9847	sidekiq	done	true	1	1	true	true	1	pass	MERGED	PENDING	reconstructable	4	4	""
-hichee-2026-07-17-deploy-verification-wave1	shakacode/hichee	9848	db	done	true	1	1	true	true	1	pass	MERGED	FAILURE	reconstructable	4	4	""
-hichee-2026-07-17-deploy-verification-wave1	shakacode/hichee	9849	sentry	done	true	1	1	true	true	1	pass	MERGED	PENDING	reconstructable	4	4	""
-hichee-2026-07-17-deploy-verification-wave1	shakacode/hichee	9850	scout	done	true	1	1	true	true	1	pass	MERGED	PENDING	reconstructable	4	4	""
-hichee-2026-07-18-deploy-verification-wave2	shakacode/hichee	9845	preflight	unknown	true	0	0	false	false	0	not_applicable	""	""	UNKNOWN	1	3	no_exact_coordination_match|no_terminal_outcome_observed
-hichee-2026-07-18-deploy-verification-wave2	shakacode/hichee	9852	lifecycle	blocked	true	1	1	true	false	0	not_applicable	""	""	UNKNOWN	2	3	no_terminal_outcome_observed
-hichee-20260716-home-search-focus	shakacode/hichee	adhoc:20260716-home-search-focus-scroll	implementation	done	true	1	1	true	true	0	not_applicable	""	""	reconstructable	3	3	""
-hichee-20260716-home-search-focus	shakacode/hichee	adhoc:20260716-home-search-focus-scroll-qa	qa	done	true	1	1	true	true	0	not_applicable	""	""	reconstructable	3	3	""
-hichee-a-20260718-1022	shakacode/hichee	9786	a8	blocked	true	1	7	true	false	0	not_applicable	""	""	UNKNOWN	2	3	no_terminal_outcome_observed
-hichee-a-20260718-1022	shakacode/hichee	9806	a7|qa-a	done	true	1	4	true	true	0	not_applicable	""	""	reconstructable	3	3	""
-hichee-a-20260718-1022	shakacode/hichee	9833	a2	blocked_user_input	true	1	0	true	false	1	pass	OPEN	PENDING	UNKNOWN	3	4	no_terminal_outcome_observed
-hichee-a-20260718-1022	shakacode/hichee	9842	a1	blocked	true	1	4	true	false	1	pass	OPEN	PENDING	UNKNOWN	3	4	no_terminal_outcome_observed
-hichee-a-20260718-1022	shakacode/hichee	9857	a6|qa-a	done|waiting_on_checks_or_review	true	1	1	true	true	0	not_applicable	""	""	reconstructable	3	3	""
-hichee-a-20260718-1022	shakacode/hichee	9865	a5|qa-a	done|no_pr_evidence	true	1	5	true	true	0	not_applicable	""	""	reconstructable	3	3	""
-hichee-a-20260718-1022	shakacode/hichee	9868	a4|qa-a	done|waiting_on_checks_or_review	true	1	9	true	true	0	not_applicable	""	""	reconstructable	3	3	""
-hichee-a-20260718-1022	shakacode/hichee	9870	a3|qa-a	done|ready_no_merge_authority	true	1	1	true	true	0	not_applicable	""	""	reconstructable	3	3	""
-hichee-b-20260718-1022	shakacode/hichee	9698	b8|qa-b	heartbeat|unknown	true	1	3	true	false	0	not_applicable	""	""	UNKNOWN	2	3	no_terminal_outcome_observed
-hichee-b-20260718-1022	shakacode/hichee	9703	b6|qa-b	unknown|waiting_on_checks_or_review	true	1	2	true	false	0	not_applicable	""	""	UNKNOWN	2	3	no_terminal_outcome_observed
-hichee-b-20260718-1022	shakacode/hichee	9708	b7|qa-b	in_progress|unknown	true	1	1	true	false	0	not_applicable	""	""	UNKNOWN	2	3	no_terminal_outcome_observed
-hichee-b-20260718-1022	shakacode/hichee	9766	b3|qa-b	blocked|unknown	true	1	0	true	false	1	pass	OPEN	PENDING	UNKNOWN	3	4	no_terminal_outcome_observed
-hichee-b-20260718-1022	shakacode/hichee	9809	b5|qa-b	in_progress|unknown	true	1	1	true	false	0	not_applicable	""	""	UNKNOWN	2	3	no_terminal_outcome_observed
-hichee-b-20260718-1022	shakacode/hichee	9829	b2|qa-b	in_progress|unknown	true	1	2	true	false	1	pass	OPEN	PENDING	UNKNOWN	3	4	no_terminal_outcome_observed
-hichee-b-20260718-1022	shakacode/hichee	9831	b1|qa-b	unknown|waiting_on_checks_or_review	true	1	1	true	false	1	pass	OPEN	PENDING	UNKNOWN	3	4	no_terminal_outcome_observed
-hichee-b-20260718-1022	shakacode/hichee	9864	b4|qa-b	in_progress|unknown	true	1	2	true	false	0	not_applicable	""	""	UNKNOWN	2	3	no_terminal_outcome_observed
-hichee-c-20260718-1022	shakacode/hichee	9466	c2	unknown	true	0	1	true	false	1	pass	OPEN	PENDING	UNKNOWN	3	4	no_terminal_outcome_observed
-hichee-c-20260718-1022	shakacode/hichee	9697	c3	unknown	true	0	1	true	false	0	not_applicable	""	""	UNKNOWN	2	3	no_terminal_outcome_observed
-hichee-c-20260718-1022	shakacode/hichee	9704	c7	unknown	true	0	1	true	false	0	not_applicable	""	""	UNKNOWN	2	3	no_terminal_outcome_observed
-hichee-c-20260718-1022	shakacode/hichee	9706	c6	unknown	true	0	1	true	false	0	not_applicable	""	""	UNKNOWN	2	3	no_terminal_outcome_observed
-hichee-c-20260718-1022	shakacode/hichee	9707	c5	unknown	true	0	1	true	false	0	not_applicable	""	""	UNKNOWN	2	3	no_terminal_outcome_observed
-hichee-c-20260718-1022	shakacode/hichee	9710	c4	unknown	true	0	3	true	false	0	not_applicable	""	""	UNKNOWN	2	3	no_terminal_outcome_observed
-hichee-c-20260718-1022	shakacode/hichee	9797	c8	blocked	true	1	7	true	false	0	not_applicable	""	""	UNKNOWN	2	3	no_terminal_outcome_observed
-hichee-c-20260718-1022	shakacode/hichee	9827	c1	unknown	true	0	1	true	false	1	pass	OPEN	PENDING	UNKNOWN	3	4	no_terminal_outcome_observed
-hichee-c-20260718-1022	shakacode/hichee	audit-c	audit-c	unknown	true	0	1	true	false	0	not_applicable	""	""	UNKNOWN	2	3	no_terminal_outcome_observed
-hichee-c-20260718-1022	shakacode/hichee	qa-c	qa-c	unknown	true	0	1	true	false	0	not_applicable	""	""	UNKNOWN	2	3	no_terminal_outcome_observed
-hichee-d-20260718-1022	shakacode/hichee	9693	d6	unknown	true	0	1	true	false	0	not_applicable	""	""	UNKNOWN	2	3	no_terminal_outcome_observed
-hichee-d-20260718-1022	shakacode/hichee	9803	d5	unknown	true	0	0	false	false	0	not_applicable	""	""	UNKNOWN	1	3	no_exact_coordination_match|no_terminal_outcome_observed
-hichee-d-20260718-1022	shakacode/hichee	9822	d4	unknown	true	0	0	false	false	0	not_applicable	""	""	UNKNOWN	1	3	no_exact_coordination_match|no_terminal_outcome_observed
-hichee-d-20260718-1022	shakacode/hichee	9826	d3	unknown	true	0	0	false	false	0	not_applicable	""	""	UNKNOWN	1	3	no_exact_coordination_match|no_terminal_outcome_observed
-hichee-d-20260718-1022	shakacode/hichee	9839	d2	blocked	true	1	0	true	false	0	not_applicable	""	""	UNKNOWN	2	3	no_terminal_outcome_observed
-hichee-d-20260718-1022	shakacode/hichee	9840	d1	done	true	1	2	true	true	0	not_applicable	""	""	reconstructable	3	3	""
-hichee-d-20260718-1022	shakacode/hichee	qa-d	qa-d	unknown	true	0	0	false	false	0	not_applicable	""	""	UNKNOWN	1	3	no_exact_coordination_match|no_terminal_outcome_observed
-hichee-pr9701-20260714	shakacode/hichee	9701	pr9701	done	true	1	1	true	true	1	pass	MERGED	FAILURE	reconstructable	4	4	""
-hichee-pr9815-20260718	shakacode/hichee	9815	hichee-9815-coral	done	true	1	1	true	true	1	pass	MERGED	PENDING	reconstructable	4	4	""
-hichee-pr9817-spring-opt-in-20260716	shakacode/hichee	9817	pr9817-qa	done	true	1	1	true	true	1	pass	MERGED	FAILURE	reconstructable	4	4	""
-hichee-prs-9824-9825-20260717	shakacode/hichee	9824	pr-9824|qa	done	true	1	1	true	true	1	pass	MERGED	PENDING	reconstructable	4	4	""
-hichee-prs-9824-9825-20260717	shakacode/hichee	9825	pr-9825|qa	done	true	1	1	true	true	1	pass	MERGED	PENDING	reconstructable	4	4	""
-hichee0715-koa	shakacode/hichee	9600	a2-fetch	done	true	1	1	true	true	0	not_applicable	""	""	reconstructable	3	3	""
-hichee0715-koa	shakacode/hichee	9628	b2-copy	done	true	1	1	true	true	0	not_applicable	""	""	reconstructable	3	3	""
-hichee0715-koa	shakacode/hichee	9629	c3-claudemd-9629	done	true	1	1	true	true	0	not_applicable	""	""	reconstructable	3	3	""
-hichee0715-koa	shakacode/hichee	9634	a3-whatscheaper	done	true	1	1	true	true	0	not_applicable	""	""	reconstructable	3	3	""
-hichee0715-koa	shakacode/hichee	9670	b1-predicate	done	true	1	1	true	true	0	not_applicable	""	""	reconstructable	3	3	""
-hichee0715-koa	shakacode/hichee	9672	a1-brakeman	done	true	1	1	true	true	0	not_applicable	""	""	reconstructable	3	3	""
-hichee0715-koa	shakacode/hichee	9685	c3-claudemd-9685	done	true	1	1	true	true	0	not_applicable	""	""	reconstructable	3	3	""
-hichee0715-koa	shakacode/hichee	9700	c3-claudemd-9700	done	true	1	1	true	true	0	not_applicable	""	""	reconstructable	3	3	""
-hichee0715-koa	shakacode/hichee	9783	c1-archdoc	abandoned	true	1	1	true	true	0	not_applicable	""	""	reconstructable	3	3	""
-marketplace-e2e-20260718	shakacode/react-on-rails-demo-marketplace-rsc	142	route-contract	done	true	1	1	true	true	0	not_applicable	""	""	reconstructable	3	3	""
-marketplace-e2e-20260718	shakacode/react-on-rails-demo-marketplace-rsc	143	chromium-all-routes	done	true	1	1	true	true	1	pass	OPEN	SUCCESS	reconstructable	4	4	""
-marketplace-e2e-20260718	shakacode/react-on-rails-demo-marketplace-rsc	144	playwright-search	done	true	1	1	true	true	1	pass	OPEN	SUCCESS	reconstructable	4	4	""
-marketplace-e2e-20260718	shakacode/react-on-rails-demo-marketplace-rsc	145	playwright-product	done	true	1	1	true	true	1	pass	OPEN	SUCCESS	reconstructable	4	4	""
-marketplace-e2e-20260718	shakacode/react-on-rails-demo-marketplace-rsc	146	playwright-blog-restaurant	done	true	1	1	true	true	1	pass	OPEN	SUCCESS	reconstructable	4	4	""
-marketplace-e2e-20260718	shakacode/react-on-rails-demo-marketplace-rsc	86	playwright-blog-restaurant	done	true	1	0	true	true	1	pass	OPEN	SUCCESS	reconstructable	4	4	""
-marketplace-e2e-20260718	shakacode/react-on-rails-demo-marketplace-rsc	marketplace-e2e-20260718:checker	checker	unknown	true	0	0	false	false	0	not_applicable	""	""	UNKNOWN	1	3	no_exact_coordination_match|no_terminal_outcome_observed
-marketplace-e2e-20260718	shakacode/react-on-rails-demo-marketplace-rsc	marketplace-e2e-20260718:qa	qa	in_progress	true	1	0	true	false	0	not_applicable	""	""	UNKNOWN	2	3	no_terminal_outcome_observed
-private-dotfiles-20260717-all-open-prs	justin808/private-dotfiles	39	pr39	superseded	true	1	1	true	true	1	pass	CLOSED	UNKNOWN	reconstructable	4	4	""
-private-dotfiles-20260717-all-open-prs	justin808/private-dotfiles	41	pr41	done	true	1	1	true	true	1	pass	MERGED	UNKNOWN	reconstructable	4	4	""
-private-dotfiles-20260717-all-open-prs	justin808/private-dotfiles	42	pr42	done	true	1	1	true	true	1	pass	MERGED	UNKNOWN	reconstructable	4	4	""
-qa-http-20260712T145459Z-57140	qa/ac-a-20260712T145459Z-57140	one	http-one	done	true	1	2	true	true	1	fail	""	""	observed_only	3	4	github_pr_url_invalid_or_unresolved
-qa-http-20260712T145459Z-57140	qa/ac-a-20260712T145459Z-57140	two	http-two	superseded	true	1	1	true	true	1	fail	""	""	observed_only	3	4	github_pr_url_invalid_or_unresolved
-qa-http-stdin-20260712T145459Z-57140	qa/ac-a-20260712T145459Z-57140	stdin	http-stdin	abandoned	true	1	1	true	true	1	fail	""	""	observed_only	3	4	github_pr_url_invalid_or_unresolved
-qa-pr57-http-path-20260712T150640Z-75520	qa/pr57-http-20260712T150640Z-75520	target	lane	unknown	true	0	0	false	false	0	not_applicable	""	""	UNKNOWN	1	3	no_exact_coordination_match|no_terminal_outcome_observed
-qa-pr57-http-stdin-20260712T150640Z-75520	qa/pr57-http-20260712T150640Z-75520	target	lane	unknown	true	0	0	false	false	0	not_applicable	""	""	UNKNOWN	1	3	no_exact_coordination_match|no_terminal_outcome_observed
-ror-17-0-0-rc10-demo-fleet-0713-1420-hst		135	marketplace-135-followup	done	false	0	0	false	true	1	fail	MERGED	SUCCESS	observed_only	1	4	missing_repo_join_component|no_exact_coordination_match
-ror-17-0-0-rc10-demo-fleet-0713-1420-hst		780	tutorial-780-followup	done	false	0	0	false	true	1	fail	MERGED	SUCCESS	observed_only	1	4	missing_repo_join_component|no_exact_coordination_match
-ror-17-0-0-rc10-demo-fleet-0713-1420-hst		rc10-flagship	flagship	done	false	0	0	false	true	1	fail	MERGED	SUCCESS	observed_only	1	4	missing_repo_join_component|no_exact_coordination_match
-ror-17-0-0-rc10-demo-fleet-0713-1420-hst		rc10-followup-independent-checker	followup-independent-checker	done	false	0	0	false	true	0	not_applicable	""	""	observed_only	1	3	missing_repo_join_component|no_exact_coordination_match
-ror-17-0-0-rc10-demo-fleet-0713-1420-hst		rc10-generator-gate	generator-gate	done	false	0	0	false	true	0	not_applicable	""	""	observed_only	1	3	missing_repo_join_component|no_exact_coordination_match
-ror-17-0-0-rc10-demo-fleet-0713-1420-hst		rc10-gumroad	gumroad	done	false	0	0	false	true	0	not_applicable	""	""	observed_only	1	3	missing_repo_join_component|no_exact_coordination_match
-ror-17-0-0-rc10-demo-fleet-0713-1420-hst		rc10-hacker-news	hacker-news	done	false	0	0	false	true	1	fail	MERGED	SUCCESS	observed_only	1	4	missing_repo_join_component|no_exact_coordination_match
-ror-17-0-0-rc10-demo-fleet-0713-1420-hst		rc10-hichee	hichee	done	false	0	0	false	true	0	not_applicable	""	""	observed_only	1	3	missing_repo_join_component|no_exact_coordination_match
-ror-17-0-0-rc10-demo-fleet-0713-1420-hst		rc10-independent-checker	independent-checker	done	false	0	0	false	true	0	not_applicable	""	""	observed_only	1	3	missing_repo_join_component|no_exact_coordination_match
-ror-17-0-0-rc10-demo-fleet-0713-1420-hst		rc10-marketplace	marketplace	done	false	0	0	false	true	1	fail	MERGED	SUCCESS	observed_only	1	4	missing_repo_join_component|no_exact_coordination_match
-ror-17-0-0-rc10-demo-fleet-0713-1420-hst		rc10-marketplace-combined-recheck	marketplace-rc10-combined-recheck	done	false	0	0	false	true	0	not_applicable	""	""	observed_only	1	3	missing_repo_join_component|no_exact_coordination_match
-ror-17-0-0-rc10-demo-fleet-0713-1420-hst		rc10-private-recheck	private-recheck-followup	done	false	0	0	false	true	0	not_applicable	""	""	observed_only	1	3	missing_repo_join_component|no_exact_coordination_match
-ror-17-0-0-rc10-demo-fleet-0713-1420-hst		rc10-published-starter-followup	published-starter-followup	done	false	0	0	false	true	0	not_applicable	""	""	observed_only	1	3	missing_repo_join_component|no_exact_coordination_match
-ror-17-0-0-rc10-demo-fleet-0713-1420-hst		rc10-soft-bundle-splitting	soft-bundle-splitting	done	false	0	0	false	true	0	not_applicable	""	""	observed_only	1	3	missing_repo_join_component|no_exact_coordination_match
-ror-17-0-0-rc10-demo-fleet-0713-1420-hst		rc10-soft-migration	soft-migration	done	false	0	0	false	true	0	not_applicable	""	""	observed_only	1	3	missing_repo_join_component|no_exact_coordination_match
-ror-17-0-0-rc10-demo-fleet-0713-1420-hst		rc10-soft-octochangelog	soft-octochangelog	done	false	0	0	false	true	0	not_applicable	""	""	observed_only	1	3	missing_repo_join_component|no_exact_coordination_match
-ror-17-0-0-rc10-demo-fleet-0713-1420-hst		rc10-soft-open-flights	soft-open-flights	done	false	0	0	false	true	0	not_applicable	""	""	observed_only	1	3	missing_repo_join_component|no_exact_coordination_match
-ror-17-0-0-rc10-demo-fleet-0713-1420-hst		rc10-soft-ssr-hmr	soft-ssr-hmr	done	false	0	0	false	true	0	not_applicable	""	""	observed_only	1	3	missing_repo_join_component|no_exact_coordination_match
-ror-17-0-0-rc10-demo-fleet-0713-1420-hst		rc10-tanstack	tanstack	done	false	0	0	false	true	1	fail	MERGED	SUCCESS	observed_only	1	4	missing_repo_join_component|no_exact_coordination_match
-ror-17-0-0-rc10-demo-fleet-0713-1420-hst		rc10-tutorial	tutorial	done	false	0	0	false	true	0	not_applicable	""	""	observed_only	1	3	missing_repo_join_component|no_exact_coordination_match
-ror-17-0-0-rc10-demo-fleet-0713-1420-hst		rc10-tutorial-combined-recheck	tutorial-rc10-combined-recheck	done	false	0	0	false	true	0	not_applicable	""	""	observed_only	1	3	missing_repo_join_component|no_exact_coordination_match
-ror-17-0-0-rc12-demo-fleet-0715-hst	shakacode/react_on_rails	adhoc:20260715-flagship	flagship	done	true	1	5	true	true	0	not_applicable	""	""	reconstructable	3	3	""
-ror-17-0-0-rc12-demo-fleet-0715-hst	shakacode/react_on_rails	adhoc:20260715-generator-install	generator-install	done	true	1	4	true	true	0	not_applicable	""	""	reconstructable	3	3	""
-ror-17-0-0-rc12-demo-fleet-0715-hst	shakacode/react_on_rails	adhoc:20260715-gumroad	gumroad	done	true	1	9	true	true	0	not_applicable	""	""	reconstructable	3	3	""
-ror-17-0-0-rc12-demo-fleet-0715-hst	shakacode/react_on_rails	adhoc:20260715-hacker-news	hacker-news	done	true	1	5	true	true	0	not_applicable	""	""	reconstructable	3	3	""
-ror-17-0-0-rc12-demo-fleet-0715-hst	shakacode/react_on_rails	adhoc:20260715-hichee	hichee	done	true	1	4	true	true	0	not_applicable	""	""	reconstructable	3	3	""
-ror-17-0-0-rc12-demo-fleet-0715-hst	shakacode/react_on_rails	adhoc:20260715-independent-audit	independent-audit	done	true	1	7	true	true	0	not_applicable	""	""	reconstructable	3	3	""
-ror-17-0-0-rc12-demo-fleet-0715-hst	shakacode/react_on_rails	adhoc:20260715-marketplace	marketplace	done	true	1	4	true	true	0	not_applicable	""	""	reconstructable	3	3	""
-ror-17-0-0-rc12-demo-fleet-0715-hst	shakacode/react_on_rails	adhoc:20260715-soft-bundle-splitting	soft-bundle-splitting	done	true	0	1	true	true	0	not_applicable	""	""	reconstructable	3	3	""
-ror-17-0-0-rc12-demo-fleet-0715-hst	shakacode/react_on_rails	adhoc:20260715-soft-migration	soft-migration	done	true	0	1	true	true	0	not_applicable	""	""	reconstructable	3	3	""
-ror-17-0-0-rc12-demo-fleet-0715-hst	shakacode/react_on_rails	adhoc:20260715-soft-octochangelog	soft-octochangelog	done	true	0	1	true	true	0	not_applicable	""	""	reconstructable	3	3	""
-ror-17-0-0-rc12-demo-fleet-0715-hst	shakacode/react_on_rails	adhoc:20260715-soft-open-flights	soft-open-flights	done	true	0	1	true	true	0	not_applicable	""	""	reconstructable	3	3	""
-ror-17-0-0-rc12-demo-fleet-0715-hst	shakacode/react_on_rails	adhoc:20260715-soft-ssr-hmr	soft-ssr-hmr	done	true	0	1	true	true	0	not_applicable	""	""	reconstructable	3	3	""
-ror-17-0-0-rc12-demo-fleet-0715-hst	shakacode/react_on_rails	adhoc:20260715-tanstack	tanstack	done	true	1	9	true	true	1	fail	OPEN	SUCCESS	observed_only	3	4	github_repo_mismatch
-ror-17-0-0-rc12-demo-fleet-0715-hst	shakacode/react_on_rails	adhoc:20260715-tutorial	tutorial	done	true	1	4	true	true	0	not_applicable	""	""	reconstructable	3	3	""
-ror-17-0-0-rc13-security-20260717	shakacode/react_on_rails	4629	diag-fix	ready	true	1	0	true	true	0	not_applicable	""	""	reconstructable	3	3	""
-ror-17-0-0-rc13-security-20260717	shakacode/react_on_rails	qa-4629	diag-qa	blocked	true	1	0	true	false	0	not_applicable	""	""	UNKNOWN	2	3	no_terminal_outcome_observed
-ror-17-0-0-rsc187-disposition-20260717	shakacode/react_on_rails_rsc	187	rsc187-evidence|rsc187-qa	done	true	1	2	true	true	0	not_applicable	""	""	reconstructable	3	3	""
-ror-17-0-1-rsc419-investigation-20260717	shakacode/react_on_rails	4712	rsc419-discovery	done	true	1	1	true	true	0	not_applicable	""	""	reconstructable	3	3	""
-ror-4568-20260710	shakacode/react_on_rails	4568	impl	done	true	1	0	true	true	0	not_applicable	""	""	reconstructable	3	3	""
-ror-4568-20260710	shakacode/react_on_rails	4568-main-followup	main-followup	done	true	1	0	true	true	0	not_applicable	""	""	reconstructable	3	3	""
-ror-4568-20260710	shakacode/react_on_rails	4568-qa	qa	done	true	1	0	true	true	0	not_applicable	""	""	reconstructable	3	3	""
-ror-4568-20260710	shakacode/react_on_rails	4568-release-17.0.0	release	done	true	1	0	true	true	0	not_applicable	""	""	reconstructable	3	3	""
-ror-4568-20260710	shakacode/react_on_rails	4568-release-17.0.0-qa	release-qa	done	true	1	0	true	true	0	not_applicable	""	""	reconstructable	3	3	""
-ror-4620-main-cache-identity-20260716	shakacode/react_on_rails	4620	c4620|qa	done	true	1	4	true	true	1	pass	MERGED	SUCCESS	reconstructable	4	4	""
-ror-4626-closeout-20260712	shakacode/react_on_rails	4626	closeout	done	true	1	9	true	true	1	pass	MERGED	SUCCESS	reconstructable	4	4	""
-ror-4626-closeout-20260712	shakacode/react_on_rails	qa-4626	qa	done	true	1	3	true	true	1	pass	MERGED	SUCCESS	reconstructable	4	4	""
-ror-4626-closeout-20260712	shakacode/react_on_rails	review-4626	adversarial-review	done	true	1	9	true	true	1	pass	MERGED	SUCCESS	reconstructable	4	4	""
-ror-4627-workflow-exercise-20260714	shakacode/react_on_rails	4627	exercise	done	true	1	3	true	true	1	pass	CLOSED	SUCCESS	reconstructable	4	4	""
-ror-4627-workflow-exercise-20260714	shakacode/react_on_rails	audit-4627	audit	done	true	1	8	true	true	1	fail	""	""	observed_only	3	4	github_pr_url_invalid_or_unresolved
-ror-4627-workflow-exercise-20260714	shakacode/react_on_rails	control-4627	control	done	true	1	3	true	true	1	pass	CLOSED	SUCCESS	reconstructable	4	4	""
-ror-4627-workflow-exercise-20260714	shakacode/react_on_rails	qa-4627	qa	done	true	1	3	true	true	1	fail	""	""	observed_only	3	4	github_pr_url_invalid_or_unresolved
-ror-4641-rc10-20260713	shakacode/react_on_rails	4569	release-rc10	active	true	1	1	true	false	0	not_applicable	""	""	UNKNOWN	2	3	no_terminal_outcome_observed
-ror-4641-rc10-20260713	shakacode/react_on_rails	4641	pr4641-closeout	active	true	1	1	true	true	0	not_applicable	""	""	reconstructable	3	3	""
-ror-4641-rc10-20260713	shakacode/react_on_rails	adhoc:20260713-rc10-qa	qa-rc10	active	true	1	0	true	false	0	not_applicable	""	""	UNKNOWN	2	3	no_terminal_outcome_observed
-ror-4653-demo-smoke-20260714-0910-hst	shakacode/react_on_rails	4653	implement	done	true	1	1	true	true	1	pass	MERGED	SUCCESS	reconstructable	4	4	""
-ror-4653-demo-smoke-20260714-0910-hst	shakacode/react_on_rails	audit-4653	audit	done	true	1	1	true	true	1	pass	MERGED	SUCCESS	reconstructable	4	4	""
-ror-4653-demo-smoke-20260714-0910-hst	shakacode/react_on_rails	qa-4653	qa	done	true	1	1	true	true	1	pass	MERGED	SUCCESS	reconstructable	4	4	""
-ror-a-ci-fleet-lifecycle-20260718	shakacode/react_on_rails	4682	ci-4682	done	true	1	2	true	true	1	pass	CLOSED	SUCCESS	reconstructable	4	4	""
-ror-a-ci-fleet-lifecycle-20260718	shakacode/react_on_rails	4683	generator-4683	done	true	1	5	true	true	1	pass	MERGED	SUCCESS	reconstructable	4	4	""
-ror-a-ci-fleet-lifecycle-20260718	shakacode/react_on_rails	4713	lifecycle-4713	done	true	1	1	true	true	1	pass	MERGED	SUCCESS	reconstructable	4	4	""
-ror-a-ci-fleet-lifecycle-20260718	shakacode/react_on_rails	qa-ror-a-ci-fleet-lifecycle-20260718	qa	done	true	1	1	true	true	1	pass	MERGED	SUCCESS	reconstructable	4	4	""
-ror-a-open-pr-closeout-20260715	shakacode/react_on_rails	4507	a4507|completed-audit	unknown	true	0	0	false	false	0	not_applicable	""	""	UNKNOWN	1	3	no_exact_coordination_match|no_terminal_outcome_observed
-ror-a-open-pr-closeout-20260715	shakacode/react_on_rails	4592	a-qa|a4592|completed-audit	unknown|waiting_on_checks_or_review	true	1	0	true	false	1	pass	OPEN	SUCCESS	UNKNOWN	3	4	no_terminal_outcome_observed
-ror-a-open-pr-closeout-20260715	shakacode/react_on_rails	4599	a-qa|a4599|completed-audit	done|unknown	true	1	1	true	true	1	pass	MERGED	SUCCESS	reconstructable	4	4	""
-ror-a-open-pr-closeout-20260715	shakacode/react_on_rails	4606	a-qa|a4606|completed-audit	blocked|unknown	true	1	0	true	false	1	pass	MERGED	SUCCESS	UNKNOWN	3	4	no_terminal_outcome_observed
-ror-a-open-pr-closeout-20260715	shakacode/react_on_rails	4681	a4681|completed-audit	done|unknown	true	1	1	true	true	0	not_applicable	""	""	reconstructable	3	3	""
-ror-a-pr4552-cedar	shakacode/react_on_rails	4552	merge-license|qa-license-config	done	true	1	0	true	true	1	pass	MERGED	SUCCESS	reconstructable	4	4	""
-ror-a-stalled-prs-20260712	shakacode/react_on_rails	4485	pr4485|qa-a	done	true	1	0	true	true	1	pass	MERGED	SUCCESS	reconstructable	4	4	""
-ror-a-stalled-prs-20260712	shakacode/react_on_rails	4546	pr4546	done	true	1	0	true	true	1	pass	MERGED	SUCCESS	reconstructable	4	4	""
-ror-a-stalled-prs-20260712	shakacode/react_on_rails	4558	pr4558	done	true	1	0	true	true	1	pass	MERGED	SUCCESS	reconstructable	4	4	""
-ror-a-stalled-prs-20260712	shakacode/react_on_rails	4559	pr4559	done	true	1	1	true	true	1	pass	CLOSED	SUCCESS	reconstructable	4	4	""
-ror-b-4501-20260709-1733	shakacode/react_on_rails	4501	docs-residual|qa-docs-sync	done	true	1	0	true	true	0	not_applicable	""	""	reconstructable	3	3	""
-ror-b-ci-workflows-20260715	shakacode/react_on_rails	4613	b4613	done	true	1	1	true	true	0	not_applicable	""	""	reconstructable	3	3	""
-ror-b-ci-workflows-20260715	shakacode/react_on_rails	4655	b4655	done	true	1	3	true	true	1	pass	MERGED	SUCCESS	reconstructable	4	4	""
-ror-b-ci-workflows-20260715	shakacode/react_on_rails	4663	b4663	blocked	true	0	2	true	false	0	not_applicable	""	""	UNKNOWN	2	3	no_terminal_outcome_observed
-ror-b-ci-workflows-20260715	shakacode/react_on_rails	4682	b4682	waiting	true	0	4	true	true	0	not_applicable	""	""	reconstructable	3	3	""
-ror-b-ci-workflows-20260715	shakacode/react_on_rails	4683	b4683	waiting	true	0	3	true	true	0	not_applicable	""	""	reconstructable	3	3	""
-ror-b-ci-workflows-20260715	shakacode/react_on_rails	qa-ror-b-ci-workflows-20260715	b-qa	unknown	true	0	0	false	false	0	not_applicable	""	""	UNKNOWN	1	3	no_exact_coordination_match|no_terminal_outcome_observed
-ror-b-demo-fleet-health-20260718	shakacode/react_on_rails	3898	fleet-core-3898|fleet-discovery|qa	blocked|done|merged	true	1	0	true	true	1	pass	MERGED	SUCCESS	reconstructable	4	4	""
-ror-b-demo-fleet-health-20260718	shakacode/react_on_rails	fleet-final-20260718	flagship-final|gumroad-final|hacker-news-final|marketplace-final|tanstack-final|tutorial-final	blocked	true	0	0	false	false	0	not_applicable	""	""	UNKNOWN	1	3	no_exact_coordination_match|no_terminal_outcome_observed
-ror-b-demo-fleet-health-20260718	shakacode/react_on_rails	public-soft-and-archived	public-report-only	done	true	0	0	false	true	0	not_applicable	""	""	observed_only	2	3	no_exact_coordination_match
-ror-b-pro-ember-20260713-1528	shakacode/react_on_rails	4642	decision-4642	done	true	0	1	true	true	0	not_applicable	""	""	reconstructable	3	3	""
-ror-b-pro-ember-20260713-1528	shakacode/react_on_rails	4644	smoke-4644	done	true	1	4	true	true	1	pass	MERGED	SUCCESS	reconstructable	4	4	""
-ror-b-pro-ember-20260713-1528	shakacode/react_on_rails	audit-pro-batch	audit-pro	done	true	1	1	true	true	1	pass	MERGED	SUCCESS	reconstructable	4	4	""
-ror-b-pro-ember-20260713-1528	shakacode/react_on_rails	qa-pro-4644	qa-pro	done	true	1	2	true	true	1	pass	MERGED	SUCCESS	reconstructable	4	4	""
-ror-b-release-rsc-20260712	shakacode/react_on_rails	4357	external4357	external_gate_failing	true	0	1	true	false	0	not_applicable	""	""	UNKNOWN	2	3	no_terminal_outcome_observed
-ror-b-release-rsc-20260712	shakacode/react_on_rails	4536	changelog4536	merged	true	1	2	true	true	1	pass	MERGED	SUCCESS	reconstructable	4	4	""
-ror-b-release-rsc-20260712	shakacode/react_on_rails	4557	fouc4557-4561|qa-b	blocked	true	0	0	false	false	0	not_applicable	""	""	UNKNOWN	1	3	no_exact_coordination_match|no_terminal_outcome_observed
-ror-b-release-rsc-20260712	shakacode/react_on_rails	4561	fouc4557-4561|qa-b	blocked	true	0	0	false	false	0	not_applicable	""	""	UNKNOWN	1	3	no_exact_coordination_match|no_terminal_outcome_observed
-ror-b-release-rsc-20260712	shakacode/react_on_rails	4569	qa-b|release4569	blocked	true	0	4	true	false	0	not_applicable	""	""	UNKNOWN	2	3	no_terminal_outcome_observed
-ror-backport-main-to-release-20260715	shakacode/react_on_rails	adhoc-20260715-backport-4652	backport-4652	done	true	1	2	true	true	1	pass	MERGED	SUCCESS	reconstructable	4	4	""
-ror-backport-main-to-release-20260715	shakacode/react_on_rails	adhoc-20260715-backport-4654	backport-4654	done	true	1	2	true	true	1	pass	MERGED	SUCCESS	reconstructable	4	4	""
-ror-backport-main-to-release-20260715	shakacode/react_on_rails	adhoc-20260715-backport-4656	backport-4656	done	true	1	2	true	true	1	pass	MERGED	SUCCESS	reconstructable	4	4	""
-ror-backport-main-to-release-20260715	shakacode/react_on_rails	adhoc-20260715-backport-4658	backport-4658	done	true	1	2	true	true	1	pass	MERGED	SUCCESS	reconstructable	4	4	""
-ror-backport-main-to-release-20260715	shakacode/react_on_rails	adhoc-20260715-backport-4661	backport-4661	done	true	1	2	true	true	1	pass	MERGED	SUCCESS	reconstructable	4	4	""
-ror-backport-main-to-release-20260715	shakacode/react_on_rails	adhoc-20260715-backport-batch-qa	batch-qa	done	true	1	1	true	true	0	not_applicable	""	""	reconstructable	3	3	""
-ror-backport-main-to-release-20260715	shakacode/react_on_rails	adhoc-20260715-forward-port-4676-fix	forward-port-4676-fix	done	true	1	3	true	true	1	pass	MERGED	SUCCESS	reconstructable	4	4	""
-ror-bugs-20260717	shakacode/react_on_rails	4581	lane-4581	unknown	true	0	0	false	false	0	not_applicable	""	""	UNKNOWN	1	3	no_exact_coordination_match|no_terminal_outcome_observed
-ror-bugs-20260717	shakacode/react_on_rails	4619	lane-4619	unknown	true	0	0	false	false	0	not_applicable	""	""	UNKNOWN	1	3	no_exact_coordination_match|no_terminal_outcome_observed
-ror-bugs-20260717	shakacode/react_on_rails	4639	lane-4639	unknown	true	0	0	false	false	0	not_applicable	""	""	UNKNOWN	1	3	no_exact_coordination_match|no_terminal_outcome_observed
-ror-bugs-20260717	shakacode/react_on_rails	4710	lane-4710	unknown	true	0	0	false	false	0	not_applicable	""	""	UNKNOWN	1	3	no_exact_coordination_match|no_terminal_outcome_observed
-ror-bugs-20260717	shakacode/react_on_rails	4712	lane-4712	unknown	true	0	0	false	false	0	not_applicable	""	""	UNKNOWN	1	3	no_exact_coordination_match|no_terminal_outcome_observed
-ror-c-20260716-1543-pro-node-residuals	shakacode/react_on_rails	4313	fix-4313-knip|lane-4313	done|superseded	true	1	4	true	true	2	pass	MERGED	SUCCESS	reconstructable	4	4	""
-ror-c-20260716-1543-pro-node-residuals	shakacode/react_on_rails	4325	lane-4325	done	true	1	3	true	true	1	pass	MERGED	SUCCESS	reconstructable	4	4	""
-ror-c-20260716-1543-pro-node-residuals	shakacode/react_on_rails	4506	lane-4506	done	true	1	0	true	true	0	not_applicable	""	""	reconstructable	3	3	""
-ror-c-20260716-1543-pro-node-residuals	shakacode/react_on_rails	4688	lane-4313	done	true	1	1	true	true	1	pass	MERGED	SUCCESS	reconstructable	4	4	""
-ror-c-20260716-1543-pro-node-residuals	shakacode/react_on_rails	4719	qa-4325	done	true	1	2	true	true	1	pass	MERGED	SUCCESS	reconstructable	4	4	""
-ror-c-pro-rsc-20260715	shakacode/react_on_rails	4329	c4329|qa	done	true	1	3	true	true	1	pass	MERGED	SUCCESS	reconstructable	4	4	""
-ror-c-pro-rsc-20260715	shakacode/react_on_rails	4506	c4506	done	true	0	1	true	true	0	not_applicable	""	""	reconstructable	3	3	""
-ror-c-pro-rsc-20260715	shakacode/react_on_rails	4557	c4557|qa	blocked|done	true	1	1	true	true	1	pass	MERGED	SUCCESS	reconstructable	4	4	""
-ror-c-pro-rsc-20260715	shakacode/react_on_rails	4561	c4561|qa	blocked|done	true	1	1	true	true	1	pass	MERGED	SUCCESS	reconstructable	4	4	""
-ror-c-pro-rsc-20260715	shakacode/react_on_rails	4569	d4569	blocked	true	0	0	false	false	0	not_applicable	""	""	UNKNOWN	1	3	no_exact_coordination_match|no_terminal_outcome_observed
-ror-c-pro-rsc-20260715	shakacode/react_on_rails	4620	c4620|qa	blocked|done	true	0	1	true	true	1	pass	MERGED	SUCCESS	reconstructable	4	4	""
-ror-c-security-tests-20260712	shakacode/react_on_rails	4565	tests4565	done	true	1	1	true	true	1	pass	MERGED	SUCCESS	reconstructable	4	4	""
-ror-c-security-tests-20260712	shakacode/react_on_rails	4595	auth4595	done	true	1	1	true	true	1	pass	MERGED	SUCCESS	reconstructable	4	4	""
-ror-c-security-tests-20260712	shakacode/react_on_rails	4596	node4596	done	true	1	1	true	true	1	pass	MERGED	SUCCESS	reconstructable	4	4	""
-ror-c-security-tests-20260712	shakacode/react_on_rails	4597	ruby4597	done	true	1	1	true	true	1	pass	MERGED	SUCCESS	reconstructable	4	4	""
-ror-c-security-tests-20260712	shakacode/react_on_rails	4609	doc4609	done	true	1	1	true	true	1	pass	MERGED	SUCCESS	reconstructable	4	4	""
-ror-c-security-tests-20260712	shakacode/react_on_rails	qa-c	qa-c	done	true	1	1	true	true	0	not_applicable	""	""	reconstructable	3	3	""
-ror-ci-20260717	shakacode/react_on_rails	pr:4691	lane-4691	unknown	true	0	0	false	false	0	not_applicable	""	""	UNKNOWN	1	3	no_exact_coordination_match|no_terminal_outcome_observed
-ror-ci-20260717	shakacode/react_on_rails	pr:4692	lane-4692	unknown	true	0	0	false	false	0	not_applicable	""	""	UNKNOWN	1	3	no_exact_coordination_match|no_terminal_outcome_observed
-ror-ci-20260717	shakacode/react_on_rails	pr:4714	lane-4714	unknown	true	0	0	false	false	0	not_applicable	""	""	UNKNOWN	1	3	no_exact_coordination_match|no_terminal_outcome_observed
-ror-d-20260716-1543-rspack-adoption-recovery	shakacode/react_on_rails	4600	bench4600	done	true	1	1	true	true	1	pass	MERGED	SUCCESS	reconstructable	4	4	""
-ror-d-20260716-1543-rspack-adoption-recovery	shakacode/react_on_rails	4601	doc4601	done	true	1	1	true	true	1	pass	MERGED	SUCCESS	reconstructable	4	4	""
-ror-d-20260716-1543-rspack-adoption-recovery	shakacode/react_on_rails	4603	eval4603	done	true	0	1	true	true	1	pass	MERGED	SUCCESS	reconstructable	4	4	""
-ror-d-adoption-proof-20260712	shakacode/react_on_rails	4600	bench4600	done	true	0	0	false	true	0	not_applicable	""	""	observed_only	2	3	no_exact_coordination_match
-ror-d-adoption-proof-20260712	shakacode/react_on_rails	4601	doc4601	done	true	0	0	false	true	0	not_applicable	""	""	observed_only	2	3	no_exact_coordination_match
-ror-d-adoption-proof-20260712	shakacode/react_on_rails	4602	doctor4602	done	true	1	0	true	true	0	not_applicable	""	""	reconstructable	3	3	""
-ror-d-adoption-proof-20260712	shakacode/react_on_rails	4603	eval4603	done	true	0	0	false	true	0	not_applicable	""	""	observed_only	2	3	no_exact_coordination_match
-ror-d-adoption-proof-20260712	shakacode/react_on_rails	4604	install4604	done	true	1	0	true	true	0	not_applicable	""	""	reconstructable	3	3	""
-ror-d-adoption-proof-20260712	shakacode/react_on_rails	qa-d	qa-d	done	true	1	1	true	true	0	not_applicable	""	""	reconstructable	3	3	""
-ror-d-roadmap-evidence-20260715	shakacode/react_on_rails	4073	d4073	abandoned	true	1	1	true	true	0	not_applicable	""	""	reconstructable	3	3	""
-ror-d-roadmap-evidence-20260715	shakacode/react_on_rails	4271	d4271	done	true	1	1	true	true	0	not_applicable	""	""	reconstructable	3	3	""
-ror-d-roadmap-evidence-20260715	shakacode/react_on_rails	4274	d4274	done	true	1	0	true	true	0	not_applicable	""	""	reconstructable	3	3	""
-ror-d-roadmap-evidence-20260715	shakacode/react_on_rails	4279	d4279	done	true	1	1	true	true	0	not_applicable	""	""	reconstructable	3	3	""
-ror-d-roadmap-evidence-20260715	shakacode/react_on_rails	4282	d4274	done	true	1	1	true	true	0	not_applicable	""	""	reconstructable	3	3	""
-ror-d-roadmap-evidence-20260715	shakacode/react_on_rails	4605	d4605	blocked	true	0	0	false	false	0	not_applicable	""	""	UNKNOWN	1	3	no_exact_coordination_match|no_terminal_outcome_observed
-ror-docs1-20260717	shakacode/react_on_rails	4633	lane-4636	unknown	true	0	0	false	false	0	not_applicable	""	""	UNKNOWN	1	3	no_exact_coordination_match|no_terminal_outcome_observed
-ror-docs1-20260717	shakacode/react_on_rails	4634	lane-4637	unknown	true	0	0	false	false	0	not_applicable	""	""	UNKNOWN	1	3	no_exact_coordination_match|no_terminal_outcome_observed
-ror-docs1-20260717	shakacode/react_on_rails	4638	lane-4640	unknown	true	0	0	false	false	0	not_applicable	""	""	UNKNOWN	1	3	no_exact_coordination_match|no_terminal_outcome_observed
-ror-docs1-20260717	shakacode/react_on_rails	4703	lane-4708	unknown	true	0	0	false	false	0	not_applicable	""	""	UNKNOWN	1	3	no_exact_coordination_match|no_terminal_outcome_observed
-ror-docs1-20260717	shakacode/react_on_rails	4704	lane-4706	unknown	true	0	0	false	false	0	not_applicable	""	""	UNKNOWN	1	3	no_exact_coordination_match|no_terminal_outcome_observed
-ror-docs1-20260717	shakacode/react_on_rails	pr:4636	lane-4636	unknown	true	0	0	false	false	0	not_applicable	""	""	UNKNOWN	1	3	no_exact_coordination_match|no_terminal_outcome_observed
-ror-docs1-20260717	shakacode/react_on_rails	pr:4637	lane-4637	unknown	true	0	0	false	false	0	not_applicable	""	""	UNKNOWN	1	3	no_exact_coordination_match|no_terminal_outcome_observed
-ror-docs1-20260717	shakacode/react_on_rails	pr:4640	lane-4640	unknown	true	0	0	false	false	0	not_applicable	""	""	UNKNOWN	1	3	no_exact_coordination_match|no_terminal_outcome_observed
-ror-docs1-20260717	shakacode/react_on_rails	pr:4706	lane-4706	unknown	true	0	0	false	false	0	not_applicable	""	""	UNKNOWN	1	3	no_exact_coordination_match|no_terminal_outcome_observed
-ror-docs1-20260717	shakacode/react_on_rails	pr:4708	lane-4708	unknown	true	0	0	false	false	0	not_applicable	""	""	UNKNOWN	1	3	no_exact_coordination_match|no_terminal_outcome_observed
-ror-docs2-20260717	shakacode/react_on_rails	4702	lane-4707	in_progress	true	0	0	false	false	0	not_applicable	""	""	UNKNOWN	1	3	no_exact_coordination_match|no_terminal_outcome_observed
-ror-docs2-20260717	shakacode/react_on_rails	4705	lane-4709	in_progress	true	0	0	false	false	0	not_applicable	""	""	UNKNOWN	1	3	no_exact_coordination_match|no_terminal_outcome_observed
-ror-docs2-20260717	shakacode/react_on_rails	pr:4707	lane-4707	in_progress	true	0	0	false	false	0	not_applicable	""	""	UNKNOWN	1	3	no_exact_coordination_match|no_terminal_outcome_observed
-ror-docs2-20260717	shakacode/react_on_rails	pr:4709	lane-4709	in_progress	true	0	0	false	false	0	not_applicable	""	""	UNKNOWN	1	3	no_exact_coordination_match|no_terminal_outcome_observed
-ror-pr4564-20260710-1813	shakacode/react_on_rails	4564	adversarial-review|post-merge-audit|pr4564|qa	done|merged	true	1	0	true	true	0	not_applicable	""	""	reconstructable	3	3	""
-ror-pro-20260717	shakacode/react_on_rails	4571	lane-4575	unknown	true	0	0	false	false	0	not_applicable	""	""	UNKNOWN	1	3	no_exact_coordination_match|no_terminal_outcome_observed
-ror-pro-20260717	shakacode/react_on_rails	4620	lane-4701	in_progress	true	0	0	false	false	0	not_applicable	""	""	UNKNOWN	1	3	no_exact_coordination_match|no_terminal_outcome_observed
-ror-pro-20260717	shakacode/react_on_rails	pr:4575	lane-4575	unknown	true	0	0	false	false	0	not_applicable	""	""	UNKNOWN	1	3	no_exact_coordination_match|no_terminal_outcome_observed
-ror-pro-20260717	shakacode/react_on_rails	pr:4579	lane-4579	unknown	true	0	0	false	false	0	not_applicable	""	""	UNKNOWN	1	3	no_exact_coordination_match|no_terminal_outcome_observed
-ror-pro-20260717	shakacode/react_on_rails	pr:4701	lane-4701	in_progress	true	0	0	false	false	0	not_applicable	""	""	UNKNOWN	1	3	no_exact_coordination_match|no_terminal_outcome_observed
-ror-release-20260713	shakacode/react_on_rails	4645	audit-release|prerun-4645|qa-release	done	true	1	3	true	true	1	pass	MERGED	SUCCESS	reconstructable	4	4	""
-ror-release-20260713	shakacode/react_on_rails	4646	audit-release|qa-release|retry-4646	done	true	1	1	true	true	1	pass	MERGED	SUCCESS	reconstructable	4	4	""
-ror-release-20260713	shakacode/react_on_rails	4647	audit-release|guidance-4647|qa-release	done	true	1	2	true	true	1	pass	MERGED	SUCCESS	reconstructable	4	4	""
-ror-release-20260713	shakacode/react_on_rails	4648	async-4648|audit-release|qa-release	done	true	1	4	true	true	1	pass	MERGED	SUCCESS	reconstructable	4	4	""
-ror-release-backports-20260711	shakacode/react_on_rails	4566	backport-4551	merged	true	1	0	true	true	0	not_applicable	""	""	reconstructable	3	3	""
-ror-release-backports-20260711	shakacode/react_on_rails	4567	backport-4564	in_progress	true	1	0	true	false	0	not_applicable	""	""	UNKNOWN	2	3	no_terminal_outcome_observed
-ror-release-backports-20260711	shakacode/react_on_rails	qa-release-4551	qa-4551	done	true	1	0	true	true	0	not_applicable	""	""	reconstructable	3	3	""
-ror-release-backports-20260711	shakacode/react_on_rails	qa-release-4564	qa-4564	unknown	true	0	0	false	false	0	not_applicable	""	""	UNKNOWN	1	3	no_exact_coordination_match|no_terminal_outcome_observed
-ror-rsc-20260717	shakacode/react_on_rails	4629	lane-4631	unknown	true	0	0	false	false	0	not_applicable	""	""	UNKNOWN	1	3	no_exact_coordination_match|no_terminal_outcome_observed
-ror-rsc-20260717	shakacode/react_on_rails	4630	lane-4632	unknown	true	0	0	false	false	0	not_applicable	""	""	UNKNOWN	1	3	no_exact_coordination_match|no_terminal_outcome_observed
-ror-rsc-20260717	shakacode/react_on_rails	pr:4599	lane-4599	unknown	true	0	0	false	false	0	not_applicable	""	""	UNKNOWN	1	3	no_exact_coordination_match|no_terminal_outcome_observed
-ror-rsc-20260717	shakacode/react_on_rails	pr:4606	lane-4606	unknown	true	0	0	false	false	0	not_applicable	""	""	UNKNOWN	1	3	no_exact_coordination_match|no_terminal_outcome_observed
-ror-rsc-20260717	shakacode/react_on_rails	pr:4631	lane-4631	unknown	true	0	0	false	false	0	not_applicable	""	""	UNKNOWN	1	3	no_exact_coordination_match|no_terminal_outcome_observed
-ror-rsc-20260717	shakacode/react_on_rails	pr:4632	lane-4632	unknown	true	0	0	false	false	0	not_applicable	""	""	UNKNOWN	1	3	no_exact_coordination_match|no_terminal_outcome_observed
-ror-unblock-20260717	shakacode/react_on_rails	pr:4689	lane-4689	done	true	0	1	true	true	1	pass	MERGED	SUCCESS	reconstructable	4	4	""
-ror-unblock-20260717	shakacode/react_on_rails	pr:4693	lane-4693	done	true	0	1	true	true	1	pass	MERGED	SUCCESS	reconstructable	4	4	""
-ror-unblock-20260717	shakacode/react_on_rails	pr:4718	lane-4718	done	true	0	1	true	true	1	pass	MERGED	SUCCESS	reconstructable	4	4	""
-ror-wave2-20260717	shakacode/react_on_rails	3492	lane-4580	unknown	true	0	0	false	false	0	not_applicable	""	""	UNKNOWN	1	3	no_exact_coordination_match|no_terminal_outcome_observed
-ror-wave2-20260717	shakacode/react_on_rails	4187	lane-dependabot	unknown	true	0	0	false	false	0	not_applicable	""	""	UNKNOWN	1	3	no_exact_coordination_match|no_terminal_outcome_observed
-ror-wave2-20260717	shakacode/react_on_rails	4572	lane-4591	unknown	true	0	0	false	false	0	not_applicable	""	""	UNKNOWN	1	3	no_exact_coordination_match|no_terminal_outcome_observed
-ror-wave2-20260717	shakacode/react_on_rails	pr:4580	lane-4580	unknown	true	0	0	false	false	0	not_applicable	""	""	UNKNOWN	1	3	no_exact_coordination_match|no_terminal_outcome_observed
-ror-wave2-20260717	shakacode/react_on_rails	pr:4591	lane-4591	unknown	true	0	0	false	false	0	not_applicable	""	""	UNKNOWN	1	3	no_exact_coordination_match|no_terminal_outcome_observed
-ror17-fleet-b-20260717	shakacode/react-on-rails-demo-marketplace-rsc	138	checker|marketplace-gates|qa	done	true	1	1	true	true	2	pass	MERGED	SUCCESS	reconstructable	4	4	""
-ror17-fleet-b-20260717	shakacode/react-on-rails-demo-marketplace-rsc	86	checker|marketplace-interaction|qa	done	true	0	6	true	true	1	pass	MERGED	SUCCESS	reconstructable	4	4	""
-ror17-fleet-c-20260717		194	tanstack-remediation|tanstack-reviewapp	done|waiting_maintainer_decision	false	0	0	false	true	2	fail	CLOSED|OPEN	SUCCESS	observed_only	1	4	missing_repo_join_component|no_exact_coordination_match
-ror17-fleet-c-20260717		784	tutorial-replay2|tutorial-replay3|tutorial-reviewapp	blocked|done	false	0	0	false	true	3	fail	CLOSED	SUCCESS	observed_only	1	4	missing_repo_join_component|no_exact_coordination_match
-ror17-fleet-c-20260717		81	gumroad-replay2|gumroad-reviewapp	done	false	0	0	false	true	2	fail	CLOSED|MERGED	SUCCESS	observed_only	1	4	missing_repo_join_component|no_exact_coordination_match
-ror17-fleet-c-20260717		batch-checker	checker	superseded	false	0	0	false	true	0	not_applicable	""	""	observed_only	1	3	missing_repo_join_component|no_exact_coordination_match
-ror17-fleet-c-20260717		batch-final-checker	final-checker	pending	false	0	0	false	false	0	not_applicable	""	""	UNKNOWN	0	3	missing_repo_join_component|no_exact_coordination_match|no_terminal_outcome_observed
-ror17-fleet-c-20260717		batch-qa	qa	superseded	false	0	0	false	true	0	not_applicable	""	""	observed_only	1	3	missing_repo_join_component|no_exact_coordination_match
-ror17-fleet-c-20260717		batch-qa-interim	qa-interim2	done	false	0	0	false	true	0	not_applicable	""	""	observed_only	1	3	missing_repo_join_component|no_exact_coordination_match
-rsc-0710-2115-parity-discover	shakacode/react-on-rails-demo-gumroad-rsc	71	contract	done	true	1	10	true	true	1	pass	MERGED	SUCCESS	reconstructable	4	4	""
-rsc-0710-2115-parity-discover	shakacode/react-on-rails-demo-gumroad-rsc	72	discover|qa-discover	done	true	1	4	true	true	1	pass	MERGED	SUCCESS	reconstructable	4	4	""
-shakapacker-1219-20260714T183711Z	shakacode/shakapacker	1219	cjs-fix	done	true	1	1	true	true	1	pass	MERGED	SUCCESS	reconstructable	4	4	""
-sim-task_one	sim/local	task_one	worker	failed	true	0	1	true	true	0	not_applicable	""	""	reconstructable	3	3	""
-ss-open-20260712	shakacode/shakastack-com	12	ia	done	true	1	9	true	true	1	pass	MERGED	SUCCESS	reconstructable	4	4	""
-ss-open-20260712	shakacode/shakastack-com	13	ia	done	true	0	0	false	true	1	pass	MERGED	SUCCESS	observed_only	3	4	no_exact_coordination_match
-ss-open-20260712	shakacode/shakastack-com	22	ia	done	true	0	0	false	true	1	pass	MERGED	SUCCESS	observed_only	3	4	no_exact_coordination_match
-ss-open-20260712	shakacode/shakastack-com	23	ia	done	true	0	0	false	true	1	pass	MERGED	SUCCESS	observed_only	3	4	no_exact_coordination_match
-ss-open-20260712	shakacode/shakastack-com	24	ia	done	true	0	0	false	true	1	pass	MERGED	SUCCESS	observed_only	3	4	no_exact_coordination_match
-ss-open-20260712-b	shakacode/shakastack-com	10	mobile	done	true	1	6	true	true	1	pass	MERGED	SUCCESS	reconstructable	4	4	""
-ss-open-20260712-b	shakacode/shakastack-com	26	agent-proof	done	true	1	6	true	true	1	pass	MERGED	SUCCESS	reconstructable	4	4	""
-stack-rollout-20260708-actions-parity	shakacode/agent-workflows	claude-actions-parity	agent-coordination-actions|agent-coordination-dashboard-actions|agent-workflows-actions	merged_pr_94	true	1	0	true	false	0	not_applicable	""	""	UNKNOWN	2	3	no_terminal_outcome_observed
-stack-rollout-20260708-m5-b	shakacode/agent-coordination	4	schema-cli	merged	true	0	0	false	true	1	pass	MERGED	SUCCESS	observed_only	3	4	no_exact_coordination_match
-stack-rollout-20260708-wave-b	shakacode/agent-coordination	4	coordination-4-metadata-options	external-gate-failing	true	1	0	true	false	0	not_applicable	""	""	UNKNOWN	2	3	no_terminal_outcome_observed
-tr-07-13-1224-pr14	shakacode/team-reports	14	pr14-readiness	done	true	1	1	true	true	1	pass	MERGED	SUCCESS	reconstructable	4	4	""
-tr-07-13-1344-plugin-split		adhoc:20260713-create-team-reports-plugin	plugin-repo	done	false	0	0	false	true	1	fail	MERGED	SUCCESS	observed_only	1	4	missing_repo_join_component|no_exact_coordination_match
-tr-07-13-1344-plugin-split		adhoc:20260713-cross-repo-qa	cross-repo-qa	done	false	0	0	false	true	0	not_applicable	""	""	observed_only	1	3	missing_repo_join_component|no_exact_coordination_match
-tr-07-13-1344-plugin-split		adhoc:20260713-migrate-team-reports-data	data-repo	done	false	0	0	false	true	1	fail	MERGED	SUCCESS	observed_only	1	4	missing_repo_join_component|no_exact_coordination_match
+batch_id	repo	target	lanes	lane_statuses	key_complete	exact_claim_count	exact_event_count	coordination_exact	terminal_observed	pr_url_count	github_gate	github_states	target_pr_state	final_state	final_state_source	present_head_check_rollups	reconstruction	score_numerator	score_denominator	gaps
+HC-A-foundation-kite	shakacode/hichee	9716	export	done	true	1	14	true	true	1	pass	MERGED	merged	merged	github	PENDING	reconstructable	4	4	""
+HC-A-foundation-kite	shakacode/hichee	9717	parity	done	true	1	7	true	true	1	pass	MERGED	merged	merged	github	PENDING	reconstructable	4	4	""
+HC-A-foundation-kite	shakacode/hichee	9718	sitemap	done	true	1	5	true	true	1	pass	MERGED	merged	merged	github	PENDING	reconstructable	4	4	""
+HC-A-foundation-kite	shakacode/hichee	qa-foundation	qa-foundation	done	true	1	2	true	true	0	not_applicable	""	UNKNOWN	done	coordination	""	reconstructable	3	3	""
+HC-staging-release-qa-20260715-1157	shakacode/hichee	adhoc:20260715-release-notifications	notifications	unknown	true	0	0	false	false	0	not_applicable	""	UNKNOWN	UNKNOWN	coordination	""	UNKNOWN	1	3	no_exact_coordination_match|no_terminal_outcome_observed
+HC-staging-release-qa-20260715-1157	shakacode/hichee	adhoc:20260715-release-qa-ledger	ledger	unknown	true	0	0	false	false	0	not_applicable	""	UNKNOWN	UNKNOWN	coordination	""	UNKNOWN	1	3	no_exact_coordination_match|no_terminal_outcome_observed
+HC-staging-release-qa-20260715-1157	shakacode/hichee	adhoc:20260715-staging-release-qa-automation	qa	unknown	true	0	0	false	false	0	not_applicable	""	UNKNOWN	UNKNOWN	coordination	""	UNKNOWN	1	3	no_exact_coordination_match|no_terminal_outcome_observed
+HC-staging-release-qa-20260715-1157	shakacode/hichee	adhoc:20260715-staging-smoke-orchestrator	smoke	heartbeat	true	1	0	true	false	1	pass	MERGED	merged	merged	github	PENDING	UNKNOWN	3	4	no_terminal_outcome_observed
+ac-a-0712-0107	shakacode/agent-coordination	44	ac-a-i44	done	true	1	1	true	true	1	pass	MERGED	merged	merged	github	SUCCESS	reconstructable	4	4	""
+ac-a-0712-0107	shakacode/agent-coordination	48	ac-a-i48	done	true	1	1	true	true	1	pass	MERGED	merged	merged	github	SUCCESS	reconstructable	4	4	""
+ac-a-0712-0107	shakacode/agent-coordination	51	ac-a-i51	done	true	1	1	true	true	1	pass	MERGED	merged	merged	github	SUCCESS	reconstructable	4	4	""
+ac-a-0712-0107	shakacode/agent-coordination	qa-51-44-48	ac-a-qa	done	true	1	1	true	true	0	not_applicable	""	UNKNOWN	done	coordination	""	reconstructable	3	3	""
+ac-a-coord-cinder	shakacode/agent-coordination	54	ac-a-pr54|ac-a-qa	done	true	1	2	true	true	0	not_applicable	""	UNKNOWN	done	coordination	""	reconstructable	3	3	""
+ac-a-coord-cinder	shakacode/agent-coordination	55	ac-a-pr55|ac-a-qa	done	true	1	1	true	true	0	not_applicable	""	UNKNOWN	done	coordination	""	reconstructable	3	3	""
+ac-b-0712-0107	shakacode/agent-coordination	52	ac-b-i52	done	true	1	1	true	true	1	pass	MERGED	merged	merged	github	SUCCESS	reconstructable	4	4	""
+ac-b-0712-0107	shakacode/agent-coordination	8	ac-b-i8	done	true	0	1	true	true	1	pass	MERGED	merged	merged	github	SUCCESS	reconstructable	4	4	""
+ac-b-0712-0107	shakacode/agent-coordination	qa-52-8	ac-b-qa	done	true	1	1	true	true	0	not_applicable	""	UNKNOWN	done	coordination	""	reconstructable	3	3	""
+ac-c-0712-0107	shakacode/agent-coordination	5	ac-c-i5	complete	true	0	0	false	true	0	not_applicable	""	UNKNOWN	done	coordination	""	observed_only	2	3	no_exact_coordination_match
+ac-c-0712-0107	shakacode/agent-coordination	6	ac-c-i6	complete	true	0	0	false	true	0	not_applicable	""	UNKNOWN	done	coordination	""	observed_only	2	3	no_exact_coordination_match
+ac-datafix-20260716-1555	shakacode/agent-coordination	62	protocol	done	true	1	1	true	true	1	pass	MERGED	merged	merged	github	SUCCESS	reconstructable	4	4	""
+ac-datafix-20260716-1555	shakacode/agent-coordination	66	protocol	done	true	1	1	true	true	1	pass	MERGED	merged	merged	github	SUCCESS	reconstructable	4	4	""
+ac-datafix-20260716-1555	shakacode/agent-coordination	adhoc:20260716-qa-acb	qa	done	true	0	1	true	true	0	not_applicable	""	UNKNOWN	done	coordination	""	reconstructable	3	3	""
+aca	shakacode/agent-coordination	7	license-contract	merged	true	0	0	false	true	1	pass	MERGED	merged	merged	github	SUCCESS	observed_only	3	4	no_exact_coordination_match
+aca-20260709-1753	shakacode/agent-coordination	38	issue38|qa-core	done|merged	true	1	0	true	true	0	not_applicable	""	UNKNOWN	merged	coordination	""	reconstructable	3	3	""
+aca-20260709-1753	shakacode/agent-coordination	39	issue39|qa-core	done|merged	true	1	0	true	true	0	not_applicable	""	UNKNOWN	merged	coordination	""	reconstructable	3	3	""
+aca-20260709-1753	shakacode/agent-coordination	40	issue40|qa-core	done|merged	true	1	0	true	true	0	not_applicable	""	UNKNOWN	merged	coordination	""	reconstructable	3	3	""
+aca-20260709-1753	shakacode/agent-coordination	7	issue7	done	true	1	0	true	true	0	not_applicable	""	UNKNOWN	done	coordination	""	reconstructable	3	3	""
+acb	shakacode/agent-coordination	5	launcher	complete	true	0	0	false	true	0	not_applicable	""	UNKNOWN	done	coordination	""	observed_only	2	3	no_exact_coordination_match
+acb	shakacode/agent-coordination	6	reservations	complete	true	0	0	false	true	0	not_applicable	""	UNKNOWN	done	coordination	""	observed_only	2	3	no_exact_coordination_match
+acb	shakacode/agent-coordination	8	host-limits-contract	complete	true	0	0	false	true	0	not_applicable	""	UNKNOWN	done	coordination	""	observed_only	2	3	no_exact_coordination_match
+acd-a-0711-1813	shakacode/agent-coordination-dashboard	44	acd-a-i44|acd-a-i44-overflow	merged	true	1	9	true	true	0	not_applicable	""	UNKNOWN	merged	coordination	""	reconstructable	3	3	""
+acd-a-0711-1813	shakacode/agent-coordination-dashboard	51	acd-a-pr51	merged	true	1	1	true	true	0	not_applicable	""	UNKNOWN	merged	coordination	""	reconstructable	3	3	""
+acd-a-0711-1813	shakacode/agent-coordination-dashboard	qa-51-44	acd-a-qa	done	true	1	4	true	true	0	not_applicable	""	UNKNOWN	done	coordination	""	reconstructable	3	3	""
+acd-actionable-20260715-2057	shakacode/agent-coordination-dashboard	63	issue63-lifecycle	done	true	1	9	true	true	0	not_applicable	""	UNKNOWN	done	coordination	""	reconstructable	3	3	""
+acd-actionable-20260715-2057	shakacode/agent-coordination-dashboard	65	issue65-recommendations	blocked	true	0	0	false	false	0	not_applicable	""	UNKNOWN	blocked	coordination	""	UNKNOWN	1	3	no_exact_coordination_match|no_terminal_outcome_observed
+acd-actionable-20260715-2057	shakacode/agent-coordination-dashboard	adhoc:20260715-completed-audit	completed-audit	blocked	true	0	0	false	false	0	not_applicable	""	UNKNOWN	blocked	coordination	""	UNKNOWN	1	3	no_exact_coordination_match|no_terminal_outcome_observed
+acd-actionable-20260715-2057	shakacode/agent-coordination-dashboard	adhoc:20260715-qa-63	qa63-lifecycle	failed	true	1	30	true	true	0	not_applicable	""	UNKNOWN	failed	coordination	""	reconstructable	3	3	""
+acd-actionable-20260715-2057	shakacode/agent-coordination-dashboard	adhoc:20260715-qa-65	qa65-recommendations	blocked	true	0	0	false	false	0	not_applicable	""	UNKNOWN	blocked	coordination	""	UNKNOWN	1	3	no_exact_coordination_match|no_terminal_outcome_observed
+acd-b-0712-0107	shakacode/agent-coordination-dashboard	43	acd-b-i43	completed	true	1	16	true	true	0	not_applicable	""	UNKNOWN	done	coordination	""	reconstructable	3	3	""
+acd-b-0712-0107	shakacode/agent-coordination-dashboard	45	acd-b-i45	completed	true	1	16	true	true	0	not_applicable	""	UNKNOWN	done	coordination	""	reconstructable	3	3	""
+acd-b-0712-0107	shakacode/agent-coordination-dashboard	qa-43-45	acd-b-qa	completed	true	1	3	true	true	0	not_applicable	""	UNKNOWN	done	coordination	""	reconstructable	3	3	""
+acd-c-0712-0107	shakacode/agent-coordination-dashboard	29	acd-c-i29	done	true	0	2	true	true	0	not_applicable	""	UNKNOWN	done	coordination	""	reconstructable	3	3	""
+acd-c-0712-0107	shakacode/agent-coordination-dashboard	46	acd-c-i46	done	true	1	19	true	true	1	pass	MERGED	merged	merged	github	SUCCESS	reconstructable	4	4	""
+acd-c-0712-0107	shakacode/agent-coordination-dashboard	47	acd-c-i47	done	true	1	1	true	true	1	pass	MERGED	merged	merged	github	SUCCESS	reconstructable	4	4	""
+acd-c-0712-0107	shakacode/agent-coordination-dashboard	qa-46-47	acd-c-qa	done	true	0	1	true	true	0	not_applicable	""	UNKNOWN	done	coordination	""	reconstructable	3	3	""
+acd-c-pr61-followup-0714	shakacode/agent-coordination-dashboard	61	acd-c-pr61-stale-actions	done	true	1	1	true	true	1	pass	MERGED	merged	merged	github	SUCCESS	reconstructable	4	4	""
+acd-datafix-20260715-2339	shakacode/agent-coordination-dashboard	66	qa|ui	done	true	1	1	true	true	1	pass	MERGED	merged	merged	github	SUCCESS	reconstructable	4	4	""
+acd-datafix-20260715-2339	shakacode/agent-coordination-dashboard	67	qa|ui	done	true	1	1	true	true	1	pass	MERGED	merged	merged	github	SUCCESS	reconstructable	4	4	""
+acd-datafix-20260715-2339	shakacode/agent-coordination-dashboard	68	qa|server	active|done	true	1	0	true	true	1	pass	MERGED	merged	merged	github	SUCCESS	reconstructable	4	4	""
+acda-2026-07-09-1753	shakacode/agent-coordination-dashboard	27	demo|qa-demo	complete|merged	true	1	0	true	true	1	pass	MERGED	merged	merged	github	SUCCESS	reconstructable	4	4	""
+acda-2026-07-09-1753	shakacode/agent-coordination-dashboard	28	publish-prep|qa-demo	complete|merged	true	1	0	true	true	1	pass	MERGED	merged	merged	github	SUCCESS	reconstructable	4	4	""
+acda-2026-07-09-1753	shakacode/agent-coordination-dashboard	29	operator-split	complete	true	1	0	true	true	0	not_applicable	""	UNKNOWN	done	coordination	""	reconstructable	3	3	""
+acda-2026-07-09-1753	shakacode/agent-coordination-dashboard	7	license-check	complete	true	0	0	false	true	0	not_applicable	""	UNKNOWN	done	coordination	""	observed_only	2	3	no_exact_coordination_match
+acda-operator-ux	shakacode/agent-coordination-dashboard	33	closeout-33|impl-33|qa-33	completed	true	1	24	true	true	1	pass	MERGED	merged	merged	github	SUCCESS	reconstructable	4	4	""
+acda-operator-ux	shakacode/agent-coordination-dashboard	34	closeout-34|impl-34|qa-34	completed	true	1	10	true	true	1	pass	MERGED	merged	merged	github	SUCCESS	reconstructable	4	4	""
+acda-operator-ux	shakacode/agent-coordination-dashboard	35	closeout-35|impl-35|qa-35	completed	true	1	15	true	true	1	pass	MERGED	merged	merged	github	SUCCESS	reconstructable	4	4	""
+acda-operator-ux	shakacode/agent-coordination-dashboard	36	decision-36	completed	true	0	2	true	true	0	not_applicable	""	UNKNOWN	done	coordination	""	reconstructable	3	3	""
+acda-operator-ux	shakacode/agent-coordination-dashboard	37	closeout-37|impl-37|qa-37	completed	true	1	8	true	true	1	pass	MERGED	merged	merged	github	SUCCESS	reconstructable	4	4	""
+acda-operator-ux	shakacode/agent-coordination-dashboard	49	audit-fix-49|closeout-audit-fix-49|qa-audit-fix-49	completed	true	1	6	true	true	1	pass	MERGED	merged	merged	github	SUCCESS	reconstructable	4	4	""
+aw-ce-pov-orbit	shakacode/agent-workflows	126	issue-126	merged	true	1	0	true	true	0	not_applicable	""	UNKNOWN	merged	coordination	""	reconstructable	3	3	""
+aw-ce-pov-orbit	shakacode/agent-workflows	127	issue-127	merged	true	1	0	true	true	0	not_applicable	""	UNKNOWN	merged	coordination	""	reconstructable	3	3	""
+aw-ce-pov-orbit	shakacode/agent-workflows	128	issue-128	done	true	1	0	true	true	0	not_applicable	""	UNKNOWN	done	coordination	""	reconstructable	3	3	""
+aw-ce-pov-orbit	shakacode/agent-workflows	129	issue-129	done	true	1	0	true	true	0	not_applicable	""	UNKNOWN	done	coordination	""	reconstructable	3	3	""
+aw-ce-pov-orbit	shakacode/agent-workflows	130	issue-130	done	true	1	1	true	true	1	pass	MERGED	merged	merged	github	SUCCESS	reconstructable	4	4	""
+aw-ce-pov-orbit	shakacode/agent-workflows	131	issue-131	merged	true	1	0	true	true	0	not_applicable	""	UNKNOWN	merged	coordination	""	reconstructable	3	3	""
+aw-ce-pov-orbit	shakacode/agent-workflows	132	issue-132	done	true	1	0	true	true	0	not_applicable	""	UNKNOWN	done	coordination	""	reconstructable	3	3	""
+aw-ce-pov-orbit	shakacode/agent-workflows	qa-ce	qa-ce	done	true	1	0	true	true	0	not_applicable	""	UNKNOWN	done	coordination	""	reconstructable	3	3	""
+aw-closeout-20260715-2057	shakacode/agent-workflows	152	audit|pr152-post-merge-fix|pr152-recovery|qa	complete|done	true	1	3	true	true	2	pass	MERGED	merged	merged	github	SUCCESS	reconstructable	4	4	""
+aw-closeout-20260715-2057	shakacode/agent-workflows	165	audit|pr165-disposition|qa	done	true	1	1	true	true	1	pass	MERGED	merged	merged	github	SUCCESS	reconstructable	4	4	""
+aw-closeout-20260715-2057	shakacode/agent-workflows	170	audit|pr170-closeout|qa	done	true	1	0	true	true	1	pass	MERGED	merged	merged	github	SUCCESS	reconstructable	4	4	""
+aw-closeout-20260715-2057	shakacode/agent-workflows	178	audit|pr178-closeout|qa	done	true	1	0	true	true	1	pass	MERGED	merged	merged	github	SUCCESS	reconstructable	4	4	""
+aw-closeout-20260715-2057	shakacode/agent-workflows	182	audit|pr182-closeout|qa	done	true	1	0	true	true	1	pass	MERGED	merged	merged	github	SUCCESS	reconstructable	4	4	""
+aw-closeout-20260715-2057	shakacode/agent-workflows	185	audit|qa	done	true	1	1	true	true	0	not_applicable	""	UNKNOWN	done	coordination	""	reconstructable	3	3	""
+awfa-20260709-1753-docs-adoption	shakacode/agent-workflows	100	maintainer-boundary	merged	true	1	0	true	true	0	not_applicable	""	UNKNOWN	merged	coordination	""	reconstructable	3	3	""
+awfa-20260709-1753-docs-adoption	shakacode/agent-workflows	101	topology-amend	merged	true	1	0	true	true	0	not_applicable	""	UNKNOWN	merged	coordination	""	reconstructable	3	3	""
+awfa-20260709-1753-docs-adoption	shakacode/agent-workflows	112	seam-init-corrective	merged	true	1	1	true	true	0	not_applicable	""	UNKNOWN	merged	coordination	""	reconstructable	3	3	""
+awfa-20260709-1753-docs-adoption	shakacode/agent-workflows	119	changelog-audit-followup|qa-seam-init	done|merged	true	1	3	true	true	0	not_applicable	""	UNKNOWN	merged	coordination	""	reconstructable	3	3	""
+awfa-20260709-1753-docs-adoption	shakacode/agent-workflows	80	changelog-followups	merged	true	1	0	true	true	0	not_applicable	""	UNKNOWN	merged	coordination	""	reconstructable	3	3	""
+awfa-20260709-1753-docs-adoption	shakacode/agent-workflows	84	changelog-followups	merged	true	1	0	true	true	0	not_applicable	""	UNKNOWN	merged	coordination	""	reconstructable	3	3	""
+awfa-20260709-1753-docs-adoption	shakacode/agent-workflows	99	seam-init	done	true	1	0	true	true	0	not_applicable	""	UNKNOWN	done	coordination	""	reconstructable	3	3	""
+awfb-20260709-1753	shakacode/agent-workflows	27	deep-review-eval	done	true	1	0	true	true	0	not_applicable	""	UNKNOWN	done	coordination	""	reconstructable	3	3	""
+awfb-20260709-1753	shakacode/agent-workflows	46	actions-exercise	done	true	1	0	true	true	0	not_applicable	""	UNKNOWN	done	coordination	""	reconstructable	3	3	""
+awfb-20260709-1753	shakacode/agent-workflows	59	host-output-check	done	true	1	0	true	true	0	not_applicable	""	UNKNOWN	done	coordination	""	reconstructable	3	3	""
+awfb-20260709-1753	shakacode/agent-workflows	81	final-head-qa|qa-workflow	done	true	1	0	true	true	0	not_applicable	""	UNKNOWN	done	coordination	""	reconstructable	3	3	""
+awfb-20260709-1753	shakacode/agent-workflows	82	host-validator|qa-workflow	done	true	1	0	true	true	0	not_applicable	""	UNKNOWN	done	coordination	""	reconstructable	3	3	""
+awr-a-20260716-1535	shakacode/agent-coordination	67	a2	done	true	1	1	true	true	1	pass	MERGED	merged	merged	github	SUCCESS	reconstructable	4	4	""
+awr-a-20260716-1535	shakacode/agent-coordination	68	a1|qa	done	true	1	4	true	true	1	pass	MERGED	merged	merged	github	SUCCESS	reconstructable	4	4	""
+awr-a-20260716-1535	shakacode/agent-coordination	75	a3|qa	done|unknown	true	0	0	false	true	1	fail	OPEN	UNKNOWN	done	coordination	SUCCESS	observed_only	2	4	no_exact_coordination_match|github_repo_mismatch
+awr-b-0716-1535		151	b3	done	false	0	0	false	true	0	not_applicable	""	UNKNOWN	done	coordination	""	observed_only	1	3	missing_repo_join_component|no_exact_coordination_match
+awr-b-0716-1535		154	b3	done	false	0	0	false	true	0	not_applicable	""	UNKNOWN	done	coordination	""	observed_only	1	3	missing_repo_join_component|no_exact_coordination_match
+awr-b-0716-1535		171	b3	done	false	0	0	false	true	0	not_applicable	""	UNKNOWN	done	coordination	""	observed_only	1	3	missing_repo_join_component|no_exact_coordination_match
+awr-b-0716-1535		175	b3	done	false	0	0	false	true	0	not_applicable	""	UNKNOWN	done	coordination	""	observed_only	1	3	missing_repo_join_component|no_exact_coordination_match
+awr-b-0716-1535		177	b4	done	false	0	0	false	true	0	not_applicable	""	UNKNOWN	done	coordination	""	observed_only	1	3	missing_repo_join_component|no_exact_coordination_match
+awr-b-0716-1535		23	b5	done	false	0	0	false	true	0	not_applicable	""	UNKNOWN	done	coordination	""	observed_only	1	3	missing_repo_join_component|no_exact_coordination_match
+awr-b-0716-1535		5	b1	done	false	0	0	false	true	0	not_applicable	""	UNKNOWN	done	coordination	""	observed_only	1	3	missing_repo_join_component|no_exact_coordination_match
+awr-b-0716-1535		6	b1	done	false	0	0	false	true	0	not_applicable	""	UNKNOWN	done	coordination	""	observed_only	1	3	missing_repo_join_component|no_exact_coordination_match
+awr-b-0716-1535		65	b2	done	false	0	0	false	true	0	not_applicable	""	UNKNOWN	done	coordination	""	observed_only	1	3	missing_repo_join_component|no_exact_coordination_match
+awr-b-0716-1535		8	b1	done	false	0	0	false	true	0	not_applicable	""	UNKNOWN	done	coordination	""	observed_only	1	3	missing_repo_join_component|no_exact_coordination_match
+batch-b	shakacode/react_on_rails	3972	docs	unknown	true	0	0	false	false	1	fail	""	UNKNOWN	UNKNOWN	github-unavailable	""	UNKNOWN	1	4	no_exact_coordination_match|no_terminal_outcome_observed|github_pr_url_invalid_or_unresolved
+batch-shakacode-control-plane-flow-2vl3ja	shakacode/control-plane-flow	pr:395	lane-pr-395|qa-pr-395	done|merged	true	1	24	true	true	1	pass	MERGED	merged	merged	github	SUCCESS	reconstructable	4	4	""
+cpf-b-20260716-1543	shakacode/control-plane-flow	379	issue379	done	true	1	1	true	true	1	pass	MERGED	merged	merged	github	SUCCESS	reconstructable	4	4	""
+cpf-b-20260716-1543	shakacode/control-plane-flow	382	issue382	done	true	1	1	true	true	1	pass	MERGED	merged	merged	github	SUCCESS	reconstructable	4	4	""
+cpf-b-20260716-1543	shakacode/control-plane-flow	383	issue383	done	true	1	1	true	true	1	pass	MERGED	merged	merged	github	SUCCESS	reconstructable	4	4	""
+cpf-b-20260716-1543	shakacode/control-plane-flow	387	batch-qa	unknown	true	0	0	false	false	0	not_applicable	""	UNKNOWN	UNKNOWN	coordination	""	UNKNOWN	1	3	no_exact_coordination_match|no_terminal_outcome_observed
+cpf-slow-suite-20260715-2057	shakacode/control-plane-flow	409	issue409-slow-suite	waiting_on_checks_or_review	true	1	21	true	false	1	pass	OPEN	open	open-pr	github	SUCCESS	UNKNOWN	3	4	no_terminal_outcome_observed
+cpflowA-release-0709-reef	shakacode/control-plane-flow	373	offline-tests|release-qa	merged|unknown	true	1	0	true	true	0	not_applicable	""	UNKNOWN	merged	coordination	""	reconstructable	3	3	""
+cpflowA-release-0709-reef	shakacode/control-plane-flow	374	release-qa|slow-ci	merged|unknown	true	1	0	true	true	0	not_applicable	""	UNKNOWN	merged	coordination	""	reconstructable	3	3	""
+cpflowA-release-0709-reef	shakacode/control-plane-flow	378	coverage|release-qa	merged|unknown	true	1	0	true	true	0	not_applicable	""	UNKNOWN	merged	coordination	""	reconstructable	3	3	""
+cpflowA-release-0709-reef	shakacode/control-plane-flow	398	release-qa|utf8	blocked|unknown	true	1	0	true	false	1	pass	CLOSED	closed-unmerged	closed-unmerged	github	SUCCESS	UNKNOWN	3	4	no_terminal_outcome_observed
+cpor-0710-docs-spawn	shakacode/cypress-playwright-on-rails	185	qa|spawn	done	true	1	1	true	true	1	pass	MERGED	merged	merged	github	SUCCESS	reconstructable	4	4	""
+cpor-0710-docs-spawn	shakacode/cypress-playwright-on-rails	236	docs|qa	done	true	1	2	true	true	1	pass	MERGED	merged	merged	github	SUCCESS	reconstructable	4	4	""
+hichee-07-13-1342-readonly-db	shakacode/hichee	9756	issue-9756|qa-9756	done	true	1	2	true	true	0	not_applicable	""	UNKNOWN	done	coordination	""	reconstructable	3	3	""
+hichee-07-14-1718-pr9768	shakacode/hichee	9768	pr-9768-closeout	done	true	1	1	true	true	1	pass	MERGED	merged	merged	github	FAILURE	reconstructable	4	4	""
+hichee-2026-07-17-deploy-verification-wave1	shakacode/hichee	9846	guard	done	true	1	1	true	true	1	pass	MERGED	merged	merged	github	PENDING	reconstructable	4	4	""
+hichee-2026-07-17-deploy-verification-wave1	shakacode/hichee	9847	sidekiq	done	true	1	1	true	true	1	pass	MERGED	merged	merged	github	PENDING	reconstructable	4	4	""
+hichee-2026-07-17-deploy-verification-wave1	shakacode/hichee	9848	db	done	true	1	1	true	true	1	pass	MERGED	merged	merged	github	FAILURE	reconstructable	4	4	""
+hichee-2026-07-17-deploy-verification-wave1	shakacode/hichee	9849	sentry	done	true	1	1	true	true	1	pass	MERGED	merged	merged	github	PENDING	reconstructable	4	4	""
+hichee-2026-07-17-deploy-verification-wave1	shakacode/hichee	9850	scout	done	true	1	1	true	true	1	pass	MERGED	merged	merged	github	PENDING	reconstructable	4	4	""
+hichee-2026-07-18-deploy-verification-wave2	shakacode/hichee	9845	preflight	unknown	true	0	0	false	false	0	not_applicable	""	UNKNOWN	UNKNOWN	coordination	""	UNKNOWN	1	3	no_exact_coordination_match|no_terminal_outcome_observed
+hichee-2026-07-18-deploy-verification-wave2	shakacode/hichee	9852	lifecycle	blocked	true	1	1	true	false	0	not_applicable	""	UNKNOWN	blocked	coordination	""	UNKNOWN	2	3	no_terminal_outcome_observed
+hichee-20260716-home-search-focus	shakacode/hichee	adhoc:20260716-home-search-focus-scroll	implementation	done	true	1	1	true	true	0	not_applicable	""	UNKNOWN	done	coordination	""	reconstructable	3	3	""
+hichee-20260716-home-search-focus	shakacode/hichee	adhoc:20260716-home-search-focus-scroll-qa	qa	done	true	1	1	true	true	0	not_applicable	""	UNKNOWN	done	coordination	""	reconstructable	3	3	""
+hichee-a-20260718-1022	shakacode/hichee	9786	a8	blocked	true	1	7	true	false	0	not_applicable	""	UNKNOWN	blocked	coordination	""	UNKNOWN	2	3	no_terminal_outcome_observed
+hichee-a-20260718-1022	shakacode/hichee	9806	a7|qa-a	done	true	1	4	true	true	0	not_applicable	""	UNKNOWN	done	coordination	""	reconstructable	3	3	""
+hichee-a-20260718-1022	shakacode/hichee	9833	a2	blocked_user_input	true	1	0	true	false	1	pass	OPEN	open	blocked-user-input	coordination	PENDING	UNKNOWN	3	4	no_terminal_outcome_observed
+hichee-a-20260718-1022	shakacode/hichee	9842	a1	blocked	true	1	4	true	false	1	pass	OPEN	open	open-pr	github	PENDING	UNKNOWN	3	4	no_terminal_outcome_observed
+hichee-a-20260718-1022	shakacode/hichee	9857	a6|qa-a	done|waiting_on_checks_or_review	true	1	1	true	true	0	not_applicable	""	UNKNOWN	conflicting-observations	coordination	""	reconstructable	3	3	""
+hichee-a-20260718-1022	shakacode/hichee	9865	a5|qa-a	done|no_pr_evidence	true	1	5	true	true	0	not_applicable	""	UNKNOWN	no-pr-evidence	coordination	""	reconstructable	3	3	""
+hichee-a-20260718-1022	shakacode/hichee	9868	a4|qa-a	done|waiting_on_checks_or_review	true	1	9	true	true	0	not_applicable	""	UNKNOWN	conflicting-observations	coordination	""	reconstructable	3	3	""
+hichee-a-20260718-1022	shakacode/hichee	9870	a3|qa-a	done|ready_no_merge_authority	true	1	1	true	true	0	not_applicable	""	UNKNOWN	conflicting-observations	coordination	""	reconstructable	3	3	""
+hichee-b-20260718-1022	shakacode/hichee	9698	b8|qa-b	heartbeat|unknown	true	1	3	true	false	0	not_applicable	""	UNKNOWN	in-progress	coordination	""	UNKNOWN	2	3	no_terminal_outcome_observed
+hichee-b-20260718-1022	shakacode/hichee	9703	b6|qa-b	unknown|waiting_on_checks_or_review	true	1	2	true	false	0	not_applicable	""	UNKNOWN	waiting	coordination	""	UNKNOWN	2	3	no_terminal_outcome_observed
+hichee-b-20260718-1022	shakacode/hichee	9708	b7|qa-b	in_progress|unknown	true	1	1	true	false	0	not_applicable	""	UNKNOWN	in-progress	coordination	""	UNKNOWN	2	3	no_terminal_outcome_observed
+hichee-b-20260718-1022	shakacode/hichee	9766	b3|qa-b	blocked|unknown	true	1	0	true	false	1	pass	OPEN	open	open-pr	github	PENDING	UNKNOWN	3	4	no_terminal_outcome_observed
+hichee-b-20260718-1022	shakacode/hichee	9809	b5|qa-b	in_progress|unknown	true	1	1	true	false	0	not_applicable	""	UNKNOWN	in-progress	coordination	""	UNKNOWN	2	3	no_terminal_outcome_observed
+hichee-b-20260718-1022	shakacode/hichee	9829	b2|qa-b	in_progress|unknown	true	1	2	true	false	1	pass	OPEN	open	open-pr	github	PENDING	UNKNOWN	3	4	no_terminal_outcome_observed
+hichee-b-20260718-1022	shakacode/hichee	9831	b1|qa-b	unknown|waiting_on_checks_or_review	true	1	1	true	false	1	pass	OPEN	open	open-pr	github	PENDING	UNKNOWN	3	4	no_terminal_outcome_observed
+hichee-b-20260718-1022	shakacode/hichee	9864	b4|qa-b	in_progress|unknown	true	1	2	true	false	0	not_applicable	""	UNKNOWN	in-progress	coordination	""	UNKNOWN	2	3	no_terminal_outcome_observed
+hichee-c-20260718-1022	shakacode/hichee	9466	c2	unknown	true	0	1	true	false	1	pass	OPEN	open	open-pr	github	PENDING	UNKNOWN	3	4	no_terminal_outcome_observed
+hichee-c-20260718-1022	shakacode/hichee	9697	c3	unknown	true	0	1	true	false	0	not_applicable	""	UNKNOWN	UNKNOWN	coordination	""	UNKNOWN	2	3	no_terminal_outcome_observed
+hichee-c-20260718-1022	shakacode/hichee	9704	c7	unknown	true	0	1	true	false	0	not_applicable	""	UNKNOWN	UNKNOWN	coordination	""	UNKNOWN	2	3	no_terminal_outcome_observed
+hichee-c-20260718-1022	shakacode/hichee	9706	c6	unknown	true	0	1	true	false	0	not_applicable	""	UNKNOWN	UNKNOWN	coordination	""	UNKNOWN	2	3	no_terminal_outcome_observed
+hichee-c-20260718-1022	shakacode/hichee	9707	c5	unknown	true	0	1	true	false	0	not_applicable	""	UNKNOWN	UNKNOWN	coordination	""	UNKNOWN	2	3	no_terminal_outcome_observed
+hichee-c-20260718-1022	shakacode/hichee	9710	c4	unknown	true	0	3	true	false	0	not_applicable	""	UNKNOWN	UNKNOWN	coordination	""	UNKNOWN	2	3	no_terminal_outcome_observed
+hichee-c-20260718-1022	shakacode/hichee	9797	c8	blocked	true	1	7	true	false	0	not_applicable	""	UNKNOWN	blocked	coordination	""	UNKNOWN	2	3	no_terminal_outcome_observed
+hichee-c-20260718-1022	shakacode/hichee	9827	c1	unknown	true	0	1	true	false	1	pass	OPEN	open	open-pr	github	PENDING	UNKNOWN	3	4	no_terminal_outcome_observed
+hichee-c-20260718-1022	shakacode/hichee	audit-c	audit-c	unknown	true	0	1	true	false	0	not_applicable	""	UNKNOWN	UNKNOWN	coordination	""	UNKNOWN	2	3	no_terminal_outcome_observed
+hichee-c-20260718-1022	shakacode/hichee	qa-c	qa-c	unknown	true	0	1	true	false	0	not_applicable	""	UNKNOWN	UNKNOWN	coordination	""	UNKNOWN	2	3	no_terminal_outcome_observed
+hichee-d-20260718-1022	shakacode/hichee	9693	d6	unknown	true	0	1	true	false	0	not_applicable	""	UNKNOWN	UNKNOWN	coordination	""	UNKNOWN	2	3	no_terminal_outcome_observed
+hichee-d-20260718-1022	shakacode/hichee	9803	d5	unknown	true	0	0	false	false	0	not_applicable	""	UNKNOWN	UNKNOWN	coordination	""	UNKNOWN	1	3	no_exact_coordination_match|no_terminal_outcome_observed
+hichee-d-20260718-1022	shakacode/hichee	9822	d4	unknown	true	0	0	false	false	0	not_applicable	""	UNKNOWN	UNKNOWN	coordination	""	UNKNOWN	1	3	no_exact_coordination_match|no_terminal_outcome_observed
+hichee-d-20260718-1022	shakacode/hichee	9826	d3	unknown	true	0	0	false	false	0	not_applicable	""	UNKNOWN	UNKNOWN	coordination	""	UNKNOWN	1	3	no_exact_coordination_match|no_terminal_outcome_observed
+hichee-d-20260718-1022	shakacode/hichee	9839	d2	blocked	true	1	0	true	false	0	not_applicable	""	UNKNOWN	blocked	coordination	""	UNKNOWN	2	3	no_terminal_outcome_observed
+hichee-d-20260718-1022	shakacode/hichee	9840	d1	done	true	1	2	true	true	0	not_applicable	""	UNKNOWN	done	coordination	""	reconstructable	3	3	""
+hichee-d-20260718-1022	shakacode/hichee	qa-d	qa-d	unknown	true	0	0	false	false	0	not_applicable	""	UNKNOWN	UNKNOWN	coordination	""	UNKNOWN	1	3	no_exact_coordination_match|no_terminal_outcome_observed
+hichee-pr9701-20260714	shakacode/hichee	9701	pr9701	done	true	1	1	true	true	1	pass	MERGED	merged	merged	github	FAILURE	reconstructable	4	4	""
+hichee-pr9815-20260718	shakacode/hichee	9815	hichee-9815-coral	done	true	1	1	true	true	1	pass	MERGED	merged	merged	github	PENDING	reconstructable	4	4	""
+hichee-pr9817-spring-opt-in-20260716	shakacode/hichee	9817	pr9817-qa	done	true	1	1	true	true	1	pass	MERGED	merged	merged	github	FAILURE	reconstructable	4	4	""
+hichee-prs-9824-9825-20260717	shakacode/hichee	9824	pr-9824|qa	done	true	1	1	true	true	1	pass	MERGED	merged	merged	github	PENDING	reconstructable	4	4	""
+hichee-prs-9824-9825-20260717	shakacode/hichee	9825	pr-9825|qa	done	true	1	1	true	true	1	pass	MERGED	merged	merged	github	PENDING	reconstructable	4	4	""
+hichee0715-koa	shakacode/hichee	9600	a2-fetch	done	true	1	1	true	true	0	not_applicable	""	UNKNOWN	done	coordination	""	reconstructable	3	3	""
+hichee0715-koa	shakacode/hichee	9628	b2-copy	done	true	1	1	true	true	0	not_applicable	""	UNKNOWN	done	coordination	""	reconstructable	3	3	""
+hichee0715-koa	shakacode/hichee	9629	c3-claudemd-9629	done	true	1	1	true	true	0	not_applicable	""	UNKNOWN	done	coordination	""	reconstructable	3	3	""
+hichee0715-koa	shakacode/hichee	9634	a3-whatscheaper	done	true	1	1	true	true	0	not_applicable	""	UNKNOWN	done	coordination	""	reconstructable	3	3	""
+hichee0715-koa	shakacode/hichee	9670	b1-predicate	done	true	1	1	true	true	0	not_applicable	""	UNKNOWN	done	coordination	""	reconstructable	3	3	""
+hichee0715-koa	shakacode/hichee	9672	a1-brakeman	done	true	1	1	true	true	0	not_applicable	""	UNKNOWN	done	coordination	""	reconstructable	3	3	""
+hichee0715-koa	shakacode/hichee	9685	c3-claudemd-9685	done	true	1	1	true	true	0	not_applicable	""	UNKNOWN	done	coordination	""	reconstructable	3	3	""
+hichee0715-koa	shakacode/hichee	9700	c3-claudemd-9700	done	true	1	1	true	true	0	not_applicable	""	UNKNOWN	done	coordination	""	reconstructable	3	3	""
+hichee0715-koa	shakacode/hichee	9783	c1-archdoc	abandoned	true	1	1	true	true	0	not_applicable	""	UNKNOWN	abandoned	coordination	""	reconstructable	3	3	""
+marketplace-e2e-20260718	shakacode/react-on-rails-demo-marketplace-rsc	142	route-contract	done	true	1	1	true	true	0	not_applicable	""	UNKNOWN	done	coordination	""	reconstructable	3	3	""
+marketplace-e2e-20260718	shakacode/react-on-rails-demo-marketplace-rsc	143	chromium-all-routes	done	true	1	1	true	true	1	pass	OPEN	open	open-pr	github	SUCCESS	reconstructable	4	4	""
+marketplace-e2e-20260718	shakacode/react-on-rails-demo-marketplace-rsc	144	playwright-search	done	true	1	1	true	true	1	pass	OPEN	open	open-pr	github	SUCCESS	reconstructable	4	4	""
+marketplace-e2e-20260718	shakacode/react-on-rails-demo-marketplace-rsc	145	playwright-product	done	true	1	1	true	true	1	pass	OPEN	open	open-pr	github	SUCCESS	reconstructable	4	4	""
+marketplace-e2e-20260718	shakacode/react-on-rails-demo-marketplace-rsc	146	playwright-blog-restaurant	done	true	1	1	true	true	1	pass	OPEN	open	open-pr	github	SUCCESS	reconstructable	4	4	""
+marketplace-e2e-20260718	shakacode/react-on-rails-demo-marketplace-rsc	86	playwright-blog-restaurant	done	true	1	0	true	true	1	pass	OPEN	open	open-pr	github	SUCCESS	reconstructable	4	4	""
+marketplace-e2e-20260718	shakacode/react-on-rails-demo-marketplace-rsc	marketplace-e2e-20260718:checker	checker	unknown	true	0	0	false	false	0	not_applicable	""	UNKNOWN	UNKNOWN	coordination	""	UNKNOWN	1	3	no_exact_coordination_match|no_terminal_outcome_observed
+marketplace-e2e-20260718	shakacode/react-on-rails-demo-marketplace-rsc	marketplace-e2e-20260718:qa	qa	in_progress	true	1	0	true	false	0	not_applicable	""	UNKNOWN	in-progress	coordination	""	UNKNOWN	2	3	no_terminal_outcome_observed
+private-dotfiles-20260717-all-open-prs	justin808/private-dotfiles	39	pr39	superseded	true	1	1	true	true	1	pass	CLOSED	closed-unmerged	superseded	coordination	UNKNOWN	reconstructable	4	4	""
+private-dotfiles-20260717-all-open-prs	justin808/private-dotfiles	41	pr41	done	true	1	1	true	true	1	pass	MERGED	merged	merged	github	UNKNOWN	reconstructable	4	4	""
+private-dotfiles-20260717-all-open-prs	justin808/private-dotfiles	42	pr42	done	true	1	1	true	true	1	pass	MERGED	merged	merged	github	UNKNOWN	reconstructable	4	4	""
+qa-http-20260712T145459Z-57140	qa/ac-a-20260712T145459Z-57140	one	http-one	done	true	1	2	true	true	1	fail	""	UNKNOWN	done	coordination	""	observed_only	3	4	github_pr_url_invalid_or_unresolved
+qa-http-20260712T145459Z-57140	qa/ac-a-20260712T145459Z-57140	two	http-two	superseded	true	1	1	true	true	1	fail	""	UNKNOWN	superseded	coordination	""	observed_only	3	4	github_pr_url_invalid_or_unresolved
+qa-http-stdin-20260712T145459Z-57140	qa/ac-a-20260712T145459Z-57140	stdin	http-stdin	abandoned	true	1	1	true	true	1	fail	""	UNKNOWN	abandoned	coordination	""	observed_only	3	4	github_pr_url_invalid_or_unresolved
+qa-pr57-http-path-20260712T150640Z-75520	qa/pr57-http-20260712T150640Z-75520	target	lane	unknown	true	0	0	false	false	0	not_applicable	""	UNKNOWN	UNKNOWN	coordination	""	UNKNOWN	1	3	no_exact_coordination_match|no_terminal_outcome_observed
+qa-pr57-http-stdin-20260712T150640Z-75520	qa/pr57-http-20260712T150640Z-75520	target	lane	unknown	true	0	0	false	false	0	not_applicable	""	UNKNOWN	UNKNOWN	coordination	""	UNKNOWN	1	3	no_exact_coordination_match|no_terminal_outcome_observed
+ror-17-0-0-rc10-demo-fleet-0713-1420-hst		135	marketplace-135-followup	done	false	0	0	false	true	1	fail	MERGED	merged	merged	github	SUCCESS	observed_only	1	4	missing_repo_join_component|no_exact_coordination_match
+ror-17-0-0-rc10-demo-fleet-0713-1420-hst		780	tutorial-780-followup	done	false	0	0	false	true	1	fail	MERGED	merged	merged	github	SUCCESS	observed_only	1	4	missing_repo_join_component|no_exact_coordination_match
+ror-17-0-0-rc10-demo-fleet-0713-1420-hst		rc10-flagship	flagship	done	false	0	0	false	true	1	fail	MERGED	merged	merged	github	SUCCESS	observed_only	1	4	missing_repo_join_component|no_exact_coordination_match
+ror-17-0-0-rc10-demo-fleet-0713-1420-hst		rc10-followup-independent-checker	followup-independent-checker	done	false	0	0	false	true	0	not_applicable	""	UNKNOWN	done	coordination	""	observed_only	1	3	missing_repo_join_component|no_exact_coordination_match
+ror-17-0-0-rc10-demo-fleet-0713-1420-hst		rc10-generator-gate	generator-gate	done	false	0	0	false	true	0	not_applicable	""	UNKNOWN	done	coordination	""	observed_only	1	3	missing_repo_join_component|no_exact_coordination_match
+ror-17-0-0-rc10-demo-fleet-0713-1420-hst		rc10-gumroad	gumroad	done	false	0	0	false	true	0	not_applicable	""	UNKNOWN	done	coordination	""	observed_only	1	3	missing_repo_join_component|no_exact_coordination_match
+ror-17-0-0-rc10-demo-fleet-0713-1420-hst		rc10-hacker-news	hacker-news	done	false	0	0	false	true	1	fail	MERGED	merged	merged	github	SUCCESS	observed_only	1	4	missing_repo_join_component|no_exact_coordination_match
+ror-17-0-0-rc10-demo-fleet-0713-1420-hst		rc10-hichee	hichee	done	false	0	0	false	true	0	not_applicable	""	UNKNOWN	done	coordination	""	observed_only	1	3	missing_repo_join_component|no_exact_coordination_match
+ror-17-0-0-rc10-demo-fleet-0713-1420-hst		rc10-independent-checker	independent-checker	done	false	0	0	false	true	0	not_applicable	""	UNKNOWN	done	coordination	""	observed_only	1	3	missing_repo_join_component|no_exact_coordination_match
+ror-17-0-0-rc10-demo-fleet-0713-1420-hst		rc10-marketplace	marketplace	done	false	0	0	false	true	1	fail	MERGED	merged	merged	github	SUCCESS	observed_only	1	4	missing_repo_join_component|no_exact_coordination_match
+ror-17-0-0-rc10-demo-fleet-0713-1420-hst		rc10-marketplace-combined-recheck	marketplace-rc10-combined-recheck	done	false	0	0	false	true	0	not_applicable	""	UNKNOWN	done	coordination	""	observed_only	1	3	missing_repo_join_component|no_exact_coordination_match
+ror-17-0-0-rc10-demo-fleet-0713-1420-hst		rc10-private-recheck	private-recheck-followup	done	false	0	0	false	true	0	not_applicable	""	UNKNOWN	done	coordination	""	observed_only	1	3	missing_repo_join_component|no_exact_coordination_match
+ror-17-0-0-rc10-demo-fleet-0713-1420-hst		rc10-published-starter-followup	published-starter-followup	done	false	0	0	false	true	0	not_applicable	""	UNKNOWN	done	coordination	""	observed_only	1	3	missing_repo_join_component|no_exact_coordination_match
+ror-17-0-0-rc10-demo-fleet-0713-1420-hst		rc10-soft-bundle-splitting	soft-bundle-splitting	done	false	0	0	false	true	0	not_applicable	""	UNKNOWN	done	coordination	""	observed_only	1	3	missing_repo_join_component|no_exact_coordination_match
+ror-17-0-0-rc10-demo-fleet-0713-1420-hst		rc10-soft-migration	soft-migration	done	false	0	0	false	true	0	not_applicable	""	UNKNOWN	done	coordination	""	observed_only	1	3	missing_repo_join_component|no_exact_coordination_match
+ror-17-0-0-rc10-demo-fleet-0713-1420-hst		rc10-soft-octochangelog	soft-octochangelog	done	false	0	0	false	true	0	not_applicable	""	UNKNOWN	done	coordination	""	observed_only	1	3	missing_repo_join_component|no_exact_coordination_match
+ror-17-0-0-rc10-demo-fleet-0713-1420-hst		rc10-soft-open-flights	soft-open-flights	done	false	0	0	false	true	0	not_applicable	""	UNKNOWN	done	coordination	""	observed_only	1	3	missing_repo_join_component|no_exact_coordination_match
+ror-17-0-0-rc10-demo-fleet-0713-1420-hst		rc10-soft-ssr-hmr	soft-ssr-hmr	done	false	0	0	false	true	0	not_applicable	""	UNKNOWN	done	coordination	""	observed_only	1	3	missing_repo_join_component|no_exact_coordination_match
+ror-17-0-0-rc10-demo-fleet-0713-1420-hst		rc10-tanstack	tanstack	done	false	0	0	false	true	1	fail	MERGED	merged	merged	github	SUCCESS	observed_only	1	4	missing_repo_join_component|no_exact_coordination_match
+ror-17-0-0-rc10-demo-fleet-0713-1420-hst		rc10-tutorial	tutorial	done	false	0	0	false	true	0	not_applicable	""	UNKNOWN	done	coordination	""	observed_only	1	3	missing_repo_join_component|no_exact_coordination_match
+ror-17-0-0-rc10-demo-fleet-0713-1420-hst		rc10-tutorial-combined-recheck	tutorial-rc10-combined-recheck	done	false	0	0	false	true	0	not_applicable	""	UNKNOWN	done	coordination	""	observed_only	1	3	missing_repo_join_component|no_exact_coordination_match
+ror-17-0-0-rc12-demo-fleet-0715-hst	shakacode/react_on_rails	adhoc:20260715-flagship	flagship	done	true	1	5	true	true	0	not_applicable	""	UNKNOWN	done	coordination	""	reconstructable	3	3	""
+ror-17-0-0-rc12-demo-fleet-0715-hst	shakacode/react_on_rails	adhoc:20260715-generator-install	generator-install	done	true	1	4	true	true	0	not_applicable	""	UNKNOWN	done	coordination	""	reconstructable	3	3	""
+ror-17-0-0-rc12-demo-fleet-0715-hst	shakacode/react_on_rails	adhoc:20260715-gumroad	gumroad	done	true	1	9	true	true	0	not_applicable	""	UNKNOWN	done	coordination	""	reconstructable	3	3	""
+ror-17-0-0-rc12-demo-fleet-0715-hst	shakacode/react_on_rails	adhoc:20260715-hacker-news	hacker-news	done	true	1	5	true	true	0	not_applicable	""	UNKNOWN	done	coordination	""	reconstructable	3	3	""
+ror-17-0-0-rc12-demo-fleet-0715-hst	shakacode/react_on_rails	adhoc:20260715-hichee	hichee	done	true	1	4	true	true	0	not_applicable	""	UNKNOWN	done	coordination	""	reconstructable	3	3	""
+ror-17-0-0-rc12-demo-fleet-0715-hst	shakacode/react_on_rails	adhoc:20260715-independent-audit	independent-audit	done	true	1	7	true	true	0	not_applicable	""	UNKNOWN	done	coordination	""	reconstructable	3	3	""
+ror-17-0-0-rc12-demo-fleet-0715-hst	shakacode/react_on_rails	adhoc:20260715-marketplace	marketplace	done	true	1	4	true	true	0	not_applicable	""	UNKNOWN	done	coordination	""	reconstructable	3	3	""
+ror-17-0-0-rc12-demo-fleet-0715-hst	shakacode/react_on_rails	adhoc:20260715-soft-bundle-splitting	soft-bundle-splitting	done	true	0	1	true	true	0	not_applicable	""	UNKNOWN	done	coordination	""	reconstructable	3	3	""
+ror-17-0-0-rc12-demo-fleet-0715-hst	shakacode/react_on_rails	adhoc:20260715-soft-migration	soft-migration	done	true	0	1	true	true	0	not_applicable	""	UNKNOWN	done	coordination	""	reconstructable	3	3	""
+ror-17-0-0-rc12-demo-fleet-0715-hst	shakacode/react_on_rails	adhoc:20260715-soft-octochangelog	soft-octochangelog	done	true	0	1	true	true	0	not_applicable	""	UNKNOWN	done	coordination	""	reconstructable	3	3	""
+ror-17-0-0-rc12-demo-fleet-0715-hst	shakacode/react_on_rails	adhoc:20260715-soft-open-flights	soft-open-flights	done	true	0	1	true	true	0	not_applicable	""	UNKNOWN	done	coordination	""	reconstructable	3	3	""
+ror-17-0-0-rc12-demo-fleet-0715-hst	shakacode/react_on_rails	adhoc:20260715-soft-ssr-hmr	soft-ssr-hmr	done	true	0	1	true	true	0	not_applicable	""	UNKNOWN	done	coordination	""	reconstructable	3	3	""
+ror-17-0-0-rc12-demo-fleet-0715-hst	shakacode/react_on_rails	adhoc:20260715-tanstack	tanstack	done	true	1	9	true	true	1	fail	OPEN	UNKNOWN	done	coordination	SUCCESS	observed_only	3	4	github_repo_mismatch
+ror-17-0-0-rc12-demo-fleet-0715-hst	shakacode/react_on_rails	adhoc:20260715-tutorial	tutorial	done	true	1	4	true	true	0	not_applicable	""	UNKNOWN	done	coordination	""	reconstructable	3	3	""
+ror-17-0-0-rc13-security-20260717	shakacode/react_on_rails	4629	diag-fix	ready	true	1	0	true	true	0	not_applicable	""	UNKNOWN	ready	coordination	""	reconstructable	3	3	""
+ror-17-0-0-rc13-security-20260717	shakacode/react_on_rails	qa-4629	diag-qa	blocked	true	1	0	true	false	0	not_applicable	""	UNKNOWN	blocked	coordination	""	UNKNOWN	2	3	no_terminal_outcome_observed
+ror-17-0-0-rsc187-disposition-20260717	shakacode/react_on_rails_rsc	187	rsc187-evidence|rsc187-qa	done	true	1	2	true	true	0	not_applicable	""	UNKNOWN	done	coordination	""	reconstructable	3	3	""
+ror-17-0-1-rsc419-investigation-20260717	shakacode/react_on_rails	4712	rsc419-discovery	done	true	1	1	true	true	0	not_applicable	""	UNKNOWN	done	coordination	""	reconstructable	3	3	""
+ror-4568-20260710	shakacode/react_on_rails	4568	impl	done	true	1	0	true	true	0	not_applicable	""	UNKNOWN	done	coordination	""	reconstructable	3	3	""
+ror-4568-20260710	shakacode/react_on_rails	4568-main-followup	main-followup	done	true	1	0	true	true	0	not_applicable	""	UNKNOWN	done	coordination	""	reconstructable	3	3	""
+ror-4568-20260710	shakacode/react_on_rails	4568-qa	qa	done	true	1	0	true	true	0	not_applicable	""	UNKNOWN	done	coordination	""	reconstructable	3	3	""
+ror-4568-20260710	shakacode/react_on_rails	4568-release-17.0.0	release	done	true	1	0	true	true	0	not_applicable	""	UNKNOWN	done	coordination	""	reconstructable	3	3	""
+ror-4568-20260710	shakacode/react_on_rails	4568-release-17.0.0-qa	release-qa	done	true	1	0	true	true	0	not_applicable	""	UNKNOWN	done	coordination	""	reconstructable	3	3	""
+ror-4620-main-cache-identity-20260716	shakacode/react_on_rails	4620	c4620|qa	done	true	1	4	true	true	1	pass	MERGED	merged	merged	github	SUCCESS	reconstructable	4	4	""
+ror-4626-closeout-20260712	shakacode/react_on_rails	4626	closeout	done	true	1	9	true	true	1	pass	MERGED	merged	merged	github	SUCCESS	reconstructable	4	4	""
+ror-4626-closeout-20260712	shakacode/react_on_rails	qa-4626	qa	done	true	1	3	true	true	1	pass	MERGED	merged	merged	github	SUCCESS	reconstructable	4	4	""
+ror-4626-closeout-20260712	shakacode/react_on_rails	review-4626	adversarial-review	done	true	1	9	true	true	1	pass	MERGED	merged	merged	github	SUCCESS	reconstructable	4	4	""
+ror-4627-workflow-exercise-20260714	shakacode/react_on_rails	4627	exercise	done	true	1	3	true	true	1	pass	CLOSED	closed-unmerged	closed-unmerged	github	SUCCESS	reconstructable	4	4	""
+ror-4627-workflow-exercise-20260714	shakacode/react_on_rails	audit-4627	audit	done	true	1	8	true	true	1	fail	""	UNKNOWN	done	coordination	""	observed_only	3	4	github_pr_url_invalid_or_unresolved
+ror-4627-workflow-exercise-20260714	shakacode/react_on_rails	control-4627	control	done	true	1	3	true	true	1	pass	CLOSED	closed-unmerged	closed-unmerged	github	SUCCESS	reconstructable	4	4	""
+ror-4627-workflow-exercise-20260714	shakacode/react_on_rails	qa-4627	qa	done	true	1	3	true	true	1	fail	""	UNKNOWN	done	coordination	""	observed_only	3	4	github_pr_url_invalid_or_unresolved
+ror-4641-rc10-20260713	shakacode/react_on_rails	4569	release-rc10	active	true	1	1	true	false	0	not_applicable	""	UNKNOWN	in-progress	coordination	""	UNKNOWN	2	3	no_terminal_outcome_observed
+ror-4641-rc10-20260713	shakacode/react_on_rails	4641	pr4641-closeout	active	true	1	1	true	true	0	not_applicable	""	UNKNOWN	in-progress	coordination	""	reconstructable	3	3	""
+ror-4641-rc10-20260713	shakacode/react_on_rails	adhoc:20260713-rc10-qa	qa-rc10	active	true	1	0	true	false	0	not_applicable	""	UNKNOWN	in-progress	coordination	""	UNKNOWN	2	3	no_terminal_outcome_observed
+ror-4653-demo-smoke-20260714-0910-hst	shakacode/react_on_rails	4653	implement	done	true	1	1	true	true	1	pass	MERGED	merged	merged	github	SUCCESS	reconstructable	4	4	""
+ror-4653-demo-smoke-20260714-0910-hst	shakacode/react_on_rails	audit-4653	audit	done	true	1	1	true	true	1	pass	MERGED	merged	merged	github	SUCCESS	reconstructable	4	4	""
+ror-4653-demo-smoke-20260714-0910-hst	shakacode/react_on_rails	qa-4653	qa	done	true	1	1	true	true	1	pass	MERGED	merged	merged	github	SUCCESS	reconstructable	4	4	""
+ror-a-ci-fleet-lifecycle-20260718	shakacode/react_on_rails	4682	ci-4682	done	true	1	2	true	true	1	pass	CLOSED	closed-unmerged	closed-unmerged	github	SUCCESS	reconstructable	4	4	""
+ror-a-ci-fleet-lifecycle-20260718	shakacode/react_on_rails	4683	generator-4683	done	true	1	5	true	true	1	pass	MERGED	merged	merged	github	SUCCESS	reconstructable	4	4	""
+ror-a-ci-fleet-lifecycle-20260718	shakacode/react_on_rails	4713	lifecycle-4713	done	true	1	1	true	true	1	pass	MERGED	merged	merged	github	SUCCESS	reconstructable	4	4	""
+ror-a-ci-fleet-lifecycle-20260718	shakacode/react_on_rails	qa-ror-a-ci-fleet-lifecycle-20260718	qa	done	true	1	1	true	true	1	pass	MERGED	merged	merged	github	SUCCESS	reconstructable	4	4	""
+ror-a-open-pr-closeout-20260715	shakacode/react_on_rails	4507	a4507|completed-audit	unknown	true	0	0	false	false	0	not_applicable	""	UNKNOWN	UNKNOWN	coordination	""	UNKNOWN	1	3	no_exact_coordination_match|no_terminal_outcome_observed
+ror-a-open-pr-closeout-20260715	shakacode/react_on_rails	4592	a-qa|a4592|completed-audit	unknown|waiting_on_checks_or_review	true	1	0	true	false	1	pass	OPEN	open	open-pr	github	SUCCESS	UNKNOWN	3	4	no_terminal_outcome_observed
+ror-a-open-pr-closeout-20260715	shakacode/react_on_rails	4599	a-qa|a4599|completed-audit	done|unknown	true	1	1	true	true	1	pass	MERGED	merged	merged	github	SUCCESS	reconstructable	4	4	""
+ror-a-open-pr-closeout-20260715	shakacode/react_on_rails	4606	a-qa|a4606|completed-audit	blocked|unknown	true	1	0	true	false	1	pass	MERGED	merged	merged	github	SUCCESS	UNKNOWN	3	4	no_terminal_outcome_observed
+ror-a-open-pr-closeout-20260715	shakacode/react_on_rails	4681	a4681|completed-audit	done|unknown	true	1	1	true	true	0	not_applicable	""	UNKNOWN	done	coordination	""	reconstructable	3	3	""
+ror-a-pr4552-cedar	shakacode/react_on_rails	4552	merge-license|qa-license-config	done	true	1	0	true	true	1	pass	MERGED	merged	merged	github	SUCCESS	reconstructable	4	4	""
+ror-a-stalled-prs-20260712	shakacode/react_on_rails	4485	pr4485|qa-a	done	true	1	0	true	true	1	pass	MERGED	merged	merged	github	SUCCESS	reconstructable	4	4	""
+ror-a-stalled-prs-20260712	shakacode/react_on_rails	4546	pr4546	done	true	1	0	true	true	1	pass	MERGED	merged	merged	github	SUCCESS	reconstructable	4	4	""
+ror-a-stalled-prs-20260712	shakacode/react_on_rails	4558	pr4558	done	true	1	0	true	true	1	pass	MERGED	merged	merged	github	SUCCESS	reconstructable	4	4	""
+ror-a-stalled-prs-20260712	shakacode/react_on_rails	4559	pr4559	done	true	1	1	true	true	1	pass	CLOSED	closed-unmerged	closed-unmerged	github	SUCCESS	reconstructable	4	4	""
+ror-b-4501-20260709-1733	shakacode/react_on_rails	4501	docs-residual|qa-docs-sync	done	true	1	0	true	true	0	not_applicable	""	UNKNOWN	done	coordination	""	reconstructable	3	3	""
+ror-b-ci-workflows-20260715	shakacode/react_on_rails	4613	b4613	done	true	1	1	true	true	0	not_applicable	""	UNKNOWN	done	coordination	""	reconstructable	3	3	""
+ror-b-ci-workflows-20260715	shakacode/react_on_rails	4655	b4655	done	true	1	3	true	true	1	pass	MERGED	merged	merged	github	SUCCESS	reconstructable	4	4	""
+ror-b-ci-workflows-20260715	shakacode/react_on_rails	4663	b4663	blocked	true	0	2	true	false	0	not_applicable	""	UNKNOWN	blocked	coordination	""	UNKNOWN	2	3	no_terminal_outcome_observed
+ror-b-ci-workflows-20260715	shakacode/react_on_rails	4682	b4682	waiting	true	0	4	true	true	0	not_applicable	""	UNKNOWN	waiting	coordination	""	reconstructable	3	3	""
+ror-b-ci-workflows-20260715	shakacode/react_on_rails	4683	b4683	waiting	true	0	3	true	true	0	not_applicable	""	UNKNOWN	waiting	coordination	""	reconstructable	3	3	""
+ror-b-ci-workflows-20260715	shakacode/react_on_rails	qa-ror-b-ci-workflows-20260715	b-qa	unknown	true	0	0	false	false	0	not_applicable	""	UNKNOWN	UNKNOWN	coordination	""	UNKNOWN	1	3	no_exact_coordination_match|no_terminal_outcome_observed
+ror-b-demo-fleet-health-20260718	shakacode/react_on_rails	3898	fleet-core-3898|fleet-discovery|qa	blocked|done|merged	true	1	0	true	true	1	pass	MERGED	merged	merged	github	SUCCESS	reconstructable	4	4	""
+ror-b-demo-fleet-health-20260718	shakacode/react_on_rails	fleet-final-20260718	flagship-final|gumroad-final|hacker-news-final|marketplace-final|tanstack-final|tutorial-final	blocked	true	0	0	false	false	0	not_applicable	""	UNKNOWN	blocked	coordination	""	UNKNOWN	1	3	no_exact_coordination_match|no_terminal_outcome_observed
+ror-b-demo-fleet-health-20260718	shakacode/react_on_rails	public-soft-and-archived	public-report-only	done	true	0	0	false	true	0	not_applicable	""	UNKNOWN	done	coordination	""	observed_only	2	3	no_exact_coordination_match
+ror-b-pro-ember-20260713-1528	shakacode/react_on_rails	4642	decision-4642	done	true	0	1	true	true	0	not_applicable	""	UNKNOWN	done	coordination	""	reconstructable	3	3	""
+ror-b-pro-ember-20260713-1528	shakacode/react_on_rails	4644	smoke-4644	done	true	1	4	true	true	1	pass	MERGED	merged	merged	github	SUCCESS	reconstructable	4	4	""
+ror-b-pro-ember-20260713-1528	shakacode/react_on_rails	audit-pro-batch	audit-pro	done	true	1	1	true	true	1	pass	MERGED	merged	merged	github	SUCCESS	reconstructable	4	4	""
+ror-b-pro-ember-20260713-1528	shakacode/react_on_rails	qa-pro-4644	qa-pro	done	true	1	2	true	true	1	pass	MERGED	merged	merged	github	SUCCESS	reconstructable	4	4	""
+ror-b-release-rsc-20260712	shakacode/react_on_rails	4357	external4357	external_gate_failing	true	0	1	true	false	0	not_applicable	""	UNKNOWN	blocked	coordination	""	UNKNOWN	2	3	no_terminal_outcome_observed
+ror-b-release-rsc-20260712	shakacode/react_on_rails	4536	changelog4536	merged	true	1	2	true	true	1	pass	MERGED	merged	merged	github	SUCCESS	reconstructable	4	4	""
+ror-b-release-rsc-20260712	shakacode/react_on_rails	4557	fouc4557-4561|qa-b	blocked	true	0	0	false	false	0	not_applicable	""	UNKNOWN	blocked	coordination	""	UNKNOWN	1	3	no_exact_coordination_match|no_terminal_outcome_observed
+ror-b-release-rsc-20260712	shakacode/react_on_rails	4561	fouc4557-4561|qa-b	blocked	true	0	0	false	false	0	not_applicable	""	UNKNOWN	blocked	coordination	""	UNKNOWN	1	3	no_exact_coordination_match|no_terminal_outcome_observed
+ror-b-release-rsc-20260712	shakacode/react_on_rails	4569	qa-b|release4569	blocked	true	0	4	true	false	0	not_applicable	""	UNKNOWN	blocked	coordination	""	UNKNOWN	2	3	no_terminal_outcome_observed
+ror-backport-main-to-release-20260715	shakacode/react_on_rails	adhoc-20260715-backport-4652	backport-4652	done	true	1	2	true	true	1	pass	MERGED	merged	merged	github	SUCCESS	reconstructable	4	4	""
+ror-backport-main-to-release-20260715	shakacode/react_on_rails	adhoc-20260715-backport-4654	backport-4654	done	true	1	2	true	true	1	pass	MERGED	merged	merged	github	SUCCESS	reconstructable	4	4	""
+ror-backport-main-to-release-20260715	shakacode/react_on_rails	adhoc-20260715-backport-4656	backport-4656	done	true	1	2	true	true	1	pass	MERGED	merged	merged	github	SUCCESS	reconstructable	4	4	""
+ror-backport-main-to-release-20260715	shakacode/react_on_rails	adhoc-20260715-backport-4658	backport-4658	done	true	1	2	true	true	1	pass	MERGED	merged	merged	github	SUCCESS	reconstructable	4	4	""
+ror-backport-main-to-release-20260715	shakacode/react_on_rails	adhoc-20260715-backport-4661	backport-4661	done	true	1	2	true	true	1	pass	MERGED	merged	merged	github	SUCCESS	reconstructable	4	4	""
+ror-backport-main-to-release-20260715	shakacode/react_on_rails	adhoc-20260715-backport-batch-qa	batch-qa	done	true	1	1	true	true	0	not_applicable	""	UNKNOWN	done	coordination	""	reconstructable	3	3	""
+ror-backport-main-to-release-20260715	shakacode/react_on_rails	adhoc-20260715-forward-port-4676-fix	forward-port-4676-fix	done	true	1	3	true	true	1	pass	MERGED	merged	merged	github	SUCCESS	reconstructable	4	4	""
+ror-bugs-20260717	shakacode/react_on_rails	4581	lane-4581	unknown	true	0	0	false	false	0	not_applicable	""	UNKNOWN	UNKNOWN	coordination	""	UNKNOWN	1	3	no_exact_coordination_match|no_terminal_outcome_observed
+ror-bugs-20260717	shakacode/react_on_rails	4619	lane-4619	unknown	true	0	0	false	false	0	not_applicable	""	UNKNOWN	UNKNOWN	coordination	""	UNKNOWN	1	3	no_exact_coordination_match|no_terminal_outcome_observed
+ror-bugs-20260717	shakacode/react_on_rails	4639	lane-4639	unknown	true	0	0	false	false	0	not_applicable	""	UNKNOWN	UNKNOWN	coordination	""	UNKNOWN	1	3	no_exact_coordination_match|no_terminal_outcome_observed
+ror-bugs-20260717	shakacode/react_on_rails	4710	lane-4710	unknown	true	0	0	false	false	0	not_applicable	""	UNKNOWN	UNKNOWN	coordination	""	UNKNOWN	1	3	no_exact_coordination_match|no_terminal_outcome_observed
+ror-bugs-20260717	shakacode/react_on_rails	4712	lane-4712	unknown	true	0	0	false	false	0	not_applicable	""	UNKNOWN	UNKNOWN	coordination	""	UNKNOWN	1	3	no_exact_coordination_match|no_terminal_outcome_observed
+ror-c-20260716-1543-pro-node-residuals	shakacode/react_on_rails	4313	fix-4313-knip|lane-4313	done|superseded	true	1	4	true	true	2	pass	MERGED	merged	merged	github	SUCCESS	reconstructable	4	4	""
+ror-c-20260716-1543-pro-node-residuals	shakacode/react_on_rails	4325	lane-4325	done	true	1	3	true	true	1	pass	MERGED	merged	merged	github	SUCCESS	reconstructable	4	4	""
+ror-c-20260716-1543-pro-node-residuals	shakacode/react_on_rails	4506	lane-4506	done	true	1	0	true	true	0	not_applicable	""	UNKNOWN	done	coordination	""	reconstructable	3	3	""
+ror-c-20260716-1543-pro-node-residuals	shakacode/react_on_rails	4688	lane-4313	done	true	1	1	true	true	1	pass	MERGED	merged	merged	github	SUCCESS	reconstructable	4	4	""
+ror-c-20260716-1543-pro-node-residuals	shakacode/react_on_rails	4719	qa-4325	done	true	1	2	true	true	1	pass	MERGED	merged	merged	github	SUCCESS	reconstructable	4	4	""
+ror-c-pro-rsc-20260715	shakacode/react_on_rails	4329	c4329|qa	done	true	1	3	true	true	1	pass	MERGED	merged	merged	github	SUCCESS	reconstructable	4	4	""
+ror-c-pro-rsc-20260715	shakacode/react_on_rails	4506	c4506	done	true	0	1	true	true	0	not_applicable	""	UNKNOWN	done	coordination	""	reconstructable	3	3	""
+ror-c-pro-rsc-20260715	shakacode/react_on_rails	4557	c4557|qa	blocked|done	true	1	1	true	true	1	pass	MERGED	merged	merged	github	SUCCESS	reconstructable	4	4	""
+ror-c-pro-rsc-20260715	shakacode/react_on_rails	4561	c4561|qa	blocked|done	true	1	1	true	true	1	pass	MERGED	merged	merged	github	SUCCESS	reconstructable	4	4	""
+ror-c-pro-rsc-20260715	shakacode/react_on_rails	4569	d4569	blocked	true	0	0	false	false	0	not_applicable	""	UNKNOWN	blocked	coordination	""	UNKNOWN	1	3	no_exact_coordination_match|no_terminal_outcome_observed
+ror-c-pro-rsc-20260715	shakacode/react_on_rails	4620	c4620|qa	blocked|done	true	0	1	true	true	1	pass	MERGED	merged	merged	github	SUCCESS	reconstructable	4	4	""
+ror-c-security-tests-20260712	shakacode/react_on_rails	4565	tests4565	done	true	1	1	true	true	1	pass	MERGED	merged	merged	github	SUCCESS	reconstructable	4	4	""
+ror-c-security-tests-20260712	shakacode/react_on_rails	4595	auth4595	done	true	1	1	true	true	1	pass	MERGED	merged	merged	github	SUCCESS	reconstructable	4	4	""
+ror-c-security-tests-20260712	shakacode/react_on_rails	4596	node4596	done	true	1	1	true	true	1	pass	MERGED	merged	merged	github	SUCCESS	reconstructable	4	4	""
+ror-c-security-tests-20260712	shakacode/react_on_rails	4597	ruby4597	done	true	1	1	true	true	1	pass	MERGED	merged	merged	github	SUCCESS	reconstructable	4	4	""
+ror-c-security-tests-20260712	shakacode/react_on_rails	4609	doc4609	done	true	1	1	true	true	1	pass	MERGED	merged	merged	github	SUCCESS	reconstructable	4	4	""
+ror-c-security-tests-20260712	shakacode/react_on_rails	qa-c	qa-c	done	true	1	1	true	true	0	not_applicable	""	UNKNOWN	done	coordination	""	reconstructable	3	3	""
+ror-ci-20260717	shakacode/react_on_rails	pr:4691	lane-4691	unknown	true	0	0	false	false	0	not_applicable	""	UNKNOWN	UNKNOWN	coordination	""	UNKNOWN	1	3	no_exact_coordination_match|no_terminal_outcome_observed
+ror-ci-20260717	shakacode/react_on_rails	pr:4692	lane-4692	unknown	true	0	0	false	false	0	not_applicable	""	UNKNOWN	UNKNOWN	coordination	""	UNKNOWN	1	3	no_exact_coordination_match|no_terminal_outcome_observed
+ror-ci-20260717	shakacode/react_on_rails	pr:4714	lane-4714	unknown	true	0	0	false	false	0	not_applicable	""	UNKNOWN	UNKNOWN	coordination	""	UNKNOWN	1	3	no_exact_coordination_match|no_terminal_outcome_observed
+ror-d-20260716-1543-rspack-adoption-recovery	shakacode/react_on_rails	4600	bench4600	done	true	1	1	true	true	1	pass	MERGED	merged	merged	github	SUCCESS	reconstructable	4	4	""
+ror-d-20260716-1543-rspack-adoption-recovery	shakacode/react_on_rails	4601	doc4601	done	true	1	1	true	true	1	pass	MERGED	merged	merged	github	SUCCESS	reconstructable	4	4	""
+ror-d-20260716-1543-rspack-adoption-recovery	shakacode/react_on_rails	4603	eval4603	done	true	0	1	true	true	1	pass	MERGED	merged	merged	github	SUCCESS	reconstructable	4	4	""
+ror-d-adoption-proof-20260712	shakacode/react_on_rails	4600	bench4600	done	true	0	0	false	true	0	not_applicable	""	UNKNOWN	done	coordination	""	observed_only	2	3	no_exact_coordination_match
+ror-d-adoption-proof-20260712	shakacode/react_on_rails	4601	doc4601	done	true	0	0	false	true	0	not_applicable	""	UNKNOWN	done	coordination	""	observed_only	2	3	no_exact_coordination_match
+ror-d-adoption-proof-20260712	shakacode/react_on_rails	4602	doctor4602	done	true	1	0	true	true	0	not_applicable	""	UNKNOWN	done	coordination	""	reconstructable	3	3	""
+ror-d-adoption-proof-20260712	shakacode/react_on_rails	4603	eval4603	done	true	0	0	false	true	0	not_applicable	""	UNKNOWN	done	coordination	""	observed_only	2	3	no_exact_coordination_match
+ror-d-adoption-proof-20260712	shakacode/react_on_rails	4604	install4604	done	true	1	0	true	true	0	not_applicable	""	UNKNOWN	done	coordination	""	reconstructable	3	3	""
+ror-d-adoption-proof-20260712	shakacode/react_on_rails	qa-d	qa-d	done	true	1	1	true	true	0	not_applicable	""	UNKNOWN	done	coordination	""	reconstructable	3	3	""
+ror-d-roadmap-evidence-20260715	shakacode/react_on_rails	4073	d4073	abandoned	true	1	1	true	true	0	not_applicable	""	UNKNOWN	abandoned	coordination	""	reconstructable	3	3	""
+ror-d-roadmap-evidence-20260715	shakacode/react_on_rails	4271	d4271	done	true	1	1	true	true	0	not_applicable	""	UNKNOWN	done	coordination	""	reconstructable	3	3	""
+ror-d-roadmap-evidence-20260715	shakacode/react_on_rails	4274	d4274	done	true	1	0	true	true	0	not_applicable	""	UNKNOWN	done	coordination	""	reconstructable	3	3	""
+ror-d-roadmap-evidence-20260715	shakacode/react_on_rails	4279	d4279	done	true	1	1	true	true	0	not_applicable	""	UNKNOWN	done	coordination	""	reconstructable	3	3	""
+ror-d-roadmap-evidence-20260715	shakacode/react_on_rails	4282	d4274	done	true	1	1	true	true	0	not_applicable	""	UNKNOWN	done	coordination	""	reconstructable	3	3	""
+ror-d-roadmap-evidence-20260715	shakacode/react_on_rails	4605	d4605	blocked	true	0	0	false	false	0	not_applicable	""	UNKNOWN	blocked	coordination	""	UNKNOWN	1	3	no_exact_coordination_match|no_terminal_outcome_observed
+ror-docs1-20260717	shakacode/react_on_rails	4633	lane-4636	unknown	true	0	0	false	false	0	not_applicable	""	UNKNOWN	UNKNOWN	coordination	""	UNKNOWN	1	3	no_exact_coordination_match|no_terminal_outcome_observed
+ror-docs1-20260717	shakacode/react_on_rails	4634	lane-4637	unknown	true	0	0	false	false	0	not_applicable	""	UNKNOWN	UNKNOWN	coordination	""	UNKNOWN	1	3	no_exact_coordination_match|no_terminal_outcome_observed
+ror-docs1-20260717	shakacode/react_on_rails	4638	lane-4640	unknown	true	0	0	false	false	0	not_applicable	""	UNKNOWN	UNKNOWN	coordination	""	UNKNOWN	1	3	no_exact_coordination_match|no_terminal_outcome_observed
+ror-docs1-20260717	shakacode/react_on_rails	4703	lane-4708	unknown	true	0	0	false	false	0	not_applicable	""	UNKNOWN	UNKNOWN	coordination	""	UNKNOWN	1	3	no_exact_coordination_match|no_terminal_outcome_observed
+ror-docs1-20260717	shakacode/react_on_rails	4704	lane-4706	unknown	true	0	0	false	false	0	not_applicable	""	UNKNOWN	UNKNOWN	coordination	""	UNKNOWN	1	3	no_exact_coordination_match|no_terminal_outcome_observed
+ror-docs1-20260717	shakacode/react_on_rails	pr:4636	lane-4636	unknown	true	0	0	false	false	0	not_applicable	""	UNKNOWN	UNKNOWN	coordination	""	UNKNOWN	1	3	no_exact_coordination_match|no_terminal_outcome_observed
+ror-docs1-20260717	shakacode/react_on_rails	pr:4637	lane-4637	unknown	true	0	0	false	false	0	not_applicable	""	UNKNOWN	UNKNOWN	coordination	""	UNKNOWN	1	3	no_exact_coordination_match|no_terminal_outcome_observed
+ror-docs1-20260717	shakacode/react_on_rails	pr:4640	lane-4640	unknown	true	0	0	false	false	0	not_applicable	""	UNKNOWN	UNKNOWN	coordination	""	UNKNOWN	1	3	no_exact_coordination_match|no_terminal_outcome_observed
+ror-docs1-20260717	shakacode/react_on_rails	pr:4706	lane-4706	unknown	true	0	0	false	false	0	not_applicable	""	UNKNOWN	UNKNOWN	coordination	""	UNKNOWN	1	3	no_exact_coordination_match|no_terminal_outcome_observed
+ror-docs1-20260717	shakacode/react_on_rails	pr:4708	lane-4708	unknown	true	0	0	false	false	0	not_applicable	""	UNKNOWN	UNKNOWN	coordination	""	UNKNOWN	1	3	no_exact_coordination_match|no_terminal_outcome_observed
+ror-docs2-20260717	shakacode/react_on_rails	4702	lane-4707	in_progress	true	0	0	false	false	0	not_applicable	""	UNKNOWN	in-progress	coordination	""	UNKNOWN	1	3	no_exact_coordination_match|no_terminal_outcome_observed
+ror-docs2-20260717	shakacode/react_on_rails	4705	lane-4709	in_progress	true	0	0	false	false	0	not_applicable	""	UNKNOWN	in-progress	coordination	""	UNKNOWN	1	3	no_exact_coordination_match|no_terminal_outcome_observed
+ror-docs2-20260717	shakacode/react_on_rails	pr:4707	lane-4707	in_progress	true	0	0	false	false	0	not_applicable	""	UNKNOWN	in-progress	coordination	""	UNKNOWN	1	3	no_exact_coordination_match|no_terminal_outcome_observed
+ror-docs2-20260717	shakacode/react_on_rails	pr:4709	lane-4709	in_progress	true	0	0	false	false	0	not_applicable	""	UNKNOWN	in-progress	coordination	""	UNKNOWN	1	3	no_exact_coordination_match|no_terminal_outcome_observed
+ror-pr4564-20260710-1813	shakacode/react_on_rails	4564	adversarial-review|post-merge-audit|pr4564|qa	done|merged	true	1	0	true	true	0	not_applicable	""	UNKNOWN	merged	coordination	""	reconstructable	3	3	""
+ror-pro-20260717	shakacode/react_on_rails	4571	lane-4575	unknown	true	0	0	false	false	0	not_applicable	""	UNKNOWN	UNKNOWN	coordination	""	UNKNOWN	1	3	no_exact_coordination_match|no_terminal_outcome_observed
+ror-pro-20260717	shakacode/react_on_rails	4620	lane-4701	in_progress	true	0	0	false	false	0	not_applicable	""	UNKNOWN	in-progress	coordination	""	UNKNOWN	1	3	no_exact_coordination_match|no_terminal_outcome_observed
+ror-pro-20260717	shakacode/react_on_rails	pr:4575	lane-4575	unknown	true	0	0	false	false	0	not_applicable	""	UNKNOWN	UNKNOWN	coordination	""	UNKNOWN	1	3	no_exact_coordination_match|no_terminal_outcome_observed
+ror-pro-20260717	shakacode/react_on_rails	pr:4579	lane-4579	unknown	true	0	0	false	false	0	not_applicable	""	UNKNOWN	UNKNOWN	coordination	""	UNKNOWN	1	3	no_exact_coordination_match|no_terminal_outcome_observed
+ror-pro-20260717	shakacode/react_on_rails	pr:4701	lane-4701	in_progress	true	0	0	false	false	0	not_applicable	""	UNKNOWN	in-progress	coordination	""	UNKNOWN	1	3	no_exact_coordination_match|no_terminal_outcome_observed
+ror-release-20260713	shakacode/react_on_rails	4645	audit-release|prerun-4645|qa-release	done	true	1	3	true	true	1	pass	MERGED	merged	merged	github	SUCCESS	reconstructable	4	4	""
+ror-release-20260713	shakacode/react_on_rails	4646	audit-release|qa-release|retry-4646	done	true	1	1	true	true	1	pass	MERGED	merged	merged	github	SUCCESS	reconstructable	4	4	""
+ror-release-20260713	shakacode/react_on_rails	4647	audit-release|guidance-4647|qa-release	done	true	1	2	true	true	1	pass	MERGED	merged	merged	github	SUCCESS	reconstructable	4	4	""
+ror-release-20260713	shakacode/react_on_rails	4648	async-4648|audit-release|qa-release	done	true	1	4	true	true	1	pass	MERGED	merged	merged	github	SUCCESS	reconstructable	4	4	""
+ror-release-backports-20260711	shakacode/react_on_rails	4566	backport-4551	merged	true	1	0	true	true	0	not_applicable	""	UNKNOWN	merged	coordination	""	reconstructable	3	3	""
+ror-release-backports-20260711	shakacode/react_on_rails	4567	backport-4564	in_progress	true	1	0	true	false	0	not_applicable	""	UNKNOWN	in-progress	coordination	""	UNKNOWN	2	3	no_terminal_outcome_observed
+ror-release-backports-20260711	shakacode/react_on_rails	qa-release-4551	qa-4551	done	true	1	0	true	true	0	not_applicable	""	UNKNOWN	done	coordination	""	reconstructable	3	3	""
+ror-release-backports-20260711	shakacode/react_on_rails	qa-release-4564	qa-4564	unknown	true	0	0	false	false	0	not_applicable	""	UNKNOWN	UNKNOWN	coordination	""	UNKNOWN	1	3	no_exact_coordination_match|no_terminal_outcome_observed
+ror-rsc-20260717	shakacode/react_on_rails	4629	lane-4631	unknown	true	0	0	false	false	0	not_applicable	""	UNKNOWN	UNKNOWN	coordination	""	UNKNOWN	1	3	no_exact_coordination_match|no_terminal_outcome_observed
+ror-rsc-20260717	shakacode/react_on_rails	4630	lane-4632	unknown	true	0	0	false	false	0	not_applicable	""	UNKNOWN	UNKNOWN	coordination	""	UNKNOWN	1	3	no_exact_coordination_match|no_terminal_outcome_observed
+ror-rsc-20260717	shakacode/react_on_rails	pr:4599	lane-4599	unknown	true	0	0	false	false	0	not_applicable	""	UNKNOWN	UNKNOWN	coordination	""	UNKNOWN	1	3	no_exact_coordination_match|no_terminal_outcome_observed
+ror-rsc-20260717	shakacode/react_on_rails	pr:4606	lane-4606	unknown	true	0	0	false	false	0	not_applicable	""	UNKNOWN	UNKNOWN	coordination	""	UNKNOWN	1	3	no_exact_coordination_match|no_terminal_outcome_observed
+ror-rsc-20260717	shakacode/react_on_rails	pr:4631	lane-4631	unknown	true	0	0	false	false	0	not_applicable	""	UNKNOWN	UNKNOWN	coordination	""	UNKNOWN	1	3	no_exact_coordination_match|no_terminal_outcome_observed
+ror-rsc-20260717	shakacode/react_on_rails	pr:4632	lane-4632	unknown	true	0	0	false	false	0	not_applicable	""	UNKNOWN	UNKNOWN	coordination	""	UNKNOWN	1	3	no_exact_coordination_match|no_terminal_outcome_observed
+ror-unblock-20260717	shakacode/react_on_rails	pr:4689	lane-4689	done	true	0	1	true	true	1	pass	MERGED	merged	merged	github	SUCCESS	reconstructable	4	4	""
+ror-unblock-20260717	shakacode/react_on_rails	pr:4693	lane-4693	done	true	0	1	true	true	1	pass	MERGED	merged	merged	github	SUCCESS	reconstructable	4	4	""
+ror-unblock-20260717	shakacode/react_on_rails	pr:4718	lane-4718	done	true	0	1	true	true	1	pass	MERGED	merged	merged	github	SUCCESS	reconstructable	4	4	""
+ror-wave2-20260717	shakacode/react_on_rails	3492	lane-4580	unknown	true	0	0	false	false	0	not_applicable	""	UNKNOWN	UNKNOWN	coordination	""	UNKNOWN	1	3	no_exact_coordination_match|no_terminal_outcome_observed
+ror-wave2-20260717	shakacode/react_on_rails	4187	lane-dependabot	unknown	true	0	0	false	false	0	not_applicable	""	UNKNOWN	UNKNOWN	coordination	""	UNKNOWN	1	3	no_exact_coordination_match|no_terminal_outcome_observed
+ror-wave2-20260717	shakacode/react_on_rails	4572	lane-4591	unknown	true	0	0	false	false	0	not_applicable	""	UNKNOWN	UNKNOWN	coordination	""	UNKNOWN	1	3	no_exact_coordination_match|no_terminal_outcome_observed
+ror-wave2-20260717	shakacode/react_on_rails	pr:4580	lane-4580	unknown	true	0	0	false	false	0	not_applicable	""	UNKNOWN	UNKNOWN	coordination	""	UNKNOWN	1	3	no_exact_coordination_match|no_terminal_outcome_observed
+ror-wave2-20260717	shakacode/react_on_rails	pr:4591	lane-4591	unknown	true	0	0	false	false	0	not_applicable	""	UNKNOWN	UNKNOWN	coordination	""	UNKNOWN	1	3	no_exact_coordination_match|no_terminal_outcome_observed
+ror17-fleet-b-20260717	shakacode/react-on-rails-demo-marketplace-rsc	138	checker|marketplace-gates|qa	done	true	1	1	true	true	2	pass	MERGED	merged	merged	github	SUCCESS	reconstructable	4	4	""
+ror17-fleet-b-20260717	shakacode/react-on-rails-demo-marketplace-rsc	86	checker|marketplace-interaction|qa	done	true	0	6	true	true	1	pass	MERGED	merged	merged	github	SUCCESS	reconstructable	4	4	""
+ror17-fleet-c-20260717		194	tanstack-remediation|tanstack-reviewapp	done|waiting_maintainer_decision	false	0	0	false	true	2	fail	CLOSED|OPEN	open	open-pr	github	SUCCESS	observed_only	1	4	missing_repo_join_component|no_exact_coordination_match
+ror17-fleet-c-20260717		784	tutorial-replay2|tutorial-replay3|tutorial-reviewapp	blocked|done	false	0	0	false	true	3	fail	CLOSED	closed-unmerged	closed-unmerged	github	SUCCESS	observed_only	1	4	missing_repo_join_component|no_exact_coordination_match
+ror17-fleet-c-20260717		81	gumroad-replay2|gumroad-reviewapp	done	false	0	0	false	true	2	fail	CLOSED|MERGED	merged	merged	github	SUCCESS	observed_only	1	4	missing_repo_join_component|no_exact_coordination_match
+ror17-fleet-c-20260717		batch-checker	checker	superseded	false	0	0	false	true	0	not_applicable	""	UNKNOWN	superseded	coordination	""	observed_only	1	3	missing_repo_join_component|no_exact_coordination_match
+ror17-fleet-c-20260717		batch-final-checker	final-checker	pending	false	0	0	false	false	0	not_applicable	""	UNKNOWN	in-progress	coordination	""	UNKNOWN	0	3	missing_repo_join_component|no_exact_coordination_match|no_terminal_outcome_observed
+ror17-fleet-c-20260717		batch-qa	qa	superseded	false	0	0	false	true	0	not_applicable	""	UNKNOWN	superseded	coordination	""	observed_only	1	3	missing_repo_join_component|no_exact_coordination_match
+ror17-fleet-c-20260717		batch-qa-interim	qa-interim2	done	false	0	0	false	true	0	not_applicable	""	UNKNOWN	done	coordination	""	observed_only	1	3	missing_repo_join_component|no_exact_coordination_match
+rsc-0710-2115-parity-discover	shakacode/react-on-rails-demo-gumroad-rsc	71	contract	done	true	1	10	true	true	1	pass	MERGED	merged	merged	github	SUCCESS	reconstructable	4	4	""
+rsc-0710-2115-parity-discover	shakacode/react-on-rails-demo-gumroad-rsc	72	discover|qa-discover	done	true	1	4	true	true	1	pass	MERGED	merged	merged	github	SUCCESS	reconstructable	4	4	""
+shakapacker-1219-20260714T183711Z	shakacode/shakapacker	1219	cjs-fix	done	true	1	1	true	true	1	pass	MERGED	merged	merged	github	SUCCESS	reconstructable	4	4	""
+sim-task_one	sim/local	task_one	worker	failed	true	0	1	true	true	0	not_applicable	""	UNKNOWN	failed	coordination	""	reconstructable	3	3	""
+ss-open-20260712	shakacode/shakastack-com	12	ia	done	true	1	9	true	true	1	pass	MERGED	merged	merged	github	SUCCESS	reconstructable	4	4	""
+ss-open-20260712	shakacode/shakastack-com	13	ia	done	true	0	0	false	true	1	pass	MERGED	merged	merged	github	SUCCESS	observed_only	3	4	no_exact_coordination_match
+ss-open-20260712	shakacode/shakastack-com	22	ia	done	true	0	0	false	true	1	pass	MERGED	merged	merged	github	SUCCESS	observed_only	3	4	no_exact_coordination_match
+ss-open-20260712	shakacode/shakastack-com	23	ia	done	true	0	0	false	true	1	pass	MERGED	merged	merged	github	SUCCESS	observed_only	3	4	no_exact_coordination_match
+ss-open-20260712	shakacode/shakastack-com	24	ia	done	true	0	0	false	true	1	pass	MERGED	merged	merged	github	SUCCESS	observed_only	3	4	no_exact_coordination_match
+ss-open-20260712-b	shakacode/shakastack-com	10	mobile	done	true	1	6	true	true	1	pass	MERGED	merged	merged	github	SUCCESS	reconstructable	4	4	""
+ss-open-20260712-b	shakacode/shakastack-com	26	agent-proof	done	true	1	6	true	true	1	pass	MERGED	merged	merged	github	SUCCESS	reconstructable	4	4	""
+stack-rollout-20260708-actions-parity	shakacode/agent-workflows	claude-actions-parity	agent-coordination-actions|agent-coordination-dashboard-actions|agent-workflows-actions	merged_pr_94	true	1	0	true	false	0	not_applicable	""	UNKNOWN	UNKNOWN	coordination	""	UNKNOWN	2	3	no_terminal_outcome_observed
+stack-rollout-20260708-m5-b	shakacode/agent-coordination	4	schema-cli	merged	true	0	0	false	true	1	pass	MERGED	merged	merged	github	SUCCESS	observed_only	3	4	no_exact_coordination_match
+stack-rollout-20260708-wave-b	shakacode/agent-coordination	4	coordination-4-metadata-options	external-gate-failing	true	1	0	true	false	0	not_applicable	""	UNKNOWN	blocked	coordination	""	UNKNOWN	2	3	no_terminal_outcome_observed
+tr-07-13-1224-pr14	shakacode/team-reports	14	pr14-readiness	done	true	1	1	true	true	1	pass	MERGED	merged	merged	github	SUCCESS	reconstructable	4	4	""
+tr-07-13-1344-plugin-split		adhoc:20260713-create-team-reports-plugin	plugin-repo	done	false	0	0	false	true	1	fail	MERGED	merged	merged	github	SUCCESS	observed_only	1	4	missing_repo_join_component|no_exact_coordination_match
+tr-07-13-1344-plugin-split		adhoc:20260713-cross-repo-qa	cross-repo-qa	done	false	0	0	false	true	0	not_applicable	""	UNKNOWN	done	coordination	""	observed_only	1	3	missing_repo_join_component|no_exact_coordination_match
+tr-07-13-1344-plugin-split		adhoc:20260713-migrate-team-reports-data	data-repo	done	false	0	0	false	true	1	fail	MERGED	merged	merged	github	SUCCESS	observed_only	1	4	missing_repo_join_component|no_exact_coordination_match

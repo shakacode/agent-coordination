@@ -1,0 +1,52 @@
+{
+  "contract": "historical-batch-marker-fixture-v1",
+  "captured_at": "2026-07-19T08:06:00Z",
+  "graphql_requests": 1,
+  "pagination_complete": true,
+  "pull_requests": [
+    {
+      "repository": "example/alpha",
+      "number": 7,
+      "url": "https://github.com/example/alpha/pull/7",
+      "surfaces": {
+        "body": [
+          "```json review-findings\n{\"schema\":\"review-finding-v0\",\"review_findings\":[{\"id\":\"fixture-001\",\"source\":\"fixture-review\",\"target\":{\"repo\":\"example/alpha\",\"pr\":7},\"severity\":\"P1\",\"disposition\":\"should_fix\",\"title\":\"synthetic fixture finding\",\"body\":\"Synthetic risk explanation for offline schema validation.\",\"verification\":{\"status\":\"verified\",\"current_head_state\":\"current\"},\"location\":{\"file\":\"example.rb\",\"line\":7},\"evidence\":[\"synthetic fixture evidence\"],\"recommendation\":\"Keep the fixture complete.\",\"owner\":\"fixture-owner\",\"links\":[\"https://example.test/evidence\"],\"related_ids\":[],\"consequential\":false,\"notes\":\"Synthetic only.\"}]}\n```"
+        ],
+        "comments": [
+          "<!-- completed-batch-audit v1\nsynthetic fixture marker\n-->"
+        ],
+        "reviews": [
+          "<!-- codex-claim v1\nsynthetic fixture marker\n-->"
+        ],
+        "review_thread_comments": [
+          "<!-- post-merge-audit-finding v1\nsynthetic fixture marker\n-->"
+        ]
+      },
+      "pagination_requests": {
+        "body": 0,
+        "comments": 0,
+        "reviews": 1,
+        "review_thread_comments": 0
+      }
+    },
+    {
+      "repository": "example/beta",
+      "number": 9,
+      "url": "https://github.com/example/beta/pull/9",
+      "surfaces": {
+        "body": [
+          null
+        ],
+        "comments": [],
+        "reviews": [],
+        "review_thread_comments": []
+      },
+      "pagination_requests": {
+        "body": 0,
+        "comments": 0,
+        "reviews": 0,
+        "review_thread_comments": 0
+      }
+    }
+  ]
+}
