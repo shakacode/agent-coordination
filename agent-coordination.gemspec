@@ -25,6 +25,7 @@ Gem::Specification.new do |spec|
     LICENSE
     README.md
     bin/agent-coord
+    bin/agent-coord-harvest
     contracts/state-schema-v2.json
     docs/adr/0007-host-limit-state-contract.md
     docs/adr/0008-capacity-reservation-state-contract.md
@@ -142,9 +143,13 @@ Gem::Specification.new do |spec|
     schema/state/v1/usage/fixtures/valid/usage-known.json
     schema/state/v1/usage/fixtures/valid/usage-unknown-metrics.json
     schema/state/v1/usage/usage-record.schema.json
+    schema/telemetry-ledger/0001_initial.sql
+    lib/agent_coordination/harvester.rb
+    lib/agent_coordination/ledger.rb
   ]
   spec.bindir = "bin"
-  spec.executables = ["agent-coord"]
+  spec.executables = ["agent-coord", "agent-coord-harvest"]
 
   spec.add_dependency "base64", ">= 0.1.1", "< 1.0"
+  spec.add_dependency "sqlite3", ">= 2.9.5", "< 3.0"
 end
