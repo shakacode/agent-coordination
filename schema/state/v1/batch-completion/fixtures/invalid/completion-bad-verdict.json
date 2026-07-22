@@ -1,5 +1,6 @@
 {
   "schema_version": 1,
+  "workspace": "default",
   "batch_id": "b",
   "audit": {
     "verdict": "ok",

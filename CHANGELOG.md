@@ -9,7 +9,7 @@ when releases begin.
 
 ### Added
 
-- A schema-first v1 batch completion-report contract keyed by `batch_id` that
+- A schema-first v1 batch completion-report contract keyed by `(workspace, batch_id)` that
   persists a completed batch's audit (`verdict` + free-form `author` that folds
   version and timestamp), completion report (`state`, `receipts`, `baseline`,
   per-lane `outcomes`, and optional `usage`/`tokensTotal`/`cost`/`duration`

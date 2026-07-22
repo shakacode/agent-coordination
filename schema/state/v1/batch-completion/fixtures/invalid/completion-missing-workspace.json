@@ -1,6 +1,5 @@
 {
   "schema_version": 1,
-  "workspace": "default",
   "batch_id": "b",
   "audit": {
     "verdict": "pending",
@@ -25,6 +24,7 @@
     },
     "outcomes": [],
     "usage": "—",
+    "tokensTotal": "—",
     "cost": null,
     "duration": "—"
   },

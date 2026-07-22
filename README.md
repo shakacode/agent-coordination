@@ -576,7 +576,7 @@ The published
 persists a completed batch's `audit` (verdict + free-form author that folds
 version and timestamp), `completion` report (`state`, `receipts`, `baseline`,
 per-lane `outcomes`, and optional `usage`/`tokensTotal`/`cost`/`duration`), and
-`finalReport`, keyed by `batch_id`, so the dashboard drawer renders the audit
+`finalReport`, keyed by `(workspace, batch_id)`, so the dashboard drawer renders the audit
 chip, completion table, and final report instead of a degrade note. The
 dashboard-rendered payload follows the dashboard report contract verbatim
 (camelCase field names such as `tokensTotal`), while the record envelope keeps

@@ -24,8 +24,10 @@ consumer.
 
 Publish the versioned JSON Schema at
 [`schema/state/v1/batch-completion/batch-completion.schema.json`](../../schema/state/v1/batch-completion/batch-completion.schema.json),
-keyed by `batch_id`. The record carries three dashboard-rendered payload members
-plus a protocol envelope:
+keyed by `(workspace, batch_id)`. Per ADR [0004](0004-tenancy-ready-state-contract.md),
+`workspace` is a first-class key dimension (default `default`), so two tenants
+sharing a `batch_id` do not overwrite each other's report. The record carries
+three dashboard-rendered payload members plus a protocol envelope:
 
 - `audit: { verdict: "clean" | "findings" | "pending", author }`. `author` is
   free-form and folds the version and timestamp (for example
@@ -37,9 +39,12 @@ plus a protocol envelope:
   `usage`, `tokensTotal`, `cost`, `duration`, and `state.replay` are optional
   metrics: they send `null` or the em dash `"—"` when unknown and are **never
   omitted or fabricated** (the schema rejects a dropped metric key and a
-  fabricated string for the numeric metrics). Any `{ k, v }` metadata pair may
-  carry an optional `href`; an outcome keeps plain-text refs unless it also sends
-  a `links: [{ label, href }]` array.
+  fabricated string for the numeric metrics). A numeric `duration` is seconds and
+  cannot be negative. Any `{ k, v }` metadata pair may carry an optional `href`;
+  an outcome keeps plain-text refs unless it also sends a `links: [{ label, href }]`
+  array. An outcome row stays strict (`additionalProperties: false`) with the
+  documented `route`/`pr`/`sha`/`issue` producer fields, so a typo'd key is
+  rejected rather than silently dropped.
 - `finalReport`: the canonical handoff text, rendered verbatim.
 
 **Archive-ready** requires `state.live`, `audit`, and `receipts`.
@@ -61,10 +66,11 @@ protocol-plane state.
 - Positive fixtures cover a full report, an archive-ready minimal report,
   plain-text outcomes, and each verdict. Negative fixtures cover a missing audit,
   missing/`null` final report, a bad verdict, empty receipts, a missing
-  `state.live`, an omitted optional metric, a fabricated metric string, a
-  separate `version` field, a link missing its `href`, and a baseline missing its
-  `path`. A drawer replay proves the audit chip, outcome rows, and that a `null`
-  or `"—"` metric renders an em dash rather than a fabricated value.
+  `state.live`, a missing `workspace`, an omitted optional metric, a fabricated
+  metric string, a negative numeric duration, a separate `version` field, a link
+  missing its `href`, a baseline missing its `path`, and an outcome with an
+  unknown key. A drawer replay proves the audit chip, outcome rows, and that a
+  `null` or `"—"` metric renders an em dash rather than a fabricated value.
 - Breaking changes to the payload require `schema/state/v2`; additive optional
   fields may extend v1.
 - This foundation does not add capture, persistence routes, or dashboard

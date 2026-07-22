@@ -23,8 +23,14 @@
     "baseline": {
       "path": "p"
     },
-    "outcomes": [],
+    "outcomes": [
+      {
+        "lane": "x",
+        "lable": "typo"
+      }
+    ],
     "usage": "—",
+    "tokensTotal": "—",
     "cost": null,
     "duration": "—"
   },

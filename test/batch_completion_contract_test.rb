@@ -15,9 +15,28 @@ class BatchCompletionContractTest < Minitest::Test
     assert JSONSchemer.valid_schema?(schema_document)
     assert_equal 1, schema_document.fetch("x-contract-version")
     assert_equal "batch_completion", schema_document.fetch("x-record-family")
-    assert_equal %w[batch_id], schema_document.fetch("x-logical-key")
-    assert_equal "batch_completions/{batch_id}.json", schema_document.dig("x-storage-key", "template")
+    assert_equal %w[workspace batch_id], schema_document.fetch("x-logical-key")
+    assert_equal "batch_completions/{workspace}/{batch_id}.json", schema_document.dig("x-storage-key", "template")
+    assert_equal "default", schema_document.dig("$defs", "workspace", "default")
     assert_equal %w[clean findings pending], schema_document.dig("$defs", "audit", "properties", "verdict", "enum")
+  end
+
+  def test_workspace_is_required_in_the_logical_key
+    schema = JSONSchemer.schema(read_json(SCHEMA_PATH))
+    record = read_fixture(File.join(FIXTURES_PATH, "valid", "completion-full.json"))
+
+    assert_empty schema.validate(record).to_a
+    refute_empty schema.validate(without(record, "workspace")).to_a,
+                 "workspace is a first-class key dimension (ADR 0004)"
+  end
+
+  def test_numeric_duration_must_be_non_negative
+    schema = JSONSchemer.schema(read_json(SCHEMA_PATH))
+    record = read_fixture(File.join(FIXTURES_PATH, "valid", "completion-full.json"))
+
+    assert_empty schema.validate(with_metric(record, "duration", 4980)).to_a, "non-negative seconds conform"
+    assert_empty schema.validate(with_metric(record, "duration", "1h23m")).to_a, "a human string conforms"
+    refute_empty schema.validate(with_metric(record, "duration", -1)).to_a, "a negative duration is rejected"
   end
 
   def test_positive_and_negative_fixtures_conform_to_v1_contract

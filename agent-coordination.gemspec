@@ -42,9 +42,12 @@ Gem::Specification.new do |spec|
     schema/state/v1/batch-completion/fixtures/invalid/completion-missing-audit.json
     schema/state/v1/batch-completion/fixtures/invalid/completion-missing-final-report.json
     schema/state/v1/batch-completion/fixtures/invalid/completion-missing-state-live.json
+    schema/state/v1/batch-completion/fixtures/invalid/completion-missing-workspace.json
+    schema/state/v1/batch-completion/fixtures/invalid/completion-negative-duration.json
     schema/state/v1/batch-completion/fixtures/invalid/completion-null-final-report.json
     schema/state/v1/batch-completion/fixtures/invalid/completion-omitted-tokens-total.json
     schema/state/v1/batch-completion/fixtures/invalid/completion-outcome-link-missing-href.json
+    schema/state/v1/batch-completion/fixtures/invalid/completion-outcome-unknown-field.json
     schema/state/v1/batch-completion/fixtures/replay/completion-drawer-render.json
     schema/state/v1/batch-completion/fixtures/valid/completion-full.json
     schema/state/v1/batch-completion/fixtures/valid/completion-minimal-archive-ready.json

@@ -1,5 +1,6 @@
 {
   "schema_version": 1,
+  "workspace": "default",
   "batch_id": "acoord-minimal-2026-07-22",
   "audit": {
     "verdict": "pending",
@@ -7,13 +8,21 @@
   },
   "completion": {
     "state": {
-      "live": { "k": "live", "v": "state/live/acoord-minimal" },
+      "live": {
+        "k": "live",
+        "v": "state/live/acoord-minimal"
+      },
       "replay": "—"
     },
     "receipts": [
-      { "k": "receipt", "v": "durable-1" }
+      {
+        "k": "receipt",
+        "v": "durable-1"
+      }
     ],
-    "baseline": { "path": "docs/archive/reports/data" },
+    "baseline": {
+      "path": "docs/archive/reports/data"
+    },
     "outcomes": [],
     "usage": "—",
     "tokensTotal": "—",

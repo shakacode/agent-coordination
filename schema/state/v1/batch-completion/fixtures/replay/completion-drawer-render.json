@@ -1,6 +1,7 @@
 {
   "record": {
     "schema_version": 1,
+    "workspace": "default",
     "batch_id": "acoord-emit-2026-07-22",
     "audit": {
       "verdict": "clean",
@@ -8,23 +9,41 @@
     },
     "completion": {
       "state": {
-        "live": { "k": "live", "v": "state/live/acoord-emit" },
+        "live": {
+          "k": "live",
+          "v": "state/live/acoord-emit"
+        },
         "replay": "—"
       },
       "receipts": [
-        { "k": "audit-ledger", "v": "#83", "href": "https://github.com/shakacode/agent-coordination/issues/83" }
+        {
+          "k": "audit-ledger",
+          "v": "#83",
+          "href": "https://github.com/shakacode/agent-coordination/issues/83"
+        }
       ],
-      "baseline": { "path": "docs/archive/reports/data" },
+      "baseline": {
+        "path": "docs/archive/reports/data"
+      },
       "outcomes": [
         {
           "lane": "usage-cost",
           "refs": "#84 · #89",
           "links": [
-            { "label": "#84", "href": "https://github.com/shakacode/agent-coordination/issues/84" },
-            { "label": "#89", "href": "https://github.com/shakacode/agent-coordination/pull/89" }
+            {
+              "label": "#84",
+              "href": "https://github.com/shakacode/agent-coordination/issues/84"
+            },
+            {
+              "label": "#89",
+              "href": "https://github.com/shakacode/agent-coordination/pull/89"
+            }
           ]
         },
-        { "lane": "route", "refs": "#85 · #90" }
+        {
+          "lane": "route",
+          "refs": "#85 · #90"
+        }
       ],
       "usage": "—",
       "tokensTotal": 154500,
@@ -34,12 +53,31 @@
     "finalReport": "Batch complete: lanes merged, gates green, no blockers."
   },
   "expected": {
-    "audit_chip": { "verdict": "clean", "author": "justin808 · v1 durable · 2026-07-22T01:24:07Z" },
+    "audit_chip": {
+      "verdict": "clean",
+      "author": "justin808 · v1 durable · 2026-07-22T01:24:07Z"
+    },
     "outcome_rows": [
-      { "lane": "usage-cost", "refs": "#84 · #89", "link_labels": ["#84", "#89"] },
-      { "lane": "route", "refs": "#85 · #90", "link_labels": [] }
+      {
+        "lane": "usage-cost",
+        "refs": "#84 · #89",
+        "link_labels": [
+          "#84",
+          "#89"
+        ]
+      },
+      {
+        "lane": "route",
+        "refs": "#85 · #90",
+        "link_labels": []
+      }
     ],
-    "rendered_metrics": { "usage": "—", "tokensTotal": 154500, "cost": "—", "duration": "1h23m" },
+    "rendered_metrics": {
+      "usage": "—",
+      "tokensTotal": 154500,
+      "cost": "—",
+      "duration": "1h23m"
+    },
     "final_report": "Batch complete: lanes merged, gates green, no blockers."
   }
 }

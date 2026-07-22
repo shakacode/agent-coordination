@@ -1,13 +1,44 @@
 {
   "schema_version": 1,
+  "workspace": "default",
   "batch_id": "acoord-findings-2026-07-22",
-  "audit": { "verdict": "findings", "author": "justin808 · v1 durable · 2026-07-22T01:32:00Z" },
+  "audit": {
+    "verdict": "findings",
+    "author": "justin808 · v1 durable · 2026-07-22T01:32:00Z"
+  },
   "completion": {
-    "state": { "live": { "k": "live", "v": "state/live/acoord-findings" }, "replay": "—" },
-    "receipts": [ { "k": "receipt", "v": "durable-1" } ],
-    "baseline": { "path": "docs/archive" },
-    "outcomes": [ { "lane": "batch-blocker", "refs": "#88", "links": [ { "label": "#88", "href": "https://github.com/shakacode/agent-coordination/issues/88" } ] } ],
-    "usage": "—", "tokensTotal": "—", "cost": "—", "duration": "—"
+    "state": {
+      "live": {
+        "k": "live",
+        "v": "state/live/acoord-findings"
+      },
+      "replay": "—"
+    },
+    "receipts": [
+      {
+        "k": "receipt",
+        "v": "durable-1"
+      }
+    ],
+    "baseline": {
+      "path": "docs/archive"
+    },
+    "outcomes": [
+      {
+        "lane": "batch-blocker",
+        "refs": "#88",
+        "links": [
+          {
+            "label": "#88",
+            "href": "https://github.com/shakacode/agent-coordination/issues/88"
+          }
+        ]
+      }
+    ],
+    "usage": "—",
+    "tokensTotal": "—",
+    "cost": "—",
+    "duration": "—"
   },
   "finalReport": "Audit found follow-ups; see linked outcomes."
 }
