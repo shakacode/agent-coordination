@@ -5447,6 +5447,9 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     lane = JSON.parse(result.stdout).fetch("lanes").first
     assert_equal 0, lane.fetch("event_count")
     assert_equal ["claim.acquired", "terminal"], lane.fetch("missing")
+    # Uniform lane schema: a normal lane carries the same "malformed" key as a
+    # malformed lane entry, set to false, so downstream consumers see one shape.
+    assert_equal false, lane.fetch("malformed")
   end
 
   def test_batch_audit_uses_auto_emitted_lifecycle_events

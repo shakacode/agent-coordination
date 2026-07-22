@@ -3006,7 +3006,13 @@ module AgentCoord
       lanes = Array(batch_entry.data["lanes"])
       return batch_audit_unknown_report(batch_id, "batch #{batch_id} registers no lanes") if lanes.empty?
 
-      events = store.list_json(AgentCoord.event_batch_prefix(batch_id)).map(&:data)
+      event_prefix = AgentCoord.event_batch_prefix(batch_id)
+      event_records = store.list_json(event_prefix)
+      if filtered_status_list?(store, event_prefix)
+        return batch_audit_unknown_report(batch_id, "event trail for #{batch_id} is filtered by a scoped token")
+      end
+
+      events = event_records.map(&:data)
       owner_counts = batch_audit_owner_counts(lanes)
       target_counts = batch_audit_target_counts(lanes)
       reports = lanes.map { |lane| batch_audit_lane_report(lane, events, owner_counts, target_counts) }
@@ -3074,7 +3080,8 @@ module AgentCoord
         "targets" => targets,
         "event_count" => lane_events.length,
         "missing" => missing,
-        "complete" => missing.empty?
+        "complete" => missing.empty?,
+        "malformed" => false
       }
     end
 

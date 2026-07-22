@@ -545,8 +545,9 @@ every registered lane is complete. A batch that registers no lanes (an empty or
 missing `lanes` array, only reachable via hand-edited/legacy state since
 `register-batch` rejects it) is reported UNKNOWN (exit 2), never a vacuous
 `complete`. Text output lists each lane; `--json` enumerates per-lane
-`{ name, owner, targets, event_count, missing, complete }` plus the overall
-`verdict`.
+`{ name, owner, targets, event_count, missing, complete, malformed }` (every lane
+entry carries the same keys — `malformed` is `false` for a normal lane and `true`
+for a non-object manifest entry) plus the overall `verdict`.
 
 Exit codes let closeout gate on the result:
 
@@ -554,7 +555,7 @@ Exit codes let closeout gate on the result:
 | ---- | ------------ | ----------------------------------------------------------------------- |
 | 0    | `complete`   | Every registered lane has an acquire event and a terminal signal.       |
 | 1    | `incomplete` | At least one lane is missing a signal; closeout should fail-closed.      |
-| 2    | `unknown`    | Coordination state is UNKNOWN — the batch id is unregistered, invalid/unsafe, a non-object batch record, a batch registering no lanes, or the batch/events are unreadable. A malformed id returns `unknown` (exit 2), never `incomplete` (exit 1). Never reported as a false `complete`. |
+| 2    | `unknown`    | Coordination state is UNKNOWN — the batch id is unregistered, invalid/unsafe, a non-object batch record, a batch registering no lanes, an event trail only partially visible to a scoped token (filtered listing), or the batch/events are unreadable. A malformed id returns `unknown` (exit 2), never `incomplete` (exit 1). Never reported as a false `complete`. |
 
 ### Host-limit contract foundation
 
