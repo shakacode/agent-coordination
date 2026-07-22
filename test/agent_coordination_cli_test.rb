@@ -5456,6 +5456,98 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     assert_empty payload.fetch("lanes")
   end
 
+  def test_batch_audit_does_not_false_complete_lanes_sharing_an_owner
+    write_batch(
+      "batch-shared-owner",
+      lanes: [
+        { "name" => "lane-101", "owner" => "worker-a", "targets" => ["101"] },
+        { "name" => "lane-102", "owner" => "worker-a", "targets" => ["102"] }
+      ]
+    )
+    run_agent_coord(
+      "claim", "--agent-id", "worker-a", "--repo", "shakacode/x", "--target", "101",
+      "--batch-id", "batch-shared-owner", "--branch", "b-a"
+    )
+    run_agent_coord(
+      "release", "--agent-id", "worker-a", "--repo", "shakacode/x", "--target", "101",
+      "--batch-id", "batch-shared-owner", "--branch", "b-a"
+    )
+
+    result = run_agent_coord("batch-audit", "--batch-id", "batch-shared-owner", "--json")
+
+    assert_equal 1, result.status.exitstatus, result.stderr
+    payload = JSON.parse(result.stdout)
+    assert_equal "incomplete", payload.fetch("verdict")
+    lanes = payload.fetch("lanes").to_h { |lane| [lane.fetch("name"), lane] }
+    assert lanes.fetch("lane-101").fetch("complete"), "lane-101 (target 101) should be complete"
+    assert_empty lanes.fetch("lane-101").fetch("missing")
+    refute lanes.fetch("lane-102").fetch("complete"), "same-owner lane-102 (target 102) must not false-complete"
+    assert_equal ["claim.acquired", "terminal"], lanes.fetch("lane-102").fetch("missing")
+  end
+
+  def test_batch_audit_defaults_to_status_state_root_without_global_state_root
+    write_batch("batch-status-root", lanes: [{ "name" => "code", "owner" => "worker-a", "targets" => ["101"] }])
+    fake_bin = Dir.mktmpdir("agent-coord-gh")
+    File.write(File.join(fake_bin, "gh"), "#!/bin/sh\necho unexpected gh >&2\nexit 42\n")
+    FileUtils.chmod(0o755, File.join(fake_bin, "gh"))
+
+    result = run_command(
+      {
+        "AGENT_COORD_STATE_ROOT" => nil,
+        "AGENT_COORD_STATUS_STATE_ROOT" => @state_root,
+        "PATH" => [fake_bin, File.dirname(RbConfig.ruby), "/usr/bin", "/bin"].join(File::PATH_SEPARATOR)
+      },
+      RbConfig.ruby,
+      BIN,
+      "batch-audit",
+      "--batch-id",
+      "batch-status-root"
+    )
+
+    assert_equal 1, result.status.exitstatus, result.stderr
+    assert_includes result.stdout, "batch-audit batch-status-root incomplete"
+    refute_includes result.stderr, "local mode — single-machine only"
+    refute_includes result.stderr, "unexpected gh"
+  ensure
+    FileUtils.remove_entry(fake_bin) if fake_bin && Dir.exist?(fake_bin)
+  end
+
+  def test_batch_audit_malformed_batch_id_is_unknown_not_incomplete
+    result = run_agent_coord("batch-audit", "--batch-id", "../evil")
+    assert_equal 2, result.status.exitstatus, result.stderr
+    assert_includes result.stdout, "batch-audit ../evil unknown"
+
+    json = run_agent_coord("batch-audit", "--batch-id", "../evil", "--json")
+    assert_equal 2, json.status.exitstatus
+    assert_equal "unknown", JSON.parse(json.stdout).fetch("verdict")
+  end
+
+  def test_batch_audit_tolerates_malformed_lane_entry
+    write_state_record(
+      "batches/batch-null-lane.json",
+      { "schema_version" => 1, "batch_id" => "batch-null-lane", "lanes" => [nil] }
+    )
+
+    result = run_agent_coord("batch-audit", "--batch-id", "batch-null-lane", "--json")
+
+    assert_equal 1, result.status.exitstatus, result.stderr
+    payload = JSON.parse(result.stdout)
+    assert_equal "incomplete", payload.fetch("verdict")
+    lane = payload.fetch("lanes").first
+    refute lane.fetch("complete")
+    assert lane.fetch("malformed")
+    assert_equal ["claim.acquired", "terminal"], lane.fetch("missing")
+  end
+
+  def test_batch_audit_non_object_batch_state_is_unknown
+    write_state_record("batches/batch-scalar.json", "not-an-object")
+
+    result = run_agent_coord("batch-audit", "--batch-id", "batch-scalar")
+
+    assert_equal 2, result.status.exitstatus, result.stderr
+    assert_includes result.stdout, "state is not an object"
+  end
+
   def test_register_batch_rejects_malformed_lane_name
     manifest_path = File.join(@state_root, "batch-manifest.json")
     File.write(

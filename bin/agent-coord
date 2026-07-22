@@ -692,8 +692,15 @@ module AgentCoord
       @stderr.puts message if @backend_conflict_warnings
     end
 
+    # Read-only, status-style commands that prefer the status state root over the
+    # write-mode local default. batch-audit reads coordination state exactly like
+    # status, so it resolves and warns identically.
+    def status_read_command?(command)
+      %w[status doctor batch-audit].include?(command)
+    end
+
     def warn_consumer_split_brain(command, options)
-      return unless %w[status doctor].include?(command)
+      return unless status_read_command?(command)
       return if options[:stack_json]
       return unless options[:state_root] && !options[:api_url]
       return unless ENV.fetch("AGENT_COORD_API_URL", "").empty?
@@ -737,7 +744,7 @@ module AgentCoord
     def resolve_default_local_backend(command, options)
       return if options[:state_root] || options[:api_url] || !options[:backend].to_s.empty?
 
-      status_command = %w[status doctor].include?(command)
+      status_command = status_read_command?(command)
       configured_status_root = ENV.fetch(STATUS_STATE_ROOT_ENV, nil)
       if status_command && !configured_status_root.to_s.empty?
         options[:state_root] = configured_status_root
@@ -2969,15 +2976,20 @@ module AgentCoord
     def batch_audit_report(store, batch_id)
       batch_entry = store.read_json(AgentCoord.batch_path(batch_id))
       return batch_audit_unknown_report(batch_id, "batch #{batch_id} is not registered") if batch_entry.nil?
+      unless batch_entry.data.is_a?(Hash)
+        return batch_audit_unknown_report(batch_id, "batch #{batch_id} state is not an object")
+      end
 
       events = store.list_json(AgentCoord.event_batch_prefix(batch_id)).map(&:data)
-      lanes = Array(batch_entry.data["lanes"]).map { |lane| batch_audit_lane_report(lane, events) }
+      lanes = Array(batch_entry.data["lanes"])
+      owner_counts = batch_audit_owner_counts(lanes)
+      reports = lanes.map { |lane| batch_audit_lane_report(lane, events, owner_counts) }
       {
         "batch_id" => batch_id,
-        "verdict" => lanes.all? { |lane| lane.fetch("complete") } ? "complete" : "incomplete",
-        "lanes" => lanes
+        "verdict" => reports.all? { |lane| lane.fetch("complete") } ? "complete" : "incomplete",
+        "lanes" => reports
       }
-    rescue OperationalError, JSON::ParserError => e
+    rescue OperationalError, JSON::ParserError, PathValidationError => e
       batch_audit_unknown_report(batch_id, "coordination state unreadable: #{e.message}")
     end
 
@@ -2985,11 +2997,29 @@ module AgentCoord
       { "batch_id" => batch_id, "verdict" => "unknown", "reason" => reason, "lanes" => [] }
     end
 
-    def batch_audit_lane_report(lane, events)
+    # Count how many lanes each non-UNKNOWN owner appears on, so owner-only
+    # attribution can be gated to owners that unambiguously identify one lane.
+    # register-batch enforces unique lane names but not unique owners.
+    def batch_audit_owner_counts(lanes)
+      lanes.each_with_object(Hash.new(0)) do |lane, counts|
+        next unless lane.is_a?(Hash)
+
+        owner = lane_owner(lane)
+        counts[owner] += 1 unless owner == "UNKNOWN"
+      end
+    end
+
+    # A non-Hash lane entry (legacy or hand-edited state such as `[null]`) cannot
+    # be verified, so it is reported incomplete rather than allowed to crash;
+    # this preserves the never-false-complete guarantee.
+    def batch_audit_lane_report(lane, events, owner_counts)
+      return batch_audit_malformed_lane_report unless lane.is_a?(Hash)
+
       name = lane_name(lane)
       owner = lane_owner(lane)
       targets = Array(lane["targets"] || lane["target"]).compact.map(&:to_s)
-      lane_events = events.select { |event| batch_audit_event_for_lane?(event, name, owner, targets) }
+      owner_unique = owner != "UNKNOWN" && owner_counts.fetch(owner, 0) <= 1
+      lane_events = events.select { |event| batch_audit_event_for_lane?(event, name, owner, targets, owner_unique) }
       missing = batch_audit_missing_signals(lane_events)
       {
         "name" => name,
@@ -3001,6 +3031,18 @@ module AgentCoord
       }
     end
 
+    def batch_audit_malformed_lane_report
+      {
+        "name" => "UNKNOWN",
+        "owner" => "UNKNOWN",
+        "targets" => [],
+        "event_count" => 0,
+        "missing" => ["claim.acquired", "terminal"],
+        "complete" => false,
+        "malformed" => true
+      }
+    end
+
     def batch_audit_missing_signals(lane_events)
       types = lane_events.map { |event| event["type"] }
       missing = []
@@ -3009,17 +3051,18 @@ module AgentCoord
       missing
     end
 
-    # Classify an event to a lane by any of: an explicit matching lane name, a
-    # matching owner (agent_id), or a matching target. Auto-emitted
-    # claim.acquired/claim.released events carry agent_id but no lane, so the
-    # owner match is the reliable key; lane_closed and typed events add the
-    # lane-name and target keys.
-    def batch_audit_event_for_lane?(event, name, owner, targets)
+    # Classify an event to a lane. Lane-name and target matches are lane-specific
+    # and always trusted. Owner (agent_id) is only used as a fallback when the
+    # owner uniquely identifies one lane in the batch: two lanes may share an
+    # owner, and auto-emitted claim.acquired/claim.released carry agent_id + target
+    # but no lane, so an owner-only match on a shared owner would misattribute an
+    # event across lanes and falsely mark an untouched lane complete.
+    def batch_audit_event_for_lane?(event, name, owner, targets, owner_unique)
       return false unless event.is_a?(Hash)
-      return true if name != "UNKNOWN" && !name.to_s.empty? && event["lane"].to_s == name
-      return true if owner != "UNKNOWN" && !owner.to_s.empty? && event["agent_id"].to_s == owner
+      return true if name != "UNKNOWN" && !name.to_s.empty? && event["lane"].to_s == name.to_s
+      return true if targets.include?(event["target"].to_s)
 
-      targets.include?(event["target"].to_s)
+      owner_unique && event["agent_id"].to_s == owner.to_s
     end
 
     def emit_batch_audit_report(report, options)

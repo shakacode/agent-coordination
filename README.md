@@ -518,10 +518,15 @@ and batch dependency checks never turn into an all-archive scan.
 lifecycle events are missing, so a batch-closeout workflow can fail-closed on an
 incomplete event trail. It is read-only and, like `status`, defaults to the local
 status state root. It reads the registered batch manifest for its lanes and the
-batch's events under `events/<batch-id>/`, classifying each event to a lane by a
-matching lane name, owner (`agent_id`), or target — the owner match is what links
-the auto-emitted `claim.acquired`/`claim.released` events (which carry no `lane`
-field) to their lane.
+batch's events under `events/<batch-id>/`, classifying each event to a lane by
+its **explicit lane name or its target** (both lane-specific). Owner (`agent_id`)
+is used only as a fallback, and only when that owner uniquely identifies one lane
+in the batch — this is what links the auto-emitted `claim.acquired`/`claim.released`
+events (which carry `agent_id` and target but no `lane` field) to their lane.
+`register-batch` enforces unique lane *names* but not unique owners, so when two
+lanes share an owner, owner-only events are not attributed to either lane; each
+relies on its target/lane-name match, so a lane whose target was never touched
+correctly stays incomplete rather than false-completing.
 
 A lane is **telemetry-complete** when it has both:
 
@@ -530,10 +535,11 @@ A lane is **telemetry-complete** when it has both:
 
 A lane missing either signal is reported incomplete with the specific missing
 signals (`claim.acquired`, `terminal`); a lane with no events at all is incomplete
-with both missing. The batch verdict is `complete` only when every registered lane
-is complete. Text output lists each lane; `--json` enumerates per-lane
-`{ name, owner, targets, event_count, missing, complete }` plus the overall
-`verdict`.
+with both missing. A malformed (non-object) lane entry in the manifest is reported
+incomplete (never assumed complete). The batch verdict is `complete` only when
+every registered lane is complete. Text output lists each lane; `--json`
+enumerates per-lane `{ name, owner, targets, event_count, missing, complete }`
+plus the overall `verdict`.
 
 Exit codes let closeout gate on the result:
 
@@ -541,7 +547,7 @@ Exit codes let closeout gate on the result:
 | ---- | ------------ | ----------------------------------------------------------------------- |
 | 0    | `complete`   | Every registered lane has an acquire event and a terminal signal.       |
 | 1    | `incomplete` | At least one lane is missing a signal; closeout should fail-closed.      |
-| 2    | `unknown`    | Coordination state is UNKNOWN — the batch id is unregistered or the batch/events are unreadable. Never reported as a false `complete`. |
+| 2    | `unknown`    | Coordination state is UNKNOWN — the batch id is unregistered, invalid/unsafe, a non-object batch record, or the batch/events are unreadable. A malformed id returns `unknown` (exit 2), never `incomplete` (exit 1). Never reported as a false `complete`. |
 
 ### Host-limit contract foundation
 
