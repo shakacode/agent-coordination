@@ -1,0 +1,60 @@
+{
+  "schema_version": 1,
+  "workspace": "default",
+  "batch_id": "acoord-emit-2026-07-22",
+  "audit": {
+    "verdict": "clean",
+    "author": "justin808 · v1 durable · 2026-07-22T01:24:07Z"
+  },
+  "completion": {
+    "state": {
+      "live": {
+        "k": "live",
+        "v": "state/live/acoord-emit",
+        "href": "https://github.com/shakacode/agent-coordination/tree/main/state"
+      },
+      "replay": {
+        "k": "replay",
+        "v": "state/replay/acoord-emit"
+      }
+    },
+    "receipts": [
+      {
+        "k": "audit-ledger",
+        "v": "#83",
+        "href": "https://github.com/shakacode/agent-coordination/issues/83"
+      }
+    ],
+    "baseline": {
+      "k": "baseline",
+      "v": "af8b686",
+      "path": "docs/archive/reports/data",
+      "href": "https://github.com/shakacode/agent-coordination/commit/af8b686"
+    },
+    "outcomes": [
+      {
+        "lane": "usage-cost",
+        "refs": "#84 · #89",
+        "links": [
+          {
+            "label": "#84",
+            "href": "https://github.com/shakacode/agent-coordination/issues/84"
+          },
+          {
+            "label": "#89",
+            "href": "https://github.com/shakacode/agent-coordination/pull/89"
+          }
+        ]
+      },
+      {
+        "lane": "route",
+        "refs": "#85 · #90"
+      }
+    ],
+    "usage": "150000 in / 4500 out",
+    "tokensTotal": 154500,
+    "cost": 3.7,
+    "duration": "1h23m"
+  },
+  "finalReport": "Batch complete: 5 lanes merged, gates green, no blockers."
+}

@@ -1,0 +1,29 @@
+{
+  "schema_version": 1,
+  "workspace": "default",
+  "batch_id": "b",
+  "completion": {
+    "state": {
+      "live": {
+        "k": "live",
+        "v": "x"
+      },
+      "replay": "—"
+    },
+    "receipts": [
+      {
+        "k": "r",
+        "v": "1"
+      }
+    ],
+    "baseline": {
+      "path": "p"
+    },
+    "outcomes": [],
+    "usage": "—",
+    "tokensTotal": "—",
+    "cost": null,
+    "duration": "—"
+  },
+  "finalReport": "done"
+}

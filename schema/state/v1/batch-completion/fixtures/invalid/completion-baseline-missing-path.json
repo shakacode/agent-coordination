@@ -1,0 +1,33 @@
+{
+  "schema_version": 1,
+  "workspace": "default",
+  "batch_id": "b",
+  "audit": {
+    "verdict": "pending",
+    "author": "a"
+  },
+  "completion": {
+    "state": {
+      "live": {
+        "k": "live",
+        "v": "x"
+      },
+      "replay": "—"
+    },
+    "receipts": [
+      {
+        "k": "r",
+        "v": "1"
+      }
+    ],
+    "baseline": {
+      "v": "af8b686"
+    },
+    "outcomes": [],
+    "usage": "—",
+    "tokensTotal": "—",
+    "cost": null,
+    "duration": "—"
+  },
+  "finalReport": "done"
+}

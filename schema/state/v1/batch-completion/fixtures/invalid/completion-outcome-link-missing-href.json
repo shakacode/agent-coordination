@@ -1,0 +1,42 @@
+{
+  "schema_version": 1,
+  "workspace": "default",
+  "batch_id": "b",
+  "audit": {
+    "verdict": "pending",
+    "author": "a"
+  },
+  "completion": {
+    "state": {
+      "live": {
+        "k": "live",
+        "v": "x"
+      },
+      "replay": "—"
+    },
+    "receipts": [
+      {
+        "k": "r",
+        "v": "1"
+      }
+    ],
+    "baseline": {
+      "path": "p"
+    },
+    "outcomes": [
+      {
+        "lane": "x",
+        "links": [
+          {
+            "label": "#84"
+          }
+        ]
+      }
+    ],
+    "usage": "—",
+    "tokensTotal": "—",
+    "cost": null,
+    "duration": "—"
+  },
+  "finalReport": "done"
+}
