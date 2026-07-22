@@ -399,9 +399,8 @@ link without parsing handoff prose.
 moving work between agents, hosts, machines, or operators. The released claim is
 stamped with `release_mode: "handoff"` plus `handoff_to` and `handoff_note`, so
 the next claimant can recover the branch, PR, phase, and resume note from the
-target-scoped record. When the claim has a `batch_id`, release also appends a
-`handoff` event to `events/<batch-id>/`; the event is best-effort because the
-released claim itself is the durable handoff source.
+target-scoped record. The handoff fields ride along on the auto-emitted
+`claim.released` event described under "Auto-emitted lifecycle events" below.
 
 `release --terminal done|abandoned|superseded` records a version-2
 `lane_closed` event before releasing the held claim, then stamps the matching
@@ -425,12 +424,32 @@ them, so completed synthetic batches retain the one-day GC window.
 `events/<batch-id>/<event-id>.json`. Use it for phase changes and noteworthy
 operator-visible milestones that should remain visible even when a heartbeat is
 overwritten by the next phase. Event records accept the same optional metadata
-fields as claims and heartbeats, plus `--type`, `--lane`, and `--message`.
-`release --handoff-*` creates `handoff` events automatically when a batch id is
-available; use direct `record-event --type handoff` only for non-release
-breadcrumbs.
+fields as claims and heartbeats, plus `--type`, `--lane`, and `--message`. Most
+claim-lifecycle events are now emitted automatically (see below); use direct
+`record-event` for additional operator breadcrumbs.
 
-Ordinary phase, handoff, and milestone events use timestamp-plus-random IDs and
+### Auto-emitted lifecycle events
+
+`claim`, `release`, and `heartbeat` auto-emit lifecycle events so a claim's
+acquire, phase transitions, and release leave a queryable trail under
+`events/<batch-id>/` without any explicit `record-event` calls. Each emit is
+best-effort (a failed event write warns on stderr and never fails the underlying
+operation) and only happens when a `batch_id` is known for the operation:
+
+- `claim.acquired` on a genuine claim acquisition or takeover — carries the
+  agent, target, branch, and any `phase`/`generation`/`instance-id` metadata on
+  the claim. A same-holder TTL renewal with an unchanged lane and unchanged
+  generation/instance is treated as a routine renewal and emits nothing.
+- `claim.released` on every non-terminal `release` — carries the final claim
+  `status`, and for handoffs the `release_mode: "handoff"`, `handoff_to`, and
+  `handoff_note` fields. Terminal releases emit the richer `lane_closed` event
+  instead and do not double-emit `claim.released`.
+- `phase.changed` on a `heartbeat` whose `--phase` differs from the phase on the
+  record it overwrote — carries `previous_phase` and the new `phase`. It fires
+  only on an actual transition between two phases, never on every beat; the first
+  phase assignment is captured by `claim.acquired` instead.
+
+Ordinary phase, lifecycle, and milestone events use timestamp-plus-random IDs and
 remain append-only. `lane_closed` is the deliberate exception: its event ID is
 a deterministic reservation derived from the lane name, stable within the
 batch. A create-only write to that path makes concurrent or retried closeout
@@ -953,7 +972,7 @@ vocabulary.
 Normalization applies where the CLI writes caller-supplied status values: the
 `heartbeat` command and ordinary `record-event` statuses. Claim `status`
 (`active`/`released`), lane-closure `terminal` reasons, and the `released`
-claim-status snapshot on handoff events are separate closed vocabularies
+claim-status snapshot on `claim.released` events are separate closed vocabularies
 written by the CLI itself and pass through unchanged. Rows written by older
 CLIs are normalized only when rewritten: dependency gating still accepts the
 legacy `complete`/`completed` synonyms, and `gc` continues to reclaim legacy
@@ -1028,9 +1047,9 @@ characters, because dependency refs split on the last colon. An ordinary
 event's optional `status` uses the
 [heartbeat status vocabulary](#heartbeat-status-vocabulary) and is normalized
 the same way at write time, with the caller's original spelling in
-`status_raw` when coercion changed it. Handoff events record the released
-claim's `status` snapshot (`released`) verbatim; that value is claim-status
-vocabulary, not a heartbeat status. Event ids are
+`status_raw` when coercion changed it. `claim.released` events record the
+released claim's `status` snapshot (`released`) verbatim; that value is
+claim-status vocabulary, not a heartbeat status. Event ids are
 time-sortable and unique per write for ordinary append-only events. A
 `lane_closed` ID is instead stable per batch/lane and begins with
 `lane_closed-`; it is not a chronology key. Consumers should order mixed event

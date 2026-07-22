@@ -567,8 +567,7 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
 
     assert_equal 0, claim.status.exitstatus, claim.stderr
     assert_equal 0, release.status.exitstatus, release.stderr
-    event_path = Dir.glob(File.join(@state_root, "events", "batch-synthetic-terminal", "*.json")).fetch(0)
-    event = JSON.parse(File.read(event_path))
+    event = event_of_type("batch-synthetic-terminal", "lane_closed")
     assert_equal "lane_closed", event.fetch("type")
     assert_equal true, event.fetch("synthetic")
     assert_equal "simulation", event.fetch("synthetic_kind")
@@ -706,7 +705,7 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     [claim, handoff, reclaim, close].each { |result| assert_equal 0, result.status.exitstatus, result.stderr }
     event_paths = Dir.glob(File.join(@state_root, "events/batch-handoff-gc/*.json"))
     events = event_paths.map { |path| JSON.parse(File.read(path)) }
-    assert_equal(1, events.count { |event| event["type"] == "handoff" && !event.key?("lane") })
+    assert_equal(1, events.count { |event| event["type"] == "claim.released" && !event.key?("lane") })
     assert_equal(1, events.count { |event| event["type"] == "lane_closed" && event["lane"] == "code" })
     old = (Time.utc(2026, 7, 12, 12, 0, 0) - (8 * 86_400)).iso8601
     event_paths.each do |path|
@@ -2622,7 +2621,7 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     assert_equal 0, release.status.exitstatus, release.stderr
 
     claim_payload = JSON.parse(File.read(File.join(@state_root, "claims", "shakacode", "react_on_rails", "62.json")))
-    event = JSON.parse(File.read(Dir.glob(File.join(@state_root, "events", "batch-identity", "*.json")).fetch(0)))
+    event = event_of_type("batch-identity", "lane_closed")
     assert_equal "m1-codex", claim_payload.fetch("machine_id")
     assert_equal "m1-codex", event.fetch("machine_id")
     assert_equal({ "agent_id" => "worker-a", "machine" => "m1-codex" }, event.fetch("closed_by"))
@@ -2683,8 +2682,7 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     )
     assert_equal 0, release.status.exitstatus, release.stderr
 
-    event_path = Dir.glob(File.join(@state_root, "events", "batch-identity", "*.json")).fetch(0)
-    event = JSON.parse(File.read(event_path))
+    event = event_of_type("batch-identity", "lane_closed")
     assert_equal({ "agent_id" => "worker-a", "machine" => "m5" }, event.fetch("closed_by"))
     assert_equal "m5", event.fetch("machine_id")
     assert_equal "codex-thread-42", event.fetch("session_id")
@@ -3093,8 +3091,7 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     assert_equal "released", claim_payload.fetch("status")
     assert_equal "done", claim_payload.fetch("terminal")
 
-    event_path = Dir.glob(File.join(@state_root, "events", "batch-terminal", "*.json")).fetch(0)
-    event = JSON.parse(File.read(event_path))
+    event = event_of_type("batch-terminal", "lane_closed")
     assert_equal 2, event.fetch("schema_version")
     assert_equal "lane_closed", event.fetch("type")
     assert_equal "code", event.fetch("lane")
@@ -3157,8 +3154,7 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     )
 
     assert_equal 0, release.status.exitstatus, release.stderr
-    event_path = Dir.glob(File.join(@state_root, "events", "batch-legacy-id", "*.json")).fetch(0)
-    assert_equal "legacy", JSON.parse(File.read(event_path)).fetch("lane")
+    assert_equal "legacy", event_of_type("batch-legacy-id", "lane_closed").fetch("lane")
   end
 
   def test_concurrent_terminal_releases_reconcile_both_batch_lanes
@@ -3252,6 +3248,275 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     [results, errors, event, batch]
   end
 
+  def test_claim_acquire_with_batch_id_records_claim_acquired_event
+    write_batch("batch-lifecycle", lanes: [{ "name" => "code", "owner" => "worker-a", "targets" => ["4100"] }])
+    claim = run_agent_coord(
+      "claim", "--agent-id", "worker-a", "--repo", "shakacode/react_on_rails", "--target", "4100",
+      "--batch-id", "batch-lifecycle", "--branch", "jg/lifecycle", "--host", "codex",
+      "--phase", "implementing", "--generation", "2", "--instance-id", "instance-a"
+    )
+    assert_equal 0, claim.status.exitstatus, claim.stderr
+
+    event = event_of_type("batch-lifecycle", "claim.acquired")
+    assert_equal "batch-lifecycle", event.fetch("batch_id")
+    assert_equal "worker-a", event.fetch("agent_id")
+    assert_equal "shakacode/react_on_rails", event.fetch("repo")
+    assert_equal "4100", event.fetch("target")
+    assert_equal "jg/lifecycle", event.fetch("branch")
+    assert_equal "implementing", event.fetch("phase")
+    assert_equal 2, event.fetch("generation")
+    assert_equal "instance-a", event.fetch("instance_id")
+    assert_match(/\A\d{8}T\d{6}\.\d{6}Z-[0-9a-f]{8}\z/, event.fetch("event_id"))
+    refute event.key?("status"), "expected claim.acquired to omit a status snapshot"
+  end
+
+  def test_claim_acquire_without_batch_id_records_no_event
+    claim = run_agent_coord(
+      "claim", "--agent-id", "worker-a", "--repo", "shakacode/react_on_rails", "--target", "4101",
+      "--phase", "implementing"
+    )
+    assert_equal 0, claim.status.exitstatus, claim.stderr
+    refute_path_exists File.join(@state_root, "events")
+  end
+
+  def test_claim_acquire_tolerates_event_write_failure
+    write_batch("batch-acquire-fail", lanes: [{ "name" => "code", "owner" => "worker-a", "targets" => ["4102"] }])
+    FileUtils.mkdir_p(File.join(@state_root, "events"))
+    File.write(File.join(@state_root, "events", "batch-acquire-fail"), "not a directory")
+
+    claim = run_agent_coord(
+      "claim", "--agent-id", "worker-a", "--repo", "shakacode/react_on_rails", "--target", "4102",
+      "--batch-id", "batch-acquire-fail"
+    )
+
+    assert_equal 0, claim.status.exitstatus, claim.stderr
+    assert_includes claim.stderr, "warning: claim.acquired event not recorded"
+    claim_path = File.join(@state_root, "claims", "shakacode", "react_on_rails", "4102.json")
+    assert_equal "active", JSON.parse(File.read(claim_path)).fetch("status")
+  end
+
+  def test_claim_same_holder_renewal_records_no_additional_claim_acquired_event
+    write_batch("batch-renewal", lanes: [{ "name" => "code", "owner" => "worker-a", "targets" => ["4160"] }])
+    args = [
+      "claim", "--agent-id", "worker-a", "--repo", "shakacode/react_on_rails", "--target", "4160",
+      "--batch-id", "batch-renewal", "--branch", "jg/renewal", "--generation", "1", "--instance-id", "instance-a"
+    ]
+    first = run_agent_coord(*args)
+    assert_equal 0, first.status.exitstatus, first.stderr
+    second = run_agent_coord(*args)
+    assert_equal 0, second.status.exitstatus, second.stderr
+
+    assert_equal 1, events_of_type("batch-renewal", "claim.acquired").length
+  end
+
+  def test_claim_after_release_re_emits_claim_acquired_event
+    write_batch("batch-reacquire", lanes: [{ "name" => "code", "owner" => "worker-a", "targets" => ["4161"] }])
+    base = [
+      "--agent-id", "worker-a", "--repo", "shakacode/react_on_rails",
+      "--target", "4161", "--batch-id", "batch-reacquire"
+    ]
+    assert_equal 0, run_agent_coord("claim", *base).status.exitstatus
+    assert_equal 0, run_agent_coord(
+      "release", "--agent-id", "worker-a", "--repo", "shakacode/react_on_rails", "--target", "4161"
+    ).status.exitstatus
+    assert_equal 0, run_agent_coord("claim", *base).status.exitstatus
+
+    assert_equal 2, events_of_type("batch-reacquire", "claim.acquired").length
+  end
+
+  def test_claim_with_changed_generation_re_emits_claim_acquired_event
+    write_batch("batch-generation", lanes: [{ "name" => "code", "owner" => "worker-a", "targets" => ["4162"] }])
+    common = [
+      "claim", "--agent-id", "worker-a", "--repo", "shakacode/react_on_rails", "--target", "4162",
+      "--batch-id", "batch-generation"
+    ]
+    assert_equal 0, run_agent_coord(*common, "--generation", "1").status.exitstatus
+    assert_equal 0, run_agent_coord(*common, "--generation", "2").status.exitstatus
+
+    assert_equal 2, events_of_type("batch-generation", "claim.acquired").length
+  end
+
+  def test_claim_renewal_that_adds_instance_id_re_emits_claim_acquired_event
+    write_batch("batch-add-instance", lanes: [{ "name" => "code", "owner" => "worker-a", "targets" => ["4191"] }])
+    common = [
+      "claim", "--agent-id", "worker-a", "--repo", "shakacode/react_on_rails", "--target", "4191",
+      "--batch-id", "batch-add-instance"
+    ]
+    assert_equal 0, run_agent_coord(*common).status.exitstatus
+    assert_equal 0, run_agent_coord(*common, "--instance-id", "instance-a").status.exitstatus
+
+    assert_equal 2, events_of_type("batch-add-instance", "claim.acquired").length
+  end
+
+  def test_release_records_claim_released_event_with_final_status
+    write_batch("batch-release", lanes: [{ "name" => "code", "owner" => "worker-a", "targets" => ["4130"] }])
+    claim = run_agent_coord(
+      "claim", "--agent-id", "worker-a", "--repo", "shakacode/react_on_rails", "--target", "4130",
+      "--batch-id", "batch-release", "--branch", "jg/release"
+    )
+    assert_equal 0, claim.status.exitstatus, claim.stderr
+
+    release = run_agent_coord(
+      "release", "--agent-id", "worker-a", "--repo", "shakacode/react_on_rails", "--target", "4130"
+    )
+    assert_equal 0, release.status.exitstatus, release.stderr
+
+    event = event_of_type("batch-release", "claim.released")
+    assert_equal "worker-a", event.fetch("agent_id")
+    assert_equal "shakacode/react_on_rails", event.fetch("repo")
+    assert_equal "4130", event.fetch("target")
+    assert_equal "jg/release", event.fetch("branch")
+    assert_equal "released", event.fetch("status")
+    refute event.key?("status_raw"), "expected the released-status snapshot to bypass status coercion"
+    refute event.key?("release_mode"), "expected a plain release to omit release_mode"
+    refute event.key?("handoff_to"), "expected a plain release to omit handoff fields"
+  end
+
+  def test_release_tolerates_event_write_failure
+    write_batch("batch-release-fail", lanes: [{ "name" => "code", "owner" => "worker-a", "targets" => ["4131"] }])
+    claim = run_agent_coord(
+      "claim", "--agent-id", "worker-a", "--repo", "shakacode/react_on_rails", "--target", "4131",
+      "--batch-id", "batch-release-fail"
+    )
+    assert_equal 0, claim.status.exitstatus, claim.stderr
+    # Replace the event directory (created by claim.acquired) with a plain file
+    # so the release's claim.released event write fails.
+    FileUtils.rm_rf(File.join(@state_root, "events", "batch-release-fail"))
+    File.write(File.join(@state_root, "events", "batch-release-fail"), "not a directory")
+
+    release = run_agent_coord(
+      "release", "--agent-id", "worker-a", "--repo", "shakacode/react_on_rails", "--target", "4131"
+    )
+
+    assert_equal 0, release.status.exitstatus, release.stderr
+    assert_includes release.stderr, "warning: claim.released event not recorded"
+    claim_path = File.join(@state_root, "claims", "shakacode", "react_on_rails", "4131.json")
+    assert_equal "released", JSON.parse(File.read(claim_path)).fetch("status")
+  end
+
+  def test_heartbeat_phase_transition_emits_single_phase_changed_event
+    args = [
+      "heartbeat", "--agent-id", "worker-a", "--batch-id", "batch-phase",
+      "--repo", "shakacode/react_on_rails", "--target", "4120", "--status", "in_progress"
+    ]
+    base = run_agent_coord(*args, "--phase", "implementing")
+    assert_equal 0, base.status.exitstatus, base.stderr
+    # The first phase assignment is not a transition; claim.acquired records the
+    # initial phase, so a heartbeat with no prior phase emits nothing.
+    assert_empty events_of_type("batch-phase", "phase.changed")
+
+    changed = run_agent_coord(*args, "--phase", "validating")
+    assert_equal 0, changed.status.exitstatus, changed.stderr
+
+    repeat = run_agent_coord(*args, "--phase", "validating")
+    assert_equal 0, repeat.status.exitstatus, repeat.stderr
+
+    event = event_of_type("batch-phase", "phase.changed")
+    assert_equal "batch-phase", event.fetch("batch_id")
+    assert_equal "worker-a", event.fetch("agent_id")
+    assert_equal "implementing", event.fetch("previous_phase")
+    assert_equal "validating", event.fetch("phase")
+    assert_equal "phase implementing -> validating", event.fetch("message")
+  end
+
+  def test_heartbeat_repeated_phase_records_no_event
+    args = [
+      "heartbeat", "--agent-id", "worker-a", "--batch-id", "batch-phase-same",
+      "--repo", "shakacode/react_on_rails", "--target", "4121", "--phase", "validating", "--status", "in_progress"
+    ]
+    first = run_agent_coord(*args)
+    assert_equal 0, first.status.exitstatus, first.stderr
+    second = run_agent_coord(*args)
+    assert_equal 0, second.status.exitstatus, second.stderr
+
+    assert_empty events_of_type("batch-phase-same", "phase.changed")
+  end
+
+  def test_heartbeat_without_batch_id_records_no_phase_changed_event
+    common = [
+      "heartbeat", "--agent-id", "worker-a",
+      "--repo", "shakacode/react_on_rails", "--target", "4122", "--status", "in_progress"
+    ]
+    assert_equal 0, run_agent_coord(*common, "--phase", "implementing").status.exitstatus
+    assert_equal 0, run_agent_coord(*common, "--phase", "validating").status.exitstatus
+    refute_path_exists File.join(@state_root, "events")
+  end
+
+  def test_heartbeat_phase_change_tolerates_event_write_failure
+    common = [
+      "heartbeat", "--agent-id", "worker-a", "--batch-id", "batch-phase-fail",
+      "--repo", "shakacode/react_on_rails", "--target", "4123", "--status", "in_progress"
+    ]
+    first = run_agent_coord(*common, "--phase", "implementing")
+    assert_equal 0, first.status.exitstatus, first.stderr
+    FileUtils.mkdir_p(File.join(@state_root, "events"))
+    File.write(File.join(@state_root, "events", "batch-phase-fail"), "not a directory")
+
+    second = run_agent_coord(*common, "--phase", "validating")
+
+    assert_equal 0, second.status.exitstatus, second.stderr
+    assert_includes second.stderr, "warning: phase.changed event not recorded"
+    heartbeat = JSON.parse(File.read(File.join(@state_root, "heartbeats", "worker-a.json")))
+    assert_equal "validating", heartbeat.fetch("phase")
+  end
+
+  def test_heartbeat_lane_switch_does_not_fabricate_phase_changed_event
+    # The per-agent heartbeat record is reused across lanes; a beat that switches
+    # to a different batch/target must not compare phases across lanes and write a
+    # bogus transition into the new batch.
+    first = run_agent_coord(
+      "heartbeat", "--agent-id", "worker-a", "--batch-id", "batch-lane-a",
+      "--repo", "shakacode/react_on_rails", "--target", "4150", "--phase", "implementing", "--status", "in_progress"
+    )
+    assert_equal 0, first.status.exitstatus, first.stderr
+
+    second = run_agent_coord(
+      "heartbeat", "--agent-id", "worker-a", "--batch-id", "batch-lane-b",
+      "--repo", "shakacode/react_on_rails", "--target", "4151", "--phase", "validating", "--status", "in_progress"
+    )
+    assert_equal 0, second.status.exitstatus, second.stderr
+
+    assert_empty events_of_type("batch-lane-a", "phase.changed")
+    assert_empty events_of_type("batch-lane-b", "phase.changed")
+  end
+
+  def test_phase_changed_inherits_preserved_heartbeat_metadata
+    args = [
+      "heartbeat", "--agent-id", "worker-a", "--batch-id", "batch-phase-meta",
+      "--repo", "shakacode/react_on_rails", "--target", "4170", "--status", "in_progress"
+    ]
+    first = run_agent_coord(*args, "--phase", "implementing", "--synthetic", "--synthetic-kind", "simulation")
+    assert_equal 0, first.status.exitstatus, first.stderr
+    # The transition supplies only --phase; synthetic/synthetic_kind must be
+    # inherited from the overwritten heartbeat record onto the phase.changed event
+    # so the batch's lifecycle history keeps the short synthetic GC retention.
+    second = run_agent_coord(*args, "--phase", "validating")
+    assert_equal 0, second.status.exitstatus, second.stderr
+
+    event = event_of_type("batch-phase-meta", "phase.changed")
+    assert_equal "validating", event.fetch("phase")
+    assert_equal "implementing", event.fetch("previous_phase")
+    assert_equal true, event.fetch("synthetic")
+    assert_equal "simulation", event.fetch("synthetic_kind")
+  end
+
+  def test_status_json_projects_phase_changed_previous_phase
+    write_batch("batch-phase-status", lanes: [{ "name" => "code", "owner" => "worker-a", "targets" => ["4180"] }])
+    args = [
+      "heartbeat", "--agent-id", "worker-a", "--batch-id", "batch-phase-status",
+      "--repo", "shakacode/react_on_rails", "--target", "4180", "--status", "in_progress"
+    ]
+    assert_equal 0, run_agent_coord(*args, "--phase", "implementing").status.exitstatus
+    assert_equal 0, run_agent_coord(*args, "--phase", "validating").status.exitstatus
+
+    status = run_agent_coord("status", "--batch-id", "batch-phase-status", "--json")
+    assert_equal 0, status.status.exitstatus, status.stderr
+    event = JSON.parse(status.stdout).fetch("events").find { |projected| projected["type"] == "phase.changed" }
+    refute_nil event, "expected a phase.changed event in the status projection"
+    assert_equal "implementing", event.fetch("previous_phase")
+    assert_equal "validating", event.fetch("phase")
+  end
+
   def test_release_handoff_preserves_resume_metadata_and_records_event
     write_batch(
       "batch-handoff",
@@ -3286,15 +3551,14 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     claim_path = File.join(@state_root, "claims", "shakacode", "react_on_rails", "3975.json")
     assert_handoff_release_claim(JSON.parse(File.read(claim_path)))
 
-    event_files = Dir.glob(File.join(@state_root, "events", "batch-handoff", "*.json"))
-    assert_equal 1, event_files.length
-    event = JSON.parse(File.read(event_files.first))
+    assert_equal 1, events_of_type("batch-handoff", "claim.acquired").length
+    event = event_of_type("batch-handoff", "claim.released")
     assert_handoff_release_event(event)
 
     status = run_agent_coord("status", "--batch-id", "batch-handoff", "--json")
 
     assert_equal 0, status.status.exitstatus, status.stderr
-    status_event = JSON.parse(status.stdout).fetch("events").first
+    status_event = JSON.parse(status.stdout).fetch("events").find { |projected| projected["type"] == "claim.released" }
     assert_handoff_status_event(status_event, event.fetch("event_id"))
   end
 
@@ -3421,7 +3685,7 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     )
 
     assert_equal 0, release.status.exitstatus, release.stderr
-    assert_includes release.stderr, "warning: handoff event not recorded"
+    assert_includes release.stderr, "warning: claim.released event not recorded"
     released_payload = JSON.parse(File.read(File.join(claim_dir, "3979.json")))
     assert_equal "released", released_payload.fetch("status")
     assert_equal "handoff", released_payload.fetch("release_mode")
@@ -3437,7 +3701,9 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
       "--batch-id", "batch-file"
     )
     assert_equal 0, claim.status.exitstatus, claim.stderr
-    FileUtils.mkdir_p(File.join(@state_root, "events"))
+    # Replace the event directory (created by the claim.acquired auto-emit) with a
+    # plain file so the release's claim.released event write fails.
+    FileUtils.rm_rf(File.join(@state_root, "events", "batch-file"))
     File.write(File.join(@state_root, "events", "batch-file"), "not a directory")
 
     release = run_agent_coord(
@@ -3449,7 +3715,7 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     )
 
     assert_equal 0, release.status.exitstatus, release.stderr
-    assert_includes release.stderr, "warning: handoff event not recorded"
+    assert_includes release.stderr, "warning: claim.released event not recorded"
     claim_path = File.join(@state_root, "claims", "shakacode", "react_on_rails", "3980.json")
     released_payload = JSON.parse(File.read(claim_path))
     assert_equal "released", released_payload.fetch("status")
@@ -4705,7 +4971,6 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     ]
     first = run_agent_coord(*args)
     assert_equal 0, first.status.exitstatus, first.stderr
-    event_glob = File.join(@state_root, "events", "batch-sticky-release", "*.json")
     claim_path = File.join(@state_root, "claims", "shakacode", "react_on_rails", "3991.json")
     batch_path = File.join(@state_root, "batches", "batch-sticky-release.json")
     originals = [File.read(claim_path), File.read(batch_path)]
@@ -4714,7 +4979,7 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
 
     assert_equal 0, replay.status.exitstatus, replay.stderr
     assert_includes replay.stdout, "already closed"
-    assert_equal 1, Dir.glob(event_glob).length
+    assert_equal 1, events_of_type("batch-sticky-release", "lane_closed").length
     assert_equal originals, [File.read(claim_path), File.read(batch_path)]
 
     conflicting = args.dup
@@ -4723,7 +4988,7 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
 
     assert_equal 1, conflict.status.exitstatus
     assert_includes conflict.stderr, "conflicting terminal closeout"
-    assert_equal 1, Dir.glob(event_glob).length
+    assert_equal 1, events_of_type("batch-sticky-release", "lane_closed").length
     assert_equal originals, [File.read(claim_path), File.read(batch_path)]
   end
 
@@ -4799,7 +5064,7 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     assert_equal "done", claim_payload.fetch("terminal")
     assert_equal "default", claim_payload.fetch("workspace")
     assert_equal({ "agent_id" => "worker-a", "machine" => "codex" }, claim_payload.fetch("closed_by"))
-    assert_equal 1, Dir.glob(File.join(@state_root, "events", "batch-partial-release", "*.json")).length
+    assert_equal 1, events_of_type("batch-partial-release", "lane_closed").length
     assert_equal authoritative_batch, File.read(batch_path)
   end
 
@@ -4855,7 +5120,7 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
 
     assert_empty errors
     assert_equal [0, 0], results.sort
-    assert_equal 1, Dir.glob(File.join(@state_root, "events", "batch-same-claim", "*.json")).length
+    assert_equal 1, events_of_type("batch-same-claim", "lane_closed").length
     claim_payload = JSON.parse(File.read(File.join(@state_root, "claims", "shakacode", "react_on_rails", "4013.json")))
     assert_equal "released", claim_payload.fetch("status")
     batch = JSON.parse(File.read(File.join(@state_root, "batches", "batch-same-claim.json")))
@@ -6247,6 +6512,20 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     File.write(full_path, "#{JSON.pretty_generate(payload)}\n")
   end
 
+  def event_records(batch_id)
+    Dir.glob(File.join(@state_root, "events", batch_id, "*.json")).map { |path| JSON.parse(File.read(path)) }
+  end
+
+  def events_of_type(batch_id, type)
+    event_records(batch_id).select { |event| event["type"] == type }
+  end
+
+  def event_of_type(batch_id, type)
+    matches = events_of_type(batch_id, type)
+    assert_equal 1, matches.length, "expected exactly one #{type} event in #{batch_id}"
+    matches.first
+  end
+
   def run_agent_coord(*, state_root: @state_root, stdin_data: nil, env: {})
     merged_env = {}
     merged_env["AGENT_COORD_STATE_ROOT"] = state_root if state_root
@@ -6356,7 +6635,7 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
 
   def assert_handoff_release_event(event)
     {
-      "type" => "handoff",
+      "type" => "claim.released",
       "batch_id" => "batch-handoff",
       "agent_id" => "worker-a",
       "repo" => "shakacode/react_on_rails",
@@ -6374,7 +6653,7 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
 
   def assert_handoff_status_event(status_event, event_id)
     assert_equal event_id, status_event.fetch("event_id")
-    assert_equal "handoff", status_event.fetch("type")
+    assert_equal "claim.released", status_event.fetch("type")
     assert_equal "claude-code/conductor", status_event.fetch("handoff_to")
     assert_equal "Continue from the failing docs spec.", status_event.fetch("message")
   end

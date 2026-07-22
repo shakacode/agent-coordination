@@ -130,7 +130,8 @@ module AgentCoord
   STATUS_EVENT_METADATA_FIELDS = %w[
     event_id lane agent_id repo target branch status status_raw message thread_handle chat_handle host machine_id
     session_id session_source pr_url dashboard_url
-    operator phase generation instance_id release_mode handoff_to handoff_note terminal pr_state evidence_url
+    operator phase previous_phase generation instance_id release_mode handoff_to handoff_note terminal pr_state
+    evidence_url
     workspace closed_by
     synthetic synthetic_kind
   ].freeze
@@ -1351,6 +1352,7 @@ module AgentCoord
       rescue Conflict => e
         raise OperationalError, "claim write contention for #{options[:repo]}##{options[:target]}; #{e.message}"
       end
+      record_claim_acquired_event(store, payload, now) if claim_acquired_event?(existing, options)
       @stdout.puts "claimed #{options[:repo]}##{options[:target]} by #{options[:agent_id]} " \
                    "until #{timestamp(expires_at)}"
       0
@@ -1393,7 +1395,7 @@ module AgentCoord
         return 0
       end
       store.write_json(path, payload, message: "Release #{options[:repo]}##{options[:target]}", sha: existing.sha)
-      record_handoff_event(store, payload, now) if handoff_release?(options)
+      record_release_event(store, payload, now)
       @stdout.puts "released #{options[:repo]}##{options[:target]} by #{options[:agent_id]}"
       0
     ensure
@@ -2061,7 +2063,9 @@ module AgentCoord
         "expires_at" => timestamp(now + ttl)
       }.compact
 
+      prior_record = nil
       upsert_json(store, path, message: "Heartbeat #{options[:agent_id]}") do |existing|
+        prior_record = existing&.data
         preserved_payload(existing, heartbeat_preserved_fields(existing, options))
           .merge(payload)
           .merge(metadata_payload(options))
@@ -2069,6 +2073,7 @@ module AgentCoord
           .merge(status_attribution_payload(options))
           .compact
       end
+      record_phase_change_event(store, options, prior_record, now)
       @stdout.puts "heartbeat #{options[:agent_id]} #{timestamp(now)}"
       0
     ensure
@@ -2193,11 +2198,36 @@ module AgentCoord
       changed_identity_fields(existing, options, "batch_id", "branch").any?
     end
 
+    # A claim.acquired event marks a genuine acquisition or takeover, not a
+    # same-holder TTL renewal. Suppress the event only when the prior record is a
+    # still-active claim held by the same agent with an unchanged lane and
+    # unchanged generation/instance identity; emit for a fresh claim, a released
+    # or expired prior claim, a different holder, or a changed OR newly-added
+    # generation/instance (e.g. a process restart that starts stamping identity).
+    def claim_acquired_event?(existing, options)
+      return true unless renewed_claim?(existing, options)
+
+      reacquire_fields = %w[generation instance_id]
+      changed_identity_fields(existing, options, *reacquire_fields).any? ||
+        added_identity_fields(existing, options, *reacquire_fields).any?
+    end
+
     def heartbeat_preserved_fields(existing, options)
       changed_fields = heartbeat_changed_fields(existing, options)
       return HEARTBEAT_PRESERVED_FIELDS if changed_fields.empty?
 
       heartbeat_target_fields_to_preserve(changed_fields)
+    end
+
+    # True when the current heartbeat targets a different lane than the record it
+    # overwrote. Only explicitly supplied identity fields are compared: an omitted
+    # field is preserved from the prior record and therefore never changes the
+    # lane, while a supplied value that differs from (or newly sets) the prior
+    # record's batch_id/repo/target marks a lane switch.
+    def heartbeat_lane_changed?(options, prior_data)
+      identity_fields(options, "batch_id", "repo", "target").any? do |field, value|
+        prior_data[field].to_s != value.to_s
+      end
     end
 
     def heartbeat_changed_fields(existing, options)
@@ -2351,20 +2381,51 @@ module AgentCoord
       "lane_closed-#{Digest::SHA256.hexdigest(lane)[0, 16]}"
     end
 
-    def record_handoff_event(store, release_payload, now)
+    # Auto-emitted lifecycle events. Each is best-effort and batch_id-gated: a
+    # failed event write warns on stderr and returns without failing the
+    # claim/release/heartbeat operation, and nothing is emitted when no batch_id
+    # is known for the operation. They reuse the shared write_event_record path
+    # so the records stay consistent with explicit `record-event` writes.
+    def record_claim_acquired_event(store, claim_payload, now)
+      batch_id = claim_payload["batch_id"]
+      return if batch_id.to_s.empty?
+
+      event_options = claim_acquired_event_options(claim_payload, batch_id)
+      write_event_record(store, event_options, now, output: false)
+    rescue Error, SystemCallError => e
+      @stderr.puts "warning: claim.acquired event not recorded: #{e.message}"
+    end
+
+    def claim_acquired_event_options(claim_payload, batch_id)
+      event_options = {
+        batch_id: batch_id,
+        type: "claim.acquired",
+        agent_id: claim_payload["agent_id"],
+        repo: claim_payload["repo"],
+        target: claim_payload["target"],
+        branch: claim_payload["branch"]
+      }
+      METADATA_OPTION_FIELDS.each do |field|
+        value = claim_payload[field]
+        event_options[field.to_sym] = value unless value.nil?
+      end
+      event_options
+    end
+
+    def record_release_event(store, release_payload, now)
       batch_id = release_payload["batch_id"]
       return if batch_id.to_s.empty?
 
-      event_options = handoff_event_options(release_payload, batch_id)
+      event_options = release_event_options(release_payload, batch_id)
       write_event_record(store, event_options, now, output: false)
     rescue Error, SystemCallError => e
-      @stderr.puts "warning: handoff event not recorded: #{e.message}"
+      @stderr.puts "warning: claim.released event not recorded: #{e.message}"
     end
 
-    def handoff_event_options(release_payload, batch_id)
+    def release_event_options(release_payload, batch_id)
       event_options = {
         batch_id: batch_id,
-        type: "handoff",
+        type: "claim.released",
         agent_id: release_payload["agent_id"],
         repo: release_payload["repo"],
         target: release_payload["target"],
@@ -2375,6 +2436,51 @@ module AgentCoord
       }
       (METADATA_OPTION_FIELDS + HANDOFF_OPTION_FIELDS).each do |field|
         value = release_payload[field]
+        event_options[field.to_sym] = value unless value.nil?
+      end
+      event_options
+    end
+
+    # Emits phase.changed only when the heartbeat carries a new phase that
+    # differs from the phase on the record it overwrote. A first phase
+    # assignment (no prior phase) is captured by claim.acquired instead, so it is
+    # not treated as a transition here; repeated same-phase beats emit nothing.
+    def record_phase_change_event(store, options, prior_record, now)
+      new_phase = options[:phase]
+      return if new_phase.nil?
+
+      prior_data = prior_record.is_a?(Hash) ? prior_record : {}
+      prior_phase = prior_data["phase"]
+      return if prior_phase.to_s.empty? || prior_phase == new_phase
+      # The heartbeat record is per-agent, so a beat can overwrite a record that
+      # belonged to a different lane. Only a same-lane transition is a real phase
+      # change; comparing across lanes would fabricate a bogus transition into the
+      # new batch, so require the overwritten record's lane identity to match.
+      return if heartbeat_lane_changed?(options, prior_data)
+
+      batch_id = options[:batch_id] || prior_data["batch_id"]
+      return if batch_id.to_s.empty?
+
+      event_options = phase_change_event_options(options, batch_id, prior_phase, prior_data)
+      write_event_record(store, event_options, now, output: false)
+    rescue Error, SystemCallError => e
+      @stderr.puts "warning: phase.changed event not recorded: #{e.message}"
+    end
+
+    def phase_change_event_options(options, batch_id, prior_phase, prior_data)
+      event_options = {
+        batch_id: batch_id,
+        type: "phase.changed",
+        agent_id: options[:agent_id],
+        repo: options[:repo] || prior_data["repo"],
+        target: options[:target] || prior_data["target"],
+        branch: options[:branch] || prior_data["branch"],
+        previous_phase: prior_phase,
+        message: "phase #{prior_phase} -> #{options[:phase]}"
+      }
+      METADATA_OPTION_FIELDS.each do |field|
+        value = options[field.to_sym]
+        value = prior_data[field] if value.nil?
         event_options[field.to_sym] = value unless value.nil?
       end
       event_options
@@ -2412,6 +2518,7 @@ module AgentCoord
       }
       payload["status"] = options[:status] if options[:status_given]
       payload["status_raw"] = options[:status_raw] if options[:status_given] && options[:status_raw]
+      payload["previous_phase"] = options[:previous_phase] if options[:previous_phase]
       payload.merge(metadata_payload(options))
              .merge(handoff_payload(options))
              .merge(environment_identity_payload)
