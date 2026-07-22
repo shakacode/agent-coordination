@@ -9,6 +9,13 @@ when releases begin.
 
 ### Added
 
+- A schema-first v1 lane route contract for the bound model + reasoning effort,
+  emitted additively on a claim/heartbeat/lane-manifest record as either the
+  compact `model/effort` string or the equivalent `{ model, effort }` object
+  (both canonicalize to the same chip). Route is optional and signaled absent by
+  omission only (never `null`), so the dashboard degrades a missing route to a
+  hidden/em-dash chip; conformance, both-form, and chip-rendering fixtures live
+  beside the schema while emit paths remain deferred.
 - A schema-first v1 usage record keyed by
   `(workspace, repo, batch_id, lane_name, agent_id, target, model)` for
   per-model token and estimated-cost telemetry, with an additive optional

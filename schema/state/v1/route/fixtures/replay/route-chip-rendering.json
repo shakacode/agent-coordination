@@ -1,0 +1,28 @@
+{
+  "lanes": [
+    {
+      "lane": "usage-cost",
+      "agent_id": "gpt-sol",
+      "route": "gpt-5.6-sol/xhigh"
+    },
+    {
+      "lane": "route",
+      "agent_id": "claude-opus",
+      "route": {
+        "model": "claude-opus-4-8",
+        "effort": "high"
+      }
+    },
+    {
+      "lane": "merge-authority",
+      "agent_id": "claude-opus"
+    }
+  ],
+  "expected": {
+    "chips": {
+      "usage-cost": "gpt-5.6-sol/xhigh",
+      "route": "claude-opus-4-8/high",
+      "merge-authority": "hidden"
+    }
+  }
+}

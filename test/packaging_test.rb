@@ -20,6 +20,7 @@ class PackagingTest < Minitest::Test
     docs/adr/0007-host-limit-state-contract.md
     docs/adr/0008-capacity-reservation-state-contract.md
     docs/adr/0009-usage-record-state-contract.md
+    docs/adr/0010-route-state-contract.md
     docs/protocol-curl.md
     schema/state/v1/capacity-reservation/capacity-profile.schema.json
     schema/state/v1/capacity-reservation/capacity-reservation.schema.json
@@ -56,6 +57,20 @@ class PackagingTest < Minitest::Test
     schema/state/v1/fixtures/valid/host-limit-active.json
     schema/state/v1/fixtures/valid/host-limit-cleared.json
     schema/state/v1/host-limit.schema.json
+    schema/state/v1/route/fixtures/invalid/route-null.json
+    schema/state/v1/route/fixtures/invalid/route-object-empty-model.json
+    schema/state/v1/route/fixtures/invalid/route-object-extra-field.json
+    schema/state/v1/route/fixtures/invalid/route-object-missing-both.json
+    schema/state/v1/route/fixtures/invalid/route-object-missing-effort.json
+    schema/state/v1/route/fixtures/invalid/route-string-empty-part.json
+    schema/state/v1/route/fixtures/invalid/route-string-extra-slash.json
+    schema/state/v1/route/fixtures/invalid/route-string-no-effort.json
+    schema/state/v1/route/fixtures/invalid/route-wrong-type.json
+    schema/state/v1/route/fixtures/replay/route-chip-rendering.json
+    schema/state/v1/route/fixtures/valid/route-absent.json
+    schema/state/v1/route/fixtures/valid/route-compact-string.json
+    schema/state/v1/route/fixtures/valid/route-structured.json
+    schema/state/v1/route/route.schema.json
     schema/state/v1/usage/fixtures/invalid/usage-fabricated-string-metric.json
     schema/state/v1/usage/fixtures/invalid/usage-missing-model.json
     schema/state/v1/usage/fixtures/invalid/usage-negative-cost.json

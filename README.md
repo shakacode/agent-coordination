@@ -535,6 +535,23 @@ or project these records, and provider token accounting and pricing remain
 [ADR 0009](docs/adr/0009-usage-record-state-contract.md) for logical-key,
 optional-metric discipline, storage-key encoding, and non-goal semantics.
 
+### Lane route contract foundation
+
+The published
+[`schema/state/v1/route/route.schema.json`](schema/state/v1/route/route.schema.json)
+defines a lane's bound model + reasoning effort (the "route"), emitted additively
+on a claim, heartbeat, or lane-manifest record. A route is either the compact
+`model/effort` string (for example `gpt-5.6-sol/xhigh`) or the equivalent
+`{ model, effort }` object; both canonicalize to the same chip. Route is optional
+and the only way to signal no route is to omit the property — it is never `null`
+— so the dashboard degrades an absent route to a hidden/`—` chip. Positive,
+negative, and chip-rendering fixtures live under
+[`schema/state/v1/route/fixtures/`](schema/state/v1/route/fixtures/).
+
+This is a schema-only foundation. The CLI and Worker do not yet emit, detect, or
+project routes. Route rides on the identity of its host record and declares no
+key of its own. See [ADR 0010](docs/adr/0010-route-state-contract.md).
+
 `gc` applies one retention plan to local, GitHub, and HTTP stores. Exactly one
 mode is required: `--dry-run` prints proposed actions without writing, while
 `--execute` copies eligible records into `archive/` with compare-and-swap
