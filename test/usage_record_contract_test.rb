@@ -103,6 +103,14 @@ class UsageRecordContractTest < Minitest::Test
     assert_empty projection.validate(fixture.fetch("status")).to_a,
                  "JSON Schema validates the records but cannot enforce composite-key uniqueness"
     assert_equal 1, records.map { |record| logical_key(record) }.uniq.length
+
+    # A later report supersedes earlier ones, so aggregation collapses the
+    # duplicate to the latest reported_at instead of summing both.
+    actual = aggregate_usage(records)
+    expected = fixture.fetch("expected_after_supersede")
+    assert_equal expected.fetch("records_with_unknown_metrics"), actual.fetch("records_with_unknown_metrics")
+    assert_model_totals(expected.fetch("tokens_by_model"), actual.fetch("tokens_by_model"))
+    assert_model_totals({ "batch" => expected.fetch("batch_totals") }, { "batch" => actual.fetch("batch_totals") })
   end
 
   private
@@ -127,7 +135,7 @@ class UsageRecordContractTest < Minitest::Test
     by_model = {}
     totals = new_accumulator
     unknown = 0
-    records.each do |record|
+    dedupe_by_latest(records).each do |record|
       slot = (by_model[record.fetch("model")] ||= new_accumulator)
       unknown += 1 if accumulate(record, slot, totals)
     end
@@ -136,6 +144,16 @@ class UsageRecordContractTest < Minitest::Test
       "batch_totals" => finalize(totals),
       "records_with_unknown_metrics" => unknown
     }
+  end
+
+  # A later report for the same logical key supersedes earlier ones, so a stale
+  # or retried duplicate is collapsed to the latest reported_at before summing.
+  # reported_at values are UTC "...Z" timestamps that sort chronologically.
+  def dedupe_by_latest(records)
+    records
+      .group_by { |record| logical_key(record) }
+      .values
+      .map { |group| group.max_by { |record| record.fetch("reported_at") } }
   end
 
   def new_accumulator

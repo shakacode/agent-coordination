@@ -8,7 +8,7 @@
   "x-logical-key": ["workspace", "repo", "batch_id", "lane_name", "agent_id", "target", "model"],
   "x-storage-key": {
     "template": "usage/{workspace}/{repo}/{batch_id}/{lane_name}/{agent_id}/{target}/{model}.json",
-    "segment_encoding": "UTF-8 bytes; leave ASCII alphanumeric, underscore, and hyphen literal; percent-encode every other byte with uppercase hexadecimal. Applies to every logical-key segment because repo, target, and identifier strings may contain slashes or other separators (for example repo owner/name encodes its slash as %2F)."
+    "segment_encoding": "UTF-8 bytes; leave ASCII alphanumeric, underscore, and hyphen literal; percent-encode every other byte with uppercase hexadecimal. Applies to every logical-key segment because repo, target, and identifier strings may contain slashes or other separators (for example repo owner/name encodes its slash as %2F). This conservative encoding also percent-encodes dots, so a value such as gpt-5.6-sol becomes gpt-5%2E6-sol and no segment can form a . or .. traversal component; a runtime implementation may relax dot handling for readability once it owns the path builder. This template is not wired to the CLI or Worker yet."
   },
   "$ref": "#/$defs/usage_record",
   "$defs": {
