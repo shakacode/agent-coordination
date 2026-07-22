@@ -5575,6 +5575,22 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     assert_includes result.stdout, "state is not an object"
   end
 
+  def test_batch_audit_zero_lane_batch_is_unknown_not_complete
+    write_state_record(
+      "batches/batch-no-lanes.json",
+      { "schema_version" => 1, "batch_id" => "batch-no-lanes", "lanes" => [] }
+    )
+
+    result = run_agent_coord("batch-audit", "--batch-id", "batch-no-lanes")
+    assert_equal 2, result.status.exitstatus, result.stderr
+    assert_includes result.stdout, "batch-audit batch-no-lanes unknown"
+    assert_includes result.stdout, "batch batch-no-lanes registers no lanes"
+
+    json = run_agent_coord("batch-audit", "--batch-id", "batch-no-lanes", "--json")
+    assert_equal 2, json.status.exitstatus
+    assert_equal "unknown", JSON.parse(json.stdout).fetch("verdict")
+  end
+
   def test_batch_audit_disambiguates_shared_target_by_owner
     write_batch(
       "batch-shared-target",
