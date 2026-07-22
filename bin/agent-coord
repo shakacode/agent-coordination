@@ -3013,9 +3013,10 @@ module AgentCoord
       end
 
       events = event_records.map(&:data)
+      batch_repo = batch_entry.data["repo"]
       owner_counts = batch_audit_owner_counts(lanes)
       target_counts = batch_audit_target_counts(lanes)
-      reports = lanes.map { |lane| batch_audit_lane_report(lane, events, owner_counts, target_counts) }
+      reports = lanes.map { |lane| batch_audit_lane_report(lane, events, owner_counts, target_counts, batch_repo) }
       {
         "batch_id" => batch_id,
         "verdict" => reports.all? { |lane| lane.fetch("complete") } ? "complete" : "incomplete",
@@ -3062,7 +3063,7 @@ module AgentCoord
     # A non-Hash lane entry (legacy or hand-edited state such as `[null]`) cannot
     # be verified, so it is reported incomplete rather than allowed to crash;
     # this preserves the never-false-complete guarantee.
-    def batch_audit_lane_report(lane, events, owner_counts, target_counts)
+    def batch_audit_lane_report(lane, events, owner_counts, target_counts, batch_repo)
       return batch_audit_malformed_lane_report unless lane.is_a?(Hash)
 
       name = lane_name(lane)
@@ -3071,7 +3072,8 @@ module AgentCoord
       owner_unique = owner != "UNKNOWN" && owner_counts.fetch(owner, 0) <= 1
       unique_targets = targets.select { |target| target_counts.fetch(target, 0) <= 1 }
       lane_events = events.select do |event|
-        batch_audit_event_for_lane?(event, name, unique_targets, owner, owner_unique)
+        batch_audit_event_for_repo?(event, batch_repo) &&
+          batch_audit_event_for_lane?(event, name, unique_targets, owner, owner_unique)
       end
       missing = batch_audit_missing_signals(lane_events)
       {
@@ -3105,6 +3107,19 @@ module AgentCoord
       missing
     end
 
+    # Repo gate applied before any lane-attribution key, so it constrains all three
+    # paths uniformly. A batch manifest declares an optional repo and lanes carry no
+    # per-lane repo; batch ids are reused across repos with colliding target numbers,
+    # so a same-batch-id claim/release/lane_closed recorded under a different --repo
+    # must never attribute to this batch. When the batch declares no repo, every
+    # event passes (unchanged behavior). An event whose repo is absent is excluded
+    # once the batch declares a repo, matching the terminal-closeout repo check.
+    def batch_audit_event_for_repo?(event, batch_repo)
+      return true if batch_repo.to_s.empty?
+
+      event.is_a?(Hash) && event["repo"].to_s == batch_repo.to_s
+    end
+
     # Classify an event to a lane. The explicit lane-name match is always trusted
     # (lane names are unique, and lane_closed/typed events may carry an explicit
     # `lane`). Target and owner (agent_id) are lane-specific keys only when they
@@ -3112,7 +3127,8 @@ module AgentCoord
     # owners, and auto-emitted claim.acquired/claim.released carry target + agent_id
     # but no lane, so an ambiguous target/owner match would misattribute an event
     # across lanes and falsely mark an untouched lane complete. `unique_targets`
-    # already holds only this lane's targets that map to exactly one lane.
+    # already holds only this lane's targets that map to exactly one lane. The batch
+    # repo gate (batch_audit_event_for_repo?) is applied by the caller before this.
     def batch_audit_event_for_lane?(event, name, unique_targets, owner, owner_unique)
       return false unless event.is_a?(Hash)
       return true if name != "UNKNOWN" && !name.to_s.empty? && event["lane"].to_s == name.to_s

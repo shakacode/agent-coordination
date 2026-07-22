@@ -5671,6 +5671,52 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     refute lane.fetch("complete")
   end
 
+  def test_batch_audit_ignores_events_from_a_different_repo
+    write_state_record(
+      "batches/batch-repo-a.json",
+      { "schema_version" => 1, "batch_id" => "batch-repo-a", "repo" => "shakacode/repo-a",
+        "lanes" => [{ "name" => "code", "owner" => "worker-a", "targets" => ["42"] }] }
+    )
+    # Same batch-id, target number, and owner but a DIFFERENT repo must not attribute.
+    run_agent_coord(
+      "claim", "--agent-id", "worker-a", "--repo", "shakacode/repo-b", "--target", "42",
+      "--batch-id", "batch-repo-a", "--branch", "b"
+    )
+    run_agent_coord(
+      "release", "--agent-id", "worker-a", "--repo", "shakacode/repo-b", "--target", "42",
+      "--batch-id", "batch-repo-a", "--branch", "b"
+    )
+
+    result = run_agent_coord("batch-audit", "--batch-id", "batch-repo-a", "--json")
+
+    assert_equal 1, result.status.exitstatus, result.stderr
+    lane = JSON.parse(result.stdout).fetch("lanes").first
+    assert_equal 0, lane.fetch("event_count")
+    refute lane.fetch("complete")
+    assert_equal ["claim.acquired", "terminal"], lane.fetch("missing")
+  end
+
+  def test_batch_audit_completes_with_matching_repo_events
+    write_state_record(
+      "batches/batch-repo-a.json",
+      { "schema_version" => 1, "batch_id" => "batch-repo-a", "repo" => "shakacode/repo-a",
+        "lanes" => [{ "name" => "code", "owner" => "worker-a", "targets" => ["42"] }] }
+    )
+    run_agent_coord(
+      "claim", "--agent-id", "worker-a", "--repo", "shakacode/repo-a", "--target", "42",
+      "--batch-id", "batch-repo-a", "--branch", "b"
+    )
+    run_agent_coord(
+      "release", "--agent-id", "worker-a", "--repo", "shakacode/repo-a", "--target", "42",
+      "--batch-id", "batch-repo-a", "--branch", "b"
+    )
+
+    result = run_agent_coord("batch-audit", "--batch-id", "batch-repo-a")
+
+    assert_equal 0, result.status.exitstatus, result.stderr
+    assert_includes result.stdout, "batch-audit batch-repo-a complete"
+  end
+
   def test_register_batch_rejects_malformed_lane_name
     manifest_path = File.join(@state_root, "batch-manifest.json")
     File.write(

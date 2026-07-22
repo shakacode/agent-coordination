@@ -530,7 +530,11 @@ lane). This is what links the auto-emitted `claim.acquired`/`claim.released` eve
 when two lanes share a target or an owner that shared key is ambiguous and is not
 used for attribution; a lane whose only keys are ambiguous and was never touched by
 a lane-name-tagged event correctly stays incomplete rather than false-completing.
-Empty-string targets are ignored (never an attribution key).
+Empty-string targets are ignored (never an attribution key). When the batch manifest
+declares a `repo`, only events whose `repo` matches it are considered at all (lanes
+carry no per-lane repo); a batch id reused across repos with colliding target numbers
+therefore cannot let an event recorded under a different `--repo` complete a lane. A
+batch that declares no repo applies no repo gate.
 
 A lane is **telemetry-complete** when it has both:
 
