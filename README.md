@@ -368,6 +368,7 @@ bin/agent-coord record-event --batch-id ID --type TYPE [--lane NAME] [--agent-id
 bin/agent-coord status [--json] [--include-archived]
 bin/agent-coord status --repo OWNER/REPO --target ISSUE_OR_PR [--json]
 bin/agent-coord status --batch-id ID [--json]
+bin/agent-coord batch-audit --batch-id ID [--json]
 bin/agent-coord version [--json]
 bin/agent-coord config [show] [--json]
 bin/agent-coord doctor [--json|--stack-json] [--deep] [--doctor-prefix PREFIX] [--state-root PATH|--api-url URL|--backend OWNER/REPO]
@@ -464,6 +465,30 @@ default `workspace` to `default` and identify the closer in `closed_by` using
 the agent id and `--host` machine value. The public producer/consumer contract
 is [`contracts/state-schema-v2.json`](contracts/state-schema-v2.json).
 
+### Typed operational-signal events
+
+`record-event` recognizes four typed `--type` names for the operational signals
+most worth counting. Each validates its required fields at write time and rejects
+a missing field or out-of-set value with a clear error and a non-zero exit; the
+values are stored as additive payload fields on the event record and projected
+into `status --batch-id --json` events (present-only). Any other `--type` value
+stays allowed and unvalidated, exactly as before, so free-form breadcrumbs are
+unaffected.
+
+| `--type`               | Required fields                                    | Allowed values                                              |
+| ---------------------- | -------------------------------------------------- | ---------------------------------------------------------- |
+| `help_requested`       | `--reason`                                         | `reason` ∈ `blocked-user-input`, `question`, `permission`  |
+| `escalation_requested` | `--from-route`, `--to-route`, `--evidence`         | free-form (all three required and non-empty)               |
+| `error`                | `--severity`, `--category`, `--message`            | `severity` ∈ `P0`, `P1`, `P2`, `P3`; `category`/`message` free-form |
+| `human_intervention`   | `--kind`                                           | `kind` ∈ `takeover`, `supersede`, `manual-fix`, `drain`    |
+
+The typed fields (`reason`, `from_route`, `to_route`, `evidence`, `severity`,
+`category`, `kind`) are payload-only and never become path segments. Events stay
+append-only and reuse the same write path as every other `record-event` call.
+These four types plus their fields are the schema downstream consumers (the event
+harvester and the agent-workflows companion) read; treat this table as the
+reference.
+
 `heartbeat` upserts `heartbeats/<agent-id>.json`. `status` renders coordination
 state in text or JSON. Full `status` renders compact claims, heartbeats, batch
 lanes, lane dependencies, blocked-on refs, and recent events for broad audits.
@@ -486,6 +511,37 @@ out full coordination read as degraded/`UNKNOWN` rather than guessing.
 Unscoped `status` excludes `archive/` by default. Pass `--include-archived` for
 an explicit archive inventory; scoped status remains hot-state-only so target
 and batch dependency checks never turn into an all-archive scan.
+
+### batch-audit telemetry-completeness gate
+
+`batch-audit --batch-id ID` reports, per registered lane, which expected
+lifecycle events are missing, so a batch-closeout workflow can fail-closed on an
+incomplete event trail. It is read-only and, like `status`, defaults to the local
+status state root. It reads the registered batch manifest for its lanes and the
+batch's events under `events/<batch-id>/`, classifying each event to a lane by a
+matching lane name, owner (`agent_id`), or target — the owner match is what links
+the auto-emitted `claim.acquired`/`claim.released` events (which carry no `lane`
+field) to their lane.
+
+A lane is **telemetry-complete** when it has both:
+
+- at least one `claim.acquired` event, and
+- a terminal signal — either a `claim.released` event or a `lane_closed` event.
+
+A lane missing either signal is reported incomplete with the specific missing
+signals (`claim.acquired`, `terminal`); a lane with no events at all is incomplete
+with both missing. The batch verdict is `complete` only when every registered lane
+is complete. Text output lists each lane; `--json` enumerates per-lane
+`{ name, owner, targets, event_count, missing, complete }` plus the overall
+`verdict`.
+
+Exit codes let closeout gate on the result:
+
+| Exit | Verdict      | Meaning                                                                 |
+| ---- | ------------ | ----------------------------------------------------------------------- |
+| 0    | `complete`   | Every registered lane has an acquire event and a terminal signal.       |
+| 1    | `incomplete` | At least one lane is missing a signal; closeout should fail-closed.      |
+| 2    | `unknown`    | Coordination state is UNKNOWN — the batch id is unregistered or the batch/events are unreadable. Never reported as a false `complete`. |
 
 ### Host-limit contract foundation
 
