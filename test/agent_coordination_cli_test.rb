@@ -3295,6 +3295,47 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     assert_equal "active", JSON.parse(File.read(claim_path)).fetch("status")
   end
 
+  def test_claim_same_holder_renewal_records_no_additional_claim_acquired_event
+    write_batch("batch-renewal", lanes: [{ "name" => "code", "owner" => "worker-a", "targets" => ["4160"] }])
+    args = [
+      "claim", "--agent-id", "worker-a", "--repo", "shakacode/react_on_rails", "--target", "4160",
+      "--batch-id", "batch-renewal", "--branch", "jg/renewal", "--generation", "1", "--instance-id", "instance-a"
+    ]
+    first = run_agent_coord(*args)
+    assert_equal 0, first.status.exitstatus, first.stderr
+    second = run_agent_coord(*args)
+    assert_equal 0, second.status.exitstatus, second.stderr
+
+    assert_equal 1, events_of_type("batch-renewal", "claim.acquired").length
+  end
+
+  def test_claim_after_release_re_emits_claim_acquired_event
+    write_batch("batch-reacquire", lanes: [{ "name" => "code", "owner" => "worker-a", "targets" => ["4161"] }])
+    base = [
+      "--agent-id", "worker-a", "--repo", "shakacode/react_on_rails",
+      "--target", "4161", "--batch-id", "batch-reacquire"
+    ]
+    assert_equal 0, run_agent_coord("claim", *base).status.exitstatus
+    assert_equal 0, run_agent_coord(
+      "release", "--agent-id", "worker-a", "--repo", "shakacode/react_on_rails", "--target", "4161"
+    ).status.exitstatus
+    assert_equal 0, run_agent_coord("claim", *base).status.exitstatus
+
+    assert_equal 2, events_of_type("batch-reacquire", "claim.acquired").length
+  end
+
+  def test_claim_with_changed_generation_re_emits_claim_acquired_event
+    write_batch("batch-generation", lanes: [{ "name" => "code", "owner" => "worker-a", "targets" => ["4162"] }])
+    common = [
+      "claim", "--agent-id", "worker-a", "--repo", "shakacode/react_on_rails", "--target", "4162",
+      "--batch-id", "batch-generation"
+    ]
+    assert_equal 0, run_agent_coord(*common, "--generation", "1").status.exitstatus
+    assert_equal 0, run_agent_coord(*common, "--generation", "2").status.exitstatus
+
+    assert_equal 2, events_of_type("batch-generation", "claim.acquired").length
+  end
+
   def test_release_records_claim_released_event_with_final_status
     write_batch("batch-release", lanes: [{ "name" => "code", "owner" => "worker-a", "targets" => ["4130"] }])
     claim = run_agent_coord(
@@ -3405,6 +3446,26 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     assert_includes second.stderr, "warning: phase.changed event not recorded"
     heartbeat = JSON.parse(File.read(File.join(@state_root, "heartbeats", "worker-a.json")))
     assert_equal "validating", heartbeat.fetch("phase")
+  end
+
+  def test_heartbeat_lane_switch_does_not_fabricate_phase_changed_event
+    # The per-agent heartbeat record is reused across lanes; a beat that switches
+    # to a different batch/target must not compare phases across lanes and write a
+    # bogus transition into the new batch.
+    first = run_agent_coord(
+      "heartbeat", "--agent-id", "worker-a", "--batch-id", "batch-lane-a",
+      "--repo", "shakacode/react_on_rails", "--target", "4150", "--phase", "implementing", "--status", "in_progress"
+    )
+    assert_equal 0, first.status.exitstatus, first.stderr
+
+    second = run_agent_coord(
+      "heartbeat", "--agent-id", "worker-a", "--batch-id", "batch-lane-b",
+      "--repo", "shakacode/react_on_rails", "--target", "4151", "--phase", "validating", "--status", "in_progress"
+    )
+    assert_equal 0, second.status.exitstatus, second.stderr
+
+    assert_empty events_of_type("batch-lane-a", "phase.changed")
+    assert_empty events_of_type("batch-lane-b", "phase.changed")
   end
 
   def test_release_handoff_preserves_resume_metadata_and_records_event

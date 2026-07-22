@@ -1351,7 +1351,7 @@ module AgentCoord
       rescue Conflict => e
         raise OperationalError, "claim write contention for #{options[:repo]}##{options[:target]}; #{e.message}"
       end
-      record_claim_acquired_event(store, payload, now)
+      record_claim_acquired_event(store, payload, now) if claim_acquired_event?(existing, options)
       @stdout.puts "claimed #{options[:repo]}##{options[:target]} by #{options[:agent_id]} " \
                    "until #{timestamp(expires_at)}"
       0
@@ -2197,11 +2197,33 @@ module AgentCoord
       changed_identity_fields(existing, options, "batch_id", "branch").any?
     end
 
+    # A claim.acquired event marks a genuine acquisition or takeover, not a
+    # same-holder TTL renewal. Suppress the event only when the prior record is a
+    # still-active claim held by the same agent with an unchanged lane and
+    # unchanged generation/instance identity; emit for a fresh claim, a released
+    # or expired prior claim, a different holder, or a changed generation/instance.
+    def claim_acquired_event?(existing, options)
+      return true unless renewed_claim?(existing, options)
+
+      changed_identity_fields(existing, options, "generation", "instance_id").any?
+    end
+
     def heartbeat_preserved_fields(existing, options)
       changed_fields = heartbeat_changed_fields(existing, options)
       return HEARTBEAT_PRESERVED_FIELDS if changed_fields.empty?
 
       heartbeat_target_fields_to_preserve(changed_fields)
+    end
+
+    # True when the current heartbeat targets a different lane than the record it
+    # overwrote. Only explicitly supplied identity fields are compared: an omitted
+    # field is preserved from the prior record and therefore never changes the
+    # lane, while a supplied value that differs from (or newly sets) the prior
+    # record's batch_id/repo/target marks a lane switch.
+    def heartbeat_lane_changed?(options, prior_data)
+      identity_fields(options, "batch_id", "repo", "target").any? do |field, value|
+        prior_data[field].to_s != value.to_s
+      end
     end
 
     def heartbeat_changed_fields(existing, options)
@@ -2426,6 +2448,11 @@ module AgentCoord
       prior_data = prior_record.is_a?(Hash) ? prior_record : {}
       prior_phase = prior_data["phase"]
       return if prior_phase.to_s.empty? || prior_phase == new_phase
+      # The heartbeat record is per-agent, so a beat can overwrite a record that
+      # belonged to a different lane. Only a same-lane transition is a real phase
+      # change; comparing across lanes would fabricate a bogus transition into the
+      # new batch, so require the overwritten record's lane identity to match.
+      return if heartbeat_lane_changed?(options, prior_data)
 
       batch_id = options[:batch_id] || prior_data["batch_id"]
       return if batch_id.to_s.empty?

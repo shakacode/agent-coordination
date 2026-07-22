@@ -21,6 +21,7 @@ when releases begin.
   the richer `lane_closed` event and do not double-emit `claim.released`; the
   prior release-only `handoff` event type is now the generalized `claim.released`
   event. No gem has been published, so no migration is required.
+- A schema-first v1 batch blocker contract keyed by `(workspace, batch_id)` that
   persists a structured blocker (`message`, a non-empty `decisions` list, and an
   optional `recommendedReply`) when a supervisor blocks on operator authority, so
   the dashboard renders the Blocker panel instead of reconstructing decisions from
