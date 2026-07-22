@@ -38,8 +38,10 @@ by grouping on `model`.
   encodes this as a non-negative number, `null`, or `"—"` and rejects any other
   string, so an omitted metric key (a required-field violation) and a fabricated
   arbitrary string are both rejected.
-- `currency` is an optional ISO 4217 unit label (absent means USD). It is a unit
-  label rather than a metric, so it may be omitted.
+- `currency` is USD in v1 (`const: "USD"`, absent means USD). Restricting v1 to a
+  single currency means cost aggregation can never silently combine currencies.
+  It is a unit label rather than a metric, so it may be omitted. Multi-currency
+  support with per-currency aggregation is deferred to a future contract version.
 - `reported_at` is the report time; a later report for the same logical key
   supersedes an earlier one.
 
@@ -55,15 +57,19 @@ logical key. The additive `status_projection` fragment permits existing status
 properties (`claims`, `heartbeats`, `batches`, `events`), so embedding the
 section is optional and backward compatible. Consumers aggregate tokens-by-model
 and per-batch token/cost tiles from these records and exclude unknown (`null` or
-`"—"`) metrics from sums rather than counting them as zero. The array publishes
-`x-unique-key` metadata for the composite key, an unenforced producer invariant
-because JSON Schema cannot enforce uniqueness by a subset of object properties.
+`"—"`) metrics from sums. A model or batch whose metric has no numeric
+contributor aggregates to unknown, never a fabricated zero — the "never fabricate
+a zero" rule applies to aggregates as well as to individual records. Cost sums
+are USD because v1 costs are USD only. The array publishes `x-unique-key`
+metadata for the composite key, an unenforced producer invariant because JSON
+Schema cannot enforce uniqueness by a subset of object properties.
 
 ## Consequences
 
 - Positive, negative, procedural, and aggregation replay fixtures live beside the
-  schema. The replay proves tokens-by-model and batch totals ignore unknown
-  metrics without fabricating zeros.
+  schema. One replay proves tokens-by-model and batch totals ignore unknown
+  metrics; another proves an all-unknown model and batch aggregate to unknown
+  rather than a fabricated zero.
 - Breaking changes to key or field semantics require `schema/state/v2`; additive
   optional fields may extend v1.
 - This foundation does not add reporting commands, persistence routes, provider

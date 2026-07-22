@@ -64,15 +64,30 @@
         "output_tokens": "—",
         "cost": null,
         "reported_at": "2026-07-22T08:55:00Z"
+      },
+      {
+        "schema_version": 1,
+        "workspace": "default",
+        "repo": "shakacode/agent-coordination",
+        "target": "88",
+        "batch_id": "acoord-emit-2026-07-22",
+        "lane_name": "batch-blocker",
+        "agent_id": "haiku-scout",
+        "model": "claude-haiku-4-5",
+        "input_tokens": null,
+        "output_tokens": null,
+        "cost": null,
+        "reported_at": "2026-07-22T08:57:00Z"
       }
     ]
   },
   "expected": {
     "tokens_by_model": {
       "claude-opus-4-8": { "input_tokens": 150000, "output_tokens": 4500, "cost": 3.7 },
-      "gpt-5.6-sol": { "input_tokens": 80000, "output_tokens": 2000, "cost": 1.9 }
+      "gpt-5.6-sol": { "input_tokens": 80000, "output_tokens": 2000, "cost": 1.9 },
+      "claude-haiku-4-5": { "input_tokens": null, "output_tokens": null, "cost": null }
     },
     "batch_totals": { "input_tokens": 230000, "output_tokens": 6500, "cost": 5.6 },
-    "records_with_unknown_metrics": 1
+    "records_with_unknown_metrics": 2
   }
 }

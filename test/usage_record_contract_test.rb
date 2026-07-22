@@ -8,6 +8,7 @@ class UsageRecordContractTest < Minitest::Test
   ROOT = File.expand_path("..", __dir__)
   SCHEMA_PATH = File.join(ROOT, "schema", "state", "v1", "usage", "usage-record.schema.json")
   FIXTURES_PATH = File.join(ROOT, "schema", "state", "v1", "usage", "fixtures")
+  METRICS = %w[input_tokens output_tokens cost].freeze
 
   def test_schema_publishes_the_usage_record_contract_metadata
     schema_document = read_json(SCHEMA_PATH)
@@ -76,6 +77,23 @@ class UsageRecordContractTest < Minitest::Test
     assert_model_totals({ "batch" => expected.fetch("batch_totals") }, { "batch" => actual.fetch("batch_totals") })
   end
 
+  def test_all_unknown_aggregate_preserves_unknown_instead_of_fabricating_zero
+    schema_document = read_json(SCHEMA_PATH)
+    projection = JSONSchemer.schema(schema_document.merge("$ref" => "#/$defs/status_projection"))
+    replay = read_fixture(File.join(FIXTURES_PATH, "replay", "usage-all-unknown-batch.json"))
+    records = replay.dig("status", "usage")
+
+    assert_empty projection.validate(replay.fetch("status")).to_a
+    actual = aggregate_usage(records)
+    expected = replay.fetch("expected")
+
+    assert_equal expected.fetch("records_with_unknown_metrics"), actual.fetch("records_with_unknown_metrics")
+    assert_model_totals(expected.fetch("tokens_by_model"), actual.fetch("tokens_by_model"))
+    %w[input_tokens output_tokens cost].each do |metric|
+      assert_nil actual.fetch("batch_totals").fetch(metric), "batch #{metric} must stay unknown, not zero"
+    end
+  end
+
   def test_status_projection_procedurally_admits_duplicate_logical_keys
     schema_document = read_json(SCHEMA_PATH)
     projection = JSONSchemer.schema(schema_document.merge("$ref" => "#/$defs/status_projection"))
@@ -106,23 +124,33 @@ class UsageRecordContractTest < Minitest::Test
   end
 
   def aggregate_usage(records)
-    by_model = Hash.new { |hash, key| hash[key] = zeroed_totals }
-    totals = zeroed_totals
+    by_model = {}
+    totals = new_accumulator
     unknown = 0
     records.each do |record|
-      record_unknown = accumulate(record, by_model[record.fetch("model")], totals)
-      unknown += 1 if record_unknown
+      slot = (by_model[record.fetch("model")] ||= new_accumulator)
+      unknown += 1 if accumulate(record, slot, totals)
     end
-    { "tokens_by_model" => by_model, "batch_totals" => totals, "records_with_unknown_metrics" => unknown }
+    {
+      "tokens_by_model" => by_model.transform_values { |slot| finalize(slot) },
+      "batch_totals" => finalize(totals),
+      "records_with_unknown_metrics" => unknown
+    }
+  end
+
+  def new_accumulator
+    METRICS.to_h { |metric| [metric, { "sum" => 0, "seen" => false }] }
   end
 
   def accumulate(record, model_slot, totals)
     record_unknown = false
-    %w[input_tokens output_tokens cost].each do |field|
-      value = record.fetch(field)
+    METRICS.each do |metric|
+      value = record.fetch(metric)
       if value.is_a?(Numeric)
-        model_slot[field] += value
-        totals[field] += value
+        [model_slot, totals].each do |accumulator|
+          accumulator[metric]["sum"] += value
+          accumulator[metric]["seen"] = true
+        end
       else
         record_unknown = true
       end
@@ -130,16 +158,33 @@ class UsageRecordContractTest < Minitest::Test
     record_unknown
   end
 
-  def zeroed_totals
-    { "input_tokens" => 0, "output_tokens" => 0, "cost" => 0.0 }
+  # A metric with no numeric contributor stays unknown (nil) rather than a fabricated zero.
+  def finalize(accumulator)
+    METRICS.to_h do |metric|
+      entry = accumulator.fetch(metric)
+      value = entry.fetch("seen") ? entry.fetch("sum") : nil
+      value = value.round(2) if metric == "cost" && value
+      [metric, value]
+    end
   end
 
   def assert_model_totals(expected, actual)
     assert_equal expected.keys.sort, actual.keys.sort
     expected.each do |model, sums|
-      assert_equal sums.fetch("input_tokens"), actual.fetch(model).fetch("input_tokens"), "#{model} input_tokens"
-      assert_equal sums.fetch("output_tokens"), actual.fetch(model).fetch("output_tokens"), "#{model} output_tokens"
-      assert_in_delta sums.fetch("cost"), actual.fetch(model).fetch("cost"), 0.001, "#{model} cost"
+      %w[input_tokens output_tokens].each do |metric|
+        assert_metric sums.fetch(metric), actual.fetch(model).fetch(metric), "#{model} #{metric}"
+      end
+      assert_metric sums.fetch("cost"), actual.fetch(model).fetch("cost"), "#{model} cost", delta: 0.001
+    end
+  end
+
+  def assert_metric(expected, actual, message, delta: nil)
+    if expected.nil?
+      assert_nil actual, message
+    elsif delta
+      assert_in_delta expected, actual, delta, message
+    else
+      assert_equal expected, actual, message
     end
   end
 end

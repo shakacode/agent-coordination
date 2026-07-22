@@ -522,8 +522,10 @@ per model lets consumers aggregate tokens-by-model and per-batch token/cost
 tiles. `input_tokens`, `output_tokens`, and `cost` are optional metrics: an
 unknown value is sent as `null` or the em dash `"—"` and is never omitted or
 emitted as a fabricated zero, so the schema rejects both a dropped metric key
-and any other string. An optional `usage` status projection embeds records into
-existing status documents; consumers exclude unknown metrics from sums. Positive,
+and any other string. v1 `cost` is USD only, so aggregation never combines
+currencies. An optional `usage` status projection embeds records into existing
+status documents; consumers exclude unknown metrics from sums and keep an
+all-unknown model or batch aggregate unknown rather than zero. Positive,
 negative, procedural, and aggregation replay fixtures live under
 [`schema/state/v1/usage/fixtures/`](schema/state/v1/usage/fixtures/).
 

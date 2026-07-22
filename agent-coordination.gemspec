@@ -69,9 +69,11 @@ Gem::Specification.new do |spec|
     schema/state/v1/usage/fixtures/invalid/usage-missing-model.json
     schema/state/v1/usage/fixtures/invalid/usage-negative-tokens.json
     schema/state/v1/usage/fixtures/invalid/usage-noncanonical-repo.json
+    schema/state/v1/usage/fixtures/invalid/usage-nonusd-currency.json
     schema/state/v1/usage/fixtures/invalid/usage-omitted-metric.json
     schema/state/v1/usage/fixtures/invalid/usage-unknown-field.json
     schema/state/v1/usage/fixtures/procedural/usage-duplicate-logical-key.json
+    schema/state/v1/usage/fixtures/replay/usage-all-unknown-batch.json
     schema/state/v1/usage/fixtures/replay/usage-by-model-aggregation.json
     schema/state/v1/usage/fixtures/valid/usage-known.json
     schema/state/v1/usage/fixtures/valid/usage-unknown-metrics.json

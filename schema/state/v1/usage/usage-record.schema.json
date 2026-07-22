@@ -80,9 +80,8 @@
         "output_tokens": { "$ref": "#/$defs/optional_token_count" },
         "cost": { "$ref": "#/$defs/optional_cost" },
         "currency": {
-          "type": "string",
-          "pattern": "^[A-Z]{3}$",
-          "description": "Optional ISO 4217 currency code for cost. Absent means USD. This is a unit label, not an optional metric, so it may be omitted."
+          "const": "USD",
+          "description": "v1 costs are USD only, so cost aggregation can never combine currencies. This is a unit label rather than an optional metric and may be omitted; absent means USD. Multi-currency support with per-currency aggregation is deferred to a future contract version."
         },
         "reported_at": {
           "type": "string",
@@ -101,7 +100,7 @@
           "items": { "$ref": "#/$defs/usage_record" },
           "x-unique-key": ["workspace", "repo", "batch_id", "lane_name", "agent_id", "target", "model"],
           "x-unique-key-enforcement": "producer",
-          "description": "Optional additive status section. The composite x-unique-key is an unenforced producer invariant because JSON Schema cannot enforce uniqueness by a subset of object properties. Consumers aggregate tokens by model and per-batch token/cost tiles from these records; unknown (null or \"—\") metrics are excluded from sums rather than counted as zero."
+          "description": "Optional additive status section. The composite x-unique-key is an unenforced producer invariant because JSON Schema cannot enforce uniqueness by a subset of object properties. Consumers aggregate tokens by model and per-batch token/cost tiles from these records. Unknown (null or \"—\") metrics are excluded from sums, and a model or batch whose metric has no numeric contributor aggregates to unknown rather than a fabricated zero. Cost sums are USD because v1 costs are USD only."
         }
       }
     }
