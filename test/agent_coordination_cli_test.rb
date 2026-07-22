@@ -5717,6 +5717,33 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     assert_includes result.stdout, "batch-audit batch-repo-a complete"
   end
 
+  def test_batch_audit_owner_fallback_ignores_out_of_lane_target
+    write_state_record(
+      "batches/batch-owner-target.json",
+      { "schema_version" => 1, "batch_id" => "batch-owner-target",
+        "lanes" => [{ "name" => "code", "owner" => "worker-a", "targets" => ["101"] }] }
+    )
+    # The unique lane owner does unrelated work on a DIFFERENT target under the same
+    # batch-id/repo; that must not complete this lane (owner fallback requires the
+    # event target to belong to the lane).
+    run_agent_coord(
+      "claim", "--agent-id", "worker-a", "--repo", "shakacode/x", "--target", "999",
+      "--batch-id", "batch-owner-target", "--branch", "b"
+    )
+    run_agent_coord(
+      "release", "--agent-id", "worker-a", "--repo", "shakacode/x", "--target", "999",
+      "--batch-id", "batch-owner-target", "--branch", "b"
+    )
+
+    result = run_agent_coord("batch-audit", "--batch-id", "batch-owner-target", "--json")
+
+    assert_equal 1, result.status.exitstatus, result.stderr
+    lane = JSON.parse(result.stdout).fetch("lanes").first
+    assert_equal 0, lane.fetch("event_count")
+    refute lane.fetch("complete")
+    assert_equal ["claim.acquired", "terminal"], lane.fetch("missing")
+  end
+
   def test_register_batch_rejects_malformed_lane_name
     manifest_path = File.join(@state_root, "batch-manifest.json")
     File.write(

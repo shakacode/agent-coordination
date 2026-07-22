@@ -265,6 +265,12 @@ module AgentCoord
   end
 
   StoredJson = Struct.new(:path, :data, :sha, keyword_init: true)
+  # Per-lane attribution context for batch-audit. `targets` is the lane's full
+  # declared target list; `unique_targets` is the subset that maps to exactly one
+  # lane in the batch. Grouping these keeps the event matcher within the argument
+  # limit while carrying both the unique-target fast path and the full target list
+  # the owner fallback needs for its in-lane membership check.
+  BatchAuditLane = Struct.new(:name, :targets, :unique_targets, :owner, :owner_unique, keyword_init: true)
   DemoClock = Struct.new(:time) do
     def now
       time
@@ -3069,11 +3075,15 @@ module AgentCoord
       name = lane_name(lane)
       owner = lane_owner(lane)
       targets = batch_audit_lane_targets(lane)
-      owner_unique = owner != "UNKNOWN" && owner_counts.fetch(owner, 0) <= 1
-      unique_targets = targets.select { |target| target_counts.fetch(target, 0) <= 1 }
+      context = BatchAuditLane.new(
+        name: name,
+        targets: targets,
+        unique_targets: targets.select { |target| target_counts.fetch(target, 0) <= 1 },
+        owner: owner,
+        owner_unique: owner != "UNKNOWN" && owner_counts.fetch(owner, 0) <= 1
+      )
       lane_events = events.select do |event|
-        batch_audit_event_for_repo?(event, batch_repo) &&
-          batch_audit_event_for_lane?(event, name, unique_targets, owner, owner_unique)
+        batch_audit_event_for_repo?(event, batch_repo) && batch_audit_event_for_lane?(event, context)
       end
       missing = batch_audit_missing_signals(lane_events)
       {
@@ -3122,19 +3132,27 @@ module AgentCoord
 
     # Classify an event to a lane. The explicit lane-name match is always trusted
     # (lane names are unique, and lane_closed/typed events may carry an explicit
-    # `lane`). Target and owner (agent_id) are lane-specific keys only when they
-    # are unique in the batch: register-batch does not enforce unique targets or
-    # owners, and auto-emitted claim.acquired/claim.released carry target + agent_id
-    # but no lane, so an ambiguous target/owner match would misattribute an event
-    # across lanes and falsely mark an untouched lane complete. `unique_targets`
-    # already holds only this lane's targets that map to exactly one lane. The batch
-    # repo gate (batch_audit_event_for_repo?) is applied by the caller before this.
-    def batch_audit_event_for_lane?(event, name, unique_targets, owner, owner_unique)
+    # `lane`). A target match attributes only when the target is unique in the batch
+    # (register-batch does not enforce unique targets/owners). The owner (agent_id)
+    # fallback attributes only when the owner is the batch's unique owner AND the
+    # event's target belongs to this lane (or the event carries no target): a unique
+    # owner doing other work under the same batch-id/repo must not complete this lane.
+    # The batch repo gate (batch_audit_event_for_repo?) is applied by the caller first.
+    def batch_audit_event_for_lane?(event, lane)
       return false unless event.is_a?(Hash)
-      return true if name != "UNKNOWN" && !name.to_s.empty? && event["lane"].to_s == name.to_s
-      return true if unique_targets.include?(event["target"].to_s)
+      return true if lane.name != "UNKNOWN" && !lane.name.to_s.empty? && event["lane"].to_s == lane.name.to_s
+      return true if lane.unique_targets.include?(event["target"].to_s)
 
-      owner_unique && event["agent_id"].to_s == owner.to_s
+      batch_audit_owner_attributes?(event, lane)
+    end
+
+    # Owner fallback: a unique lane owner attributes an event only when the event's
+    # target is in the lane's declared targets, or the event carries no target.
+    def batch_audit_owner_attributes?(event, lane)
+      return false unless lane.owner_unique && event["agent_id"].to_s == lane.owner.to_s
+
+      target = event["target"].to_s
+      target.empty? || lane.targets.include?(target)
     end
 
     def emit_batch_audit_report(report, options)

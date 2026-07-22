@@ -522,15 +522,19 @@ incomplete event trail. It is read-only and, like `status`, defaults to the loca
 status state root. It reads the registered batch manifest for its lanes and the
 batch's events under `events/<batch-id>/`, attributing each event to a lane by
 this rule: an **explicit event `lane` matching the lane name is always trusted**
-(lane names are unique); an event **`target`** or **owner (`agent_id`)** attributes
-only when that value is **unique among the batch's lanes** (maps to exactly one
-lane). This is what links the auto-emitted `claim.acquired`/`claim.released` events
-(which carry `agent_id` and `target` but no `lane` field) to their lane.
-`register-batch` enforces unique lane *names* but not unique targets or owners, so
-when two lanes share a target or an owner that shared key is ambiguous and is not
-used for attribution; a lane whose only keys are ambiguous and was never touched by
-a lane-name-tagged event correctly stays incomplete rather than false-completing.
-Empty-string targets are ignored (never an attribution key). When the batch manifest
+(lane names are unique); a **`target`** match attributes only when the target is
+**unique among the batch's lanes** (maps to exactly one lane); and the **owner
+(`agent_id`)** fallback attributes only when the owner is unique among the batch's
+lanes **and the event's target belongs to that lane** (or the event carries no
+target). This is what links the auto-emitted `claim.acquired`/`claim.released`
+events (which carry `agent_id` and `target` but no `lane` field) to their lane —
+while a unique owner doing unrelated work on a different target under the same
+batch-id does not complete the lane. `register-batch` enforces unique lane *names*
+but not unique targets or owners, so when two lanes share a target or an owner that
+shared key is ambiguous and is not used on its own for attribution; a lane whose
+only keys are ambiguous and was never touched by a lane-name-tagged event correctly
+stays incomplete rather than false-completing. Empty-string targets are ignored
+(never an attribution key). When the batch manifest
 declares a `repo`, only events whose `repo` matches it are considered at all (lanes
 carry no per-lane repo); a batch id reused across repos with colliding target numbers
 therefore cannot let an event recorded under a different `--repo` complete a lane. A
