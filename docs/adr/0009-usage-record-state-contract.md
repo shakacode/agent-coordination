@@ -60,7 +60,12 @@ and per-batch token/cost tiles from these records and exclude unknown (`null` or
 `"—"`) metrics from sums. A model or batch whose metric has no numeric
 contributor aggregates to unknown, never a fabricated zero — the "never fabricate
 a zero" rule applies to aggregates as well as to individual records. Cost sums
-are USD because v1 costs are USD only. The array publishes `x-unique-key`
+are USD because v1 costs are USD only. Because a later report supersedes an
+earlier one for the same logical key, a consumer that still receives duplicate
+keys (a retry or stale report — already a producer-invariant violation) keeps the
+latest `reported_at` before summing, comparing parsed instants rather than raw
+strings and resolving an exact tie deterministically so aggregation never depends
+on array order. The array publishes `x-unique-key`
 metadata for the composite key, an unenforced producer invariant because JSON
 Schema cannot enforce uniqueness by a subset of object properties.
 

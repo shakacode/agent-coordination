@@ -113,6 +113,16 @@ class UsageRecordContractTest < Minitest::Test
     end
   end
 
+  def test_dedupe_resolves_equal_timestamp_ties_independently_of_array_order
+    base = read_fixture(File.join(FIXTURES_PATH, "valid", "usage-known.json"))
+    same_instant = "2026-07-22T08:00:00Z"
+    first = base.merge("reported_at" => same_instant, "input_tokens" => 111, "output_tokens" => 1, "cost" => 1.0)
+    second = base.merge("reported_at" => same_instant, "input_tokens" => 222, "output_tokens" => 2, "cost" => 2.0)
+
+    assert_equal aggregate_usage([first, second]), aggregate_usage([second, first]),
+                 "an exact reported_at tie must resolve deterministically, not by array order"
+  end
+
   def test_status_projection_procedurally_admits_duplicate_logical_keys
     schema_document = read_json(SCHEMA_PATH)
     projection = JSONSchemer.schema(schema_document.merge("$ref" => "#/$defs/status_projection"))
@@ -169,12 +179,15 @@ class UsageRecordContractTest < Minitest::Test
   # or retried duplicate is collapsed to the latest reported_at before summing.
   # reported_at is compared as a parsed instant, not lexically, because the
   # schema accepts any RFC 3339 date-time (offsets and fractional seconds), so a
-  # non-UTC representation must not be ordered by its raw string.
+  # non-UTC representation must not be ordered by its raw string. Duplicate keys
+  # already violate the x-unique-key producer invariant; the canonical-JSON
+  # secondary key just makes an exact-timestamp tie resolve deterministically
+  # instead of depending on array order.
   def dedupe_by_latest(records)
     records
       .group_by { |record| logical_key(record) }
       .values
-      .map { |group| group.max_by { |record| Time.iso8601(record.fetch("reported_at")) } }
+      .map { |group| group.max_by { |record| [Time.iso8601(record.fetch("reported_at")), JSON.generate(record)] } }
   end
 
   def new_accumulator
