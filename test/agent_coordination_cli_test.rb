@@ -1670,6 +1670,85 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     FileUtils.remove_entry(fake_bin) if fake_bin && Dir.exist?(fake_bin)
   end
 
+  def test_doctor_rejects_unreadable_archive_metadata
+    fake_bin = Dir.mktmpdir("agent-coord-gh-archived-unreadable")
+    write_fake_gh(fake_bin, archived: :unreadable)
+
+    with_agent_coord_without_source_state do |bin|
+      result = run_command(
+        {
+          "AGENT_COORD_STATE_ROOT" => nil,
+          "AGENT_COORD_STATUS_STATE_ROOT" => nil,
+          "PATH" => [fake_bin, File.dirname(RbConfig.ruby)].join(File::PATH_SEPARATOR)
+        },
+        RbConfig.ruby,
+        bin,
+        "doctor",
+        "--backend",
+        "shakacode/agent-coordination-state"
+      )
+
+      assert_equal 2, result.status.exitstatus
+      assert_includes result.stderr, "metadata is not readable"
+      refute_includes result.stdout, "status: ok"
+    end
+  ensure
+    FileUtils.remove_entry(fake_bin) if fake_bin && Dir.exist?(fake_bin)
+  end
+
+  def test_doctor_rejects_archive_metadata_missing_archived_key
+    fake_bin = Dir.mktmpdir("agent-coord-gh-archived-missing-key")
+    write_fake_gh(fake_bin, archived: :missing_key)
+
+    with_agent_coord_without_source_state do |bin|
+      result = run_command(
+        {
+          "AGENT_COORD_STATE_ROOT" => nil,
+          "AGENT_COORD_STATUS_STATE_ROOT" => nil,
+          "PATH" => [fake_bin, File.dirname(RbConfig.ruby)].join(File::PATH_SEPARATOR)
+        },
+        RbConfig.ruby,
+        bin,
+        "doctor",
+        "--backend",
+        "shakacode/agent-coordination-state"
+      )
+
+      assert_equal 2, result.status.exitstatus
+      assert_includes result.stderr, "does not report archived state"
+      refute_includes result.stdout, "status: ok"
+    end
+  ensure
+    FileUtils.remove_entry(fake_bin) if fake_bin && Dir.exist?(fake_bin)
+  end
+
+  def test_doctor_rejects_non_object_archive_metadata
+    fake_bin = Dir.mktmpdir("agent-coord-gh-archived-not-object")
+    write_fake_gh(fake_bin, archived: :not_object)
+
+    with_agent_coord_without_source_state do |bin|
+      result = run_command(
+        {
+          "AGENT_COORD_STATE_ROOT" => nil,
+          "AGENT_COORD_STATUS_STATE_ROOT" => nil,
+          "PATH" => [fake_bin, File.dirname(RbConfig.ruby)].join(File::PATH_SEPARATOR)
+        },
+        RbConfig.ruby,
+        bin,
+        "doctor",
+        "--backend",
+        "shakacode/agent-coordination-state"
+      )
+
+      assert_equal 2, result.status.exitstatus
+      assert_includes result.stderr, "does not report archived state"
+      refute_includes result.stderr, "NoMethodError"
+      refute_includes result.stdout, "status: ok"
+    end
+  ensure
+    FileUtils.remove_entry(fake_bin) if fake_bin && Dir.exist?(fake_bin)
+  end
+
   def test_deep_option_is_doctor_only
     result = run_agent_coord("status", "--deep")
 
@@ -6399,7 +6478,23 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     %w[shasum bundle npx].each { |name| FileUtils.chmod(0o755, File.join(fake_bin, name)) }
   end
 
+  # archived accepts true/false to shape the `archived` flag, or a symbol to
+  # simulate degraded backend metadata: :unreadable (gh api fails), :missing_key
+  # (object without an `archived` field), or :not_object (valid JSON that is not
+  # a Hash, e.g. null).
   def write_fake_gh(fake_bin, archived: false)
+    api_repos_body =
+      case archived
+      when :unreadable
+        %(warn "Not Found"; exit 1)
+      when :missing_key
+        %(puts JSON.generate("full_name" => "shakacode/agent-coordination-state"); exit 0)
+      when :not_object
+        %(puts JSON.generate(nil); exit 0)
+      else
+        %(puts JSON.generate("archived" => #{archived}); exit 0)
+      end
+
     File.write(
       File.join(fake_bin, "gh"),
       <<~RUBY
@@ -6412,8 +6507,7 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
         when /^repo view /
           exit 0
         when %r{^api repos/[^/]+/[^/]+$}
-          puts JSON.generate("archived" => #{archived})
-          exit 0
+          #{api_repos_body}
         when ->(value) { value.include?("git/trees/missing-ref") }
           warn "Not Found"
           exit 1

@@ -4009,7 +4009,7 @@ module AgentCoord
       end
 
       metadata = JSON.parse(result.stdout)
-      unless metadata.key?("archived")
+      unless metadata.is_a?(Hash) && metadata.key?("archived")
         raise OperationalError, "backend repository #{@backend} metadata does not report archived state"
       end
       return unless metadata.fetch("archived")
