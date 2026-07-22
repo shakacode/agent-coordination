@@ -141,6 +141,16 @@ module AgentCoord
   # at write time; any other --type value stays allowed and unvalidated. These
   # are payload fields only and never become path segments.
   TYPED_EVENT_PAYLOAD_FIELDS = %w[reason from_route to_route evidence severity category kind].freeze
+  # Typed payload fields that belong to each typed --type. A typed event rejects
+  # any TYPED_EVENT_PAYLOAD_FIELDS value outside its own set (message is a general
+  # field, not a typed field, so it is unaffected). Keys are exactly the four
+  # typed types; arbitrary --type values ignore typed fields as before.
+  TYPED_EVENT_ALLOWED_FIELDS = {
+    "help_requested" => %w[reason],
+    "escalation_requested" => %w[from_route to_route evidence],
+    "error" => %w[severity category],
+    "human_intervention" => %w[kind]
+  }.freeze
   HELP_REQUESTED_REASONS = %w[blocked-user-input question permission].freeze
   ERROR_SEVERITIES = %w[P0 P1 P2 P3].freeze
   HUMAN_INTERVENTION_KINDS = %w[takeover supersede manual-fix drain].freeze
@@ -2570,12 +2580,17 @@ module AgentCoord
       raise Error, "event lane #{lane} cannot contain ':'" if malformed_lane_name?(lane)
     end
 
-    # Per-type required-field and allowed-value enforcement for the typed
-    # operational-signal vocabulary (issue #77). Only the four typed names are
-    # validated; any other --type value stays allowed and unvalidated, so
+    # Per-type field enforcement for the typed operational-signal vocabulary
+    # (issue #77): reject typed fields foreign to the declared type, then require
+    # its own fields and validate their allowed values. Only the four typed names
+    # are validated; any other --type value stays allowed and unvalidated, so
     # existing free-form record-event callers are unaffected.
     def validate_typed_event_options!(options)
-      case options[:type]
+      type = options[:type]
+      return unless TYPED_EVENT_ALLOWED_FIELDS.key?(type)
+
+      reject_foreign_typed_fields!(options, type)
+      case type
       when "help_requested"
         require_options(options, :reason)
         validate_event_enum!(options, :reason, HELP_REQUESTED_REASONS)
@@ -2588,6 +2603,14 @@ module AgentCoord
         require_options(options, :kind)
         validate_event_enum!(options, :kind, HUMAN_INTERVENTION_KINDS)
       end
+    end
+
+    def reject_foreign_typed_fields!(options, type)
+      allowed = TYPED_EVENT_ALLOWED_FIELDS.fetch(type)
+      foreign = (TYPED_EVENT_PAYLOAD_FIELDS - allowed).reject { |field| options[field.to_sym].nil? }
+      return if foreign.empty?
+
+      raise Error, "--#{foreign.first.tr('_', '-')} is not valid for --type #{type}"
     end
 
     def validate_event_enum!(options, field, allowed)
@@ -2983,7 +3006,8 @@ module AgentCoord
       events = store.list_json(AgentCoord.event_batch_prefix(batch_id)).map(&:data)
       lanes = Array(batch_entry.data["lanes"])
       owner_counts = batch_audit_owner_counts(lanes)
-      reports = lanes.map { |lane| batch_audit_lane_report(lane, events, owner_counts) }
+      target_counts = batch_audit_target_counts(lanes)
+      reports = lanes.map { |lane| batch_audit_lane_report(lane, events, owner_counts, target_counts) }
       {
         "batch_id" => batch_id,
         "verdict" => reports.all? { |lane| lane.fetch("complete") } ? "complete" : "incomplete",
@@ -2995,6 +3019,13 @@ module AgentCoord
 
     def batch_audit_unknown_report(batch_id, reason)
       { "batch_id" => batch_id, "verdict" => "unknown", "reason" => reason, "lanes" => [] }
+    end
+
+    # Non-empty target strings declared by a lane. Mirrors validate_batch_lane!'s
+    # reject-empties so a stray "" never becomes an attribution key that would
+    # match target-less events.
+    def batch_audit_lane_targets(lane)
+      Array(lane["targets"] || lane["target"]).compact.map(&:to_s).reject(&:empty?)
     end
 
     # Count how many lanes each non-UNKNOWN owner appears on, so owner-only
@@ -3009,17 +3040,31 @@ module AgentCoord
       end
     end
 
+    # Count how many lanes each target appears on. register-batch enforces unique
+    # lane names but not unique targets, so a shared target is ambiguous and must
+    # not attribute an event to more than one lane.
+    def batch_audit_target_counts(lanes)
+      lanes.each_with_object(Hash.new(0)) do |lane, counts|
+        next unless lane.is_a?(Hash)
+
+        batch_audit_lane_targets(lane).uniq.each { |target| counts[target] += 1 }
+      end
+    end
+
     # A non-Hash lane entry (legacy or hand-edited state such as `[null]`) cannot
     # be verified, so it is reported incomplete rather than allowed to crash;
     # this preserves the never-false-complete guarantee.
-    def batch_audit_lane_report(lane, events, owner_counts)
+    def batch_audit_lane_report(lane, events, owner_counts, target_counts)
       return batch_audit_malformed_lane_report unless lane.is_a?(Hash)
 
       name = lane_name(lane)
       owner = lane_owner(lane)
-      targets = Array(lane["targets"] || lane["target"]).compact.map(&:to_s)
+      targets = batch_audit_lane_targets(lane)
       owner_unique = owner != "UNKNOWN" && owner_counts.fetch(owner, 0) <= 1
-      lane_events = events.select { |event| batch_audit_event_for_lane?(event, name, owner, targets, owner_unique) }
+      unique_targets = targets.select { |target| target_counts.fetch(target, 0) <= 1 }
+      lane_events = events.select do |event|
+        batch_audit_event_for_lane?(event, name, unique_targets, owner, owner_unique)
+      end
       missing = batch_audit_missing_signals(lane_events)
       {
         "name" => name,
@@ -3051,16 +3096,18 @@ module AgentCoord
       missing
     end
 
-    # Classify an event to a lane. Lane-name and target matches are lane-specific
-    # and always trusted. Owner (agent_id) is only used as a fallback when the
-    # owner uniquely identifies one lane in the batch: two lanes may share an
-    # owner, and auto-emitted claim.acquired/claim.released carry agent_id + target
-    # but no lane, so an owner-only match on a shared owner would misattribute an
-    # event across lanes and falsely mark an untouched lane complete.
-    def batch_audit_event_for_lane?(event, name, owner, targets, owner_unique)
+    # Classify an event to a lane. The explicit lane-name match is always trusted
+    # (lane names are unique, and lane_closed/typed events may carry an explicit
+    # `lane`). Target and owner (agent_id) are lane-specific keys only when they
+    # are unique in the batch: register-batch does not enforce unique targets or
+    # owners, and auto-emitted claim.acquired/claim.released carry target + agent_id
+    # but no lane, so an ambiguous target/owner match would misattribute an event
+    # across lanes and falsely mark an untouched lane complete. `unique_targets`
+    # already holds only this lane's targets that map to exactly one lane.
+    def batch_audit_event_for_lane?(event, name, unique_targets, owner, owner_unique)
       return false unless event.is_a?(Hash)
       return true if name != "UNKNOWN" && !name.to_s.empty? && event["lane"].to_s == name.to_s
-      return true if targets.include?(event["target"].to_s)
+      return true if unique_targets.include?(event["target"].to_s)
 
       owner_unique && event["agent_id"].to_s == owner.to_s
     end

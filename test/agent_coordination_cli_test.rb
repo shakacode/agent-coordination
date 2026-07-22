@@ -5362,6 +5362,33 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     assert_empty event.keys & %w[reason from_route to_route evidence severity category kind]
   end
 
+  def test_record_event_typed_type_rejects_foreign_typed_field
+    write_batch("batch-typed", lanes: [{ "name" => "code", "owner" => "worker-a", "targets" => ["101"] }])
+
+    help_with_severity = run_agent_coord(
+      "record-event", "--batch-id", "batch-typed", "--type", "help_requested",
+      "--reason", "question", "--severity", "P1"
+    )
+    assert_equal 1, help_with_severity.status.exitstatus
+    assert_includes help_with_severity.stderr, "--severity is not valid for --type help_requested"
+
+    error_with_kind = run_agent_coord(
+      "record-event", "--batch-id", "batch-typed", "--type", "error",
+      "--severity", "P1", "--category", "ci", "--message", "boom", "--kind", "takeover"
+    )
+    assert_equal 1, error_with_kind.status.exitstatus
+    assert_includes error_with_kind.stderr, "--kind is not valid for --type error"
+
+    escalation_with_reason = run_agent_coord(
+      "record-event", "--batch-id", "batch-typed", "--type", "escalation_requested",
+      "--from-route", "a", "--to-route", "h", "--evidence", "e", "--reason", "question"
+    )
+    assert_equal 1, escalation_with_reason.status.exitstatus
+    assert_includes escalation_with_reason.stderr, "--reason is not valid for --type escalation_requested"
+
+    assert_empty event_records("batch-typed")
+  end
+
   def test_batch_audit_reports_complete_batch
     write_batch(
       "batch-audit-ok",
@@ -5546,6 +5573,83 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
 
     assert_equal 2, result.status.exitstatus, result.stderr
     assert_includes result.stdout, "state is not an object"
+  end
+
+  def test_batch_audit_disambiguates_shared_target_by_owner
+    write_batch(
+      "batch-shared-target",
+      lanes: [
+        { "name" => "lane-a", "owner" => "worker-a", "targets" => ["101"] },
+        { "name" => "lane-b", "owner" => "worker-b", "targets" => ["101"] }
+      ]
+    )
+    run_agent_coord(
+      "claim", "--agent-id", "worker-a", "--repo", "shakacode/x", "--target", "101",
+      "--batch-id", "batch-shared-target", "--branch", "b-a"
+    )
+    run_agent_coord(
+      "release", "--agent-id", "worker-a", "--repo", "shakacode/x", "--target", "101",
+      "--batch-id", "batch-shared-target", "--branch", "b-a"
+    )
+
+    result = run_agent_coord("batch-audit", "--batch-id", "batch-shared-target", "--json")
+
+    assert_equal 1, result.status.exitstatus, result.stderr
+    lanes = JSON.parse(result.stdout).fetch("lanes").to_h { |lane| [lane.fetch("name"), lane] }
+    # Shared target 101 is ambiguous, so only the unique owner attributes the events.
+    assert lanes.fetch("lane-a").fetch("complete"), "lane-a (owner worker-a) should be complete via unique owner"
+    refute lanes.fetch("lane-b").fetch("complete"), "same-target lane-b must not false-complete"
+    assert_equal ["claim.acquired", "terminal"], lanes.fetch("lane-b").fetch("missing")
+  end
+
+  def test_batch_audit_does_not_false_complete_lanes_sharing_target_and_owner
+    write_batch(
+      "batch-ambiguous",
+      lanes: [
+        { "name" => "lane-a", "owner" => "shared", "targets" => ["101"] },
+        { "name" => "lane-b", "owner" => "shared", "targets" => ["101"] }
+      ]
+    )
+    run_agent_coord(
+      "claim", "--agent-id", "shared", "--repo", "shakacode/x", "--target", "101",
+      "--batch-id", "batch-ambiguous", "--branch", "b"
+    )
+    run_agent_coord(
+      "release", "--agent-id", "shared", "--repo", "shakacode/x", "--target", "101",
+      "--batch-id", "batch-ambiguous", "--branch", "b"
+    )
+
+    result = run_agent_coord("batch-audit", "--batch-id", "batch-ambiguous", "--json")
+
+    assert_equal 1, result.status.exitstatus, result.stderr
+    payload = JSON.parse(result.stdout)
+    assert_equal "incomplete", payload.fetch("verdict")
+    # Neither target nor owner is unique, so no lane may be credited (fail-closed).
+    payload.fetch("lanes").each do |lane|
+      refute lane.fetch("complete"), "#{lane.fetch('name')} must stay incomplete when nothing disambiguates it"
+    end
+  end
+
+  def test_batch_audit_ignores_empty_string_target
+    write_state_record(
+      "batches/batch-empty-target.json",
+      { "schema_version" => 1, "batch_id" => "batch-empty-target",
+        "lanes" => [{ "name" => "code", "owner" => "worker-a", "targets" => [""] }] }
+    )
+    # A typed event with no target and a non-matching owner must not be credited
+    # to a lane whose only target is the empty string.
+    seed_event(
+      "batch-empty-target", "e1",
+      "type" => "help_requested", "reason" => "question", "agent_id" => "someone-else"
+    )
+
+    result = run_agent_coord("batch-audit", "--batch-id", "batch-empty-target", "--json")
+
+    assert_equal 1, result.status.exitstatus, result.stderr
+    lane = JSON.parse(result.stdout).fetch("lanes").first
+    assert_empty lane.fetch("targets")
+    assert_equal 0, lane.fetch("event_count")
+    refute lane.fetch("complete")
   end
 
   def test_register_batch_rejects_malformed_lane_name

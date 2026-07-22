@@ -471,9 +471,11 @@ is [`contracts/state-schema-v2.json`](contracts/state-schema-v2.json).
 most worth counting. Each validates its required fields at write time and rejects
 a missing field or out-of-set value with a clear error and a non-zero exit; the
 values are stored as additive payload fields on the event record and projected
-into `status --batch-id --json` events (present-only). Any other `--type` value
-stays allowed and unvalidated, exactly as before, so free-form breadcrumbs are
-unaffected.
+into `status --batch-id --json` events (present-only). Typing is strict: a typed
+event also rejects any typed field that belongs to a *different* typed type (for
+example `--type help_requested --severity P1` is an error), so a typed record
+carries only its own fields. Any other `--type` value stays allowed and
+unvalidated, exactly as before, so free-form breadcrumbs are unaffected.
 
 | `--type`               | Required fields                                    | Allowed values                                              |
 | ---------------------- | -------------------------------------------------- | ---------------------------------------------------------- |
@@ -518,15 +520,17 @@ and batch dependency checks never turn into an all-archive scan.
 lifecycle events are missing, so a batch-closeout workflow can fail-closed on an
 incomplete event trail. It is read-only and, like `status`, defaults to the local
 status state root. It reads the registered batch manifest for its lanes and the
-batch's events under `events/<batch-id>/`, classifying each event to a lane by
-its **explicit lane name or its target** (both lane-specific). Owner (`agent_id`)
-is used only as a fallback, and only when that owner uniquely identifies one lane
-in the batch — this is what links the auto-emitted `claim.acquired`/`claim.released`
-events (which carry `agent_id` and target but no `lane` field) to their lane.
-`register-batch` enforces unique lane *names* but not unique owners, so when two
-lanes share an owner, owner-only events are not attributed to either lane; each
-relies on its target/lane-name match, so a lane whose target was never touched
-correctly stays incomplete rather than false-completing.
+batch's events under `events/<batch-id>/`, attributing each event to a lane by
+this rule: an **explicit event `lane` matching the lane name is always trusted**
+(lane names are unique); an event **`target`** or **owner (`agent_id`)** attributes
+only when that value is **unique among the batch's lanes** (maps to exactly one
+lane). This is what links the auto-emitted `claim.acquired`/`claim.released` events
+(which carry `agent_id` and `target` but no `lane` field) to their lane.
+`register-batch` enforces unique lane *names* but not unique targets or owners, so
+when two lanes share a target or an owner that shared key is ambiguous and is not
+used for attribution; a lane whose only keys are ambiguous and was never touched by
+a lane-name-tagged event correctly stays incomplete rather than false-completing.
+Empty-string targets are ignored (never an attribution key).
 
 A lane is **telemetry-complete** when it has both:
 
