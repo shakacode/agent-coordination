@@ -1,0 +1,47 @@
+{
+  "as_of": "2026-07-22T09:00:00Z",
+  "status": {
+    "claims": [],
+    "heartbeats": [],
+    "batches": [],
+    "events": [],
+    "usage": [
+      {
+        "schema_version": 1,
+        "workspace": "default",
+        "repo": "shakacode/agent-coordination",
+        "target": "88",
+        "batch_id": "acoord-blocked-2026-07-22",
+        "lane_name": "batch-blocker",
+        "agent_id": "claude-opus",
+        "model": "claude-opus-4-8",
+        "input_tokens": null,
+        "output_tokens": "—",
+        "cost": null,
+        "reported_at": "2026-07-22T08:58:00Z"
+      },
+      {
+        "schema_version": 1,
+        "workspace": "default",
+        "repo": "shakacode/agent-coordination",
+        "target": "88",
+        "batch_id": "acoord-blocked-2026-07-22",
+        "lane_name": "batch-blocker",
+        "agent_id": "gpt-sol",
+        "model": "gpt-5.6-sol",
+        "input_tokens": "—",
+        "output_tokens": null,
+        "cost": "—",
+        "reported_at": "2026-07-22T08:59:00Z"
+      }
+    ]
+  },
+  "expected": {
+    "tokens_by_model": {
+      "claude-opus-4-8": { "input_tokens": null, "output_tokens": null, "cost": null },
+      "gpt-5.6-sol": { "input_tokens": null, "output_tokens": null, "cost": null }
+    },
+    "batch_totals": { "input_tokens": null, "output_tokens": null, "cost": null },
+    "records_with_unknown_metrics": 2
+  }
+}

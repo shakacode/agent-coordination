@@ -512,6 +512,29 @@ implemented here; a later additive CLI uses `RESERVATION_REFUSED` exit code 4
 rather than overloading `CLAIM_REFUSED`. See
 [ADR 0008](docs/adr/0008-capacity-reservation-state-contract.md).
 
+### Usage record contract foundation
+
+The published
+[`schema/state/v1/usage/usage-record.schema.json`](schema/state/v1/usage/usage-record.schema.json)
+defines a per-model token and estimated-cost record keyed by
+`(workspace, repo, batch_id, lane_name, agent_id, target, model)`. One record
+per model lets consumers aggregate tokens-by-model and per-batch token/cost
+tiles. `input_tokens`, `output_tokens`, and `cost` are optional metrics: an
+unknown value is sent as `null` or the em dash `"—"` and is never omitted or
+emitted as a fabricated zero, so the schema rejects both a dropped metric key
+and any other string. v1 `cost` is USD only, so aggregation never combines
+currencies. An optional `usage` status projection embeds records into existing
+status documents; consumers exclude unknown metrics from sums and keep an
+all-unknown model or batch aggregate unknown rather than zero. Positive,
+negative, procedural, and aggregation replay fixtures live under
+[`schema/state/v1/usage/fixtures/`](schema/state/v1/usage/fixtures/).
+
+This is a schema-only foundation. The CLI and Worker do not yet report, persist,
+or project these records, and provider token accounting and pricing remain
+`UNKNOWN`. Absent usage keeps the dashboard's `—` degrade. See
+[ADR 0009](docs/adr/0009-usage-record-state-contract.md) for logical-key,
+optional-metric discipline, storage-key encoding, and non-goal semantics.
+
 `gc` applies one retention plan to local, GitHub, and HTTP stores. Exactly one
 mode is required: `--dry-run` prints proposed actions without writing, while
 `--execute` copies eligible records into `archive/` with compare-and-swap

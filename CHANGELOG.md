@@ -9,6 +9,15 @@ when releases begin.
 
 ### Added
 
+- A schema-first v1 usage record keyed by
+  `(workspace, repo, batch_id, lane_name, agent_id, target, model)` for
+  per-model token and estimated-cost telemetry, with an additive optional
+  `usage` status projection the dashboard aggregates into tokens-by-model and
+  per-batch token/cost tiles. Token counts and cost are optional metrics that
+  send `null` or the em dash `"—"` when unknown and are never omitted or
+  fabricated as zero; conformance, discipline, aggregation replay, and
+  duplicate-key procedural fixtures live beside the schema, while runtime
+  reporting and pricing remain deferred.
 - A canonical heartbeat/event status vocabulary enforced at the CLI write
   path: snake_case working and terminal sets with a known-alias map (terminal
   synonyms such as `completed`, hyphen/case twins such as
