@@ -123,6 +123,13 @@ class UsageRecordContractTest < Minitest::Test
                  "an exact reported_at tie must resolve deterministically, not by array order"
   end
 
+  def test_canonical_tiebreaker_is_independent_of_key_insertion_order
+    base = read_fixture(File.join(FIXTURES_PATH, "valid", "usage-known.json"))
+
+    assert_equal canonical(base), canonical(base.to_a.reverse.to_h),
+                 "the tie-break serialization must not depend on record key order"
+  end
+
   def test_status_projection_procedurally_admits_duplicate_logical_keys
     schema_document = read_json(SCHEMA_PATH)
     projection = JSONSchemer.schema(schema_document.merge("$ref" => "#/$defs/status_projection"))
@@ -180,14 +187,19 @@ class UsageRecordContractTest < Minitest::Test
   # reported_at is compared as a parsed instant, not lexically, because the
   # schema accepts any RFC 3339 date-time (offsets and fractional seconds), so a
   # non-UTC representation must not be ordered by its raw string. Duplicate keys
-  # already violate the x-unique-key producer invariant; the canonical-JSON
-  # secondary key just makes an exact-timestamp tie resolve deterministically
-  # instead of depending on array order.
+  # already violate the x-unique-key producer invariant; the secondary key just
+  # makes an exact-timestamp tie resolve deterministically instead of depending
+  # on array order. It sorts the record's keys first so the serialization is
+  # canonical (order-independent), because usage records are flat scalar maps.
   def dedupe_by_latest(records)
     records
       .group_by { |record| logical_key(record) }
       .values
-      .map { |group| group.max_by { |record| [Time.iso8601(record.fetch("reported_at")), JSON.generate(record)] } }
+      .map { |group| group.max_by { |record| [Time.iso8601(record.fetch("reported_at")), canonical(record)] } }
+  end
+
+  def canonical(record)
+    JSON.generate(record.sort.to_h)
   end
 
   def new_accumulator

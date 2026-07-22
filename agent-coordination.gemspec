@@ -67,6 +67,7 @@ Gem::Specification.new do |spec|
     schema/state/v1/host-limit.schema.json
     schema/state/v1/usage/fixtures/invalid/usage-fabricated-string-metric.json
     schema/state/v1/usage/fixtures/invalid/usage-missing-model.json
+    schema/state/v1/usage/fixtures/invalid/usage-negative-cost.json
     schema/state/v1/usage/fixtures/invalid/usage-negative-tokens.json
     schema/state/v1/usage/fixtures/invalid/usage-noncanonical-repo.json
     schema/state/v1/usage/fixtures/invalid/usage-nonusd-currency.json
