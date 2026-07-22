@@ -5206,6 +5206,544 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     assert_equal "docs/api copy", event.fetch("lane")
   end
 
+  def test_record_event_error_persists_typed_fields_and_projects_status
+    write_batch("batch-typed", lanes: [{ "name" => "code", "owner" => "worker-a", "targets" => ["101"] }])
+
+    result = run_agent_coord(
+      "record-event", "--batch-id", "batch-typed", "--type", "error",
+      "--severity", "P1", "--category", "ci-timeout", "--message", "gate timed out",
+      "--agent-id", "worker-a", "--lane", "code"
+    )
+
+    assert_equal 0, result.status.exitstatus, result.stderr
+    event = event_of_type("batch-typed", "error")
+    assert_equal "P1", event.fetch("severity")
+    assert_equal "ci-timeout", event.fetch("category")
+    assert_equal "gate timed out", event.fetch("message")
+
+    status = run_agent_coord("status", "--batch-id", "batch-typed", "--json")
+    status_event = JSON.parse(status.stdout).fetch("events").first
+    assert_equal "P1", status_event.fetch("severity")
+    assert_equal "ci-timeout", status_event.fetch("category")
+  end
+
+  def test_record_event_error_requires_severity_category_and_message
+    write_batch("batch-typed", lanes: [{ "name" => "code", "owner" => "worker-a", "targets" => ["101"] }])
+
+    missing_severity = run_agent_coord(
+      "record-event", "--batch-id", "batch-typed", "--type", "error",
+      "--category", "ci", "--message", "boom"
+    )
+    assert_equal 1, missing_severity.status.exitstatus
+    assert_includes missing_severity.stderr, "missing required --severity"
+
+    missing_category = run_agent_coord(
+      "record-event", "--batch-id", "batch-typed", "--type", "error",
+      "--severity", "P1", "--message", "boom"
+    )
+    assert_equal 1, missing_category.status.exitstatus
+    assert_includes missing_category.stderr, "missing required --category"
+
+    missing_message = run_agent_coord(
+      "record-event", "--batch-id", "batch-typed", "--type", "error",
+      "--severity", "P1", "--category", "ci"
+    )
+    assert_equal 1, missing_message.status.exitstatus
+    assert_includes missing_message.stderr, "missing required --message"
+
+    assert_empty event_records("batch-typed")
+  end
+
+  def test_record_event_error_rejects_invalid_severity
+    write_batch("batch-typed", lanes: [{ "name" => "code", "owner" => "worker-a", "targets" => ["101"] }])
+
+    result = run_agent_coord(
+      "record-event", "--batch-id", "batch-typed", "--type", "error",
+      "--severity", "P9", "--category", "ci", "--message", "boom"
+    )
+
+    assert_equal 1, result.status.exitstatus
+    assert_includes result.stderr, "--severity must be one of: P0, P1, P2, P3"
+    assert_empty event_records("batch-typed")
+  end
+
+  def test_record_event_help_requested_happy_path
+    write_batch("batch-typed", lanes: [{ "name" => "code", "owner" => "worker-a", "targets" => ["101"] }])
+
+    result = run_agent_coord(
+      "record-event", "--batch-id", "batch-typed", "--type", "help_requested",
+      "--reason", "blocked-user-input", "--agent-id", "worker-a"
+    )
+
+    assert_equal 0, result.status.exitstatus, result.stderr
+    assert_equal "blocked-user-input", event_of_type("batch-typed", "help_requested").fetch("reason")
+  end
+
+  def test_record_event_help_requested_requires_valid_reason
+    write_batch("batch-typed", lanes: [{ "name" => "code", "owner" => "worker-a", "targets" => ["101"] }])
+
+    missing = run_agent_coord("record-event", "--batch-id", "batch-typed", "--type", "help_requested")
+    assert_equal 1, missing.status.exitstatus
+    assert_includes missing.stderr, "missing required --reason"
+
+    invalid = run_agent_coord(
+      "record-event", "--batch-id", "batch-typed", "--type", "help_requested", "--reason", "because"
+    )
+    assert_equal 1, invalid.status.exitstatus
+    assert_includes invalid.stderr, "--reason must be one of: blocked-user-input, question, permission"
+    assert_empty event_records("batch-typed")
+  end
+
+  def test_record_event_escalation_requested_happy_path
+    write_batch("batch-typed", lanes: [{ "name" => "code", "owner" => "worker-a", "targets" => ["101"] }])
+
+    result = run_agent_coord(
+      "record-event", "--batch-id", "batch-typed", "--type", "escalation_requested",
+      "--from-route", "opus/high", "--to-route", "human", "--evidence", "gate red 3x",
+      "--agent-id", "worker-a"
+    )
+
+    assert_equal 0, result.status.exitstatus, result.stderr
+    event = event_of_type("batch-typed", "escalation_requested")
+    assert_equal "opus/high", event.fetch("from_route")
+    assert_equal "human", event.fetch("to_route")
+    assert_equal "gate red 3x", event.fetch("evidence")
+  end
+
+  def test_record_event_escalation_requested_requires_all_fields
+    write_batch("batch-typed", lanes: [{ "name" => "code", "owner" => "worker-a", "targets" => ["101"] }])
+
+    result = run_agent_coord(
+      "record-event", "--batch-id", "batch-typed", "--type", "escalation_requested",
+      "--from-route", "opus", "--to-route", "human"
+    )
+
+    assert_equal 1, result.status.exitstatus
+    assert_includes result.stderr, "missing required --evidence"
+    assert_empty event_records("batch-typed")
+  end
+
+  def test_record_event_human_intervention_happy_path
+    write_batch("batch-typed", lanes: [{ "name" => "code", "owner" => "worker-a", "targets" => ["101"] }])
+
+    result = run_agent_coord(
+      "record-event", "--batch-id", "batch-typed", "--type", "human_intervention",
+      "--kind", "takeover", "--agent-id", "worker-a"
+    )
+
+    assert_equal 0, result.status.exitstatus, result.stderr
+    assert_equal "takeover", event_of_type("batch-typed", "human_intervention").fetch("kind")
+  end
+
+  def test_record_event_human_intervention_requires_valid_kind
+    write_batch("batch-typed", lanes: [{ "name" => "code", "owner" => "worker-a", "targets" => ["101"] }])
+
+    missing = run_agent_coord("record-event", "--batch-id", "batch-typed", "--type", "human_intervention")
+    assert_equal 1, missing.status.exitstatus
+    assert_includes missing.stderr, "missing required --kind"
+
+    invalid = run_agent_coord(
+      "record-event", "--batch-id", "batch-typed", "--type", "human_intervention", "--kind", "reboot"
+    )
+    assert_equal 1, invalid.status.exitstatus
+    assert_includes invalid.stderr, "--kind must be one of: takeover, supersede, manual-fix, drain"
+    assert_empty event_records("batch-typed")
+  end
+
+  def test_record_event_arbitrary_type_skips_typed_field_validation
+    write_batch("batch-typed", lanes: [{ "name" => "code", "owner" => "worker-a", "targets" => ["101"] }])
+
+    result = run_agent_coord(
+      "record-event", "--batch-id", "batch-typed", "--type", "custom-note", "--agent-id", "worker-a"
+    )
+
+    assert_equal 0, result.status.exitstatus, result.stderr
+    event = event_of_type("batch-typed", "custom-note")
+    assert_empty event.keys & %w[reason from_route to_route evidence severity category kind]
+  end
+
+  def test_record_event_typed_type_rejects_foreign_typed_field
+    write_batch("batch-typed", lanes: [{ "name" => "code", "owner" => "worker-a", "targets" => ["101"] }])
+
+    help_with_severity = run_agent_coord(
+      "record-event", "--batch-id", "batch-typed", "--type", "help_requested",
+      "--reason", "question", "--severity", "P1"
+    )
+    assert_equal 1, help_with_severity.status.exitstatus
+    assert_includes help_with_severity.stderr, "--severity is not valid for --type help_requested"
+
+    error_with_kind = run_agent_coord(
+      "record-event", "--batch-id", "batch-typed", "--type", "error",
+      "--severity", "P1", "--category", "ci", "--message", "boom", "--kind", "takeover"
+    )
+    assert_equal 1, error_with_kind.status.exitstatus
+    assert_includes error_with_kind.stderr, "--kind is not valid for --type error"
+
+    escalation_with_reason = run_agent_coord(
+      "record-event", "--batch-id", "batch-typed", "--type", "escalation_requested",
+      "--from-route", "a", "--to-route", "h", "--evidence", "e", "--reason", "question"
+    )
+    assert_equal 1, escalation_with_reason.status.exitstatus
+    assert_includes escalation_with_reason.stderr, "--reason is not valid for --type escalation_requested"
+
+    assert_empty event_records("batch-typed")
+  end
+
+  def test_batch_audit_reports_complete_batch
+    write_batch(
+      "batch-audit-ok",
+      lanes: [
+        { "name" => "code", "owner" => "worker-a", "targets" => ["101"] },
+        { "name" => "docs", "owner" => "worker-b", "targets" => ["102"] }
+      ]
+    )
+    seed_event("batch-audit-ok", "a1", "type" => "claim.acquired", "agent_id" => "worker-a")
+    seed_event("batch-audit-ok", "a2", "type" => "claim.released", "agent_id" => "worker-a")
+    seed_event("batch-audit-ok", "b1", "type" => "claim.acquired", "agent_id" => "worker-b")
+    seed_event("batch-audit-ok", "b2", "type" => "lane_closed", "agent_id" => "worker-b", "lane" => "docs")
+
+    result = run_agent_coord("batch-audit", "--batch-id", "batch-audit-ok")
+
+    assert_equal 0, result.status.exitstatus, result.stderr
+    assert_includes result.stdout, "batch-audit batch-audit-ok complete"
+    assert_includes result.stdout, "lane code owner worker-a complete"
+    assert_includes result.stdout, "lane docs owner worker-b complete"
+  end
+
+  def test_batch_audit_flags_lane_gaps_with_exit_one
+    write_batch(
+      "batch-audit-gaps",
+      lanes: [
+        { "name" => "code", "owner" => "worker-a", "targets" => ["101"] },
+        { "name" => "docs", "owner" => "worker-b", "targets" => ["102"] }
+      ]
+    )
+    # code acquired but never reached a terminal signal; docs closed without an acquire event.
+    seed_event("batch-audit-gaps", "a1", "type" => "claim.acquired", "agent_id" => "worker-a")
+    seed_event("batch-audit-gaps", "b1", "type" => "claim.released", "agent_id" => "worker-b")
+
+    result = run_agent_coord("batch-audit", "--batch-id", "batch-audit-gaps")
+    assert_equal 1, result.status.exitstatus
+    assert_includes result.stdout, "batch-audit batch-audit-gaps incomplete"
+    assert_includes result.stdout, "lane code owner worker-a incomplete missing terminal"
+    assert_includes result.stdout, "lane docs owner worker-b incomplete missing claim.acquired"
+
+    json = run_agent_coord("batch-audit", "--batch-id", "batch-audit-gaps", "--json")
+    assert_equal 1, json.status.exitstatus
+    payload = JSON.parse(json.stdout)
+    assert_equal "incomplete", payload.fetch("verdict")
+    lanes = payload.fetch("lanes").to_h { |lane| [lane.fetch("name"), lane] }
+    assert_equal ["terminal"], lanes.fetch("code").fetch("missing")
+    refute lanes.fetch("code").fetch("complete")
+    assert_equal ["claim.acquired"], lanes.fetch("docs").fetch("missing")
+  end
+
+  def test_batch_audit_flags_lane_with_no_events
+    write_batch("batch-audit-empty", lanes: [{ "name" => "code", "owner" => "worker-a", "targets" => ["101"] }])
+
+    result = run_agent_coord("batch-audit", "--batch-id", "batch-audit-empty", "--json")
+
+    assert_equal 1, result.status.exitstatus
+    lane = JSON.parse(result.stdout).fetch("lanes").first
+    assert_equal 0, lane.fetch("event_count")
+    assert_equal ["claim.acquired", "terminal"], lane.fetch("missing")
+    # Uniform lane schema: a normal lane carries the same "malformed" key as a
+    # malformed lane entry, set to false, so downstream consumers see one shape.
+    assert_equal false, lane.fetch("malformed")
+  end
+
+  def test_batch_audit_uses_auto_emitted_lifecycle_events
+    write_batch("batch-audit-live", lanes: [{ "name" => "code", "owner" => "worker-a", "targets" => ["101"] }])
+    run_agent_coord(
+      "claim", "--agent-id", "worker-a", "--repo", "shakacode/x", "--target", "101",
+      "--batch-id", "batch-audit-live", "--branch", "b-a"
+    )
+
+    incomplete = run_agent_coord("batch-audit", "--batch-id", "batch-audit-live")
+    assert_equal 1, incomplete.status.exitstatus
+    assert_includes incomplete.stdout, "incomplete missing terminal"
+
+    run_agent_coord(
+      "release", "--agent-id", "worker-a", "--repo", "shakacode/x", "--target", "101",
+      "--batch-id", "batch-audit-live", "--branch", "b-a"
+    )
+
+    complete = run_agent_coord("batch-audit", "--batch-id", "batch-audit-live")
+    assert_equal 0, complete.status.exitstatus, complete.stderr
+    assert_includes complete.stdout, "batch-audit batch-audit-live complete"
+  end
+
+  def test_batch_audit_unregistered_batch_is_unknown
+    result = run_agent_coord("batch-audit", "--batch-id", "missing-batch")
+    assert_equal 2, result.status.exitstatus
+    assert_includes result.stdout, "batch-audit missing-batch unknown"
+    assert_includes result.stdout, "batch missing-batch is not registered"
+
+    json = run_agent_coord("batch-audit", "--batch-id", "missing-batch", "--json")
+    assert_equal 2, json.status.exitstatus
+    payload = JSON.parse(json.stdout)
+    assert_equal "unknown", payload.fetch("verdict")
+    assert_empty payload.fetch("lanes")
+  end
+
+  def test_batch_audit_does_not_false_complete_lanes_sharing_an_owner
+    write_batch(
+      "batch-shared-owner",
+      lanes: [
+        { "name" => "lane-101", "owner" => "worker-a", "targets" => ["101"] },
+        { "name" => "lane-102", "owner" => "worker-a", "targets" => ["102"] }
+      ]
+    )
+    run_agent_coord(
+      "claim", "--agent-id", "worker-a", "--repo", "shakacode/x", "--target", "101",
+      "--batch-id", "batch-shared-owner", "--branch", "b-a"
+    )
+    run_agent_coord(
+      "release", "--agent-id", "worker-a", "--repo", "shakacode/x", "--target", "101",
+      "--batch-id", "batch-shared-owner", "--branch", "b-a"
+    )
+
+    result = run_agent_coord("batch-audit", "--batch-id", "batch-shared-owner", "--json")
+
+    assert_equal 1, result.status.exitstatus, result.stderr
+    payload = JSON.parse(result.stdout)
+    assert_equal "incomplete", payload.fetch("verdict")
+    lanes = payload.fetch("lanes").to_h { |lane| [lane.fetch("name"), lane] }
+    assert lanes.fetch("lane-101").fetch("complete"), "lane-101 (target 101) should be complete"
+    assert_empty lanes.fetch("lane-101").fetch("missing")
+    refute lanes.fetch("lane-102").fetch("complete"), "same-owner lane-102 (target 102) must not false-complete"
+    assert_equal ["claim.acquired", "terminal"], lanes.fetch("lane-102").fetch("missing")
+  end
+
+  def test_batch_audit_defaults_to_status_state_root_without_global_state_root
+    write_batch("batch-status-root", lanes: [{ "name" => "code", "owner" => "worker-a", "targets" => ["101"] }])
+    fake_bin = Dir.mktmpdir("agent-coord-gh")
+    File.write(File.join(fake_bin, "gh"), "#!/bin/sh\necho unexpected gh >&2\nexit 42\n")
+    FileUtils.chmod(0o755, File.join(fake_bin, "gh"))
+
+    result = run_command(
+      {
+        "AGENT_COORD_STATE_ROOT" => nil,
+        "AGENT_COORD_STATUS_STATE_ROOT" => @state_root,
+        "PATH" => [fake_bin, File.dirname(RbConfig.ruby), "/usr/bin", "/bin"].join(File::PATH_SEPARATOR)
+      },
+      RbConfig.ruby,
+      BIN,
+      "batch-audit",
+      "--batch-id",
+      "batch-status-root"
+    )
+
+    assert_equal 1, result.status.exitstatus, result.stderr
+    assert_includes result.stdout, "batch-audit batch-status-root incomplete"
+    refute_includes result.stderr, "local mode — single-machine only"
+    refute_includes result.stderr, "unexpected gh"
+  ensure
+    FileUtils.remove_entry(fake_bin) if fake_bin && Dir.exist?(fake_bin)
+  end
+
+  def test_batch_audit_malformed_batch_id_is_unknown_not_incomplete
+    result = run_agent_coord("batch-audit", "--batch-id", "../evil")
+    assert_equal 2, result.status.exitstatus, result.stderr
+    assert_includes result.stdout, "batch-audit ../evil unknown"
+
+    json = run_agent_coord("batch-audit", "--batch-id", "../evil", "--json")
+    assert_equal 2, json.status.exitstatus
+    assert_equal "unknown", JSON.parse(json.stdout).fetch("verdict")
+  end
+
+  def test_batch_audit_tolerates_malformed_lane_entry
+    write_state_record(
+      "batches/batch-null-lane.json",
+      { "schema_version" => 1, "batch_id" => "batch-null-lane", "lanes" => [nil] }
+    )
+
+    result = run_agent_coord("batch-audit", "--batch-id", "batch-null-lane", "--json")
+
+    assert_equal 1, result.status.exitstatus, result.stderr
+    payload = JSON.parse(result.stdout)
+    assert_equal "incomplete", payload.fetch("verdict")
+    lane = payload.fetch("lanes").first
+    refute lane.fetch("complete")
+    assert lane.fetch("malformed")
+    assert_equal ["claim.acquired", "terminal"], lane.fetch("missing")
+  end
+
+  def test_batch_audit_non_object_batch_state_is_unknown
+    write_state_record("batches/batch-scalar.json", "not-an-object")
+
+    result = run_agent_coord("batch-audit", "--batch-id", "batch-scalar")
+
+    assert_equal 2, result.status.exitstatus, result.stderr
+    assert_includes result.stdout, "state is not an object"
+  end
+
+  def test_batch_audit_zero_lane_batch_is_unknown_not_complete
+    write_state_record(
+      "batches/batch-no-lanes.json",
+      { "schema_version" => 1, "batch_id" => "batch-no-lanes", "lanes" => [] }
+    )
+
+    result = run_agent_coord("batch-audit", "--batch-id", "batch-no-lanes")
+    assert_equal 2, result.status.exitstatus, result.stderr
+    assert_includes result.stdout, "batch-audit batch-no-lanes unknown"
+    assert_includes result.stdout, "batch batch-no-lanes registers no lanes"
+
+    json = run_agent_coord("batch-audit", "--batch-id", "batch-no-lanes", "--json")
+    assert_equal 2, json.status.exitstatus
+    assert_equal "unknown", JSON.parse(json.stdout).fetch("verdict")
+  end
+
+  def test_batch_audit_disambiguates_shared_target_by_owner
+    write_batch(
+      "batch-shared-target",
+      lanes: [
+        { "name" => "lane-a", "owner" => "worker-a", "targets" => ["101"] },
+        { "name" => "lane-b", "owner" => "worker-b", "targets" => ["101"] }
+      ]
+    )
+    run_agent_coord(
+      "claim", "--agent-id", "worker-a", "--repo", "shakacode/x", "--target", "101",
+      "--batch-id", "batch-shared-target", "--branch", "b-a"
+    )
+    run_agent_coord(
+      "release", "--agent-id", "worker-a", "--repo", "shakacode/x", "--target", "101",
+      "--batch-id", "batch-shared-target", "--branch", "b-a"
+    )
+
+    result = run_agent_coord("batch-audit", "--batch-id", "batch-shared-target", "--json")
+
+    assert_equal 1, result.status.exitstatus, result.stderr
+    lanes = JSON.parse(result.stdout).fetch("lanes").to_h { |lane| [lane.fetch("name"), lane] }
+    # Shared target 101 is ambiguous, so only the unique owner attributes the events.
+    assert lanes.fetch("lane-a").fetch("complete"), "lane-a (owner worker-a) should be complete via unique owner"
+    refute lanes.fetch("lane-b").fetch("complete"), "same-target lane-b must not false-complete"
+    assert_equal ["claim.acquired", "terminal"], lanes.fetch("lane-b").fetch("missing")
+  end
+
+  def test_batch_audit_does_not_false_complete_lanes_sharing_target_and_owner
+    write_batch(
+      "batch-ambiguous",
+      lanes: [
+        { "name" => "lane-a", "owner" => "shared", "targets" => ["101"] },
+        { "name" => "lane-b", "owner" => "shared", "targets" => ["101"] }
+      ]
+    )
+    run_agent_coord(
+      "claim", "--agent-id", "shared", "--repo", "shakacode/x", "--target", "101",
+      "--batch-id", "batch-ambiguous", "--branch", "b"
+    )
+    run_agent_coord(
+      "release", "--agent-id", "shared", "--repo", "shakacode/x", "--target", "101",
+      "--batch-id", "batch-ambiguous", "--branch", "b"
+    )
+
+    result = run_agent_coord("batch-audit", "--batch-id", "batch-ambiguous", "--json")
+
+    assert_equal 1, result.status.exitstatus, result.stderr
+    payload = JSON.parse(result.stdout)
+    assert_equal "incomplete", payload.fetch("verdict")
+    # Neither target nor owner is unique, so no lane may be credited (fail-closed).
+    payload.fetch("lanes").each do |lane|
+      refute lane.fetch("complete"), "#{lane.fetch('name')} must stay incomplete when nothing disambiguates it"
+    end
+  end
+
+  def test_batch_audit_ignores_empty_string_target
+    write_state_record(
+      "batches/batch-empty-target.json",
+      { "schema_version" => 1, "batch_id" => "batch-empty-target",
+        "lanes" => [{ "name" => "code", "owner" => "worker-a", "targets" => [""] }] }
+    )
+    # A typed event with no target and a non-matching owner must not be credited
+    # to a lane whose only target is the empty string.
+    seed_event(
+      "batch-empty-target", "e1",
+      "type" => "help_requested", "reason" => "question", "agent_id" => "someone-else"
+    )
+
+    result = run_agent_coord("batch-audit", "--batch-id", "batch-empty-target", "--json")
+
+    assert_equal 1, result.status.exitstatus, result.stderr
+    lane = JSON.parse(result.stdout).fetch("lanes").first
+    assert_empty lane.fetch("targets")
+    assert_equal 0, lane.fetch("event_count")
+    refute lane.fetch("complete")
+  end
+
+  def test_batch_audit_ignores_events_from_a_different_repo
+    write_state_record(
+      "batches/batch-repo-a.json",
+      { "schema_version" => 1, "batch_id" => "batch-repo-a", "repo" => "shakacode/repo-a",
+        "lanes" => [{ "name" => "code", "owner" => "worker-a", "targets" => ["42"] }] }
+    )
+    # Same batch-id, target number, and owner but a DIFFERENT repo must not attribute.
+    run_agent_coord(
+      "claim", "--agent-id", "worker-a", "--repo", "shakacode/repo-b", "--target", "42",
+      "--batch-id", "batch-repo-a", "--branch", "b"
+    )
+    run_agent_coord(
+      "release", "--agent-id", "worker-a", "--repo", "shakacode/repo-b", "--target", "42",
+      "--batch-id", "batch-repo-a", "--branch", "b"
+    )
+
+    result = run_agent_coord("batch-audit", "--batch-id", "batch-repo-a", "--json")
+
+    assert_equal 1, result.status.exitstatus, result.stderr
+    lane = JSON.parse(result.stdout).fetch("lanes").first
+    assert_equal 0, lane.fetch("event_count")
+    refute lane.fetch("complete")
+    assert_equal ["claim.acquired", "terminal"], lane.fetch("missing")
+  end
+
+  def test_batch_audit_completes_with_matching_repo_events
+    write_state_record(
+      "batches/batch-repo-a.json",
+      { "schema_version" => 1, "batch_id" => "batch-repo-a", "repo" => "shakacode/repo-a",
+        "lanes" => [{ "name" => "code", "owner" => "worker-a", "targets" => ["42"] }] }
+    )
+    run_agent_coord(
+      "claim", "--agent-id", "worker-a", "--repo", "shakacode/repo-a", "--target", "42",
+      "--batch-id", "batch-repo-a", "--branch", "b"
+    )
+    run_agent_coord(
+      "release", "--agent-id", "worker-a", "--repo", "shakacode/repo-a", "--target", "42",
+      "--batch-id", "batch-repo-a", "--branch", "b"
+    )
+
+    result = run_agent_coord("batch-audit", "--batch-id", "batch-repo-a")
+
+    assert_equal 0, result.status.exitstatus, result.stderr
+    assert_includes result.stdout, "batch-audit batch-repo-a complete"
+  end
+
+  def test_batch_audit_owner_fallback_ignores_out_of_lane_target
+    write_state_record(
+      "batches/batch-owner-target.json",
+      { "schema_version" => 1, "batch_id" => "batch-owner-target",
+        "lanes" => [{ "name" => "code", "owner" => "worker-a", "targets" => ["101"] }] }
+    )
+    # The unique lane owner does unrelated work on a DIFFERENT target under the same
+    # batch-id/repo; that must not complete this lane (owner fallback requires the
+    # event target to belong to the lane).
+    run_agent_coord(
+      "claim", "--agent-id", "worker-a", "--repo", "shakacode/x", "--target", "999",
+      "--batch-id", "batch-owner-target", "--branch", "b"
+    )
+    run_agent_coord(
+      "release", "--agent-id", "worker-a", "--repo", "shakacode/x", "--target", "999",
+      "--batch-id", "batch-owner-target", "--branch", "b"
+    )
+
+    result = run_agent_coord("batch-audit", "--batch-id", "batch-owner-target", "--json")
+
+    assert_equal 1, result.status.exitstatus, result.stderr
+    lane = JSON.parse(result.stdout).fetch("lanes").first
+    assert_equal 0, lane.fetch("event_count")
+    refute lane.fetch("complete")
+    assert_equal ["claim.acquired", "terminal"], lane.fetch("missing")
+  end
+
   def test_register_batch_rejects_malformed_lane_name
     manifest_path = File.join(@state_root, "batch-manifest.json")
     File.write(
@@ -6514,6 +7052,14 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
 
   def event_records(batch_id)
     Dir.glob(File.join(@state_root, "events", batch_id, "*.json")).map { |path| JSON.parse(File.read(path)) }
+  end
+
+  def seed_event(batch_id, event_id, overrides = {})
+    write_state_record(
+      "events/#{batch_id}/#{event_id}.json",
+      { "schema_version" => 1, "event_id" => event_id, "batch_id" => batch_id, "at" => "2026-07-22T00:00:00Z" }
+        .merge(overrides)
+    )
   end
 
   def events_of_type(batch_id, type)

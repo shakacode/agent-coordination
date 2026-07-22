@@ -9,6 +9,24 @@ when releases begin.
 
 ### Added
 
+- A typed operational-signal event vocabulary for `record-event` plus a
+  `batch-audit` closeout completeness gate. `record-event --type` now recognizes
+  four typed names whose required fields are validated at write time (rejecting a
+  missing field or out-of-set value with a clear error and a non-zero exit):
+  `help_requested` (`--reason` in blocked-user-input|question|permission),
+  `escalation_requested` (`--from-route`, `--to-route`, `--evidence`), `error`
+  (`--severity` in P0|P1|P2|P3, `--category`, `--message`), and
+  `human_intervention` (`--kind` in takeover|supersede|manual-fix|drain). The
+  typed fields are additive payload-only fields, projected present-only into
+  `status --batch-id --json`; any other `--type` value stays allowed and
+  unvalidated, and events remain append-only on the existing write path. The new
+  `agent-coord batch-audit --batch-id ID` command reports, per registered lane,
+  the missing lifecycle events (text or `--json`): a lane is telemetry-complete
+  with both a `claim.acquired` event and a terminal signal (`claim.released` OR
+  `lane_closed`), and the command exits `0` when every lane is complete, `1` when
+  gaps are found so closeout can fail-closed, and `2` when coordination state is
+  UNKNOWN (unregistered or unreadable batch). No gem has been published, so no
+  migration is required.
 - Auto-emitted claim-lifecycle events so a claim's acquire, phase transitions,
   and release leave a queryable trail under `events/<batch-id>/` without any
   explicit `record-event` calls. `claim` emits `claim.acquired` (agent, target,

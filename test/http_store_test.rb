@@ -538,6 +538,33 @@ class HttpBackendSelectionTest < HttpEnvTestCase
     stub.shutdown
   end
 
+  def test_batch_audit_unknown_when_event_trail_is_filtered_by_scoped_token
+    responses = [
+      [200, { "data" => { "schema_version" => 1, "batch_id" => "batch",
+                          "lanes" => [{ "name" => "code", "owner" => "worker-a", "targets" => ["101"] }] },
+              "version" => 3 }],
+      [200, { "entries" => [], "filtered" => true }]
+    ]
+    stub = HttpStoreStub.new(responses)
+    env = {
+      "AGENT_COORD_API_URL" => stub.base_url, "AGENT_COORD_API_TOKEN" => "tok",
+      "AGENT_COORD_STATE_ROOT" => nil, "AGENT_COORD_STATUS_STATE_ROOT" => nil
+    }
+    with_env(env) do
+      code, out, = run_cli(["batch-audit", "--batch-id", "batch", "--json"], env)
+      payload = JSON.parse(out)
+
+      assert_equal 2, code
+      assert_equal "unknown", payload.fetch("verdict")
+      assert_includes payload.fetch("reason"), "filtered by a scoped token"
+    end
+    # A scoped read that only lists a visible subset must not be treated as the
+    # complete trail: batch (record) read + events (filtered list) = 2 requests.
+    assert_equal 2, stub.requests.length
+  ensure
+    stub.shutdown
+  end
+
   def test_missing_token_is_operational_error
     with_env("AGENT_COORD_API_URL" => "http://127.0.0.1:9", "AGENT_COORD_API_TOKEN" => nil) do
       code, _, err = run_cli(["status"], {})

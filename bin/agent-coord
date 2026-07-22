@@ -133,8 +133,27 @@ module AgentCoord
     operator phase previous_phase generation instance_id release_mode handoff_to handoff_note terminal pr_state
     evidence_url
     workspace closed_by
+    reason from_route to_route evidence severity category kind
     synthetic synthetic_kind
   ].freeze
+  # Typed operational-signal event vocabulary (issue #77). Each name is a
+  # first-class `record-event --type` value whose required fields are validated
+  # at write time; any other --type value stays allowed and unvalidated. These
+  # are payload fields only and never become path segments.
+  TYPED_EVENT_PAYLOAD_FIELDS = %w[reason from_route to_route evidence severity category kind].freeze
+  # Typed payload fields that belong to each typed --type. A typed event rejects
+  # any TYPED_EVENT_PAYLOAD_FIELDS value outside its own set (message is a general
+  # field, not a typed field, so it is unaffected). Keys are exactly the four
+  # typed types; arbitrary --type values ignore typed fields as before.
+  TYPED_EVENT_ALLOWED_FIELDS = {
+    "help_requested" => %w[reason],
+    "escalation_requested" => %w[from_route to_route evidence],
+    "error" => %w[severity category],
+    "human_intervention" => %w[kind]
+  }.freeze
+  HELP_REQUESTED_REASONS = %w[blocked-user-input question permission].freeze
+  ERROR_SEVERITIES = %w[P0 P1 P2 P3].freeze
+  HUMAN_INTERVENTION_KINDS = %w[takeover supersede manual-fix drain].freeze
   HEARTBEAT_TARGET_FIELDS = %w[repo target].freeze
   METADATA_OPTION_FIELDS = %w[
     thread_handle chat_handle host pr_url dashboard_url operator phase generation instance_id
@@ -164,6 +183,17 @@ module AgentCoord
     "operational" => EXIT_OPERATIONAL,
     "claim_refused" => EXIT_CLAIM_REFUSED
   }.freeze
+  # batch-audit verdict -> process exit code. 0 when every registered lane is
+  # telemetry-complete; 1 when gaps are found so closeout can fail-closed; 2
+  # (EXIT_OPERATIONAL) when coordination state is UNKNOWN (unregistered or
+  # unreadable batch), matching the repo convention that exit 2 means UNKNOWN.
+  BATCH_AUDIT_EXIT_CODES = {
+    "complete" => 0,
+    "incomplete" => 1,
+    "unknown" => EXIT_OPERATIONAL
+  }.freeze
+  # A lane's terminal telemetry signal is satisfied by either event type.
+  BATCH_AUDIT_TERMINAL_EVENT_TYPES = %w[claim.released lane_closed].freeze
 
   class Error < StandardError
     attr_reader :exit_code
@@ -235,6 +265,12 @@ module AgentCoord
   end
 
   StoredJson = Struct.new(:path, :data, :sha, keyword_init: true)
+  # Per-lane attribution context for batch-audit. `targets` is the lane's full
+  # declared target list; `unique_targets` is the subset that maps to exactly one
+  # lane in the batch. Grouping these keeps the event matcher within the argument
+  # limit while carrying both the unique-target fast path and the full target list
+  # the owner fallback needs for its in-lane membership check.
+  BatchAuditLane = Struct.new(:name, :targets, :unique_targets, :owner, :owner_unique, keyword_init: true)
   DemoClock = Struct.new(:time) do
     def now
       time
@@ -268,6 +304,8 @@ module AgentCoord
         record_event(parse_options(command, @argv))
       when "status"
         render_status(parse_options(command, @argv))
+      when "batch-audit"
+        batch_audit(parse_options(command, @argv))
       when "gc"
         gc(parse_options(command, @argv))
       when "version"
@@ -317,6 +355,8 @@ module AgentCoord
           record-event
                      append a lane or batch event into coordination state
           status     render full or scoped coordination state
+          batch-audit
+                     report per-lane lifecycle-event completeness for a batch
           gc         archive and purge terminal coordination state
           version    print CLI contract version
           config     print runtime defaults and exit-code contract
@@ -470,6 +510,26 @@ module AgentCoord
       opts.on("--type TYPE", "record-event only: event type") { |value| options[:type] = value }
       opts.on("--lane NAME", "record-event only: batch lane name") { |value| options[:lane] = value }
       opts.on("--message TEXT", "record-event only: event message") { |value| options[:message] = value }
+      add_typed_event_options(opts, options)
+    end
+
+    # Typed operational-signal fields (issue #77). Like --type/--lane/--message
+    # they are accepted globally but only meaningful for record-event; per-type
+    # required-field validation happens in validate_typed_event_options!.
+    def add_typed_event_options(opts, options)
+      opts.on("--reason REASON", "record-event help_requested: reason enum") { |value| options[:reason] = value }
+      opts.on("--from-route ROUTE", "record-event escalation_requested: current route") do |value|
+        options[:from_route] = value
+      end
+      opts.on("--to-route ROUTE", "record-event escalation_requested: requested route") do |value|
+        options[:to_route] = value
+      end
+      opts.on("--evidence TEXT", "record-event escalation_requested: evidence summary") do |value|
+        options[:evidence] = value
+      end
+      opts.on("--severity SEVERITY", "record-event error: severity enum") { |value| options[:severity] = value }
+      opts.on("--category CATEGORY", "record-event error: error category") { |value| options[:category] = value }
+      opts.on("--kind KIND", "record-event human_intervention: kind enum") { |value| options[:kind] = value }
     end
 
     def add_register_batch_options(opts, options)
@@ -593,7 +653,7 @@ module AgentCoord
     end
 
     def backend_command?(command)
-      %w[claim release heartbeat register-batch record-event status gc doctor].include?(command)
+      %w[claim release heartbeat register-batch record-event status batch-audit gc doctor].include?(command)
     end
 
     def default_options
@@ -648,8 +708,15 @@ module AgentCoord
       @stderr.puts message if @backend_conflict_warnings
     end
 
+    # Read-only, status-style commands that prefer the status state root over the
+    # write-mode local default. batch-audit reads coordination state exactly like
+    # status, so it resolves and warns identically.
+    def status_read_command?(command)
+      %w[status doctor batch-audit].include?(command)
+    end
+
     def warn_consumer_split_brain(command, options)
-      return unless %w[status doctor].include?(command)
+      return unless status_read_command?(command)
       return if options[:stack_json]
       return unless options[:state_root] && !options[:api_url]
       return unless ENV.fetch("AGENT_COORD_API_URL", "").empty?
@@ -693,7 +760,7 @@ module AgentCoord
     def resolve_default_local_backend(command, options)
       return if options[:state_root] || options[:api_url] || !options[:backend].to_s.empty?
 
-      status_command = %w[status doctor].include?(command)
+      status_command = status_read_command?(command)
       configured_status_root = ENV.fetch(STATUS_STATE_ROOT_ENV, nil)
       if status_command && !configured_status_root.to_s.empty?
         options[:state_root] = configured_status_root
@@ -746,11 +813,9 @@ module AgentCoord
         opts.separator "    --launch-prompt PATH|-  prompt file or stdin (overrides manifest)"
         opts.separator ""
       when "record-event"
-        opts.separator ""
-        opts.separator "Event recording:"
-        opts.separator "    --batch-id ID --type TYPE  append an event under events/<batch-id>/"
-        opts.separator "    --lane NAME                 attach the event to a registered lane"
-        opts.separator ""
+        add_record_event_command_help(opts)
+      when "batch-audit"
+        add_batch_audit_command_help(opts)
       when "release"
         opts.separator ""
         opts.separator "Handoff release:"
@@ -760,6 +825,29 @@ module AgentCoord
         opts.separator "    --pr-state STATE            final pull request state"
         opts.separator ""
       end
+    end
+
+    def add_record_event_command_help(opts)
+      opts.separator ""
+      opts.separator "Event recording:"
+      opts.separator "    --batch-id ID --type TYPE  append an event under events/<batch-id>/"
+      opts.separator "    --lane NAME                 attach the event to a registered lane"
+      opts.separator "Typed --type values validate required fields at write time:"
+      opts.separator "    help_requested        --reason blocked-user-input|question|permission"
+      opts.separator "    escalation_requested  --from-route ROUTE --to-route ROUTE --evidence TEXT"
+      opts.separator "    error                 --severity P0|P1|P2|P3 --category CAT --message TEXT"
+      opts.separator "    human_intervention    --kind takeover|supersede|manual-fix|drain"
+      opts.separator ""
+    end
+
+    def add_batch_audit_command_help(opts)
+      opts.separator ""
+      opts.separator "Batch telemetry-completeness audit:"
+      opts.separator "    --batch-id ID   report per-lane missing lifecycle events for closeout gating"
+      opts.separator "A lane is complete with a claim.acquired event and a terminal signal"
+      opts.separator "(claim.released OR lane_closed); either missing marks it incomplete."
+      opts.separator "Exit 0 complete, 1 incomplete (gaps found), 2 UNKNOWN (unregistered/unreadable)."
+      opts.separator ""
     end
 
     def add_gc_command_help(opts)
@@ -2490,11 +2578,52 @@ module AgentCoord
       AgentCoord.batch_path(options.fetch(:batch_id))
       AgentCoord.validate_segment!(options.fetch(:type), "event type")
       validate_terminal_options!(options, event: true) if options[:type] == "lane_closed"
+      validate_typed_event_options!(options)
       return unless options.key?(:lane)
 
       lane = options[:lane].to_s
       raise Error, "--lane must not be empty" if lane.empty?
       raise Error, "event lane #{lane} cannot contain ':'" if malformed_lane_name?(lane)
+    end
+
+    # Per-type field enforcement for the typed operational-signal vocabulary
+    # (issue #77): reject typed fields foreign to the declared type, then require
+    # its own fields and validate their allowed values. Only the four typed names
+    # are validated; any other --type value stays allowed and unvalidated, so
+    # existing free-form record-event callers are unaffected.
+    def validate_typed_event_options!(options)
+      type = options[:type]
+      return unless TYPED_EVENT_ALLOWED_FIELDS.key?(type)
+
+      reject_foreign_typed_fields!(options, type)
+      case type
+      when "help_requested"
+        require_options(options, :reason)
+        validate_event_enum!(options, :reason, HELP_REQUESTED_REASONS)
+      when "escalation_requested"
+        require_options(options, :from_route, :to_route, :evidence)
+      when "error"
+        require_options(options, :severity, :category, :message)
+        validate_event_enum!(options, :severity, ERROR_SEVERITIES)
+      when "human_intervention"
+        require_options(options, :kind)
+        validate_event_enum!(options, :kind, HUMAN_INTERVENTION_KINDS)
+      end
+    end
+
+    def reject_foreign_typed_fields!(options, type)
+      allowed = TYPED_EVENT_ALLOWED_FIELDS.fetch(type)
+      foreign = (TYPED_EVENT_PAYLOAD_FIELDS - allowed).reject { |field| options[field.to_sym].nil? }
+      return if foreign.empty?
+
+      raise Error, "--#{foreign.first.tr('_', '-')} is not valid for --type #{type}"
+    end
+
+    def validate_event_enum!(options, field, allowed)
+      value = options[field]
+      return if allowed.include?(value)
+
+      raise Error, "--#{field.to_s.tr('_', '-')} must be one of: #{allowed.join(', ')}"
     end
 
     def event_payload(options, event_id, now)
@@ -2521,8 +2650,19 @@ module AgentCoord
       payload["previous_phase"] = options[:previous_phase] if options[:previous_phase]
       payload.merge(metadata_payload(options))
              .merge(handoff_payload(options))
+             .merge(typed_event_payload(options))
              .merge(environment_identity_payload)
              .compact
+    end
+
+    # Present-only projection of the typed operational-signal payload fields
+    # (issue #77). Absent fields are omitted so untyped events keep their exact
+    # existing shape.
+    def typed_event_payload(options)
+      TYPED_EVENT_PAYLOAD_FIELDS.each_with_object({}) do |field, payload|
+        value = options[field.to_sym]
+        payload[field] = value unless value.nil?
+      end
     end
 
     def terminal_event?(options)
@@ -2840,6 +2980,208 @@ module AgentCoord
       raise OperationalError, "state unreadable: #{e.message}"
     ensure
       close_store(store)
+    end
+
+    # batch-audit reports, per registered lane, which expected lifecycle events
+    # are missing so batch-closeout workflows can fail-closed on an incomplete
+    # telemetry trail. "Telemetry-complete" per lane: at least one
+    # claim.acquired event AND a terminal signal (claim.released OR lane_closed);
+    # either missing marks the lane incomplete (a lane with no events at all is
+    # incomplete with both signals missing). Read-only, defaulting to the local
+    # status state root like `status`. Exit: 0 complete, 1 incomplete (gaps), 2
+    # UNKNOWN (unregistered/unreadable batch).
+    def batch_audit(options)
+      require_options(options, :batch_id)
+      audit_options = options.dup
+      audit_options[:state_root] ||= default_status_state_root unless audit_options[:api_url]
+      store = build_store(audit_options)
+      report = batch_audit_report(store, options.fetch(:batch_id))
+      emit_batch_audit_report(report, options)
+      BATCH_AUDIT_EXIT_CODES.fetch(report.fetch("verdict"))
+    ensure
+      close_store(store)
+    end
+
+    def batch_audit_report(store, batch_id)
+      batch_entry = store.read_json(AgentCoord.batch_path(batch_id))
+      return batch_audit_unknown_report(batch_id, "batch #{batch_id} is not registered") if batch_entry.nil?
+      unless batch_entry.data.is_a?(Hash)
+        return batch_audit_unknown_report(batch_id, "batch #{batch_id} state is not an object")
+      end
+
+      lanes = Array(batch_entry.data["lanes"])
+      return batch_audit_unknown_report(batch_id, "batch #{batch_id} registers no lanes") if lanes.empty?
+
+      event_prefix = AgentCoord.event_batch_prefix(batch_id)
+      event_records = store.list_json(event_prefix)
+      if filtered_status_list?(store, event_prefix)
+        return batch_audit_unknown_report(batch_id, "event trail for #{batch_id} is filtered by a scoped token")
+      end
+
+      events = event_records.map(&:data)
+      batch_repo = batch_entry.data["repo"]
+      owner_counts = batch_audit_owner_counts(lanes)
+      target_counts = batch_audit_target_counts(lanes)
+      reports = lanes.map { |lane| batch_audit_lane_report(lane, events, owner_counts, target_counts, batch_repo) }
+      {
+        "batch_id" => batch_id,
+        "verdict" => reports.all? { |lane| lane.fetch("complete") } ? "complete" : "incomplete",
+        "lanes" => reports
+      }
+    rescue OperationalError, JSON::ParserError, PathValidationError => e
+      batch_audit_unknown_report(batch_id, "coordination state unreadable: #{e.message}")
+    end
+
+    def batch_audit_unknown_report(batch_id, reason)
+      { "batch_id" => batch_id, "verdict" => "unknown", "reason" => reason, "lanes" => [] }
+    end
+
+    # Non-empty target strings declared by a lane. Mirrors validate_batch_lane!'s
+    # reject-empties so a stray "" never becomes an attribution key that would
+    # match target-less events.
+    def batch_audit_lane_targets(lane)
+      Array(lane["targets"] || lane["target"]).compact.map(&:to_s).reject(&:empty?)
+    end
+
+    # Count how many lanes each non-UNKNOWN owner appears on, so owner-only
+    # attribution can be gated to owners that unambiguously identify one lane.
+    # register-batch enforces unique lane names but not unique owners.
+    def batch_audit_owner_counts(lanes)
+      lanes.each_with_object(Hash.new(0)) do |lane, counts|
+        next unless lane.is_a?(Hash)
+
+        owner = lane_owner(lane)
+        counts[owner] += 1 unless owner == "UNKNOWN"
+      end
+    end
+
+    # Count how many lanes each target appears on. register-batch enforces unique
+    # lane names but not unique targets, so a shared target is ambiguous and must
+    # not attribute an event to more than one lane.
+    def batch_audit_target_counts(lanes)
+      lanes.each_with_object(Hash.new(0)) do |lane, counts|
+        next unless lane.is_a?(Hash)
+
+        batch_audit_lane_targets(lane).uniq.each { |target| counts[target] += 1 }
+      end
+    end
+
+    # A non-Hash lane entry (legacy or hand-edited state such as `[null]`) cannot
+    # be verified, so it is reported incomplete rather than allowed to crash;
+    # this preserves the never-false-complete guarantee.
+    def batch_audit_lane_report(lane, events, owner_counts, target_counts, batch_repo)
+      return batch_audit_malformed_lane_report unless lane.is_a?(Hash)
+
+      name = lane_name(lane)
+      owner = lane_owner(lane)
+      targets = batch_audit_lane_targets(lane)
+      context = BatchAuditLane.new(
+        name: name,
+        targets: targets,
+        unique_targets: targets.select { |target| target_counts.fetch(target, 0) <= 1 },
+        owner: owner,
+        owner_unique: owner != "UNKNOWN" && owner_counts.fetch(owner, 0) <= 1
+      )
+      lane_events = events.select do |event|
+        batch_audit_event_for_repo?(event, batch_repo) && batch_audit_event_for_lane?(event, context)
+      end
+      missing = batch_audit_missing_signals(lane_events)
+      {
+        "name" => name,
+        "owner" => owner,
+        "targets" => targets,
+        "event_count" => lane_events.length,
+        "missing" => missing,
+        "complete" => missing.empty?,
+        "malformed" => false
+      }
+    end
+
+    def batch_audit_malformed_lane_report
+      {
+        "name" => "UNKNOWN",
+        "owner" => "UNKNOWN",
+        "targets" => [],
+        "event_count" => 0,
+        "missing" => ["claim.acquired", "terminal"],
+        "complete" => false,
+        "malformed" => true
+      }
+    end
+
+    def batch_audit_missing_signals(lane_events)
+      types = lane_events.map { |event| event["type"] }
+      missing = []
+      missing << "claim.acquired" unless types.include?("claim.acquired")
+      missing << "terminal" unless types.intersect?(BATCH_AUDIT_TERMINAL_EVENT_TYPES)
+      missing
+    end
+
+    # Repo gate applied before any lane-attribution key, so it constrains all three
+    # paths uniformly. A batch manifest declares an optional repo and lanes carry no
+    # per-lane repo; batch ids are reused across repos with colliding target numbers,
+    # so a same-batch-id claim/release/lane_closed recorded under a different --repo
+    # must never attribute to this batch. When the batch declares no repo, every
+    # event passes (unchanged behavior). An event whose repo is absent is excluded
+    # once the batch declares a repo, matching the terminal-closeout repo check.
+    def batch_audit_event_for_repo?(event, batch_repo)
+      return true if batch_repo.to_s.empty?
+
+      event.is_a?(Hash) && event["repo"].to_s == batch_repo.to_s
+    end
+
+    # Classify an event to a lane. The explicit lane-name match is always trusted
+    # (lane names are unique, and lane_closed/typed events may carry an explicit
+    # `lane`). A target match attributes only when the target is unique in the batch
+    # (register-batch does not enforce unique targets/owners). The owner (agent_id)
+    # fallback attributes only when the owner is the batch's unique owner AND the
+    # event's target belongs to this lane (or the event carries no target): a unique
+    # owner doing other work under the same batch-id/repo must not complete this lane.
+    # The batch repo gate (batch_audit_event_for_repo?) is applied by the caller first.
+    def batch_audit_event_for_lane?(event, lane)
+      return false unless event.is_a?(Hash)
+      return true if lane.name != "UNKNOWN" && !lane.name.to_s.empty? && event["lane"].to_s == lane.name.to_s
+      return true if lane.unique_targets.include?(event["target"].to_s)
+
+      batch_audit_owner_attributes?(event, lane)
+    end
+
+    # Owner fallback: a unique lane owner attributes an event only when the event's
+    # target is in the lane's declared targets, or the event carries no target.
+    def batch_audit_owner_attributes?(event, lane)
+      return false unless lane.owner_unique && event["agent_id"].to_s == lane.owner.to_s
+
+      target = event["target"].to_s
+      target.empty? || lane.targets.include?(target)
+    end
+
+    def emit_batch_audit_report(report, options)
+      if options[:json]
+        @stdout.puts JSON.pretty_generate(report)
+      else
+        render_batch_audit_text(report)
+      end
+    end
+
+    def render_batch_audit_text(report)
+      @stdout.puts "batch-audit #{report.fetch('batch_id')} #{report.fetch('verdict')}"
+      if report.fetch("verdict") == "unknown"
+        @stdout.puts "- #{report.fetch('reason')}"
+        return
+      end
+      lanes = report.fetch("lanes")
+      return @stdout.puts "- no lanes registered" if lanes.empty?
+
+      lanes.each { |lane| render_batch_audit_lane(lane) }
+    end
+
+    def render_batch_audit_lane(lane)
+      state = if lane.fetch("complete")
+                "complete"
+              else
+                "incomplete missing #{lane.fetch('missing').join(', ')}"
+              end
+      @stdout.puts "- lane #{lane.fetch('name')} owner #{lane.fetch('owner')} #{state}"
     end
 
     def status_scope(options)
