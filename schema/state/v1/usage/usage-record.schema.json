@@ -20,10 +20,10 @@
     },
     "em_dash": {
       "const": "—",
-      "description": "Explicit unknown marker. The dashboard renders this em dash for a value that was unknown at report time."
+      "description": "Explicit unknown marker. The dashboard renders this em dash for a value that was unknown at report time. Both null and this em dash are accepted for unknown per issue #84 so a producer may forward the exact marker the dashboard displays; the two are semantically identical (unknown). Consumers must treat both as unknown and guard on a numeric type before any arithmetic (an aggregator that only checks `!= null` would try to sum the em dash)."
     },
     "optional_token_count": {
-      "description": "A non-negative token count, or null / \"—\" when unknown at report time. Producers never omit the key and never emit a fabricated zero for an unknown count.",
+      "description": "A non-negative token count, or null / \"—\" when unknown at report time (the two unknown forms are equivalent; see em_dash). Producers never omit the key and never emit a fabricated zero for an unknown count.",
       "oneOf": [
         { "type": "integer", "minimum": 0 },
         { "type": "null" },
@@ -31,7 +31,7 @@
       ]
     },
     "optional_cost": {
-      "description": "A non-negative estimated cost in the record's currency, or null / \"—\" when unknown at report time. Producers never omit the key and never emit a fabricated zero for an unknown cost.",
+      "description": "A non-negative estimated cost in the record's currency, or null / \"—\" when unknown at report time (the two unknown forms are equivalent; see em_dash). Producers never omit the key and never emit a fabricated zero for an unknown cost.",
       "oneOf": [
         { "type": "number", "minimum": 0 },
         { "type": "null" },

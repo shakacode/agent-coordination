@@ -3,6 +3,7 @@
 require "json"
 require "json_schemer"
 require "minitest/autorun"
+require "time"
 
 class UsageRecordContractTest < Minitest::Test
   ROOT = File.expand_path("..", __dir__)
@@ -94,6 +95,24 @@ class UsageRecordContractTest < Minitest::Test
     end
   end
 
+  def test_dedupe_by_latest_orders_by_parsed_instant_not_lexical_string
+    base = read_fixture(File.join(FIXTURES_PATH, "valid", "usage-known.json"))
+    # Same logical key, different report instants. The +01:00 record is 07:00Z —
+    # older — but sorts AFTER 07:30:00Z lexically, so a lexical winner is wrong.
+    older = base.merge("reported_at" => "2026-07-22T08:00:00+01:00", "input_tokens" => 111,
+                       "output_tokens" => 1, "cost" => 1.0)
+    newer = base.merge("reported_at" => "2026-07-22T07:30:00Z", "input_tokens" => 222,
+                       "output_tokens" => 2, "cost" => 2.0)
+
+    model = base.fetch("model")
+    [[older, newer], [newer, older]].each do |records|
+      result = aggregate_usage(records)
+      assert_equal 222, result.dig("tokens_by_model", model, "input_tokens"), "must keep the later instant"
+      assert_equal 2, result.dig("tokens_by_model", model, "output_tokens")
+      assert_in_delta 2.0, result.dig("tokens_by_model", model, "cost"), 0.001
+    end
+  end
+
   def test_status_projection_procedurally_admits_duplicate_logical_keys
     schema_document = read_json(SCHEMA_PATH)
     projection = JSONSchemer.schema(schema_document.merge("$ref" => "#/$defs/status_projection"))
@@ -148,12 +167,14 @@ class UsageRecordContractTest < Minitest::Test
 
   # A later report for the same logical key supersedes earlier ones, so a stale
   # or retried duplicate is collapsed to the latest reported_at before summing.
-  # reported_at values are UTC "...Z" timestamps that sort chronologically.
+  # reported_at is compared as a parsed instant, not lexically, because the
+  # schema accepts any RFC 3339 date-time (offsets and fractional seconds), so a
+  # non-UTC representation must not be ordered by its raw string.
   def dedupe_by_latest(records)
     records
       .group_by { |record| logical_key(record) }
       .values
-      .map { |group| group.max_by { |record| record.fetch("reported_at") } }
+      .map { |group| group.max_by { |record| Time.iso8601(record.fetch("reported_at")) } }
   end
 
   def new_accumulator
