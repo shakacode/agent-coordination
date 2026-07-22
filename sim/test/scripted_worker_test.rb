@@ -59,8 +59,8 @@ class ScriptedWorkerTest < Minitest::Test
     assert_equal "done", claim.fetch("terminal")
     heartbeat = JSON.parse(File.read(File.join(@state, "heartbeats", "host:worker.json")))
     assert_equal "done", heartbeat.fetch("status")
-    event_path = Dir.glob(File.join(@state, "events", "sim-task_one", "*.json")).fetch(0)
-    event = JSON.parse(File.read(event_path))
+    events = Dir.glob(File.join(@state, "events", "sim-task_one", "*.json")).map { |path| JSON.parse(File.read(path)) }
+    event = events.find { |candidate| candidate.fetch("type") == "lane_closed" }
     assert_equal "lane_closed", event.fetch("type")
     assert_equal "done", event.fetch("terminal")
     batch = JSON.parse(File.read(File.join(@state, "batches", "sim-task_one.json")))

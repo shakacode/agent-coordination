@@ -9,7 +9,18 @@ when releases begin.
 
 ### Added
 
-- A schema-first v1 batch blocker contract keyed by `(workspace, batch_id)` that
+- Auto-emitted claim-lifecycle events so a claim's acquire, phase transitions,
+  and release leave a queryable trail under `events/<batch-id>/` without any
+  explicit `record-event` calls. `claim` emits `claim.acquired` (agent, target,
+  branch, and generation/instance metadata), non-terminal `release` emits
+  `claim.released` (final claim status plus `release_mode`/handoff fields when
+  present), and `heartbeat` emits `phase.changed` (`previous_phase` -> `phase`)
+  only on an actual phase transition. Each emit is append-only, best-effort (a
+  failed event write warns on stderr and never fails the claim/heartbeat/release
+  operation), and gated on a known `batch_id`. Terminal releases keep emitting
+  the richer `lane_closed` event and do not double-emit `claim.released`; the
+  prior release-only `handoff` event type is now the generalized `claim.released`
+  event. No gem has been published, so no migration is required.
   persists a structured blocker (`message`, a non-empty `decisions` list, and an
   optional `recommendedReply`) when a supervisor blocks on operator authority, so
   the dashboard renders the Blocker panel instead of reconstructing decisions from
