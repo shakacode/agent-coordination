@@ -9,6 +9,16 @@ when releases begin.
 
 ### Added
 
+- A schema-first v1 batch completion-report contract keyed by `batch_id` that
+  persists a completed batch's audit (`verdict` + free-form `author` that folds
+  version and timestamp), completion report (`state`, `receipts`, `baseline`,
+  per-lane `outcomes`, and optional `usage`/`tokensTotal`/`cost`/`duration`
+  metrics), and canonical `finalReport`, so the dashboard drawer renders them
+  instead of a degrade note. The dashboard-rendered payload follows dashboard #82
+  verbatim (camelCase), while the envelope keeps snake_case; optional metrics send
+  `null`/`"—"` and are never omitted or fabricated, archive-ready requires
+  `state.live`/`audit`/`receipts`, and conformance plus a drawer-render replay
+  ship beside the schema while capture stays deferred.
 - A schema-first v1 batch merge-authority contract that persists the declared
   authority additively on the batch manifest as the canonical short enum
   `none | ask | auto` (the pr-batch launch `auto_merge_when_gates_pass` maps to

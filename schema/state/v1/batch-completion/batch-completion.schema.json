@@ -1,0 +1,163 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/shakacode/agent-coordination/blob/main/schema/state/v1/batch-completion/batch-completion.schema.json",
+  "title": "Agent Coordination Batch Completion Report v1",
+  "description": "A completed batch's audit verdict, completion report, and final handoff, persisted at batch completion so the dashboard batch drawer can render the completed-batch audit chip, completion table, and final-report block instead of a degrade note. The dashboard-rendered payload (audit, completion, finalReport) follows the dashboard report contract verbatim, including its camelCase field names such as tokensTotal and state.replay, because that contract must be followed exactly; the record envelope (schema_version, batch_id) and contract metadata keep this repository's snake_case convention. Optional metrics send \"—\" or null and are never omitted or fabricated. This schema defines state only; capture, persistence, and UI behavior are separate concerns.",
+  "x-contract-version": 1,
+  "x-record-family": "batch_completion",
+  "x-logical-key": ["batch_id"],
+  "x-storage-key": {
+    "template": "batch_completions/{batch_id}.json",
+    "segment_encoding": "UTF-8 bytes; leave ASCII alphanumeric, underscore, and hyphen literal; percent-encode every other byte with uppercase hexadecimal, so no segment can form a . or .. traversal component. Not wired to the CLI or Worker yet."
+  },
+  "$ref": "#/$defs/batch_completion",
+  "$defs": {
+    "em_dash": {
+      "const": "—",
+      "description": "Explicit unknown marker rendered as an em dash by the dashboard."
+    },
+    "href": {
+      "type": "string",
+      "format": "uri",
+      "pattern": "^[Hh][Tt][Tt][Pp][Ss]?://[^/?#\\s]+(?:[/?#]|$)",
+      "description": "Absolute http(s) URL."
+    },
+    "metadata_pair": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["k", "v"],
+      "description": "A labeled value that may carry a link; the dashboard renders v as a link when href is present.",
+      "properties": {
+        "k": { "type": "string", "minLength": 1 },
+        "v": { "type": ["string", "number", "boolean", "null"] },
+        "href": { "$ref": "#/$defs/href" }
+      }
+    },
+    "link": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["label", "href"],
+      "properties": {
+        "label": { "type": "string", "minLength": 1 },
+        "href": { "$ref": "#/$defs/href" }
+      }
+    },
+    "optional_integer_metric": {
+      "description": "A non-negative integer, or null / \"—\" when unknown. Never omitted, never a fabricated zero.",
+      "oneOf": [
+        { "type": "integer", "minimum": 0 },
+        { "type": "null" },
+        { "$ref": "#/$defs/em_dash" }
+      ]
+    },
+    "optional_number_metric": {
+      "description": "A non-negative number, or null / \"—\" when unknown. Never omitted, never a fabricated zero.",
+      "oneOf": [
+        { "type": "number", "minimum": 0 },
+        { "type": "null" },
+        { "$ref": "#/$defs/em_dash" }
+      ]
+    },
+    "optional_text_metric": {
+      "description": "A summary string (including the em dash \"—\" when unknown), a number (for example a duration in seconds), a structured object, or null. Never omitted.",
+      "type": ["string", "number", "object", "null"]
+    },
+    "audit": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["verdict", "author"],
+      "description": "The completed-batch audit chip.",
+      "properties": {
+        "verdict": { "enum": ["clean", "findings", "pending"] },
+        "author": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Free-form author that folds the version and timestamp, for example \"justin808 · v1 durable · 2026-07-20T16:24:07Z\". There is deliberately no separate version field."
+        }
+      }
+    },
+    "state": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["live", "replay"],
+      "description": "State references. live is required; replay is optional and sends null / \"—\" when unknown, never omitted.",
+      "properties": {
+        "live": { "$ref": "#/$defs/metadata_pair" },
+        "replay": {
+          "oneOf": [
+            { "$ref": "#/$defs/metadata_pair" },
+            { "type": "null" },
+            { "$ref": "#/$defs/em_dash" }
+          ]
+        }
+      }
+    },
+    "baseline": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path"],
+      "description": "Baseline block. path is a short display path; href renders it as a link.",
+      "properties": {
+        "k": { "type": "string", "minLength": 1 },
+        "v": { "type": ["string", "number", "boolean", "null"] },
+        "path": { "type": "string", "minLength": 1 },
+        "href": { "$ref": "#/$defs/href" }
+      }
+    },
+    "outcome": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["lane"],
+      "description": "A per-lane outcome row. PR/issue references are plain text unless a links array is supplied, which the dashboard renders as chips. Additional producer fields (route, pr, sha, issue) are permitted.",
+      "properties": {
+        "lane": { "type": "string", "minLength": 1 },
+        "refs": { "type": "string" },
+        "links": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/link" }
+        }
+      }
+    },
+    "completion": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["state", "receipts", "baseline", "outcomes", "usage", "tokensTotal", "cost", "duration"],
+      "description": "The completion report. state, receipts, baseline, and outcomes are structural; usage, tokensTotal, cost, and duration are optional metrics that send null / \"—\" when unknown but are never omitted.",
+      "properties": {
+        "state": { "$ref": "#/$defs/state" },
+        "receipts": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "$ref": "#/$defs/metadata_pair" },
+          "description": "At least one durable v1 receipt; there is no minimum beyond one."
+        },
+        "baseline": { "$ref": "#/$defs/baseline" },
+        "outcomes": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/outcome" }
+        },
+        "usage": { "$ref": "#/$defs/optional_text_metric" },
+        "tokensTotal": { "$ref": "#/$defs/optional_integer_metric" },
+        "cost": { "$ref": "#/$defs/optional_number_metric" },
+        "duration": { "$ref": "#/$defs/optional_text_metric" }
+      }
+    },
+    "batch_completion": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema_version", "batch_id", "audit", "completion", "finalReport"],
+      "description": "Archive-ready requires state.live, audit, and receipts. The record additionally carries batch identity and the canonical final report.",
+      "properties": {
+        "schema_version": { "const": 1 },
+        "batch_id": { "type": "string", "minLength": 1 },
+        "audit": { "$ref": "#/$defs/audit" },
+        "completion": { "$ref": "#/$defs/completion" },
+        "finalReport": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Canonical handoff text rendered verbatim by the dashboard."
+        }
+      }
+    }
+  }
+}

@@ -22,7 +22,25 @@ class PackagingTest < Minitest::Test
     docs/adr/0009-usage-record-state-contract.md
     docs/adr/0010-route-state-contract.md
     docs/adr/0011-merge-authority-state-contract.md
+    docs/adr/0012-batch-completion-state-contract.md
     docs/protocol-curl.md
+    schema/state/v1/batch-completion/batch-completion.schema.json
+    schema/state/v1/batch-completion/fixtures/invalid/completion-audit-version-field.json
+    schema/state/v1/batch-completion/fixtures/invalid/completion-bad-verdict.json
+    schema/state/v1/batch-completion/fixtures/invalid/completion-baseline-missing-path.json
+    schema/state/v1/batch-completion/fixtures/invalid/completion-empty-receipts.json
+    schema/state/v1/batch-completion/fixtures/invalid/completion-fabricated-tokens-string.json
+    schema/state/v1/batch-completion/fixtures/invalid/completion-missing-audit.json
+    schema/state/v1/batch-completion/fixtures/invalid/completion-missing-final-report.json
+    schema/state/v1/batch-completion/fixtures/invalid/completion-missing-state-live.json
+    schema/state/v1/batch-completion/fixtures/invalid/completion-null-final-report.json
+    schema/state/v1/batch-completion/fixtures/invalid/completion-omitted-tokens-total.json
+    schema/state/v1/batch-completion/fixtures/invalid/completion-outcome-link-missing-href.json
+    schema/state/v1/batch-completion/fixtures/replay/completion-drawer-render.json
+    schema/state/v1/batch-completion/fixtures/valid/completion-full.json
+    schema/state/v1/batch-completion/fixtures/valid/completion-minimal-archive-ready.json
+    schema/state/v1/batch-completion/fixtures/valid/completion-outcomes-plain-text.json
+    schema/state/v1/batch-completion/fixtures/valid/completion-verdict-findings.json
     schema/state/v1/capacity-reservation/capacity-profile.schema.json
     schema/state/v1/capacity-reservation/capacity-reservation.schema.json
     schema/state/v1/capacity-reservation/fixtures/invalid/capacity-profile-zero.json

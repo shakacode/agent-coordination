@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "batch_id": "acoord-plain-2026-07-22",
+  "audit": { "verdict": "clean", "author": "justin808 · v1 durable · 2026-07-22T01:31:00Z" },
+  "completion": {
+    "state": { "live": { "k": "live", "v": "state/live/acoord-plain" }, "replay": null },
+    "receipts": [ { "k": "receipt", "v": "durable-1", "href": "https://github.com/shakacode/agent-coordination/issues/83" } ],
+    "baseline": { "path": "docs/archive", "href": "https://github.com/shakacode/agent-coordination" },
+    "outcomes": [ { "lane": "merge-authority", "refs": "#86 · #91" } ],
+    "usage": null,
+    "tokensTotal": 12000,
+    "cost": 0.42,
+    "duration": 4980
+  },
+  "finalReport": "Single-lane completion with plain-text outcome refs."
+}

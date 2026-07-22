@@ -569,6 +569,26 @@ This is a schema-only foundation. The CLI and Worker do not yet capture the
 launch declaration into batch state. See
 [ADR 0011](docs/adr/0011-merge-authority-state-contract.md).
 
+### Batch completion-report contract foundation
+
+The published
+[`schema/state/v1/batch-completion/batch-completion.schema.json`](schema/state/v1/batch-completion/batch-completion.schema.json)
+persists a completed batch's `audit` (verdict + free-form author that folds
+version and timestamp), `completion` report (`state`, `receipts`, `baseline`,
+per-lane `outcomes`, and optional `usage`/`tokensTotal`/`cost`/`duration`), and
+`finalReport`, keyed by `batch_id`, so the dashboard drawer renders the audit
+chip, completion table, and final report instead of a degrade note. The
+dashboard-rendered payload follows the dashboard report contract verbatim
+(camelCase field names such as `tokensTotal`), while the record envelope keeps
+snake_case. Optional metrics send `null`/`"—"` and are never omitted or
+fabricated; archive-ready requires `state.live`, `audit`, and `receipts`.
+Positive, negative, and drawer-render fixtures live under
+[`schema/state/v1/batch-completion/fixtures/`](schema/state/v1/batch-completion/fixtures/).
+
+This is a schema-only foundation. The CLI and Worker do not yet capture batch
+handoffs into this record. See
+[ADR 0012](docs/adr/0012-batch-completion-state-contract.md).
+
 `gc` applies one retention plan to local, GitHub, and HTTP stores. Exactly one
 mode is required: `--dry-run` prints proposed actions without writing, while
 `--execute` copies eligible records into `archive/` with compare-and-swap
