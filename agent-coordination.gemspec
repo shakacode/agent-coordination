@@ -28,6 +28,7 @@ Gem::Specification.new do |spec|
     contracts/state-schema-v2.json
     docs/adr/0007-host-limit-state-contract.md
     docs/adr/0008-capacity-reservation-state-contract.md
+    docs/adr/0009-usage-record-state-contract.md
     docs/protocol-curl.md
     schema/state/v1/capacity-reservation/capacity-profile.schema.json
     schema/state/v1/capacity-reservation/capacity-reservation.schema.json
@@ -64,6 +65,17 @@ Gem::Specification.new do |spec|
     schema/state/v1/fixtures/valid/host-limit-active.json
     schema/state/v1/fixtures/valid/host-limit-cleared.json
     schema/state/v1/host-limit.schema.json
+    schema/state/v1/usage/fixtures/invalid/usage-fabricated-string-metric.json
+    schema/state/v1/usage/fixtures/invalid/usage-missing-model.json
+    schema/state/v1/usage/fixtures/invalid/usage-negative-tokens.json
+    schema/state/v1/usage/fixtures/invalid/usage-noncanonical-repo.json
+    schema/state/v1/usage/fixtures/invalid/usage-omitted-metric.json
+    schema/state/v1/usage/fixtures/invalid/usage-unknown-field.json
+    schema/state/v1/usage/fixtures/procedural/usage-duplicate-logical-key.json
+    schema/state/v1/usage/fixtures/replay/usage-by-model-aggregation.json
+    schema/state/v1/usage/fixtures/valid/usage-known.json
+    schema/state/v1/usage/fixtures/valid/usage-unknown-metrics.json
+    schema/state/v1/usage/usage-record.schema.json
   ]
   spec.bindir = "bin"
   spec.executables = ["agent-coord"]

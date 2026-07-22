@@ -1,0 +1,109 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/shakacode/agent-coordination/blob/main/schema/state/v1/usage/usage-record.schema.json",
+  "title": "Agent Coordination Usage Record v1",
+  "description": "Per-model token and estimated-cost telemetry for one coordination lane/agent. A record attributes input/output tokens and estimated cost to exactly one model so consumers can aggregate tokens by model and per-batch token/cost tiles. Token counts and cost are optional metrics: when a value is unknown at report time the producer sends null or the em dash string \"—\" and never omits the key or fabricates a zero. This schema defines state only; reporting, persistence, provider detection, and UI behavior are separate concerns.",
+  "x-contract-version": 1,
+  "x-record-family": "usage",
+  "x-logical-key": ["workspace", "repo", "batch_id", "lane_name", "agent_id", "target", "model"],
+  "x-storage-key": {
+    "template": "usage/{workspace}/{repo}/{batch_id}/{lane_name}/{agent_id}/{target}/{model}.json",
+    "segment_encoding": "UTF-8 bytes; leave ASCII alphanumeric, underscore, and hyphen literal; percent-encode every other byte with uppercase hexadecimal. Applies to every logical-key segment because repo, target, and identifier strings may contain slashes or other separators (for example repo owner/name encodes its slash as %2F)."
+  },
+  "$ref": "#/$defs/usage_record",
+  "$defs": {
+    "workspace": {
+      "type": "string",
+      "minLength": 1,
+      "default": "default",
+      "description": "Tenant/workspace dimension required by ADR 0004. Self-hosted producers use default."
+    },
+    "em_dash": {
+      "const": "—",
+      "description": "Explicit unknown marker. The dashboard renders this em dash for a value that was unknown at report time."
+    },
+    "optional_token_count": {
+      "description": "A non-negative token count, or null / \"—\" when unknown at report time. Producers never omit the key and never emit a fabricated zero for an unknown count.",
+      "oneOf": [
+        { "type": "integer", "minimum": 0 },
+        { "type": "null" },
+        { "$ref": "#/$defs/em_dash" }
+      ]
+    },
+    "optional_cost": {
+      "description": "A non-negative estimated cost in the record's currency, or null / \"—\" when unknown at report time. Producers never omit the key and never emit a fabricated zero for an unknown cost.",
+      "oneOf": [
+        { "type": "number", "minimum": 0 },
+        { "type": "null" },
+        { "$ref": "#/$defs/em_dash" }
+      ]
+    },
+    "usage_record": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "workspace",
+        "repo",
+        "target",
+        "batch_id",
+        "lane_name",
+        "agent_id",
+        "model",
+        "input_tokens",
+        "output_tokens",
+        "cost",
+        "reported_at"
+      ],
+      "properties": {
+        "schema_version": { "const": 1 },
+        "workspace": { "$ref": "#/$defs/workspace" },
+        "repo": {
+          "type": "string",
+          "pattern": "^[^/]+/[^/]+$",
+          "description": "GitHub owner/name the usage is attributed to."
+        },
+        "target": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Issue/PR number or lane target the usage is attributed to."
+        },
+        "batch_id": { "type": "string", "minLength": 1 },
+        "lane_name": { "type": "string", "minLength": 1 },
+        "agent_id": { "type": "string", "minLength": 1 },
+        "model": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Model identifier the tokens and cost are attributed to, for example claude-opus-4-8 or gpt-5.6-sol. One record per model enables tokens-by-model aggregation."
+        },
+        "input_tokens": { "$ref": "#/$defs/optional_token_count" },
+        "output_tokens": { "$ref": "#/$defs/optional_token_count" },
+        "cost": { "$ref": "#/$defs/optional_cost" },
+        "currency": {
+          "type": "string",
+          "pattern": "^[A-Z]{3}$",
+          "description": "Optional ISO 4217 currency code for cost. Absent means USD. This is a unit label, not an optional metric, so it may be omitted."
+        },
+        "reported_at": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Time the usage was reported. Later reports for the same logical key supersede earlier ones."
+        }
+      }
+    },
+    "status_projection": {
+      "type": "object",
+      "additionalProperties": true,
+      "description": "Embeddable additive fragment for existing status documents. usage is optional; an omitted or empty section means no usage records were projected. When present, every item must conform to the usage record contract. Existing status properties remain valid beside this section.",
+      "properties": {
+        "usage": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/usage_record" },
+          "x-unique-key": ["workspace", "repo", "batch_id", "lane_name", "agent_id", "target", "model"],
+          "x-unique-key-enforcement": "producer",
+          "description": "Optional additive status section. The composite x-unique-key is an unenforced producer invariant because JSON Schema cannot enforce uniqueness by a subset of object properties. Consumers aggregate tokens by model and per-batch token/cost tiles from these records; unknown (null or \"—\") metrics are excluded from sums rather than counted as zero."
+        }
+      }
+    }
+  }
+}

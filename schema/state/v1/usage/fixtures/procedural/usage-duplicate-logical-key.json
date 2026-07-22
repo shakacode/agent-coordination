@@ -1,0 +1,34 @@
+{
+  "status": {
+    "usage": [
+      {
+        "schema_version": 1,
+        "workspace": "default",
+        "repo": "shakacode/agent-coordination",
+        "target": "84",
+        "batch_id": "acoord-emit-2026-07-22",
+        "lane_name": "usage-cost",
+        "agent_id": "claude-opus",
+        "model": "claude-opus-4-8",
+        "input_tokens": 100000,
+        "output_tokens": 3000,
+        "cost": 2.5,
+        "reported_at": "2026-07-22T08:40:00Z"
+      },
+      {
+        "schema_version": 1,
+        "workspace": "default",
+        "repo": "shakacode/agent-coordination",
+        "target": "84",
+        "batch_id": "acoord-emit-2026-07-22",
+        "lane_name": "usage-cost",
+        "agent_id": "claude-opus",
+        "model": "claude-opus-4-8",
+        "input_tokens": 128000,
+        "output_tokens": 4200,
+        "cost": 3.17,
+        "reported_at": "2026-07-22T08:55:00Z"
+      }
+    ]
+  }
+}
