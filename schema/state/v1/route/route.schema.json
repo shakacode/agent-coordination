@@ -1,0 +1,49 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/shakacode/agent-coordination/blob/main/schema/state/v1/route/route.schema.json",
+  "title": "Agent Coordination Lane Route v1",
+  "description": "The bound model + reasoning effort (the \"route\") for a lane, emitted additively on the lane's claim, heartbeat, or lane-manifest record. Route is a lane attribute rather than a standalone keyed record, so it carries no logical key of its own; it inherits the identity of the record it rides on. A route is either the compact \"model/effort\" string (for example gpt-5.6-sol/xhigh) or the equivalent structured object; the two forms are interchangeable and canonicalize to the same model and effort. Route is optional: a producer that has no route omits the property, and the dashboard degrades an absent route to a hidden/em-dash chip. This schema defines state only; emit paths and UI behavior are separate concerns.",
+  "x-contract-version": 1,
+  "x-record-family": "route",
+  "$ref": "#/$defs/lane_route_projection",
+  "$defs": {
+    "route_string": {
+      "type": "string",
+      "pattern": "^[^/\\s]+/[^/\\s]+$",
+      "description": "Compact route \"model/effort\" with exactly one slash and no whitespace, for example gpt-5.6-sol/xhigh or claude-opus-4-8/high. Neither part may be empty or contain a slash or whitespace. Use the structured form when a model identifier itself contains a slash."
+    },
+    "route_object": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["model", "effort"],
+      "properties": {
+        "model": {
+          "type": "string",
+          "pattern": "^\\S+$",
+          "description": "Model identifier, for example claude-opus-4-8 or gpt-5.6-sol. Non-empty and whitespace-free; a slash is allowed here because the object form is unambiguous."
+        },
+        "effort": {
+          "type": "string",
+          "pattern": "^\\S+$",
+          "description": "Reasoning-effort label, for example xhigh, high, medium, low, or none. Non-empty and whitespace-free; the provider-neutral vocabulary is intentionally open."
+        }
+      },
+      "description": "Structured route. Canonicalizes to the compact string as model + \"/\" + effort."
+    },
+    "route": {
+      "description": "A lane route in either interchangeable form.",
+      "oneOf": [
+        { "$ref": "#/$defs/route_string" },
+        { "$ref": "#/$defs/route_object" }
+      ]
+    },
+    "lane_route_projection": {
+      "type": "object",
+      "additionalProperties": true,
+      "description": "Embeddable additive fragment for a claim, heartbeat, or lane-manifest record. The record's existing properties remain valid beside this section. route is optional; when present it must be a valid route. There is exactly one way to signal \"no route\" — omit the property — so route is never null. An absent route degrades to a hidden/em-dash chip on the dashboard.",
+      "properties": {
+        "route": { "$ref": "#/$defs/route" }
+      }
+    }
+  }
+}
