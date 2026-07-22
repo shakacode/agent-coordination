@@ -436,8 +436,10 @@ acquire, phase transitions, and release leave a queryable trail under
 best-effort (a failed event write warns on stderr and never fails the underlying
 operation) and only happens when a `batch_id` is known for the operation:
 
-- `claim.acquired` on a successful `claim` write — carries the agent, target,
-  branch, and any `phase`/`generation`/`instance-id` metadata on the claim.
+- `claim.acquired` on a genuine claim acquisition or takeover — carries the
+  agent, target, branch, and any `phase`/`generation`/`instance-id` metadata on
+  the claim. A same-holder TTL renewal with an unchanged lane and unchanged
+  generation/instance is treated as a routine renewal and emits nothing.
 - `claim.released` on every non-terminal `release` — carries the final claim
   `status`, and for handoffs the `release_mode: "handoff"`, `handoff_to`, and
   `handoff_note` fields. Terminal releases emit the richer `lane_closed` event

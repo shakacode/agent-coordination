@@ -130,7 +130,8 @@ module AgentCoord
   STATUS_EVENT_METADATA_FIELDS = %w[
     event_id lane agent_id repo target branch status status_raw message thread_handle chat_handle host machine_id
     session_id session_source pr_url dashboard_url
-    operator phase generation instance_id release_mode handoff_to handoff_note terminal pr_state evidence_url
+    operator phase previous_phase generation instance_id release_mode handoff_to handoff_note terminal pr_state
+    evidence_url
     workspace closed_by
     synthetic synthetic_kind
   ].freeze
@@ -2201,11 +2202,14 @@ module AgentCoord
     # same-holder TTL renewal. Suppress the event only when the prior record is a
     # still-active claim held by the same agent with an unchanged lane and
     # unchanged generation/instance identity; emit for a fresh claim, a released
-    # or expired prior claim, a different holder, or a changed generation/instance.
+    # or expired prior claim, a different holder, or a changed OR newly-added
+    # generation/instance (e.g. a process restart that starts stamping identity).
     def claim_acquired_event?(existing, options)
       return true unless renewed_claim?(existing, options)
 
-      changed_identity_fields(existing, options, "generation", "instance_id").any?
+      reacquire_fields = %w[generation instance_id]
+      changed_identity_fields(existing, options, *reacquire_fields).any? ||
+        added_identity_fields(existing, options, *reacquire_fields).any?
     end
 
     def heartbeat_preserved_fields(existing, options)
@@ -2476,6 +2480,7 @@ module AgentCoord
       }
       METADATA_OPTION_FIELDS.each do |field|
         value = options[field.to_sym]
+        value = prior_data[field] if value.nil?
         event_options[field.to_sym] = value unless value.nil?
       end
       event_options

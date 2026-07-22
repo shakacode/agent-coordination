@@ -3336,6 +3336,18 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     assert_equal 2, events_of_type("batch-generation", "claim.acquired").length
   end
 
+  def test_claim_renewal_that_adds_instance_id_re_emits_claim_acquired_event
+    write_batch("batch-add-instance", lanes: [{ "name" => "code", "owner" => "worker-a", "targets" => ["4191"] }])
+    common = [
+      "claim", "--agent-id", "worker-a", "--repo", "shakacode/react_on_rails", "--target", "4191",
+      "--batch-id", "batch-add-instance"
+    ]
+    assert_equal 0, run_agent_coord(*common).status.exitstatus
+    assert_equal 0, run_agent_coord(*common, "--instance-id", "instance-a").status.exitstatus
+
+    assert_equal 2, events_of_type("batch-add-instance", "claim.acquired").length
+  end
+
   def test_release_records_claim_released_event_with_final_status
     write_batch("batch-release", lanes: [{ "name" => "code", "owner" => "worker-a", "targets" => ["4130"] }])
     claim = run_agent_coord(
@@ -3466,6 +3478,43 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
 
     assert_empty events_of_type("batch-lane-a", "phase.changed")
     assert_empty events_of_type("batch-lane-b", "phase.changed")
+  end
+
+  def test_phase_changed_inherits_preserved_heartbeat_metadata
+    args = [
+      "heartbeat", "--agent-id", "worker-a", "--batch-id", "batch-phase-meta",
+      "--repo", "shakacode/react_on_rails", "--target", "4170", "--status", "in_progress"
+    ]
+    first = run_agent_coord(*args, "--phase", "implementing", "--synthetic", "--synthetic-kind", "simulation")
+    assert_equal 0, first.status.exitstatus, first.stderr
+    # The transition supplies only --phase; synthetic/synthetic_kind must be
+    # inherited from the overwritten heartbeat record onto the phase.changed event
+    # so the batch's lifecycle history keeps the short synthetic GC retention.
+    second = run_agent_coord(*args, "--phase", "validating")
+    assert_equal 0, second.status.exitstatus, second.stderr
+
+    event = event_of_type("batch-phase-meta", "phase.changed")
+    assert_equal "validating", event.fetch("phase")
+    assert_equal "implementing", event.fetch("previous_phase")
+    assert_equal true, event.fetch("synthetic")
+    assert_equal "simulation", event.fetch("synthetic_kind")
+  end
+
+  def test_status_json_projects_phase_changed_previous_phase
+    write_batch("batch-phase-status", lanes: [{ "name" => "code", "owner" => "worker-a", "targets" => ["4180"] }])
+    args = [
+      "heartbeat", "--agent-id", "worker-a", "--batch-id", "batch-phase-status",
+      "--repo", "shakacode/react_on_rails", "--target", "4180", "--status", "in_progress"
+    ]
+    assert_equal 0, run_agent_coord(*args, "--phase", "implementing").status.exitstatus
+    assert_equal 0, run_agent_coord(*args, "--phase", "validating").status.exitstatus
+
+    status = run_agent_coord("status", "--batch-id", "batch-phase-status", "--json")
+    assert_equal 0, status.status.exitstatus, status.stderr
+    event = JSON.parse(status.stdout).fetch("events").find { |projected| projected["type"] == "phase.changed" }
+    refute_nil event, "expected a phase.changed event in the status projection"
+    assert_equal "implementing", event.fetch("previous_phase")
+    assert_equal "validating", event.fetch("phase")
   end
 
   def test_release_handoff_preserves_resume_metadata_and_records_event
