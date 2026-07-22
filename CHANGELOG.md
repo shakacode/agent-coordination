@@ -9,6 +9,14 @@ when releases begin.
 
 ### Added
 
+- A schema-first v1 batch blocker contract keyed by `(workspace, batch_id)` that
+  persists a structured blocker (`message`, a non-empty `decisions` list, and an
+  optional `recommendedReply`) when a supervisor blocks on operator authority, so
+  the dashboard renders the Blocker panel instead of reconstructing decisions from
+  lane `blockedOn` dependencies. `recommendedReply` is signaled absent by omission
+  only (never `null`); conformance and panel-render fixtures ship beside the schema
+  while capture stays deferred, and a batch with no structured blocker keeps the
+  dashboard's `blockedOn`-derived fallback.
 - A schema-first v1 batch completion-report contract keyed by `(workspace, batch_id)` that
   persists a completed batch's audit (`verdict` + free-form `author` that folds
   version and timestamp), completion report (`state`, `receipts`, `baseline`,
