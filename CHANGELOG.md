@@ -9,6 +9,13 @@ when releases begin.
 
 ### Added
 
+- A schema-first v1 batch merge-authority contract that persists the declared
+  authority additively on the batch manifest as the canonical short enum
+  `none | ask | auto` (the pr-batch launch `auto_merge_when_gates_pass` maps to
+  `auto`), so the dashboard renders the Merge auth field. It is optional and
+  signaled absent by omission only (never `null`), so a legacy batch degrades to
+  an em dash distinct from an explicit `none`; conformance and drawer fixtures
+  live beside the schema while launch capture stays deferred.
 - A schema-first v1 lane route contract for the bound model + reasoning effort,
   emitted additively on a claim/heartbeat/lane-manifest record as either the
   compact `model/effort` string or the equivalent `{ model, effort }` object

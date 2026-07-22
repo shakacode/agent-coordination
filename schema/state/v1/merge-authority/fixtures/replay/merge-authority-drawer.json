@@ -1,0 +1,16 @@
+{
+  "batches": [
+    { "batch_id": "acoord-emit-2026-07-22", "merge_authority": "auto" },
+    { "batch_id": "acoord-ask-2026-07-22", "merge_authority": "ask" },
+    { "batch_id": "acoord-none-2026-07-22", "merge_authority": "none" },
+    { "batch_id": "acoord-legacy-2026-07-22" }
+  ],
+  "expected": {
+    "drawer": {
+      "acoord-emit-2026-07-22": "auto",
+      "acoord-ask-2026-07-22": "ask",
+      "acoord-none-2026-07-22": "none",
+      "acoord-legacy-2026-07-22": "—"
+    }
+  }
+}
