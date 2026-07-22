@@ -552,6 +552,23 @@ This is a schema-only foundation. The CLI and Worker do not yet emit, detect, or
 project routes. Route rides on the identity of its host record and declares no
 key of its own. See [ADR 0010](docs/adr/0010-route-state-contract.md).
 
+### Batch merge-authority contract foundation
+
+The published
+[`schema/state/v1/merge-authority/merge-authority.schema.json`](schema/state/v1/merge-authority/merge-authority.schema.json)
+persists a batch's declared merge authority additively on the batch manifest as
+the canonical short enum `none | ask | auto`. The pr-batch launch vocabulary maps
+to these before persistence (`auto_merge_when_gates_pass` → `auto`), so the
+dashboard reads one short value. It is optional and signaled absent by omission
+only — never `null` — so a legacy batch degrades to an em-dash Merge auth field,
+distinct from an explicit `none`. Positive, negative, and drawer fixtures live
+under
+[`schema/state/v1/merge-authority/fixtures/`](schema/state/v1/merge-authority/fixtures/).
+
+This is a schema-only foundation. The CLI and Worker do not yet capture the
+launch declaration into batch state. See
+[ADR 0011](docs/adr/0011-merge-authority-state-contract.md).
+
 `gc` applies one retention plan to local, GitHub, and HTTP stores. Exactly one
 mode is required: `--dry-run` prints proposed actions without writing, while
 `--execute` copies eligible records into `archive/` with compare-and-swap

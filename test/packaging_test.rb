@@ -21,6 +21,7 @@ class PackagingTest < Minitest::Test
     docs/adr/0008-capacity-reservation-state-contract.md
     docs/adr/0009-usage-record-state-contract.md
     docs/adr/0010-route-state-contract.md
+    docs/adr/0011-merge-authority-state-contract.md
     docs/protocol-curl.md
     schema/state/v1/capacity-reservation/capacity-profile.schema.json
     schema/state/v1/capacity-reservation/capacity-reservation.schema.json
@@ -57,6 +58,17 @@ class PackagingTest < Minitest::Test
     schema/state/v1/fixtures/valid/host-limit-active.json
     schema/state/v1/fixtures/valid/host-limit-cleared.json
     schema/state/v1/host-limit.schema.json
+    schema/state/v1/merge-authority/fixtures/invalid/merge-authority-launch-verbose.json
+    schema/state/v1/merge-authority/fixtures/invalid/merge-authority-null.json
+    schema/state/v1/merge-authority/fixtures/invalid/merge-authority-unknown-value.json
+    schema/state/v1/merge-authority/fixtures/invalid/merge-authority-uppercase.json
+    schema/state/v1/merge-authority/fixtures/invalid/merge-authority-wrong-type.json
+    schema/state/v1/merge-authority/fixtures/replay/merge-authority-drawer.json
+    schema/state/v1/merge-authority/fixtures/valid/merge-authority-absent.json
+    schema/state/v1/merge-authority/fixtures/valid/merge-authority-ask.json
+    schema/state/v1/merge-authority/fixtures/valid/merge-authority-auto.json
+    schema/state/v1/merge-authority/fixtures/valid/merge-authority-none.json
+    schema/state/v1/merge-authority/merge-authority.schema.json
     schema/state/v1/route/fixtures/invalid/route-null.json
     schema/state/v1/route/fixtures/invalid/route-object-empty-model.json
     schema/state/v1/route/fixtures/invalid/route-object-extra-field.json

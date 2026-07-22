@@ -1,0 +1,23 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/shakacode/agent-coordination/blob/main/schema/state/v1/merge-authority/merge-authority.schema.json",
+  "title": "Agent Coordination Batch Merge Authority v1",
+  "description": "The declared merge authority for a batch, persisted additively in the batch manifest / launch metadata so the dashboard can render the batch and job Merge auth field. The pr-batch launch prompt already declares merge_authority; this contract is the canonical persisted form. merge_authority is a batch attribute rather than a standalone keyed record, so it carries no logical key of its own and inherits the identity of the batch manifest it rides on. This schema defines state only; capture, persistence, and UI behavior are separate concerns.",
+  "x-contract-version": 1,
+  "x-record-family": "merge_authority",
+  "$ref": "#/$defs/batch_manifest_projection",
+  "$defs": {
+    "merge_authority": {
+      "enum": ["none", "ask", "auto"],
+      "description": "Canonical persisted merge authority. `auto` means the supervisor may merge when gates pass; `ask` means the supervisor surfaces one merge decision for the operator; `none` means the supervisor never merges. The pr-batch launch vocabulary maps to these canonical values before persistence: `auto_merge_when_gates_pass` -> `auto`, `ask` -> `ask`, `none` -> `none`. The verbose launch strings are not persisted, so there is a single canonical form per authority."
+    },
+    "batch_manifest_projection": {
+      "type": "object",
+      "additionalProperties": true,
+      "description": "Embeddable additive fragment for a batch manifest / launch-metadata record. The manifest's existing properties remain valid beside this section. merge_authority is optional; when present it must be a canonical value. There is exactly one way to signal an undeclared authority — omit the property — so merge_authority is never null. An absent merge_authority degrades to an em-dash Merge auth field on the dashboard.",
+      "properties": {
+        "merge_authority": { "$ref": "#/$defs/merge_authority" }
+      }
+    }
+  }
+}
