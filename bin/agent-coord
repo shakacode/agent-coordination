@@ -1808,6 +1808,7 @@ module AgentCoord
         check_command!("gh", "auth", "status")
         check_command!("gh", "repo", "view", options.fetch(:backend))
         store = build_store(options)
+        store.verify_not_archived!
         store.verify_readable!
       else
         store = build_store(options)
@@ -3998,6 +3999,24 @@ module AgentCoord
 
     def verify_readable!
       tree_nodes
+    end
+
+    def verify_not_archived!
+      result = gh_api("repos/#{@backend}")
+      unless result.success?
+        raise OperationalError,
+              "backend repository #{@backend} metadata is not readable: #{result.error_message}"
+      end
+
+      metadata = JSON.parse(result.stdout)
+      unless metadata.is_a?(Hash) && metadata.key?("archived")
+        raise OperationalError, "backend repository #{@backend} metadata does not report archived state"
+      end
+      return unless metadata.fetch("archived")
+
+      raise OperationalError,
+            "legacy GitHub backend #{@backend} is archived and read-only; configure AGENT_COORD_API_URL and " \
+            "AGENT_COORD_API_TOKEN for the HTTP backend, or choose an active writable GitHub backend"
     end
 
     def verify_layout!(prefixes)
