@@ -53,6 +53,16 @@ class UsageRecordContractTest < Minitest::Test
     refute_empty schema.validate(known.merge("schema_version" => 2)).to_a
   end
 
+  def test_reported_at_date_time_format_is_asserted
+    schema = JSONSchemer.schema(read_json(SCHEMA_PATH))
+    record = read_fixture(File.join(FIXTURES_PATH, "valid",
+                                    "usage-known.json")).merge("reported_at" => "not-a-timestamp")
+
+    errors = schema.validate(record).to_a
+    assert(errors.any? { |error| error["type"] == "format" && error["data_pointer"] == "/reported_at" },
+           "a malformed reported_at must be rejected so parse-based dedup never receives garbage")
+  end
+
   def test_status_projection_allows_omitted_or_empty_usage
     schema_document = read_json(SCHEMA_PATH)
     projection = JSONSchemer.schema(schema_document.merge("$ref" => "#/$defs/status_projection"))
