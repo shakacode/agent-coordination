@@ -589,6 +589,22 @@ This is a schema-only foundation. The CLI and Worker do not yet capture batch
 handoffs into this record. See
 [ADR 0012](docs/adr/0012-batch-completion-state-contract.md).
 
+### Batch blocker contract foundation
+
+The published
+[`schema/state/v1/batch-blocker/batch-blocker.schema.json`](schema/state/v1/batch-blocker/batch-blocker.schema.json)
+persists a structured blocker on a batch, keyed by `(workspace, batch_id)`, when
+a supervisor blocks on operator authority: a `message`, a non-empty `decisions`
+list, and an optional `recommendedReply`. `recommendedReply` is signaled absent
+by omission only — never `null` — so the dashboard renders the Blocker panel
+instead of reconstructing decisions from lane `blockedOn` dependencies. Positive,
+negative, and panel-render fixtures live under
+[`schema/state/v1/batch-blocker/fixtures/`](schema/state/v1/batch-blocker/fixtures/).
+
+This is a schema-only foundation. The CLI and Worker do not yet persist a
+structured blocker. A batch with no blocker keeps the `blockedOn`-derived
+fallback. See [ADR 0013](docs/adr/0013-batch-blocker-state-contract.md).
+
 `gc` applies one retention plan to local, GitHub, and HTTP stores. Exactly one
 mode is required: `--dry-run` prints proposed actions without writing, while
 `--execute` copies eligible records into `archive/` with compare-and-swap

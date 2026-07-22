@@ -1,0 +1,57 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/shakacode/agent-coordination/blob/main/schema/state/v1/batch-blocker/batch-blocker.schema.json",
+  "title": "Agent Coordination Batch Blocker v1",
+  "description": "A structured blocker persisted on a batch when a supervisor blocks on operator authority, so the dashboard renders the Blocker panel (message, required decisions, recommended reply) instead of reconstructing decisions from lane blockedOn dependencies. The dashboard-rendered blocker payload uses the dashboard's field names (including camelCase recommendedReply); the record envelope (schema_version, batch_id) and contract metadata keep this repository's snake_case convention. This schema defines state only; capture, persistence, and UI behavior are separate concerns.",
+  "x-contract-version": 1,
+  "x-record-family": "batch_blocker",
+  "x-logical-key": ["workspace", "batch_id"],
+  "x-storage-key": {
+    "template": "batch_blockers/{workspace}/{batch_id}.json",
+    "segment_encoding": "UTF-8 bytes; leave ASCII alphanumeric, underscore, and hyphen literal; percent-encode every other byte with uppercase hexadecimal, so no segment can form a . or .. traversal component. Not wired to the CLI or Worker yet."
+  },
+  "$ref": "#/$defs/batch_blocker",
+  "$defs": {
+    "workspace": {
+      "type": "string",
+      "minLength": 1,
+      "default": "default",
+      "description": "Tenant/workspace dimension required by ADR 0004. Self-hosted producers use default. Part of the logical key so two tenants sharing a batch_id do not overwrite each other's blocker."
+    },
+    "blocker": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["message", "decisions"],
+      "description": "The structured blocker the dashboard renders as a panel.",
+      "properties": {
+        "message": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Why the batch is blocked on operator authority."
+        },
+        "decisions": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "type": "string", "minLength": 1 },
+          "description": "The required operator decisions. A structured blocker asserts at least one decision; an empty list is not meaningful and should degrade to the dashboard's blockedOn-derived fallback instead."
+        },
+        "recommendedReply": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Optional suggested operator reply. There is exactly one way to signal no recommendation — omit the property — so recommendedReply is never null or empty."
+        }
+      }
+    },
+    "batch_blocker": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema_version", "workspace", "batch_id", "blocker"],
+      "properties": {
+        "schema_version": { "const": 1 },
+        "workspace": { "$ref": "#/$defs/workspace" },
+        "batch_id": { "type": "string", "minLength": 1 },
+        "blocker": { "$ref": "#/$defs/blocker" }
+      }
+    }
+  }
+}

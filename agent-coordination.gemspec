@@ -32,7 +32,22 @@ Gem::Specification.new do |spec|
     docs/adr/0010-route-state-contract.md
     docs/adr/0011-merge-authority-state-contract.md
     docs/adr/0012-batch-completion-state-contract.md
+    docs/adr/0013-batch-blocker-state-contract.md
     docs/protocol-curl.md
+    schema/state/v1/batch-blocker/batch-blocker.schema.json
+    schema/state/v1/batch-blocker/fixtures/invalid/blocker-decision-not-string.json
+    schema/state/v1/batch-blocker/fixtures/invalid/blocker-empty-decision-string.json
+    schema/state/v1/batch-blocker/fixtures/invalid/blocker-empty-decisions.json
+    schema/state/v1/batch-blocker/fixtures/invalid/blocker-extra-field.json
+    schema/state/v1/batch-blocker/fixtures/invalid/blocker-message-empty.json
+    schema/state/v1/batch-blocker/fixtures/invalid/blocker-missing-blocker.json
+    schema/state/v1/batch-blocker/fixtures/invalid/blocker-missing-decisions.json
+    schema/state/v1/batch-blocker/fixtures/invalid/blocker-missing-message.json
+    schema/state/v1/batch-blocker/fixtures/invalid/blocker-missing-workspace.json
+    schema/state/v1/batch-blocker/fixtures/invalid/blocker-null-recommended-reply.json
+    schema/state/v1/batch-blocker/fixtures/replay/blocker-panel-render.json
+    schema/state/v1/batch-blocker/fixtures/valid/blocker-full.json
+    schema/state/v1/batch-blocker/fixtures/valid/blocker-no-recommended-reply.json
     schema/state/v1/batch-completion/batch-completion.schema.json
     schema/state/v1/batch-completion/fixtures/invalid/completion-audit-version-field.json
     schema/state/v1/batch-completion/fixtures/invalid/completion-bad-verdict.json

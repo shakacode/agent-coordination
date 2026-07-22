@@ -1,0 +1,13 @@
+{
+  "schema_version": 1,
+  "workspace": "default",
+  "batch_id": "acoord-blocked-2026-07-22",
+  "blocker": {
+    "message": "",
+    "decisions": [
+      "Approve force-push to shared branch?",
+      "Proceed with partial batch or wait?"
+    ],
+    "recommendedReply": "Approve force-push; the rebase was clean."
+  }
+}
