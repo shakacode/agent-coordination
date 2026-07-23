@@ -822,15 +822,39 @@ module AgentCoord
       false
     end
 
-    # What a shell would actually leave in the variable: a quoted value is taken
-    # verbatim, and an unquoted trailing comment is not part of the value. Without
-    # this, `AGENT_COORD_API_URL= # remote disabled` would read as a configured
-    # fleet URL and refuse every write.
+    # What a shell would actually leave in the variable. Quoted and unquoted
+    # fragments concatenate (`=""https://host` is a nonempty URL), an unquoted `#`
+    # at a word boundary starts a comment, and unquoted whitespace ends the word.
+    # A `#` inside an unquoted URL stays part of the value. Without this,
+    # `AGENT_COORD_API_URL= # remote disabled` reads as a configured fleet URL and
+    # refuses every write.
     def consumer_env_assignment_value(raw)
-      quoted = raw.match(/\A"([^"]*)"|\A'([^']*)'/)
-      return (quoted[1] || quoted[2]).to_s if quoted
+      value = +""
+      index = 0
+      while index < raw.length
+        char = raw[index]
+        case char
+        when '"', "'"
+          close = raw.index(char, index + 1)
+          # An unterminated quote is a broken file; keep the rest so the guard
+          # errs toward firing rather than silently permitting a write.
+          return value << raw[(index + 1)..] unless close
 
-      raw.sub(/(?:\A|\s)#.*\z/m, "").strip
+          value << raw[(index + 1)...close]
+          index = close + 1
+        when /\s/
+          break
+        when "#"
+          break if index.zero? || raw[index - 1].match?(/\s/)
+
+          value << char
+          index += 1
+        else
+          value << char
+          index += 1
+        end
+      end
+      value
     end
 
     def resolve_default_local_backend(command, options)

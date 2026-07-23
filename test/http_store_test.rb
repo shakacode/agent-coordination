@@ -922,7 +922,12 @@ class HttpBackendSelectionTest < HttpEnvTestCase
   def test_write_command_still_stops_for_quoted_and_fragment_api_urls
     [%(AGENT_COORD_API_URL="https://fleet.example" # primary\n),
      "AGENT_COORD_API_URL='https://fleet.example'\n",
-     "AGENT_COORD_API_URL=https://fleet.example/path#frag\n"].each do |content|
+     "AGENT_COORD_API_URL=https://fleet.example/path#frag\n",
+     # Quoted and unquoted fragments concatenate in a shell assignment.
+     %(AGENT_COORD_API_URL=""https://fleet.example\n),
+     %(AGENT_COORD_API_URL="https://fleet"".example"\n),
+     # An unterminated quote is a broken file; the guard errs toward firing.
+     %(AGENT_COORD_API_URL="https://fleet.example\n)].each do |content|
       with_split_brain_config do |_root, env_file|
         File.write(env_file, content)
         code, _, err = run_cli(claim_args, {})
