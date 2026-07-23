@@ -3074,7 +3074,7 @@ module AgentCoord
 
       validate_terminal_batch_repo!(batch, payload, batch_id)
       lane = matching_terminal_batch_lane(batch, payload, batch_id)
-      validate_terminal_lane_identity!(lane, payload)
+      validate_terminal_lane_identity!(store, batch, lane, payload)
       lane
     end
 
@@ -3095,14 +3095,81 @@ module AgentCoord
       matches.first
     end
 
-    def validate_terminal_lane_identity!(lane, payload)
+    def validate_terminal_lane_identity!(store, batch, lane, payload)
       target = terminal_payload_value(payload, "target").to_s
       unless terminal_lane_targets(lane).include?(target)
         raise Error, "terminal closeout target does not match lane #{lane_name(lane)}"
       end
-      return if lane_owner(lane) == terminal_payload_value(payload, "agent_id")
+
+      agent_id = terminal_payload_value(payload, "agent_id")
+      static_owner = lane_owner(lane)
+      return if static_owner != "UNKNOWN" && static_owner == agent_id
+      if terminal_current_claimant?(store, payload) &&
+         terminal_authorized_claimant?(store, batch, lane, payload)
+        return
+      end
 
       raise Error, "terminal closeout agent does not match lane #{lane_name(lane)}"
+    end
+
+    def terminal_current_claimant?(store, payload)
+      repo = terminal_payload_value(payload, "repo")
+      target = terminal_payload_value(payload, "target").to_s
+      claim = store.read_json(AgentCoord.claim_path(repo, target))&.data
+      return false unless claim.is_a?(Hash)
+
+      # Identity, not status, defines the current claimant. Terminal replay and
+      # reconciliation intentionally operate on the same holder's released
+      # claim, while release itself still rejects a different current holder.
+      {
+        "repo" => repo,
+        "target" => target,
+        "batch_id" => terminal_payload_value(payload, "batch_id").to_s,
+        "agent_id" => terminal_payload_value(payload, "agent_id")
+      }.all? { |field, expected| claim[field] == expected }
+    end
+
+    def terminal_authorized_claimant?(store, batch, lane, payload)
+      batch_id = terminal_payload_value(payload, "batch_id").to_s
+      prefix = AgentCoord.event_batch_prefix(batch_id)
+      records = store.list_json(prefix)
+      if filtered_status_list?(store, prefix)
+        raise OperationalError, "event trail for #{batch_id} is filtered by a scoped token"
+      end
+
+      lanes = Array(batch["lanes"])
+      context = batch_audit_lane_context(
+        lane,
+        batch_id,
+        batch_audit_owner_counts(lanes),
+        batch_audit_target_counts(lanes)
+      )
+      events = records.map(&:data).select do |event|
+        batch_audit_event_for_repo?(event, batch["repo"]) && batch_audit_event_for_lane?(event, context)
+      end
+      lineage = batch_audit_lineage(events, context)
+      return false unless lineage.fetch(:ordered) && lineage.fetch(:ordinary_valid)
+
+      terminal_events = events.select { |event| event["type"] == "lane_closed" }
+      return false unless terminal_events.all? do |event|
+        batch_audit_valid_lane_closed_event?(event, context, lineage)
+      end
+      return false if batch_audit_conflicting_terminal_events?(terminal_events)
+
+      lineage.fetch(:authorized).include?(terminal_payload_value(payload, "agent_id"))
+    end
+
+    def batch_audit_lane_context(lane, batch_id, owner_counts, target_counts)
+      targets = batch_audit_lane_targets(lane)
+      owner = lane_owner(lane)
+      BatchAuditLane.new(
+        batch_id: batch_id.to_s,
+        name: lane_name(lane),
+        targets: targets,
+        unique_targets: targets.select { |target| target_counts.fetch(target, 0) <= 1 },
+        owner: owner,
+        owner_unique: owner != "UNKNOWN" && owner_counts.fetch(owner, 0) <= 1
+      )
     end
 
     def terminal_lane_targets(lane)
@@ -3244,13 +3311,11 @@ module AgentCoord
       name = lane_name(lane)
       owner = lane_owner(lane)
       targets = batch_audit_lane_targets(lane)
-      context = BatchAuditLane.new(
-        batch_id: batch_context.fetch(:id),
-        name: name,
-        targets: targets,
-        unique_targets: targets.select { |target| target_counts.fetch(target, 0) <= 1 },
-        owner: owner,
-        owner_unique: owner != "UNKNOWN" && owner_counts.fetch(owner, 0) <= 1
+      context = batch_audit_lane_context(
+        lane,
+        batch_context.fetch(:id),
+        owner_counts,
+        target_counts
       )
       lane_events = events.select do |event|
         batch_audit_event_for_repo?(event, batch_context[:repo]) && batch_audit_event_for_lane?(event, context)
@@ -3281,27 +3346,77 @@ module AgentCoord
 
     def batch_audit_missing_signals(lane_events, lane)
       types = lane_events.map { |event| event["type"] }
+      lineage = batch_audit_lineage(lane_events, lane)
       missing = []
       missing << "claim.acquired" unless types.include?("claim.acquired")
-      missing << "terminal" unless batch_audit_valid_terminal_signal?(lane_events, lane)
-      missing << "lifecycle" unless batch_audit_valid_ordinary_lifecycle?(lane_events, lane)
+      missing << "terminal" unless batch_audit_valid_terminal_signal?(lane_events, lane, lineage)
+      missing << "lifecycle" unless lineage.fetch(:ordinary_valid)
       missing
     end
 
-    def batch_audit_valid_ordinary_lifecycle?(lane_events, lane)
-      lane_events.all? do |event|
+    def batch_audit_lineage(lane_events, lane)
+      authorized = lane.owner == "UNKNOWN" ? [] : [lane.owner]
+      event_authorized = {}.compare_by_identity
+      result = { authorized: authorized, event_authorized: event_authorized, ordinary_valid: true, ordered: true }
+      ordered = batch_audit_ordered_lineage_events(lane_events)
+      return result.merge(ordinary_valid: false, ordered: false) unless ordered
+
+      ordered.each do |event|
         type = event["type"]
-        !BATCH_AUDIT_ORDINARY_LIFECYCLE_TYPES.include?(type) ||
-          batch_audit_valid_ordinary_lifecycle_event?(event, lane, type)
+        if type == "claim.acquired"
+          valid = batch_audit_valid_claimant_admission?(event, lane)
+          authorized << event["agent_id"] if valid && !authorized.include?(event["agent_id"])
+          result[:ordinary_valid] &&= valid
+          event_authorized[event] = valid
+        elsif BATCH_AUDIT_ORDINARY_LIFECYCLE_TYPES.include?(type)
+          valid = batch_audit_valid_ordinary_lifecycle_event?(event, lane, type, authorized)
+          result[:ordinary_valid] &&= valid
+          event_authorized[event] = valid
+        else
+          closed_by = event["closed_by"]
+          closer = closed_by["agent_id"] if closed_by.is_a?(Hash)
+          event_authorized[event] = authorized.include?(closer)
+        end
       end
+      result
     end
 
-    def batch_audit_valid_ordinary_lifecycle_event?(event, lane, type)
-      batch_audit_valid_ordinary_identity?(event, lane) &&
+    def batch_audit_ordered_lineage_events(lane_events)
+      relevant = lane_events.select do |event|
+        event.is_a?(Hash) &&
+          (BATCH_AUDIT_ORDINARY_LIFECYCLE_TYPES.include?(event["type"]) || event["type"] == "lane_closed")
+      end
+      keyed = relevant.map do |event|
+        return nil unless batch_audit_fact_string?(event["event_id"]) && gc_valid_datetime?(event["at"])
+
+        [[Time.iso8601(event["at"]).utc, event["event_id"]], event]
+      end
+      return nil unless keyed.map(&:first).uniq.length == keyed.length
+
+      keyed.sort_by(&:first).map(&:last)
+    end
+
+    def batch_audit_valid_claimant_admission?(event, lane)
+      return false unless batch_audit_valid_ordinary_identity_facts?(event, lane)
+      return false unless batch_audit_valid_ordinary_payload?(event, "claim.acquired")
+      return true if event["agent_id"] == lane.owner
+      return false if lane.owner == "UNKNOWN"
+      return false unless lane.targets.include?(event["target"])
+
+      event.key?("lane") ? event["lane"] == lane.name : lane.unique_targets.include?(event["target"])
+    end
+
+    def batch_audit_valid_ordinary_lifecycle_event?(event, lane, type, authorized)
+      batch_audit_valid_ordinary_identity?(event, lane, authorized) &&
         batch_audit_valid_ordinary_payload?(event, type)
     end
 
-    def batch_audit_valid_ordinary_identity?(event, lane)
+    def batch_audit_valid_ordinary_identity?(event, lane, authorized)
+      batch_audit_valid_ordinary_identity_facts?(event, lane) &&
+        authorized.include?(event["agent_id"])
+    end
+
+    def batch_audit_valid_ordinary_identity_facts?(event, lane)
       return false unless event["schema_version"] == SCHEMA_VERSION
       return false unless BATCH_AUDIT_ORDINARY_REQUIRED_FACT_FIELDS.all? do |field|
         batch_audit_fact_string?(event[field])
@@ -3309,7 +3424,7 @@ module AgentCoord
       return false unless BATCH_AUDIT_ORDINARY_OPTIONAL_IDENTITY_FIELDS.all? do |field|
         !event.key?(field) || batch_audit_fact_string?(event[field])
       end
-      return false unless event["batch_id"] == lane.batch_id && event["agent_id"] == lane.owner
+      return false unless event["batch_id"] == lane.batch_id
       return false if event.key?("lane") && event["lane"] != lane.name
       return false if event.key?("target") && !lane.targets.include?(event["target"])
 
@@ -3345,17 +3460,24 @@ module AgentCoord
       true
     end
 
-    def batch_audit_valid_terminal_signal?(lane_events, lane)
+    def batch_audit_valid_terminal_signal?(lane_events, lane, lineage)
       terminal_events = lane_events.select { |event| event["type"] == "lane_closed" }
-      return lane_events.any? { |event| event["type"] == "claim.released" } if terminal_events.empty?
-      return false unless terminal_events.all? { |event| batch_audit_valid_lane_closed_event?(event, lane) }
+      if terminal_events.empty?
+        return lane_events.any? do |event|
+          event["type"] == "claim.released" && lineage.fetch(:event_authorized).fetch(event, false)
+        end
+      end
+      return false unless terminal_events.all? do |event|
+        batch_audit_valid_lane_closed_event?(event, lane, lineage)
+      end
       return false if batch_audit_conflicting_terminal_events?(terminal_events)
 
       true
     end
 
-    def batch_audit_valid_lane_closed_event?(event, lane)
-      batch_audit_valid_terminal_contract?(event) && batch_audit_valid_terminal_attribution?(event, lane)
+    def batch_audit_valid_lane_closed_event?(event, lane, lineage)
+      batch_audit_valid_terminal_contract?(event) &&
+        batch_audit_valid_terminal_attribution?(event, lane, lineage)
     end
 
     def batch_audit_valid_terminal_contract?(event)
@@ -3371,12 +3493,14 @@ module AgentCoord
       closed_by.values.all? { |value| batch_audit_fact_string?(value) }
     end
 
-    def batch_audit_valid_terminal_attribution?(event, lane)
+    def batch_audit_valid_terminal_attribution?(event, lane, lineage)
       return false if event.key?("batch_id") && event["batch_id"] != lane.batch_id
       return false if event.key?("lane") && event["lane"] != lane.name
       return false unless lane.targets.include?(event["target"])
-      return false if lane.owner == "UNKNOWN" || event.dig("closed_by", "agent_id") != lane.owner
-      return false if event.key?("agent_id") && event["agent_id"] != lane.owner
+
+      closer = event.dig("closed_by", "agent_id")
+      return false unless lineage.fetch(:event_authorized).fetch(event, false)
+      return false if event.key?("agent_id") && event["agent_id"] != closer
 
       true
     end

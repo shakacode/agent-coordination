@@ -5520,6 +5520,136 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     end)
   end
 
+  def test_takeover_holder_can_terminal_release_and_complete_ordinary_lifecycle_audit
+    actual = {
+      terminal: takeover_terminal_outcome("batch-takeover-terminal", "8500"),
+      ordinary: takeover_ordinary_audit_outcome("batch-takeover-ordinary", "8501")
+    }
+    expected = {
+      terminal: {
+        initial_claim_exit: 0,
+        takeover_claim_exit: 0,
+        release_exit: 0,
+        release_error: "",
+        replay_exit: 0,
+        replay_error: "",
+        replay_message: "lane already closed for shakacode/react_on_rails#8500",
+        terminal_agents: ["worker-b"],
+        lane_terminal: "done"
+      },
+      ordinary: {
+        initial_claim_exit: 0,
+        takeover_claim_exit: 0,
+        release_exit: 0,
+        audit_exit: 0,
+        verdict: "complete",
+        missing: [],
+        event_agents: {
+          "claim.acquired" => %w[worker-a worker-b],
+          "claim.released" => ["worker-b"]
+        }
+      }
+    }
+
+    assert_equal expected, actual
+  end
+
+  def test_takeover_lineage_rejects_forged_and_misattributed_claimants
+    outcomes = takeover_lineage_negative_outcomes
+
+    assert_equal 9, outcomes.length
+    assert_equal(
+      %w[
+        ambiguous-shared-target cross-batch cross-target forged-agent
+        release-before-admission terminal-agent-closed-by-mismatch
+        terminal-before-admission unknown-owner wrong-lane
+      ],
+      outcomes.map { |outcome| outcome.fetch(:name) }.sort
+    )
+    unexpected = outcomes.reject do |outcome|
+      outcome.values_at(:exit, :verdict, :complete) == [1, "incomplete", false] &&
+        !outcome.fetch(:missing).empty?
+    end
+    assert_empty unexpected
+    ambiguous = outcomes.find do |outcome|
+      outcome.fetch(:name) == "ambiguous-shared-target"
+    end
+    assert_equal [0, 0, 0], ambiguous.fetch(:setup_exits)
+  end
+
+  def test_takeover_lineage_orders_equal_time_events_by_event_id
+    actual = equal_time_takeover_lineage_outcome
+
+    assert_equal(
+      { exit: 0, verdict: "complete", complete: true, missing: [] },
+      actual
+    )
+  end
+
+  def test_takeover_terminal_release_rejects_non_current_claimant
+    actual = takeover_non_holder_terminal_outcome("batch-takeover-non-holder", "8518")
+    expected = {
+      initial_claim_exit: 0,
+      takeover_claim_exit: 0,
+      release_exit: 1,
+      release_error: "claim belongs to worker-b; worker-a cannot release it",
+      current_holder: "worker-b",
+      current_status: "active",
+      terminal_agents: [],
+      lane_terminal: nil
+    }
+
+    assert_equal expected, actual
+  end
+
+  def test_takeover_terminal_authorization_fails_closed_on_untrusted_event_trails
+    batch, claim, payload, valid_claim = terminal_authorization_fixture
+    records = {
+      AgentCoord.batch_path(payload.fetch("batch_id")) => batch,
+      AgentCoord.claim_path(payload.fetch("repo"), payload.fetch("target")) => claim
+    }
+    runner = AgentCoord::Runner.new([])
+    filtered = TerminalAuthorizationStore.new(records, [valid_claim], filtered: true)
+
+    filtered_error = assert_raises(AgentCoord::OperationalError) do
+      runner.send(:terminal_batch_lane, filtered, payload, batch: batch)
+    end
+    assert_includes filtered_error.message, "event trail"
+    assert_equal(
+      "unknown",
+      runner.send(:batch_audit_report, filtered, payload.fetch("batch_id")).fetch("verdict")
+    )
+
+    malformed_claim = valid_claim.merge("schema_version" => 0)
+    malformed = TerminalAuthorizationStore.new(records, [malformed_claim])
+    malformed_error = assert_raises(AgentCoord::Error) do
+      runner.send(:terminal_batch_lane, malformed, payload, batch: batch)
+    end
+    assert_includes malformed_error.message, "agent does not match"
+    assert_equal(
+      "incomplete",
+      runner.send(:batch_audit_report, malformed, payload.fetch("batch_id")).fetch("verdict")
+    )
+
+    unknown_batch = JSON.parse(JSON.generate(batch))
+    unknown_batch.fetch("lanes").fetch(0)["owner"] = "UNKNOWN"
+    unknown = TerminalAuthorizationStore.new(records, [valid_claim])
+    unknown_error = assert_raises(AgentCoord::Error) do
+      runner.send(:terminal_batch_lane, unknown, payload, batch: unknown_batch)
+    end
+    assert_includes unknown_error.message, "agent does not match"
+
+    malformed_records = records.merge(
+      AgentCoord.claim_path(payload.fetch("repo"), payload.fetch("target")) =>
+        claim.merge("target" => Integer(claim.fetch("target")))
+    )
+    malformed_current_claim = TerminalAuthorizationStore.new(malformed_records, [valid_claim])
+    current_claim_error = assert_raises(AgentCoord::Error) do
+      runner.send(:terminal_batch_lane, malformed_current_claim, payload, batch: batch)
+    end
+    assert_includes current_claim_error.message, "agent does not match"
+  end
+
   def test_batch_audit_flags_lane_gaps_with_exit_one
     write_batch(
       "batch-audit-gaps",
@@ -6730,6 +6860,31 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     def close_store(_store); end
   end
 
+  class TerminalAuthorizationStore
+    def initialize(records, events, filtered: false)
+      @records = records
+      @events = events
+      @filtered = filtered
+    end
+
+    def read_json(path)
+      data = @records[path]
+      return unless data
+
+      AgentCoord::StoredJson.new(path: path, data: data, sha: "fixture")
+    end
+
+    def list_json(prefix)
+      @events.each_with_index.map do |data, index|
+        AgentCoord::StoredJson.new(path: "#{prefix}/event-#{index}.json", data: data, sha: "fixture-#{index}")
+      end
+    end
+
+    def filtered_list?(_prefix)
+      @filtered
+    end
+  end
+
   class ConcurrentBatchStore < AgentCoord::LocalStore
     def initialize(root, batch_id)
       super(root)
@@ -7211,6 +7366,353 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
       "status" => "released"
     )
     [valid_batch_audit_terminal_event(batch_id, lane, owner, repo, target)]
+  end
+
+  def takeover_terminal_outcome(batch_id, target)
+    claim_outcomes = prepare_dead_holder_takeover(batch_id, target)
+    terminal_args = [
+      "release",
+      "--agent-id", "worker-b",
+      "--repo", "shakacode/react_on_rails",
+      "--target", target,
+      "--terminal", "done",
+      "--host", "codex"
+    ]
+    release = run_agent_coord(*terminal_args)
+    replay = run_agent_coord(*terminal_args)
+    batch = JSON.parse(File.read(File.join(@state_root, "batches", "#{batch_id}.json")))
+    {
+      **claim_outcomes,
+      release_exit: release.status.exitstatus,
+      release_error: release.stderr.strip,
+      replay_exit: replay.status.exitstatus,
+      replay_error: replay.stderr.strip,
+      replay_message: replay.stdout.strip,
+      terminal_agents: events_of_type(batch_id, "lane_closed").map { |event| event["agent_id"] }.sort,
+      lane_terminal: batch.fetch("lanes").fetch(0)["terminal"]
+    }
+  end
+
+  def takeover_ordinary_audit_outcome(batch_id, target)
+    claim_outcomes = prepare_dead_holder_takeover(batch_id, target)
+    release = run_agent_coord(
+      "release",
+      "--agent-id", "worker-b",
+      "--repo", "shakacode/react_on_rails",
+      "--target", target
+    )
+    audit_result = run_agent_coord("batch-audit", "--batch-id", batch_id, "--json")
+    audit = JSON.parse(audit_result.stdout)
+    lane = audit.fetch("lanes").fetch(0)
+    events = event_records(batch_id)
+    {
+      **claim_outcomes,
+      release_exit: release.status.exitstatus,
+      audit_exit: audit_result.status.exitstatus,
+      verdict: audit.fetch("verdict"),
+      missing: lane.fetch("missing"),
+      event_agents: %w[claim.acquired claim.released].to_h do |type|
+        [type, events.select { |event| event["type"] == type }.map { |event| event["agent_id"] }.sort]
+      end
+    }
+  end
+
+  def prepare_dead_holder_takeover(batch_id, target)
+    write_state_record(
+      "batches/#{batch_id}.json",
+      "schema_version" => 1,
+      "batch_id" => batch_id,
+      "repo" => "shakacode/react_on_rails",
+      "lanes" => [{ "name" => "code", "owner" => "worker-a", "targets" => [target] }]
+    )
+    initial = run_agent_coord(
+      "claim",
+      "--agent-id", "worker-a",
+      "--repo", "shakacode/react_on_rails",
+      "--target", target,
+      "--batch-id", batch_id,
+      "--branch", "feature/worker-a"
+    )
+    now = Time.now.utc
+    write_heartbeat(
+      "worker-a",
+      updated_at: now - (70 * 60),
+      expires_at: now - (55 * 60)
+    )
+    takeover = run_agent_coord(
+      "claim",
+      "--agent-id", "worker-b",
+      "--repo", "shakacode/react_on_rails",
+      "--target", target,
+      "--batch-id", batch_id,
+      "--branch", "feature/worker-b"
+    )
+    {
+      initial_claim_exit: initial.status.exitstatus,
+      takeover_claim_exit: takeover.status.exitstatus
+    }
+  end
+
+  # rubocop:disable Metrics/MethodLength
+  def takeover_lineage_negative_outcomes
+    repo = "shakacode/react_on_rails"
+    cases = {
+      "forged-agent" => [
+        "batch-negative-forged",
+        [{ "name" => "code", "owner" => "worker-a", "targets" => ["8510"] }],
+        [
+          lifecycle_event("claim.acquired", "worker-a", repo, "8510", lane: "code"),
+          lifecycle_event("claim.released", "worker-c", repo, "8510", lane: "code")
+        ]
+      ],
+      "wrong-lane" => [
+        "batch-negative-wrong-lane",
+        [
+          { "name" => "code", "owner" => "worker-a", "targets" => ["8511"] },
+          { "name" => "docs", "owner" => "worker-docs", "targets" => ["8512"] }
+        ],
+        [
+          lifecycle_event("claim.acquired", "worker-a", repo, "8511", lane: "code"),
+          lifecycle_event("claim.acquired", "worker-b", repo, "8511", lane: "docs"),
+          lifecycle_event("claim.released", "worker-b", repo, "8511", lane: "code")
+        ]
+      ],
+      "cross-target" => [
+        "batch-negative-cross-target",
+        [{ "name" => "code", "owner" => "worker-a", "targets" => ["8513"] }],
+        [
+          lifecycle_event("claim.acquired", "worker-a", repo, "8513", lane: "code"),
+          lifecycle_event("claim.acquired", "worker-b", repo, "other-target", lane: "code"),
+          lifecycle_event("claim.released", "worker-b", repo, "8513", lane: "code")
+        ]
+      ],
+      "cross-batch" => [
+        "batch-negative-cross-batch",
+        [{ "name" => "code", "owner" => "worker-a", "targets" => ["8514"] }],
+        [
+          lifecycle_event("claim.acquired", "worker-a", repo, "8514", lane: "code"),
+          lifecycle_event("claim.acquired", "worker-b", repo, "8514", lane: "code")
+          .merge("batch_id" => "other-batch"),
+          lifecycle_event("claim.released", "worker-b", repo, "8514", lane: "code")
+        ]
+      ],
+      "terminal-agent-closed-by-mismatch" => [
+        "batch-negative-terminal",
+        [{ "name" => "code", "owner" => "worker-a", "targets" => ["8515"] }],
+        mismatched_terminal_lineage_events("batch-negative-terminal", repo, "8515")
+      ],
+      "release-before-admission" => [
+        "batch-negative-release-before-admission",
+        [{ "name" => "code", "owner" => "worker-a", "targets" => ["8519"] }],
+        [
+          lifecycle_event("claim.released", "worker-b", repo, "8519", lane: "code"),
+          lifecycle_event("claim.acquired", "worker-b", repo, "8519", lane: "code")
+        ]
+      ],
+      "terminal-before-admission" => [
+        "batch-negative-terminal-before-admission",
+        [{ "name" => "code", "owner" => "worker-a", "targets" => ["8520"] }],
+        terminal_before_admission_events("batch-negative-terminal-before-admission", repo, "8520")
+      ],
+      "unknown-owner" => [
+        "batch-negative-unknown-owner",
+        [{ "name" => "code", "owner" => "UNKNOWN", "targets" => ["8517"] }],
+        unknown_owner_lineage_events("batch-negative-unknown-owner", repo, "8517")
+      ]
+    }
+    outcomes = cases.map do |name, (batch_id, lanes, events)|
+      takeover_negative_audit_outcome(name, batch_id, lanes, events)
+    end
+    outcomes << ambiguous_shared_target_takeover_outcome
+  end
+  # rubocop:enable Metrics/MethodLength
+
+  def lifecycle_event(type, agent_id, repo, target, lane:)
+    {
+      "type" => type,
+      "lane" => lane,
+      "agent_id" => agent_id,
+      "repo" => repo,
+      "target" => target,
+      "status" => type == "claim.acquired" ? "active" : "released"
+    }
+  end
+
+  def mismatched_terminal_lineage_events(batch_id, repo, target)
+    terminal = valid_batch_audit_terminal_event(batch_id, "code", "worker-b", repo, target)
+    terminal["event_id"] = "event-2"
+    terminal["agent_id"] = "worker-a"
+    [
+      lifecycle_event("claim.acquired", "worker-a", repo, target, lane: "code"),
+      lifecycle_event("claim.acquired", "worker-b", repo, target, lane: "code"),
+      terminal
+    ]
+  end
+
+  def terminal_before_admission_events(batch_id, repo, target)
+    terminal = valid_batch_audit_terminal_event(batch_id, "code", "worker-b", repo, target)
+    terminal["event_id"] = "event-0"
+    [
+      terminal,
+      lifecycle_event("claim.acquired", "worker-b", repo, target, lane: "code")
+    ]
+  end
+
+  def unknown_owner_lineage_events(batch_id, repo, target)
+    terminal = valid_batch_audit_terminal_event(batch_id, "code", "worker-b", repo, target)
+    terminal["event_id"] = "event-2"
+    [
+      lifecycle_event("claim.acquired", "worker-b", repo, target, lane: "code"),
+      lifecycle_event("claim.released", "worker-b", repo, target, lane: "code"),
+      terminal
+    ]
+  end
+
+  def takeover_negative_audit_outcome(name, batch_id, lanes, events)
+    write_state_record(
+      "batches/#{batch_id}.json",
+      "schema_version" => 1,
+      "batch_id" => batch_id,
+      "repo" => "shakacode/react_on_rails",
+      "lanes" => lanes
+    )
+    events.each_with_index do |event, index|
+      seed_event(batch_id, "event-#{index}", event)
+    end
+    result = run_agent_coord("batch-audit", "--batch-id", batch_id, "--json")
+    audit = JSON.parse(result.stdout)
+    lane = audit.fetch("lanes").find { |candidate| candidate["name"] == "code" }
+    {
+      name: name,
+      exit: result.status.exitstatus,
+      verdict: audit.fetch("verdict"),
+      complete: lane.fetch("complete"),
+      missing: lane.fetch("missing")
+    }
+  end
+
+  def ambiguous_shared_target_takeover_outcome
+    batch_id = "batch-negative-ambiguous"
+    target = "8516"
+    write_state_record(
+      "batches/#{batch_id}.json",
+      "schema_version" => 1,
+      "batch_id" => batch_id,
+      "repo" => "shakacode/react_on_rails",
+      "lanes" => [
+        { "name" => "code", "owner" => "worker-a", "targets" => [target] },
+        { "name" => "docs", "owner" => "worker-docs", "targets" => [target] }
+      ]
+    )
+    initial = run_agent_coord(
+      "claim", "--agent-id", "worker-a", "--repo", "shakacode/react_on_rails",
+      "--target", target, "--batch-id", batch_id
+    )
+    now = Time.now.utc
+    write_heartbeat("worker-a", updated_at: now - (70 * 60), expires_at: now - (55 * 60))
+    takeover = run_agent_coord(
+      "claim", "--agent-id", "worker-b", "--repo", "shakacode/react_on_rails",
+      "--target", target, "--batch-id", batch_id
+    )
+    release = run_agent_coord(
+      "release", "--agent-id", "worker-b", "--repo", "shakacode/react_on_rails", "--target", target
+    )
+    result = run_agent_coord("batch-audit", "--batch-id", batch_id, "--json")
+    audit = JSON.parse(result.stdout)
+    lane = audit.fetch("lanes").find { |candidate| candidate["name"] == "code" }
+    {
+      name: "ambiguous-shared-target",
+      exit: result.status.exitstatus,
+      verdict: audit.fetch("verdict"),
+      complete: lane.fetch("complete"),
+      missing: lane.fetch("missing"),
+      setup_exits: [initial, takeover, release].map { |command| command.status.exitstatus }
+    }
+  end
+
+  def takeover_non_holder_terminal_outcome(batch_id, target)
+    claim_outcomes = prepare_dead_holder_takeover(batch_id, target)
+    release = run_agent_coord(
+      "release",
+      "--agent-id", "worker-a",
+      "--repo", "shakacode/react_on_rails",
+      "--target", target,
+      "--terminal", "done"
+    )
+    claim = JSON.parse(
+      File.read(File.join(@state_root, "claims", "shakacode", "react_on_rails", "#{target}.json"))
+    )
+    batch = JSON.parse(File.read(File.join(@state_root, "batches", "#{batch_id}.json")))
+    {
+      **claim_outcomes,
+      release_exit: release.status.exitstatus,
+      release_error: release.stderr.strip,
+      current_holder: claim.fetch("agent_id"),
+      current_status: claim.fetch("status"),
+      terminal_agents: events_of_type(batch_id, "lane_closed").map { |event| event["agent_id"] }.sort,
+      lane_terminal: batch.fetch("lanes").fetch(0)["terminal"]
+    }
+  end
+
+  def equal_time_takeover_lineage_outcome
+    batch_id = "batch-equal-time-lineage"
+    repo = "shakacode/react_on_rails"
+    target = "8521"
+    write_state_record(
+      "batches/#{batch_id}.json",
+      "schema_version" => 1,
+      "batch_id" => batch_id,
+      "repo" => repo,
+      "lanes" => [{ "name" => "code", "owner" => "worker-a", "targets" => [target] }]
+    )
+    events = {
+      "00-backend-release-first" => lifecycle_event(
+        "claim.released", "worker-b", repo, target, lane: "code"
+      ).merge("event_id" => "20-release"),
+      "99-backend-claim-last" => lifecycle_event(
+        "claim.acquired", "worker-b", repo, target, lane: "code"
+      ).merge("event_id" => "10-claim")
+    }
+    events.each do |filename, event|
+      seed_event(batch_id, filename, event)
+    end
+    result = run_agent_coord("batch-audit", "--batch-id", batch_id, "--json")
+    audit = JSON.parse(result.stdout)
+    lane = audit.fetch("lanes").fetch(0)
+    {
+      exit: result.status.exitstatus,
+      verdict: audit.fetch("verdict"),
+      complete: lane.fetch("complete"),
+      missing: lane.fetch("missing")
+    }
+  end
+
+  def terminal_authorization_fixture
+    batch_id = "batch-terminal-untrusted-trail"
+    repo = "shakacode/react_on_rails"
+    target = "8522"
+    batch = {
+      "schema_version" => 1,
+      "batch_id" => batch_id,
+      "repo" => repo,
+      "lanes" => [{ "name" => "code", "owner" => "worker-a", "targets" => [target] }]
+    }
+    claim = {
+      "schema_version" => 1,
+      "batch_id" => batch_id,
+      "repo" => repo,
+      "target" => target,
+      "agent_id" => "worker-b",
+      "status" => "active"
+    }
+    payload = claim.merge("terminal" => "done", "lane" => "code")
+    event = claim.merge(
+      "event_id" => "claim-worker-b",
+      "type" => "claim.acquired",
+      "lane" => "code",
+      "at" => "2026-07-23T00:00:00Z"
+    )
+    [batch, claim, payload, event]
   end
 
   def ordinary_lifecycle_scalar_cases
