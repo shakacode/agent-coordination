@@ -827,6 +827,10 @@ module AgentCoord
 
       options[:state_root] = default_local_state_root
       options[:implicit_local] = true
+      # A write that is about to be refused never enters local mode, so the notice
+      # would only soften the fatal error that follows it.
+      return if split_brain_write_command?(command) && consumer_split_brain_env_file(options)
+
       @stderr.puts "notice: local mode — single-machine only; state root: #{options[:state_root]}"
     end
 

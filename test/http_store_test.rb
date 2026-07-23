@@ -815,6 +815,9 @@ class HttpBackendSelectionTest < HttpEnvTestCase
       assert_includes err, "refus"
       assert_includes err, "--state-root"
       assert_includes err, "AGENT_COORD_LOCAL=1"
+      # The refused write never enters local mode, so the local-mode notice must not
+      # precede the fatal error and read as if the claim is proceeding.
+      refute_includes err, "local mode — single-machine only"
     end
   end
 
