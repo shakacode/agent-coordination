@@ -745,6 +745,12 @@ module AgentCoord
       %w[claim release heartbeat record-event register-batch].include?(command)
     end
 
+    # Commands that surface the split-brain condition themselves, and so must not
+    # be preceded by the local-mode notice.
+    def split_brain_reporting_command?(command)
+      split_brain_write_command?(command) || command == "doctor"
+    end
+
     def local_mode_opt_in?
       LOCAL_MODE_TRUE_VALUES.include?(ENV.fetch(LOCAL_MODE_ENV, "").strip.downcase)
     end
@@ -827,9 +833,9 @@ module AgentCoord
 
       options[:state_root] = default_local_state_root
       options[:implicit_local] = true
-      # A write that is about to be refused never enters local mode, so the notice
-      # would only soften the fatal error that follows it.
-      return if split_brain_write_command?(command) && consumer_split_brain_env_file(options)
+      # A refused write never enters local mode, and doctor reports the same
+      # condition itself, so the notice would only soften the error that follows.
+      return if split_brain_reporting_command?(command) && consumer_split_brain_env_file(options)
 
       @stderr.puts "notice: local mode — single-machine only; state root: #{options[:state_root]}"
     end
@@ -1922,8 +1928,9 @@ module AgentCoord
       env_file = payload["split_brain_env_file"]
       return unless env_file
 
+      # The remediation text arrives once, on stderr, from the error raised after
+      # the report is emitted.
       @stdout.puts "split_brain_env_file: #{env_file}"
-      @stdout.puts consumer_split_brain_message(env_file)
     end
 
     def render_doctor_http_details(payload)

@@ -944,18 +944,24 @@ class HttpBackendSelectionTest < HttpEnvTestCase
       # printing a near-duplicate alongside it.
       refute_includes err, "warning: split-brain"
       assert_equal 1, err.scan("split-brain configuration").length
+      # doctor reports the condition itself, so the local-mode notice must not
+      # precede it the way it would for an ordinary implicit-local run.
+      refute_includes err, "local mode — single-machine only"
     end
   end
 
   def test_doctor_text_output_names_split_brain_escape_hatches
     with_split_brain_config do |_root, env_file|
-      code, out, = run_cli(["doctor"], {})
+      code, out, err = run_cli(["doctor"], {})
 
       assert_equal 2, code
       assert_includes out, "status: split_brain"
-      assert_includes out, env_file
-      assert_includes out, "--state-root"
-      assert_includes out, "AGENT_COORD_LOCAL=1"
+      assert_includes out, "split_brain_env_file: #{env_file}"
+      # The remediation text lands exactly once, on stderr, rather than being
+      # repeated in the report body.
+      assert_includes err, "--state-root"
+      assert_includes err, "AGENT_COORD_LOCAL=1"
+      assert_equal 1, (out + err).scan("split-brain configuration").length
     end
   end
 
