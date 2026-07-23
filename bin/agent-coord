@@ -845,7 +845,9 @@ module AgentCoord
 
           value << raw[(index + 1)...close]
           index = close + 1
-        when /\s/
+        # Unquoted whitespace ends the word, and an unquoted shell metacharacter
+        # ends the assignment: `AGENT_COORD_API_URL=; # disabled` assigns nothing.
+        when /\s/, ";", "&", "|", "<", ">", "(", ")"
           break
         when "#"
           # Only a "#" that begins a word is a comment. Directly after the "=",
@@ -882,6 +884,8 @@ module AgentCoord
       status_root = default_status_state_root if status_command
       if status_root
         options[:state_root] = status_root
+        # Also read-only redirection: writes still fall through to implicit local.
+        options[:status_root_local] = true
         return
       end
 

@@ -497,6 +497,16 @@ class HttpBackendSelectionTest < HttpEnvTestCase
     end
   end
 
+  # run_cli drives the Runner in-process, so overriding the singleton is enough.
+  # minitest/mock is not available in this bundle.
+  def with_source_root(path)
+    original = AgentCoord.method(:source_root)
+    AgentCoord.define_singleton_method(:source_root) { path }
+    yield
+  ensure
+    AgentCoord.define_singleton_method(:source_root, original)
+  end
+
   def test_status_uses_http_backend_when_api_env_set
     responses = [
       [200, { "entries" => [] }],
@@ -906,6 +916,9 @@ class HttpBackendSelectionTest < HttpEnvTestCase
      "AGENT_COORD_API_URL=  #https://fleet.example\n",
      "export AGENT_COORD_API_URL= # disabled\n",
      "AGENT_COORD_API_URL= #foo\n",
+     # An unquoted shell separator ends the assignment, leaving it empty.
+     "AGENT_COORD_API_URL=; # remote disabled\n",
+     %(AGENT_COORD_API_URL="";\n),
      "AGENT_COORD_API_URL=\n"].each do |content|
       with_split_brain_config do |root, env_file|
         File.write(env_file, content)
@@ -930,7 +943,9 @@ class HttpBackendSelectionTest < HttpEnvTestCase
      # An unterminated quote is a broken file; the guard errs toward firing.
      %(AGENT_COORD_API_URL="https://fleet.example\n),
      # No space before the "#", so it begins no comment and the value is nonempty.
-     "AGENT_COORD_API_URL=#not-a-comment\n"].each do |content|
+     "AGENT_COORD_API_URL=#not-a-comment\n",
+     # Separators inside a quoted value are ordinary characters.
+     %(AGENT_COORD_API_URL="https://fleet.example?a=1&b=2"\n)].each do |content|
       with_split_brain_config do |_root, env_file|
         File.write(env_file, content)
         code, _, err = run_cli(claim_args, {})
@@ -1030,6 +1045,25 @@ class HttpBackendSelectionTest < HttpEnvTestCase
       payload = JSON.parse(doctor_out)
       assert_equal "split_brain", payload.fetch("status")
       assert_equal env_file, payload.fetch("split_brain_env_file")
+    end
+  end
+
+  # The same disagreement via the other read-only resolution: a source root that
+  # already looks like a state root redirects doctor's reads but not writes.
+  def test_doctor_reports_split_brain_when_the_source_root_is_a_state_root
+    with_split_brain_config do |root, env_file|
+      source_root = File.join(root, "source")
+      AgentCoord::JSON_PREFIXES.each { |prefix| FileUtils.mkdir_p(File.join(source_root, prefix)) }
+      with_source_root(source_root) do
+        assert AgentCoord.state_root?(source_root), "fixture must look like a state root"
+
+        doctor_code, doctor_out, = run_cli(%w[doctor --json], {})
+
+        assert_equal 2, doctor_code, "doctor must agree with the write it is gating"
+        payload = JSON.parse(doctor_out)
+        assert_equal "split_brain", payload.fetch("status")
+        assert_equal env_file, payload.fetch("split_brain_env_file")
+      end
     end
   end
 
