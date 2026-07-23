@@ -763,8 +763,11 @@ module AgentCoord
       return nil unless options[:implicit_local]
       return nil unless ENV.fetch("AGENT_COORD_API_URL", "").empty?
       return nil if local_mode_opt_in?
+      # Consulted from the notice, the refusal and the doctor payload in one run;
+      # compute it once rather than re-reading the file at each site.
+      return options[:split_brain_env_file] if options.key?(:split_brain_env_file)
 
-      consumer_env_files.find { |path| consumer_api_url_configured?(path) }
+      options[:split_brain_env_file] = consumer_env_files.find { |path| consumer_api_url_configured?(path) }
     end
 
     def consumer_split_brain_message(env_file)
@@ -803,10 +806,21 @@ module AgentCoord
         match = line.match(/^\s*(?:export\s+)?AGENT_COORD_API_URL\s*=\s*(.*?)\s*$/)
         next false unless match
 
-        !match[1].to_s.delete_prefix('"').delete_suffix('"').delete_prefix("'").delete_suffix("'").empty?
+        !consumer_env_assignment_value(match[1].to_s).empty?
       end
     rescue SystemCallError, ArgumentError
       false
+    end
+
+    # What a shell would actually leave in the variable: a quoted value is taken
+    # verbatim, and an unquoted trailing comment is not part of the value. Without
+    # this, `AGENT_COORD_API_URL= # remote disabled` would read as a configured
+    # fleet URL and refuse every write.
+    def consumer_env_assignment_value(raw)
+      quoted = raw.match(/\A"([^"]*)"|\A'([^']*)'/)
+      return (quoted[1] || quoted[2]).to_s if quoted
+
+      raw.sub(/(?:\A|\s)#.*\z/m, "").strip
     end
 
     def resolve_default_local_backend(command, options)

@@ -893,6 +893,40 @@ class HttpBackendSelectionTest < HttpEnvTestCase
     end
   end
 
+  # A shell assignment whose value is only a comment leaves the variable empty, so
+  # the file selects no fleet backend and must not refuse writes.
+  def test_write_command_ignores_env_file_whose_api_url_is_commented_out
+    ["AGENT_COORD_API_URL= # remote disabled\n",
+     "AGENT_COORD_API_URL=  #https://fleet.example\n",
+     "export AGENT_COORD_API_URL= # disabled\n",
+     "AGENT_COORD_API_URL=\n"].each do |content|
+      with_split_brain_config do |root, env_file|
+        File.write(env_file, content)
+        code, out, err = run_cli(claim_args, {})
+
+        assert_equal 0, code, "#{content.inspect}: #{err}"
+        assert_includes out, "claimed demo/example#1"
+        refute_includes err, "split-brain"
+        FileUtils.rm_rf(File.join(root, "state"))
+      end
+    end
+  end
+
+  # Values that a shell would keep must still count as configured.
+  def test_write_command_still_stops_for_quoted_and_fragment_api_urls
+    [%(AGENT_COORD_API_URL="https://fleet.example" # primary\n),
+     "AGENT_COORD_API_URL='https://fleet.example'\n",
+     "AGENT_COORD_API_URL=https://fleet.example/path#frag\n"].each do |content|
+      with_split_brain_config do |_root, env_file|
+        File.write(env_file, content)
+        code, _, err = run_cli(claim_args, {})
+
+        assert_equal 2, code, "#{content.inspect} should still be a configured fleet URL"
+        assert_includes err, env_file
+      end
+    end
+  end
+
   def test_write_command_is_unchanged_without_a_consumer_env_file
     Dir.mktmpdir("agent-coord-local-only") do |root|
       config_home = File.join(root, "config")
