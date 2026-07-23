@@ -5332,6 +5332,55 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     assert_empty event_records("batch-typed")
   end
 
+  def test_record_event_rejects_whitespace_only_required_typed_fields_without_writing
+    escalation_args = [
+      "--from-route", "terra/high",
+      "--to-route", "sol/xhigh",
+      "--evidence", "Repeated integration failures require deeper diagnosis."
+    ]
+    error_args = [
+      "--severity", "P1",
+      "--category", "coordination-write",
+      "--message", "Backend rejected the event append."
+    ]
+    cases = [
+      ["from-route", "escalation_requested", escalation_args, 1],
+      ["to-route", "escalation_requested", escalation_args, 3],
+      ["evidence-summary", "escalation_requested", escalation_args, 5],
+      ["category", "error", error_args, 3],
+      ["description", "error", error_args, 5]
+    ]
+    outcomes = cases.each_with_index.map do |(name, type, valid_args, value_index), index|
+      batch_id = "batch-typed-whitespace-#{index}"
+      args = valid_args.dup
+      args[value_index] = " \t "
+      result = run_agent_coord("record-event", "--batch-id", batch_id, "--type", type, *args)
+      {
+        name: name,
+        exit: result.status.exitstatus,
+        event_count: event_records(batch_id).length,
+        event_path_exists: Dir.exist?(File.join(@state_root, "events", batch_id))
+      }
+    end
+
+    valid_controls = {
+      "escalation" => ["escalation_requested", escalation_args],
+      "error" => ["error", error_args]
+    }.map do |name, (type, args)|
+      batch_id = "batch-typed-whitespace-control-#{name}"
+      result = run_agent_coord("record-event", "--batch-id", batch_id, "--type", type, *args)
+      { name: name, exit: result.status.exitstatus, event_count: event_records(batch_id).length }
+    end
+
+    assert_equal 5, outcomes.length
+    assert_empty(outcomes.reject do |outcome|
+      outcome.values_at(:exit, :event_count, :event_path_exists) == [1, 0, false]
+    end)
+    assert_empty(valid_controls.reject do |outcome|
+      outcome.values_at(:exit, :event_count) == [0, 1]
+    end)
+  end
+
   def test_record_event_human_intervention_happy_path
     write_batch("batch-typed", lanes: [{ "name" => "code", "owner" => "worker-a", "targets" => ["101"] }])
 
@@ -5409,7 +5458,19 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     seed_event("batch-audit-ok", "a1", "type" => "claim.acquired", "agent_id" => "worker-a")
     seed_event("batch-audit-ok", "a2", "type" => "claim.released", "agent_id" => "worker-a")
     seed_event("batch-audit-ok", "b1", "type" => "claim.acquired", "agent_id" => "worker-b")
-    seed_event("batch-audit-ok", "b2", "type" => "lane_closed", "agent_id" => "worker-b", "lane" => "docs")
+    seed_event(
+      "batch-audit-ok",
+      "b2",
+      "schema_version" => 2,
+      "type" => "lane_closed",
+      "agent_id" => "worker-b",
+      "lane" => "docs",
+      "repo" => "shakacode/example",
+      "target" => "102",
+      "terminal" => "done",
+      "workspace" => "default",
+      "closed_by" => { "agent_id" => "worker-b", "machine" => "test" }
+    )
 
     result = run_agent_coord("batch-audit", "--batch-id", "batch-audit-ok")
 
@@ -5417,6 +5478,23 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     assert_includes result.stdout, "batch-audit batch-audit-ok complete"
     assert_includes result.stdout, "lane code owner worker-a complete"
     assert_includes result.stdout, "lane docs owner worker-b complete"
+  end
+
+  def test_batch_audit_rejects_invalid_or_conflicting_attributed_lane_closed_facts
+    families = batch_audit_terminal_false_complete_families
+    invalid_outcomes = invalid_terminal_audit_outcomes(families)
+    control_outcomes = terminal_audit_control_outcomes
+
+    assert_equal 12, families.length
+    assert_equal 23, invalid_outcomes.length
+    assert_equal 4, control_outcomes.length
+    assert_empty(invalid_outcomes.reject do |outcome|
+      outcome.values_at(:exit, :verdict, :complete) == [1, "incomplete", false] &&
+        outcome.fetch(:missing).include?("terminal")
+    end)
+    assert_empty(control_outcomes.reject do |outcome|
+      outcome.values_at(:exit, :verdict, :complete, :missing) == [0, "complete", true, []]
+    end)
   end
 
   def test_batch_audit_flags_lane_gaps_with_exit_one
@@ -7076,6 +7154,206 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
       { "schema_version" => 1, "event_id" => event_id, "batch_id" => batch_id, "at" => "2026-07-22T00:00:00Z" }
         .merge(overrides)
     )
+  end
+
+  def seed_batch_audit_terminal_case(batch_id, target)
+    repo = "shakacode/example"
+    lane = "code"
+    owner = "worker-a"
+    write_state_record(
+      "batches/#{batch_id}.json",
+      "schema_version" => 1,
+      "batch_id" => batch_id,
+      "repo" => repo,
+      "lanes" => [{ "name" => lane, "owner" => owner, "targets" => [target] }]
+    )
+    seed_event(
+      batch_id,
+      "claim",
+      "type" => "claim.acquired",
+      "lane" => lane,
+      "agent_id" => owner,
+      "repo" => repo,
+      "target" => target,
+      "status" => "active"
+    )
+    seed_event(
+      batch_id,
+      "release",
+      "type" => "claim.released",
+      "lane" => lane,
+      "agent_id" => owner,
+      "repo" => repo,
+      "target" => target,
+      "status" => "released"
+    )
+    [valid_batch_audit_terminal_event(batch_id, lane, owner, repo, target)]
+  end
+
+  def valid_batch_audit_terminal_event(batch_id, lane, owner, repo, target)
+    {
+      "schema_version" => 2,
+      "event_id" => "closed",
+      "batch_id" => batch_id,
+      "lane" => lane,
+      "type" => "lane_closed",
+      "agent_id" => owner,
+      "repo" => repo,
+      "target" => target,
+      "branch" => "feature/strict-terminal-audit",
+      "terminal" => "done",
+      "pr_url" => "https://example.test/pull/1",
+      "pr_state" => "merged",
+      "evidence_url" => "https://example.test/evidence/1",
+      "workspace" => "default",
+      "closed_by" => { "agent_id" => owner, "machine" => "test" },
+      "at" => "2026-07-22T00:00:00Z"
+    }
+  end
+
+  def write_batch_audit_terminals(batch_id, terminals)
+    terminals.each_with_index do |terminal, index|
+      write_state_record("events/#{batch_id}/closed-#{index}.json", terminal)
+    end
+  end
+
+  def invalid_terminal_audit_outcomes(families)
+    case_index = 0
+    families.flat_map do |family, variants|
+      variants.map do |variant, mutate|
+        outcome = terminal_audit_outcome(
+          "#{family}/#{variant}", "batch-audit-strict-terminal-#{case_index}", 8100 + case_index, mutate
+        )
+        case_index += 1
+        outcome
+      end
+    end
+  end
+
+  def terminal_audit_control_outcomes
+    batch_audit_terminal_controls.each_with_index.map do |(name, mutate), index|
+      terminal_audit_outcome(name, "batch-audit-strict-terminal-control-#{index}", 8200 + index, mutate)
+    end
+  end
+
+  def terminal_audit_outcome(name, batch_id, target_number, mutate)
+    target = target_number.to_s
+    terminals = seed_batch_audit_terminal_case(batch_id, target)
+    mutate.call(terminals, batch_id, target)
+    write_batch_audit_terminals(batch_id, terminals)
+    result = run_agent_coord("batch-audit", "--batch-id", batch_id, "--json")
+    audit = JSON.parse(result.stdout)
+    lane = audit.fetch("lanes").fetch(0)
+    {
+      name: name,
+      exit: result.status.exitstatus,
+      verdict: audit.fetch("verdict"),
+      complete: lane.fetch("complete"),
+      missing: lane.fetch("missing")
+    }
+  end
+
+  # Declarative public-CLI regression matrix: keeping the mutations inline makes
+  # the 12 contract families and their exact boundary values reviewable together.
+  # rubocop:disable Metrics/AbcSize, Metrics/MethodLength
+  def batch_audit_terminal_false_complete_families
+    {
+      "unknown-and-non-facts" => {
+        "exact-unknown" => ->(events, _batch_id, _target) { events.fetch(0)["workspace"] = "UNKNOWN" },
+        "nested-unknown" => lambda { |events, _batch_id, _target|
+          events.fetch(0).fetch("closed_by")["machine"] = " uNkNoWn "
+        },
+        "blank" => ->(events, _batch_id, _target) { events.fetch(0)["branch"] = "" },
+        "whitespace" => ->(events, _batch_id, _target) { events.fetch(0)["pr_state"] = " \t " }
+      },
+      "wrong-scalar-types" => {
+        "schema-version-string" => ->(events, _batch_id, _target) { events.fetch(0)["schema_version"] = "2" },
+        "event-id-integer" => ->(events, _batch_id, _target) { events.fetch(0)["event_id"] = 123 },
+        "workspace-array" => ->(events, _batch_id, _target) { events.fetch(0)["workspace"] = ["default"] }
+      },
+      "invalid-evidence-uri" => {
+        "javascript" => lambda { |events, _batch_id, _target|
+          events.fetch(0)["evidence_url"] = "javascript:alert(1)"
+        }
+      },
+      "whitespace-evidence-uri" => {
+        "embedded-space" => lambda { |events, _batch_id, _target|
+          events.fetch(0)["evidence_url"] = "https://example.test/evidence /1"
+        }
+      },
+      "integer-evidence-value" => {
+        "integer" => ->(events, _batch_id, _target) { events.fetch(0)["evidence_url"] = 123 }
+      },
+      "missing-closed-by" => {
+        "missing" => ->(events, _batch_id, _target) { events.fetch(0).delete("closed_by") }
+      },
+      "invalid-closed-by" => {
+        "extra-field" => lambda { |events, _batch_id, _target|
+          events.fetch(0).fetch("closed_by")["unexpected"] = "not-allowed"
+        },
+        "empty-machine" => lambda { |events, _batch_id, _target|
+          events.fetch(0).fetch("closed_by")["machine"] = ""
+        }
+      },
+      "scalar-closed-by" => {
+        "string" => ->(events, _batch_id, _target) { events.fetch(0)["closed_by"] = "worker-a" }
+      },
+      "impossible-calendar" => {
+        "february-30" => ->(events, _batch_id, _target) { events.fetch(0)["at"] = "2026-02-30T00:00:00Z" },
+        "non-leap-february-29" => lambda { |events, _batch_id, _target|
+          events.fetch(0)["at"] = "2026-02-29T00:00:00Z"
+        }
+      },
+      "invalid-time-range" => {
+        "hour-24" => ->(events, _batch_id, _target) { events.fetch(0)["at"] = "2026-01-01T24:00:00Z" },
+        "minute-60" => ->(events, _batch_id, _target) { events.fetch(0)["at"] = "2026-01-01T23:60:00Z" },
+        "second-61" => ->(events, _batch_id, _target) { events.fetch(0)["at"] = "2026-01-01T23:59:61Z" }
+      },
+      "invalid-time-offset" => {
+        "timezone-less" => ->(events, _batch_id, _target) { events.fetch(0)["at"] = "2026-01-01T00:00:00" },
+        "offset-hour-24" => lambda { |events, _batch_id, _target|
+          events.fetch(0)["at"] = "2026-01-01T12:00:00+24:00"
+        },
+        "offset-minute-60" => lambda { |events, _batch_id, _target|
+          events.fetch(0)["at"] = "2026-01-01T12:00:00+09:60"
+        }
+      },
+      "conflicting-duplicate-facts" => {
+        "terminal-state" => lambda { |events, _batch_id, _target|
+          conflict = events.fetch(0).merge(
+            "event_id" => "closed-conflict",
+            "terminal" => "abandoned",
+            "at" => "2026-07-22T00:00:01Z"
+          )
+          events << conflict
+        }
+      }
+    }
+  end
+  # rubocop:enable Metrics/AbcSize, Metrics/MethodLength
+
+  def batch_audit_terminal_controls
+    {
+      "valid-published-shape" => ->(_events, _batch_id, _target) {},
+      "historical-proleptic-gregorian" => lambda { |events, _batch_id, _target|
+        events.fetch(0)["at"] = "1582-10-10T00:00:00Z"
+      },
+      "identical-non-conflicting-duplicates" => lambda { |events, _batch_id, _target|
+        duplicate = JSON.parse(JSON.generate(events.fetch(0)))
+        duplicate["event_id"] = "closed-replay"
+        duplicate["at"] = "2026-07-22T00:00:01Z"
+        events << duplicate
+      },
+      "real-published-fixture" => lambda { |events, batch_id, target|
+        fixture = JSON.parse(File.read(File.join(ROOT, "contracts/fixtures/v2/lane_closed.json")))
+        fixture["batch_id"] = batch_id
+        fixture["lane"] = "code"
+        fixture["repo"] = "shakacode/example"
+        fixture["target"] = target
+        fixture.fetch("closed_by")["agent_id"] = "worker-a"
+        events.replace([fixture])
+      }
+    }
   end
 
   def events_of_type(batch_id, type)
