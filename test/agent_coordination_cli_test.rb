@@ -5497,6 +5497,29 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     end)
   end
 
+  def test_batch_audit_rejects_malformed_ordinary_lifecycle_scalars
+    invalid_outcomes = ordinary_lifecycle_scalar_cases.each_with_index.map do |(name, mutate), index|
+      ordinary_lifecycle_audit_outcome(
+        name, "batch-audit-lifecycle-scalar-#{index}", 8300 + index, mutate
+      )
+    end
+    control_outcomes = ordinary_lifecycle_control_cases.each_with_index.map do |(name, mutate), index|
+      ordinary_lifecycle_audit_outcome(
+        name, "batch-audit-lifecycle-control-#{index}", 8400 + index, mutate
+      )
+    end
+
+    assert_equal 9, invalid_outcomes.length
+    assert_equal 4, control_outcomes.length
+    assert_empty(invalid_outcomes.reject do |outcome|
+      outcome.values_at(:exit, :verdict, :complete) == [1, "incomplete", false] &&
+        !outcome.fetch(:missing).empty?
+    end)
+    assert_empty(control_outcomes.reject do |outcome|
+      outcome.values_at(:exit, :verdict, :complete, :missing) == [0, "complete", true, []]
+    end)
+  end
+
   def test_batch_audit_flags_lane_gaps_with_exit_one
     write_batch(
       "batch-audit-gaps",
@@ -7188,6 +7211,100 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
       "status" => "released"
     )
     [valid_batch_audit_terminal_event(batch_id, lane, owner, repo, target)]
+  end
+
+  def ordinary_lifecycle_scalar_cases
+    {
+      "claim-event-id-integer" => ->(events, _target) { events.fetch("claim")["event_id"] = 123 },
+      "claim-target-integer" => ->(events, target) { events.fetch("claim")["target"] = Integer(target) },
+      "release-event-id-array" => ->(events, _target) { events.fetch("release")["event_id"] = ["release"] },
+      "release-target-integer" => ->(events, target) { events.fetch("release")["target"] = Integer(target) },
+      "phase-status-integer" => ->(events, _target) { events.fetch("phase")["status"] = 1 },
+      "phase-values-integers" => lambda do |events, _target|
+        events.fetch("phase").merge!("old_phase" => 1, "new_phase" => 2, "phase" => 2)
+      end,
+      "phase-event-id-object" => lambda do |events, _target|
+        events.fetch("phase")["event_id"] = { "id" => "phase" }
+      end,
+      "phase-target-integer" => ->(events, target) { events.fetch("phase")["target"] = Integer(target) },
+      "claim-event-id-whitespace" => ->(events, _target) { events.fetch("claim")["event_id"] = " \t " }
+    }
+  end
+
+  def ordinary_lifecycle_control_cases
+    {
+      "historical-phase-fields" => ->(_events, _target) {},
+      "published-phase-fields" => lambda do |events, _target|
+        phase = events.fetch("phase")
+        phase["previous_phase"] = phase.delete("old_phase")
+        phase.delete("new_phase")
+        phase.delete("status")
+        events.fetch("claim").delete("status")
+      end,
+      "phase-optional" => ->(events, _target) { events.delete("phase") },
+      "valid-duplicates" => lambda do |events, _target|
+        events["claim-copy"] = events.fetch("claim").merge("event_id" => "claim-copy")
+        events["release-copy"] = events.fetch("release").merge("event_id" => "release-copy")
+      end
+    }
+  end
+
+  def ordinary_lifecycle_audit_outcome(name, batch_id, target_number, mutate)
+    target = target_number.to_s
+    events = seed_batch_audit_ordinary_case(batch_id, target)
+    mutate.call(events, target)
+    events.each do |filename, event|
+      write_state_record("events/#{batch_id}/#{filename}.json", event)
+    end
+
+    result = run_agent_coord("batch-audit", "--batch-id", batch_id, "--json")
+    audit = JSON.parse(result.stdout)
+    lane = audit.fetch("lanes").fetch(0)
+    {
+      name: name,
+      exit: result.status.exitstatus,
+      verdict: audit.fetch("verdict"),
+      complete: lane.fetch("complete"),
+      missing: lane.fetch("missing")
+    }
+  end
+
+  def seed_batch_audit_ordinary_case(batch_id, target)
+    repo = "shakacode/example"
+    lane = "code"
+    owner = "worker-a"
+    base = {
+      "schema_version" => 1,
+      "batch_id" => batch_id,
+      "lane" => lane,
+      "agent_id" => owner,
+      "repo" => repo,
+      "target" => target,
+      "at" => "2026-07-22T00:00:00Z"
+    }
+    write_state_record(
+      "batches/#{batch_id}.json",
+      "schema_version" => 1,
+      "batch_id" => batch_id,
+      "repo" => repo,
+      "lanes" => [{ "name" => lane, "owner" => owner, "targets" => [target] }]
+    )
+    {
+      "claim" => base.merge(
+        "event_id" => "claim", "type" => "claim.acquired", "status" => "active"
+      ),
+      "phase" => base.merge(
+        "event_id" => "phase",
+        "type" => "phase.changed",
+        "status" => "in_progress",
+        "old_phase" => "implementing",
+        "new_phase" => "validating",
+        "phase" => "validating"
+      ),
+      "release" => base.merge(
+        "event_id" => "release", "type" => "claim.released", "status" => "released"
+      )
+    }
   end
 
   def valid_batch_audit_terminal_event(batch_id, lane, owner, repo, target)

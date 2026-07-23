@@ -201,6 +201,11 @@ module AgentCoord
   BATCH_AUDIT_TERMINAL_OPTIONAL_FACT_FIELDS = %w[
     batch_id lane agent_id branch pr_url pr_state evidence_url
   ].freeze
+  BATCH_AUDIT_ORDINARY_LIFECYCLE_TYPES = %w[
+    claim.acquired claim.released phase.changed
+  ].freeze
+  BATCH_AUDIT_ORDINARY_REQUIRED_FACT_FIELDS = %w[event_id batch_id agent_id at].freeze
+  BATCH_AUDIT_ORDINARY_OPTIONAL_IDENTITY_FIELDS = %w[lane repo target].freeze
   RFC3339_PATTERN = /
     \A
     (?<year>\d{4})-(?<month>\d{2})-(?<day>\d{2})
@@ -3279,7 +3284,65 @@ module AgentCoord
       missing = []
       missing << "claim.acquired" unless types.include?("claim.acquired")
       missing << "terminal" unless batch_audit_valid_terminal_signal?(lane_events, lane)
+      missing << "lifecycle" unless batch_audit_valid_ordinary_lifecycle?(lane_events, lane)
       missing
+    end
+
+    def batch_audit_valid_ordinary_lifecycle?(lane_events, lane)
+      lane_events.all? do |event|
+        type = event["type"]
+        !BATCH_AUDIT_ORDINARY_LIFECYCLE_TYPES.include?(type) ||
+          batch_audit_valid_ordinary_lifecycle_event?(event, lane, type)
+      end
+    end
+
+    def batch_audit_valid_ordinary_lifecycle_event?(event, lane, type)
+      batch_audit_valid_ordinary_identity?(event, lane) &&
+        batch_audit_valid_ordinary_payload?(event, type)
+    end
+
+    def batch_audit_valid_ordinary_identity?(event, lane)
+      return false unless event["schema_version"] == SCHEMA_VERSION
+      return false unless BATCH_AUDIT_ORDINARY_REQUIRED_FACT_FIELDS.all? do |field|
+        batch_audit_fact_string?(event[field])
+      end
+      return false unless BATCH_AUDIT_ORDINARY_OPTIONAL_IDENTITY_FIELDS.all? do |field|
+        !event.key?(field) || batch_audit_fact_string?(event[field])
+      end
+      return false unless event["batch_id"] == lane.batch_id && event["agent_id"] == lane.owner
+      return false if event.key?("lane") && event["lane"] != lane.name
+      return false if event.key?("target") && !lane.targets.include?(event["target"])
+
+      gc_valid_datetime?(event["at"])
+    end
+
+    def batch_audit_valid_ordinary_payload?(event, type)
+      case type
+      when "claim.acquired"
+        !event.key?("status") || event["status"] == "active"
+      when "claim.released"
+        !event.key?("status") || event["status"] == "released"
+      when "phase.changed"
+        batch_audit_valid_phase_change?(event)
+      end
+    end
+
+    def batch_audit_valid_phase_change?(event)
+      return false unless batch_audit_fact_string?(event["phase"])
+      return false if event.key?("status") && !batch_audit_fact_string?(event["status"])
+
+      historical = event.key?("old_phase") || event.key?("new_phase")
+      published = event.key?("previous_phase")
+      return false unless historical || published
+
+      if historical
+        return false unless %w[old_phase new_phase].all? { |field| batch_audit_fact_string?(event[field]) }
+        return false if event["old_phase"] == event["new_phase"] || event["new_phase"] != event["phase"]
+      end
+      return false if published && (!batch_audit_fact_string?(event["previous_phase"]) ||
+                                    event["previous_phase"] == event["phase"])
+
+      true
     end
 
     def batch_audit_valid_terminal_signal?(lane_events, lane)
