@@ -905,6 +905,7 @@ class HttpBackendSelectionTest < HttpEnvTestCase
     ["AGENT_COORD_API_URL= # remote disabled\n",
      "AGENT_COORD_API_URL=  #https://fleet.example\n",
      "export AGENT_COORD_API_URL= # disabled\n",
+     "AGENT_COORD_API_URL= #foo\n",
      "AGENT_COORD_API_URL=\n"].each do |content|
       with_split_brain_config do |root, env_file|
         File.write(env_file, content)
@@ -927,7 +928,9 @@ class HttpBackendSelectionTest < HttpEnvTestCase
      %(AGENT_COORD_API_URL=""https://fleet.example\n),
      %(AGENT_COORD_API_URL="https://fleet"".example"\n),
      # An unterminated quote is a broken file; the guard errs toward firing.
-     %(AGENT_COORD_API_URL="https://fleet.example\n)].each do |content|
+     %(AGENT_COORD_API_URL="https://fleet.example\n),
+     # No space before the "#", so it begins no comment and the value is nonempty.
+     "AGENT_COORD_API_URL=#not-a-comment\n"].each do |content|
       with_split_brain_config do |_root, env_file|
         File.write(env_file, content)
         code, _, err = run_cli(claim_args, {})

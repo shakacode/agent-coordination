@@ -813,7 +813,10 @@ module AgentCoord
 
     def consumer_api_url_configured?(path)
       File.foreach(path).any? do |line|
-        match = line.match(/^\s*(?:export\s+)?AGENT_COORD_API_URL\s*=\s*(.*?)\s*$/)
+        # Capture from the "=" without consuming the space after it: in a shell,
+        # `=#x` assigns "#x" while `= #x` assigns nothing, and the value scanner
+        # needs that whitespace to tell them apart.
+        match = line.match(/^\s*(?:export\s+)?AGENT_COORD_API_URL=(.*)$/)
         next false unless match
 
         !consumer_env_assignment_value(match[1].to_s).empty?
@@ -845,7 +848,9 @@ module AgentCoord
         when /\s/
           break
         when "#"
-          break if index.zero? || raw[index - 1].match?(/\s/)
+          # Only a "#" that begins a word is a comment. Directly after the "=",
+          # or inside a URL, it is an ordinary character.
+          break if index.positive? && raw[index - 1].match?(/\s/)
 
           value << char
           index += 1
