@@ -91,7 +91,10 @@ Every command that selects this implicit default prints its path with a
 output on stdout; the notice goes to stderr.
 
 This default is for one machine only. Configure the HTTP backend before sharing
-coordination state across machines or operators.
+coordination state across machines or operators. If a consumer env file already
+configures `AGENT_COORD_API_URL`, this implicit default is refused for write
+commands; see the split-brain hard stop under backend selection, and set
+`AGENT_COORD_LOCAL=1` when single-machine local state is what you want.
 
 Run the deterministic walkthrough to see the claim and heartbeat model without
 configuring or changing any persistent backend:
@@ -290,6 +293,21 @@ When both `AGENT_COORD_API_URL` and `AGENT_COORD_STATE_ROOT` are set, the CLI
 uses the HTTP backend and warns once. Pass `--state-root` only for an explicit
 local smoke check.
 
+Selection 5 is *implicit* local. When a consumer env file
+(`AGENT_COORD_ENV_FILE`, `$XDG_CONFIG_HOME/agent-coord/env`, or
+`$XDG_CONFIG_HOME/agent-coord/http-env.sh`) configures `AGENT_COORD_API_URL`
+but that file was never sourced, an implicit local run is a split-brain
+configuration: writes would land on a local state root the fleet never reads.
+`claim`, `release`, `heartbeat`, `record-event`, and `register-batch` therefore
+hard stop with exit `2` and name the offending env file. Read commands
+(`status`, `batch-audit`) keep the advisory warning and still succeed. Choose a
+backend explicitly to proceed: source the env file for fleet writes, pass
+`--state-root PATH` (or set `AGENT_COORD_STATE_ROOT`) for an explicit local
+root, or set `AGENT_COORD_LOCAL=1` to opt into implicit local mode.
+`AGENT_COORD_LOCAL` accepts `1`, `true`, or `yes` (case-insensitive); any other
+value, including empty and `0`, is not an opt-in. The opt-in also silences the
+advisory warning for read commands.
+
 React on Rails workflow docs assume `agent-coord` is available on `PATH`.
 `bin/agent-coord bootstrap` installs `agent-coord` into `$HOME/.local/bin` by
 default and appends that directory to the current shell profile. Use
@@ -312,7 +330,12 @@ separate result for claims, heartbeats, batches, and events plus the authenticat
 machine and its scopes. A stale or unknown token names the failing resource and
 prints the token-rotation command. If a consumer env file configures an API URL
 while `status` or `doctor` resolves to local storage, the CLI emits a split-brain
-warning. If an explicitly configured backend fails, agents should report
+warning. When `doctor` itself resolved to the *implicit* local backend under
+that configuration, it emits its full report with `status: split_brain` plus a
+`split_brain_env_file` field naming the env file, then exits `2`; the same
+explicit opt-ins that unblock writes (`--state-root`, `AGENT_COORD_STATE_ROOT`,
+`AGENT_COORD_LOCAL=1`) return it to `ok` and exit `0`. If an explicitly
+configured backend fails, agents should report
 coordination state
 as `UNKNOWN` and use the public claim-comment fallback until the operator fixes
 backend access.
@@ -343,7 +366,9 @@ local state, not atomic filesystem traversal: another process able to rewrite
 the tree concurrently under the same local owner is inside that trust boundary.
 
 To override the default for a local smoke check, set `AGENT_COORD_STATE_ROOT` or
-pass `--state-root` to use a temporary filesystem state directory:
+pass `--state-root` to use a temporary filesystem state directory. Both are
+explicit local selections, so neither trips the split-brain hard stop
+(`AGENT_COORD_LOCAL=1` keeps the implicit default instead):
 
 ```bash
 STATE_ROOT=$(mktemp -d)
@@ -795,7 +820,10 @@ the doctor section above.
 A refused claim is intentionally different from a bootstrap/auth/network
 failure. A machine agent may not override exit 3 on its own. Exit 2 means the
 backend could not be trusted for that command, including storage-level compare
-and-swap contention; dependency-sensitive lanes should stop with `UNKNOWN` until
+and-swap contention and a refused split-brain write (a consumer env file
+configures `AGENT_COORD_API_URL` while the CLI fell back to the implicit local
+root; `doctor` reports `status: split_brain` for the same condition);
+dependency-sensitive lanes should stop with `UNKNOWN` until
 the coordinator restores backend access. Exit 4 is reserved by ADR 0008 but is
 not emitted or reported by `config show --json` until the separately sequenced
 capacity-reservation runtime commands exist. This additive reservation

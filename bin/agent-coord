@@ -34,6 +34,10 @@ module AgentCoord
   DEFAULT_SYNTHETIC_HOT_DAYS = 1
   MAX_ARCHIVE_STATE_BYTES = 1024 * 1024
   STATUS_STATE_ROOT_ENV = "AGENT_COORD_STATUS_STATE_ROOT"
+  # Explicit operator opt-in to the implicit local backend; suppresses the
+  # split-brain advisory and the write hard stop.
+  LOCAL_MODE_ENV = "AGENT_COORD_LOCAL"
+  LOCAL_MODE_TRUE_VALUES = %w[1 true yes].freeze
   MACHINE_ID_ENV = "AGENT_COORD_MACHINE_ID"
   SESSION_ID_ENV = "AGENT_COORD_SESSION_ID"
   CODEX_THREAD_ID_ENV = "CODEX_THREAD_ID"
@@ -606,6 +610,7 @@ module AgentCoord
         resolve_backend_env(options)
         resolve_default_local_backend(command, options)
         warn_consumer_split_brain(command, options)
+        refuse_split_brain_write!(command, options)
       end
       options
     end
@@ -718,6 +723,9 @@ module AgentCoord
     def warn_consumer_split_brain(command, options)
       return unless status_read_command?(command)
       return if options[:stack_json]
+      return if local_mode_opt_in?
+      # doctor reports the enforcing condition itself; do not say it twice.
+      return if command == "doctor" && consumer_split_brain_env_file(options)
       return unless options[:state_root] && !options[:api_url]
       return unless ENV.fetch("AGENT_COORD_API_URL", "").empty?
 
@@ -729,6 +737,44 @@ module AgentCoord
         "but this CLI is using the local backend. Load that env file for fleet reads or remove it if local mode " \
         "is intended."
       )
+    end
+
+    # Commands that mutate coordination state. gc only prunes an already chosen
+    # root, and read commands keep the advisory warning, so neither hard stops.
+    def split_brain_write_command?(command)
+      %w[claim release heartbeat record-event register-batch].include?(command)
+    end
+
+    def local_mode_opt_in?
+      LOCAL_MODE_TRUE_VALUES.include?(ENV.fetch(LOCAL_MODE_ENV, "").strip.downcase)
+    end
+
+    # A consumer env file configures a fleet API URL, but the CLI fell back to the
+    # implicit local root because that file was never sourced. Writes here would be
+    # invisible to the fleet, so the operator must choose a backend explicitly.
+    def consumer_split_brain_env_file(options)
+      return nil if options[:stack_json]
+      return nil unless options[:implicit_local]
+      return nil unless ENV.fetch("AGENT_COORD_API_URL", "").empty?
+      return nil if local_mode_opt_in?
+
+      consumer_env_files.find { |path| consumer_api_url_configured?(path) }
+    end
+
+    def consumer_split_brain_message(env_file)
+      "split-brain configuration: #{env_file} configures AGENT_COORD_API_URL, but this CLI resolved to the " \
+        "implicit local backend; refusing writes that would land on the local state root while a fleet API URL " \
+        "is configured. Source #{env_file} for fleet writes, pass --state-root PATH to choose a local root " \
+        "explicitly, or set #{LOCAL_MODE_ENV}=1 to opt into local mode."
+    end
+
+    def refuse_split_brain_write!(command, options)
+      return unless split_brain_write_command?(command)
+
+      env_file = consumer_split_brain_env_file(options)
+      return unless env_file
+
+      raise OperationalError, consumer_split_brain_message(env_file)
     end
 
     def consumer_env_files
@@ -1566,6 +1612,7 @@ module AgentCoord
         render_doctor_text(payload, doctor_options, section_notes)
       end
       raise_machine_identity_mismatch!(environment_identity) if environment_identity
+      raise_consumer_split_brain!(payload)
       0
     ensure
       close_store(store)
@@ -1597,6 +1644,13 @@ module AgentCoord
 
     def machine_identity_mismatch?(environment_identity)
       environment_identity.fetch("machine_match") == MACHINE_MATCH_MISMATCH
+    end
+
+    def raise_consumer_split_brain!(payload)
+      env_file = payload["split_brain_env_file"]
+      return unless env_file
+
+      raise OperationalError, consumer_split_brain_message(env_file)
     end
 
     def raise_machine_identity_mismatch!(environment_identity)
@@ -1816,6 +1870,11 @@ module AgentCoord
         "deep" => !deep.nil?,
         "status" => "ok"
       }
+      split_brain_file = consumer_split_brain_env_file(options)
+      if split_brain_file
+        payload["status"] = "split_brain"
+        payload["split_brain_env_file"] = split_brain_file
+      end
       if backend_kind == "http" || doctor_prefix_supplied?(options)
         payload["doctor_prefix"] = doctor_read_prefix(options)
       end
@@ -1846,12 +1905,21 @@ module AgentCoord
       @stdout.puts "state_root: #{options[:state_root] || '-'}"
       @stdout.puts "mode: #{payload.fetch('deep') ? 'deep' : 'lightweight'}"
       @stdout.puts "status: #{payload.fetch('status')}"
+      render_doctor_split_brain(payload)
       render_doctor_http_details(payload)
       render_doctor_environment_identity(payload)
       return if section_notes.empty?
 
       @stdout.puts "degraded"
       section_notes.values.uniq.each { |note| @stdout.puts "- #{note}" }
+    end
+
+    def render_doctor_split_brain(payload)
+      env_file = payload["split_brain_env_file"]
+      return unless env_file
+
+      @stdout.puts "split_brain_env_file: #{env_file}"
+      @stdout.puts consumer_split_brain_message(env_file)
     end
 
     def render_doctor_http_details(payload)

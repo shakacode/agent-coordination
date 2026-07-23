@@ -104,11 +104,20 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
   RUBY
   load BIN
 
+  # In-process runners read the real process ENV, so keep them off the developer's
+  # consumer env file, which would otherwise trip the split-brain guard.
+  CONSUMER_ENV_KEYS = %w[AGENT_COORD_ENV_FILE AGENT_COORD_LOCAL XDG_CONFIG_HOME].freeze
+
   def setup
     @state_root = Dir.mktmpdir("agent-coord-test")
+    @saved_consumer_env = CONSUMER_ENV_KEYS.to_h { |key| [key, ENV.fetch(key, nil)] }
+    ENV.delete("AGENT_COORD_ENV_FILE")
+    ENV.delete("AGENT_COORD_LOCAL")
+    ENV["XDG_CONFIG_HOME"] = ISOLATED_CONFIG_HOME
   end
 
   def teardown
+    @saved_consumer_env.each { |key, value| value.nil? ? ENV.delete(key) : ENV[key] = value }
     FileUtils.remove_entry(@state_root)
   end
 
@@ -6399,15 +6408,22 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
 
   CommandResult = Struct.new(:stdout, :stderr, :status, keyword_init: true)
   IDENTITY_ENV_KEYS = %w[AGENT_COORD_MACHINE_ID AGENT_COORD_SESSION_ID CODEX_THREAD_ID].freeze
+  # An empty XDG config home keeps the suite off the developer's real
+  # ~/.config/agent-coord/env, which would otherwise trip the split-brain guard.
+  ISOLATED_CONFIG_HOME = Dir.mktmpdir("agent-coord-isolated-config")
+  Minitest.after_run { FileUtils.rm_rf(ISOLATED_CONFIG_HOME) }
   COMMAND_ENV = {
     "AGENT_COORD_API_TOKEN" => nil,
     "AGENT_COORD_API_URL" => nil,
     "AGENT_COORD_BACKEND" => nil,
+    "AGENT_COORD_ENV_FILE" => nil,
+    "AGENT_COORD_LOCAL" => nil,
     "AGENT_COORD_MACHINE_ID" => nil,
     "AGENT_COORD_SESSION_ID" => nil,
     "AGENT_COORD_STATE_ROOT" => nil,
     "AGENT_COORD_STATUS_STATE_ROOT" => nil,
-    "CODEX_THREAD_ID" => nil
+    "CODEX_THREAD_ID" => nil,
+    "XDG_CONFIG_HOME" => ISOLATED_CONFIG_HOME
   }.freeze
 
   FixedClock = Struct.new(:time) do

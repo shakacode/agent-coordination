@@ -1,5 +1,6 @@
 # frozen_string_literal: true
 
+require "fileutils"
 require "json"
 require "minitest/autorun"
 require "net/http"
@@ -429,9 +430,18 @@ end
 
 class HttpEnvTestCase < Minitest::Test
   IDENTITY_ENV_KEYS = %w[AGENT_COORD_MACHINE_ID AGENT_COORD_SESSION_ID CODEX_THREAD_ID].freeze
+  # An empty XDG config home keeps the suite off the developer's real
+  # ~/.config/agent-coord/env, which would otherwise trip the split-brain guard.
+  ISOLATED_CONFIG_HOME = Dir.mktmpdir("agent-coord-isolated-config")
+  Minitest.after_run { FileUtils.rm_rf(ISOLATED_CONFIG_HOME) }
+  CLEAN_ENV = IDENTITY_ENV_KEYS.to_h { |key| [key, nil] }.merge(
+    "AGENT_COORD_ENV_FILE" => nil,
+    "AGENT_COORD_LOCAL" => nil,
+    "XDG_CONFIG_HOME" => ISOLATED_CONFIG_HOME
+  ).freeze
 
   def with_env(pairs)
-    pairs = IDENTITY_ENV_KEYS.to_h { |key| [key, nil] }.merge(pairs)
+    pairs = CLEAN_ENV.merge(pairs)
     saved = pairs.keys.to_h { |key| [key, ENV.fetch(key, nil)] }
     pairs.each { |key, value| value.nil? ? ENV.delete(key) : ENV[key] = value }
     yield
@@ -441,6 +451,12 @@ class HttpEnvTestCase < Minitest::Test
 end
 
 class HttpBackendSelectionTest < HttpEnvTestCase
+  CONSUMER_ENV_CONTENT = "AGENT_COORD_API_URL=https://agent-coord.example\nAGENT_COORD_API_TOKEN=secret\n"
+
+  def claim_args(*extra)
+    ["claim", "--agent-id", "split-brain-worker", "--repo", "demo/example", "--target", "1", *extra]
+  end
+
   def run_cli(args, _env)
     stdout = StringIO.new
     stderr = StringIO.new
@@ -451,6 +467,29 @@ class HttpBackendSelectionTest < HttpEnvTestCase
       e.exit_code
     end
     [code, stdout.string, stderr.string]
+  end
+
+  # Isolated consumer env file plus isolated XDG state so the implicit local
+  # backend and the split-brain probe never touch the developer's real config.
+  def with_split_brain_config(extra_env = {})
+    Dir.mktmpdir("agent-coord-consumer-env") do |root|
+      config_home = File.join(root, "config")
+      env_file = File.join(config_home, "agent-coord", "env")
+      state_home = File.join(root, "state")
+      FileUtils.mkdir_p(File.dirname(env_file))
+      FileUtils.mkdir_p(state_home)
+      File.write(env_file, CONSUMER_ENV_CONTENT)
+      base = {
+        "AGENT_COORD_API_TOKEN" => nil,
+        "AGENT_COORD_API_URL" => nil,
+        "AGENT_COORD_BACKEND" => nil,
+        "AGENT_COORD_STATE_ROOT" => nil,
+        "AGENT_COORD_STATUS_STATE_ROOT" => nil,
+        "XDG_CONFIG_HOME" => config_home,
+        "XDG_STATE_HOME" => state_home
+      }
+      with_env(base.merge(extra_env)) { yield root, env_file }
+    end
   end
 
   def test_status_uses_http_backend_when_api_env_set
@@ -761,6 +800,183 @@ class HttpBackendSelectionTest < HttpEnvTestCase
 
         assert_equal 0, code
         refute_includes err, "split-brain"
+      end
+    end
+  end
+
+  def test_write_command_hard_stops_when_consumer_env_file_points_remote
+    with_split_brain_config do |_root, env_file|
+      code, out, err = run_cli(claim_args, {})
+
+      assert_equal 2, code
+      assert_empty out
+      assert_includes err, "split-brain configuration"
+      assert_includes err, env_file
+      assert_includes err, "refus"
+      assert_includes err, "--state-root"
+      assert_includes err, "AGENT_COORD_LOCAL=1"
+    end
+  end
+
+  def test_write_command_hard_stop_also_covers_record_event_but_not_status
+    with_split_brain_config do |_root, env_file|
+      blocked = run_cli(["record-event", "--batch-id", "batch-1", "--type", "note"], {})
+
+      assert_equal 2, blocked[0]
+      assert_includes blocked[2], env_file
+
+      allowed = run_cli(["status", "--json"], {})
+
+      assert_equal 0, allowed[0]
+      assert_includes allowed[2], "split-brain"
+    end
+  end
+
+  def test_status_split_brain_advisory_is_suppressed_by_local_opt_in
+    with_split_brain_config("AGENT_COORD_LOCAL" => "1") do
+      code, _, err = run_cli(["status", "--json"], {})
+
+      assert_equal 0, code
+      refute_includes err, "split-brain"
+    end
+  end
+
+  def test_write_command_allows_explicit_state_root_flag
+    with_split_brain_config do |root, _env_file|
+      state_root = File.join(root, "explicit-state")
+      FileUtils.mkdir_p(state_root)
+      code, out, err = run_cli(claim_args("--state-root", state_root), {})
+
+      assert_equal 0, code, err
+      assert_includes out, "claimed demo/example#1"
+      refute_includes err, "split-brain"
+    end
+  end
+
+  def test_write_command_allows_explicit_state_root_env
+    with_split_brain_config do |root, _env_file|
+      state_root = File.join(root, "env-state")
+      FileUtils.mkdir_p(state_root)
+      with_env("AGENT_COORD_STATE_ROOT" => state_root) do
+        code, out, err = run_cli(claim_args, {})
+
+        assert_equal 0, code, err
+        assert_includes out, "claimed demo/example#1"
+        refute_includes err, "split-brain"
+      end
+    end
+  end
+
+  def test_write_command_allows_explicit_local_opt_in_values
+    %w[1 true TRUE yes Yes].each do |value|
+      with_split_brain_config("AGENT_COORD_LOCAL" => value) do |_root, _env_file|
+        code, out, err = run_cli(claim_args, {})
+
+        assert_equal 0, code, "AGENT_COORD_LOCAL=#{value}: #{err}"
+        assert_includes out, "claimed demo/example#1"
+        refute_includes err, "split-brain"
+      end
+    end
+  end
+
+  def test_write_command_rejects_values_that_are_not_local_opt_ins
+    ["", "0", "no", "off"].each do |value|
+      with_split_brain_config("AGENT_COORD_LOCAL" => value) do |_root, env_file|
+        code, _, err = run_cli(claim_args, {})
+
+        assert_equal 2, code, "AGENT_COORD_LOCAL=#{value.inspect} should not opt into local mode"
+        assert_includes err, env_file
+      end
+    end
+  end
+
+  def test_write_command_is_unchanged_without_a_consumer_env_file
+    Dir.mktmpdir("agent-coord-local-only") do |root|
+      config_home = File.join(root, "config")
+      state_home = File.join(root, "state")
+      FileUtils.mkdir_p(config_home)
+      FileUtils.mkdir_p(state_home)
+      with_env("AGENT_COORD_API_TOKEN" => nil,
+               "AGENT_COORD_API_URL" => nil,
+               "AGENT_COORD_BACKEND" => nil,
+               "AGENT_COORD_STATE_ROOT" => nil,
+               "AGENT_COORD_STATUS_STATE_ROOT" => nil,
+               "XDG_CONFIG_HOME" => config_home,
+               "XDG_STATE_HOME" => state_home) do
+        code, out, err = run_cli(claim_args, {})
+
+        assert_equal 0, code, err
+        assert_includes out, "claimed demo/example#1"
+        assert_includes err, "local mode — single-machine only"
+        refute_includes err, "split-brain"
+      end
+    end
+  end
+
+  def test_write_command_is_unchanged_when_api_url_is_actually_loaded
+    stub = HttpStoreStub.new([])
+    with_split_brain_config("AGENT_COORD_API_URL" => stub.base_url, "AGENT_COORD_API_TOKEN" => "tok") do
+      _, _, err = run_cli(claim_args, {})
+
+      # The env file is loaded, so the guard stays quiet and the write reaches the
+      # fleet backend. The stub answers 500, which is an ordinary HTTP failure.
+      refute_includes err, "split-brain"
+      refute_empty stub.requests
+    end
+  ensure
+    stub.shutdown
+  end
+
+  def test_doctor_reports_split_brain_status_and_exits_two
+    with_split_brain_config do |_root, env_file|
+      code, out, err = run_cli(%w[doctor --json], {})
+
+      assert_equal 2, code
+      payload = JSON.parse(out)
+      assert_equal "split_brain", payload.fetch("status")
+      assert_equal env_file, payload.fetch("split_brain_env_file")
+      assert_includes err, "split-brain configuration"
+      assert_includes err, env_file
+      # The enforcing message replaces the read-command advisory rather than
+      # printing a near-duplicate alongside it.
+      refute_includes err, "warning: split-brain"
+      assert_equal 1, err.scan("split-brain configuration").length
+    end
+  end
+
+  def test_doctor_text_output_names_split_brain_escape_hatches
+    with_split_brain_config do |_root, env_file|
+      code, out, = run_cli(["doctor"], {})
+
+      assert_equal 2, code
+      assert_includes out, "status: split_brain"
+      assert_includes out, env_file
+      assert_includes out, "--state-root"
+      assert_includes out, "AGENT_COORD_LOCAL=1"
+    end
+  end
+
+  def test_doctor_stays_ok_under_each_local_opt_in
+    with_split_brain_config("AGENT_COORD_LOCAL" => "1") do
+      code, out, = run_cli(%w[doctor --json], {})
+
+      assert_equal 0, code
+      assert_equal "ok", JSON.parse(out).fetch("status")
+    end
+
+    with_split_brain_config do |root, _env_file|
+      state_root = File.join(root, "explicit-state")
+      FileUtils.mkdir_p(state_root)
+      flag_code, flag_out, = run_cli(["doctor", "--json", "--state-root", state_root], {})
+
+      assert_equal 0, flag_code
+      assert_equal "ok", JSON.parse(flag_out).fetch("status")
+
+      with_env("AGENT_COORD_STATE_ROOT" => state_root) do
+        env_code, env_out, = run_cli(%w[doctor --json], {})
+
+        assert_equal 0, env_code
+        assert_equal "ok", JSON.parse(env_out).fetch("status")
       end
     end
   end
