@@ -177,6 +177,14 @@ when releases begin.
 
 ### Fixed
 
+- The consumer env-file probe no longer reads a commented-out assignment such as
+  `AGENT_COORD_API_URL= # remote disabled` as a configured fleet URL. Sourcing
+  that file leaves the variable empty, so it selects no fleet backend; the value
+  is now parsed the way a shell would, with quoted values taken verbatim and an
+  unquoted trailing comment excluded, while a `#` inside an unquoted URL stays
+  part of the value. This also corrects the pre-existing split-brain advisory,
+  which had the same false positive (issue #97). No gem has been published, so
+  no migration is required.
 - Lightweight and stack doctor checks now reject an archived legacy GitHub
   backend instead of reporting its readable but permanently read-only state as
   healthy, with guidance to configure the HTTP backend or another writable

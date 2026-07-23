@@ -471,6 +471,10 @@ class HttpBackendSelectionTest < HttpEnvTestCase
 
   # Isolated consumer env file plus isolated XDG state so the implicit local
   # backend and the split-brain probe never touch the developer's real config.
+  #
+  # extra_env may be a callable taking the temp root, for env values that are
+  # paths under it. Nesting a second with_env inside the block would re-apply
+  # CLEAN_ENV and silently drop the consumer env file this sets up.
   def with_split_brain_config(extra_env = {})
     Dir.mktmpdir("agent-coord-consumer-env") do |root|
       config_home = File.join(root, "config")
@@ -479,6 +483,7 @@ class HttpBackendSelectionTest < HttpEnvTestCase
       FileUtils.mkdir_p(File.dirname(env_file))
       FileUtils.mkdir_p(state_home)
       File.write(env_file, CONSUMER_ENV_CONTENT)
+      extra_env = extra_env.call(root) if extra_env.respond_to?(:call)
       base = {
         "AGENT_COORD_API_TOKEN" => nil,
         "AGENT_COORD_API_URL" => nil,
@@ -857,16 +862,17 @@ class HttpBackendSelectionTest < HttpEnvTestCase
   end
 
   def test_write_command_allows_explicit_state_root_env
-    with_split_brain_config do |root, _env_file|
+    state_root_env = lambda do |root|
       state_root = File.join(root, "env-state")
       FileUtils.mkdir_p(state_root)
-      with_env("AGENT_COORD_STATE_ROOT" => state_root) do
-        code, out, err = run_cli(claim_args, {})
+      { "AGENT_COORD_STATE_ROOT" => state_root }
+    end
+    with_split_brain_config(state_root_env) do |_root, _env_file|
+      code, out, err = run_cli(claim_args, {})
 
-        assert_equal 0, code, err
-        assert_includes out, "claimed demo/example#1"
-        refute_includes err, "split-brain"
-      end
+      assert_equal 0, code, err
+      assert_includes out, "claimed demo/example#1"
+      refute_includes err, "split-brain"
     end
   end
 
@@ -999,6 +1005,45 @@ class HttpBackendSelectionTest < HttpEnvTestCase
     end
   end
 
+  # A host bootstrapped with --status-state-root redirects doctor's reads but not
+  # writes, so doctor must not report ok while claim on that same host exits 2.
+  def test_doctor_reports_split_brain_when_only_the_status_root_is_configured
+    status_env = lambda do |root|
+      status_root = File.join(root, "status-root")
+      FileUtils.mkdir_p(status_root)
+      { "AGENT_COORD_STATUS_STATE_ROOT" => status_root }
+    end
+    with_split_brain_config(status_env) do |_root, env_file|
+      doctor_code, doctor_out, = run_cli(%w[doctor --json], {})
+      claim_code, = run_cli(claim_args, {})
+
+      assert_equal 2, claim_code, "the write must still hard stop"
+      assert_equal 2, doctor_code, "doctor must agree with the write it is gating"
+      payload = JSON.parse(doctor_out)
+      assert_equal "split_brain", payload.fetch("status")
+      assert_equal env_file, payload.fetch("split_brain_env_file")
+    end
+  end
+
+  # ...but an explicit AGENT_COORD_STATE_ROOT does govern writes, so both stay ok.
+  def test_doctor_stays_ok_when_status_root_and_state_root_are_both_configured
+    both_roots = lambda do |root|
+      status_root = File.join(root, "status-root")
+      state_root = File.join(root, "state-root")
+      FileUtils.mkdir_p(status_root)
+      FileUtils.mkdir_p(state_root)
+      { "AGENT_COORD_STATUS_STATE_ROOT" => status_root, "AGENT_COORD_STATE_ROOT" => state_root }
+    end
+    with_split_brain_config(both_roots) do |_root, _env_file|
+      doctor_code, doctor_out, = run_cli(%w[doctor --json], {})
+      claim_code, = run_cli(claim_args, {})
+
+      assert_equal 0, claim_code
+      assert_equal 0, doctor_code
+      assert_equal "ok", JSON.parse(doctor_out).fetch("status")
+    end
+  end
+
   def test_doctor_stays_ok_under_each_local_opt_in
     with_split_brain_config("AGENT_COORD_LOCAL" => "1") do
       code, out, = run_cli(%w[doctor --json], {})
@@ -1014,13 +1059,18 @@ class HttpBackendSelectionTest < HttpEnvTestCase
 
       assert_equal 0, flag_code
       assert_equal "ok", JSON.parse(flag_out).fetch("status")
+    end
 
-      with_env("AGENT_COORD_STATE_ROOT" => state_root) do
-        env_code, env_out, = run_cli(%w[doctor --json], {})
+    state_root_env = lambda do |root|
+      state_root = File.join(root, "explicit-state")
+      FileUtils.mkdir_p(state_root)
+      { "AGENT_COORD_STATE_ROOT" => state_root }
+    end
+    with_split_brain_config(state_root_env) do
+      env_code, env_out, = run_cli(%w[doctor --json], {})
 
-        assert_equal 0, env_code
-        assert_equal "ok", JSON.parse(env_out).fetch("status")
-      end
+      assert_equal 0, env_code
+      assert_equal "ok", JSON.parse(env_out).fetch("status")
     end
   end
 

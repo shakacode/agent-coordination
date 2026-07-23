@@ -758,9 +758,19 @@ module AgentCoord
     # A consumer env file configures a fleet API URL, but the CLI fell back to the
     # implicit local root because that file was never sourced. Writes here would be
     # invisible to the fleet, so the operator must choose a backend explicitly.
+    # A status-scoped root only redirects reads. Writes on the same host never
+    # consult it, so they still fall through to the implicit local root — doctor
+    # must report the condition those writes would hit, not the one its own read
+    # path took.
+    def split_brain_eligible_local?(options)
+      return true if options[:implicit_local]
+
+      options[:status_root_local] && ENV.fetch("AGENT_COORD_STATE_ROOT", "").empty?
+    end
+
     def consumer_split_brain_env_file(options)
       return nil if options[:stack_json]
-      return nil unless options[:implicit_local]
+      return nil unless split_brain_eligible_local?(options)
       return nil unless ENV.fetch("AGENT_COORD_API_URL", "").empty?
       return nil if local_mode_opt_in?
       # Consulted from the notice, the refusal and the doctor payload in one run;
@@ -830,6 +840,7 @@ module AgentCoord
       configured_status_root = ENV.fetch(STATUS_STATE_ROOT_ENV, nil)
       if status_command && !configured_status_root.to_s.empty?
         options[:state_root] = configured_status_root
+        options[:status_root_local] = true
         return
       end
 
