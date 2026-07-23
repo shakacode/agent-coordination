@@ -9,6 +9,13 @@ when releases begin.
 
 ### Added
 
+- An `AGENT_COORD_LOCAL` environment opt-in that explicitly selects the implicit
+  local backend. It accepts `1`, `true`, or `yes` (case-insensitive); any other
+  value, including empty and `0`, is not an opt-in. Setting it both satisfies the
+  new split-brain write hard stop and silences the existing split-brain advisory
+  warning on read commands, so a deliberate single-machine operator can keep a
+  consumer env file on disk without unsourcing it (issue #97). No gem has been
+  published, so no migration is required.
 - A typed operational-signal event vocabulary for `record-event` plus a
   `batch-audit` closeout completeness gate. `record-event --type` now recognizes
   four typed names whose required fields are validated at write time (rejecting a
@@ -148,6 +155,19 @@ when releases begin.
 
 ### Changed
 
+- Split-brain configuration is now enforced instead of merely advised. When a
+  consumer env file configures `AGENT_COORD_API_URL` but was never sourced, and
+  the CLI therefore fell back to the *implicit* local state root, the write
+  commands `claim`, `release`, `heartbeat`, `record-event`, and `register-batch`
+  hard stop with the existing operational exit code `2` and an error naming the
+  offending env file and the three escape hatches (source the env file, pass
+  `--state-root`/`AGENT_COORD_STATE_ROOT`, or set `AGENT_COORD_LOCAL=1`).
+  `doctor` reports the same condition as `status: split_brain` with a new
+  `split_brain_env_file` field, emitting its full report before exiting `2`.
+  Read commands keep the advisory warning and exit `0`, `gc` is unaffected, the
+  `doctor --stack-json` component contract is unchanged, and local-only users
+  without a consumer env file see no behavior change (issue #97). No gem has
+  been published, so no migration is required.
 - Token provisioning now requires explicit read/write scopes, with `--all-state`
   available only as an explicit opt-out for trusted single-operator deployments.
 - Documented the `LocalStore` symlink trust boundary: explicitly selected
@@ -157,6 +177,14 @@ when releases begin.
 
 ### Fixed
 
+- The consumer env-file probe no longer reads a commented-out assignment such as
+  `AGENT_COORD_API_URL= # remote disabled` as a configured fleet URL. Sourcing
+  that file leaves the variable empty, so it selects no fleet backend; the value
+  is now parsed the way a shell would, with quoted values taken verbatim and an
+  unquoted trailing comment excluded, while a `#` inside an unquoted URL stays
+  part of the value. This also corrects the pre-existing split-brain advisory,
+  which had the same false positive (issue #97). No gem has been published, so
+  no migration is required.
 - Lightweight and stack doctor checks now reject an archived legacy GitHub
   backend instead of reporting its readable but permanently read-only state as
   healthy, with guidance to configure the HTTP backend or another writable

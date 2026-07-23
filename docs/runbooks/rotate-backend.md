@@ -65,8 +65,13 @@ its SHA-256 hash is stored.
 
 ## Restart and verify consumers
 
-Restart every long-running consumer so it reloads the environment file. For the
-operator dashboard this is normally:
+Restart every long-running consumer so it reloads the environment file. A shell
+that has not sourced it falls back to the implicit local state root; because the
+env file configures `AGENT_COORD_API_URL`, `agent-coord` refuses writes there
+with exit `2` and `agent-coord doctor` reports `status: split_brain` naming the
+file. Source the file (below) rather than working around that stop; use
+`--state-root PATH` or `AGENT_COORD_LOCAL=1` only for a deliberate local run.
+For the operator dashboard the restart is normally:
 
 ```bash
 agent-dashboard restart
