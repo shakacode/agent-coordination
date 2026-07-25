@@ -125,6 +125,27 @@ class SimulationTemplateTest < Minitest::Test
     assert_includes out, "CONFIG_ONLY"
   end
 
+  def test_trusted_seam_guard_ignores_base_only_changes_for_stale_task_branch
+    git("branch", "task-change")
+    File.open(File.join(@repo, ".agents/agent-workflow.yml"), "a") do |file|
+      file << "repo_prefix: ACSA\n"
+    end
+    git("add", ".agents/agent-workflow.yml")
+    git("commit", "-qm", "base policy")
+    base_commit = git_output("rev-parse", "HEAD")
+
+    git("checkout", "-q", "task-change")
+    task = File.join(@repo, "lib/task_one.rb")
+    File.write(task, File.read(task).sub("numbers.sum", "numbers.reject(&:negative?).sum"))
+    git("add", "lib/task_one.rb")
+    git("commit", "-qm", "task change")
+
+    out, err, status = seam_guard(base_commit, "HEAD")
+
+    assert status.success?, err
+    assert_includes out, "TASK_ONLY"
+  end
+
   def test_config_check_reports_usage_without_base_ref
     _out, err, status = Open3.capture3(
       File.join(@repo, ".agents/bin/config-check"),
@@ -202,6 +223,13 @@ class SimulationTemplateTest < Minitest::Test
   def git(*args)
     system("git", "-C", @repo, *args, out: File::NULL, err: File::NULL) ||
       raise("git #{args.first} failed")
+  end
+
+  def git_output(*args)
+    output, status = Open3.capture2("git", "-C", @repo, *args)
+    raise("git #{args.first} failed") unless status.success?
+
+    output.strip
   end
 
   def validate

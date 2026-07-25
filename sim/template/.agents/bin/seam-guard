@@ -26,7 +26,10 @@ end
 
 base_commit = git_capture(root, "rev-parse", "--verify", "#{base_ref}^{commit}").strip
 head_commit = git_capture(root, "rev-parse", "--verify", "#{head_ref}^{commit}").strip
-changed_output = git_capture(root, "diff", "--name-only", "-z", base_commit, head_commit)
+merge_base = git_capture(root, "merge-base", base_commit, head_commit).strip
+abort "Could not resolve the simulation merge base." if merge_base.empty?
+
+changed_output = git_capture(root, "diff", "--name-only", "-z", merge_base, head_commit)
 changed_paths = changed_output.split("\0")
 
 task_path = %r{\Alib/task_[[:alnum:]_]+\.rb\z}
