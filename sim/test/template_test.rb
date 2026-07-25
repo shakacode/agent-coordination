@@ -125,6 +125,54 @@ class SimulationTemplateTest < Minitest::Test
     assert_includes out, "CONFIG_ONLY"
   end
 
+  def test_trusted_seam_guard_rejects_invalid_policy_yaml
+    File.write(File.join(@repo, ".agents/agent-workflow.yml"), "- not\n- a mapping\n")
+    git("add", ".agents/agent-workflow.yml")
+    git("commit", "-qm", "invalid policy")
+
+    _out, err, status = seam_guard("HEAD^", "HEAD")
+
+    refute status.success?
+    assert_includes err, "Agent workflow policy must be a YAML mapping."
+  end
+
+  def test_trusted_seam_guard_rejects_noncanonical_agents_pointer
+    agents = File.join(@repo, "AGENTS.md")
+    File.write(agents, File.read(agents).sub("(`setup`, `validate`, `test`, ...)", "(`ci`, `validate`, `test`)"))
+    git("add", "AGENTS.md")
+    git("commit", "-qm", "invalid pointer")
+
+    _out, err, status = seam_guard("HEAD^", "HEAD")
+
+    refute status.success?
+    assert_includes err, "Agent Workflow Configuration pointer is not canonical."
+  end
+
+  def test_trusted_seam_guard_rejects_undocumented_config_contract
+    readme = File.join(@repo, ".agents/bin/README.md")
+    File.write(readme, File.read(readme).sub("| `config-check` |", "| `unchecked-config` |"))
+    git("add", ".agents/bin/README.md")
+    git("commit", "-qm", "invalid command contract")
+
+    _out, err, status = seam_guard("HEAD^", "HEAD")
+
+    refute status.success?
+    assert_includes err, "Simulation command README does not document guarded validation."
+  end
+
+  def test_trusted_seam_guard_rejects_task_mixed_with_configuration
+    task = File.join(@repo, "lib/task_one.rb")
+    File.write(task, File.read(task).sub("numbers.sum", "numbers.reject(&:negative?).sum"))
+    File.open(File.join(@repo, "AGENTS.md"), "a") { |file| file << "\nconfiguration change\n" }
+    git("add", "lib/task_one.rb", "AGENTS.md")
+    git("commit", "-qm", "mixed change")
+
+    _out, err, status = seam_guard("HEAD^", "HEAD")
+
+    refute status.success?
+    assert_includes err, "Task changes cannot be combined with config or unrelated paths:"
+  end
+
   def test_trusted_seam_guard_ignores_base_only_changes_for_stale_task_branch
     git("branch", "task-change")
     File.open(File.join(@repo, ".agents/agent-workflow.yml"), "a") do |file|
@@ -207,6 +255,27 @@ class SimulationTemplateTest < Minitest::Test
     assert_includes out, "TASK_ONLY"
   end
 
+  def test_validate_ignores_base_only_changes_for_stale_task_branch
+    git("branch", "task-change")
+    File.open(File.join(@repo, ".agents/agent-workflow.yml"), "a") do |file|
+      file << "repo_prefix: ACSA\n"
+    end
+    git("add", ".agents/agent-workflow.yml")
+    git("commit", "-qm", "base policy")
+    base_commit = git_output("rev-parse", "HEAD")
+
+    git("checkout", "-q", "task-change")
+    task = File.join(@repo, "lib/task_one.rb")
+    File.write(task, File.read(task).sub("numbers.sum", "numbers.reject(&:negative?).sum"))
+    git("add", "lib/task_one.rb")
+    git("commit", "-qm", "task change")
+
+    out, err, status = validate(base_commit)
+
+    assert status.success?, err
+    assert_includes out, "2 runs, 2 assertions"
+  end
+
   def test_validate_rejects_undocumented_config_contract
     readme = File.join(@repo, ".agents/bin/README.md")
     File.write(readme, File.read(readme).sub("| `config-check` |", "| `unchecked-config` |"))
@@ -263,9 +332,9 @@ class SimulationTemplateTest < Minitest::Test
     output.strip
   end
 
-  def validate
+  def validate(base_ref = "HEAD")
     Open3.capture3(
-      { "AGENT_SIM_BASE_REF" => "HEAD" },
+      { "AGENT_SIM_BASE_REF" => base_ref },
       File.join(@repo, ".agents/bin/ci"),
       chdir: @repo
     )

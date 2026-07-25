@@ -33,6 +33,8 @@ changed_output = git_capture(root, "diff", "--name-only", "-z", merge_base, head
 changed_paths = changed_output.split("\0")
 
 task_path = %r{\Alib/task_[[:alnum:]_]+\.rb\z}
+# Steady-state changes are deliberately narrow. Updates to this guard, CI, or
+# validators require an explicit bootstrap PR; see .agents/bin/README.md.
 config_paths = %w[
   .agents/agent-workflow.yml
   .agents/bin/README.md
@@ -50,6 +52,8 @@ end
 unexpected_paths = non_task_paths - config_paths
 abort "Unexpected guarded paths: #{unexpected_paths.join(', ')}" unless unexpected_paths.empty?
 
+# Keep these duplicated checks aligned with config-check. Duplication is
+# intentional: this base-trusted guard must never require candidate code.
 agents = head_file(root, head_commit, "AGENTS.md")
 heading = "## Agent Workflow Configuration"
 section_start = agents.index(heading)

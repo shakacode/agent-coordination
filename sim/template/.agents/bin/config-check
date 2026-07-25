@@ -15,11 +15,16 @@ allowed_paths = %w[
   .agents/bin/config-check
   .agents/bin/seam-guard
   .agents/bin/validate
+  .github/workflows/ci.yml
   .github/workflows/seam-guard.yml
   AGENTS.md
 ]
+# Bootstrap/local compatibility only. The base-trusted seam-guard has the
+# intentionally narrower steady-state allowlist and rejects these entrypoints.
 task_path = %r{\Alib/task_[[:alnum:]_]+\.rb\z}
-expected_validator_sha256 = "c56a7aea6284034237e7352b8de4739aea909739c5a5f81905d5722c6a12d47b"
+# Regenerate after a reviewed validator update with:
+# ruby -rdigest -e 'puts Digest::SHA256.file(".agents/bin/validate").hexdigest'
+expected_validator_sha256 = "fce620ecaba324e4b00df7bcfd1c5ae8c233195409b1da29e721e6b503876ce4"
 
 base_commit, base_status = Open3.capture2("git", "-C", root, "rev-parse", "--verify", "#{base_ref}^{commit}")
 abort "Could not resolve config-check base ref." unless base_status.success?
@@ -35,6 +40,7 @@ changed_paths = changed_output.split("\0")
 task_paths, non_task_paths = changed_paths.partition { |path| path.match?(task_path) }
 
 validator = File.join(root, ".agents/bin/validate")
+abort "Simulation validator does not match the checked contract." unless File.file?(validator)
 validator_sha256 = Digest::SHA256.file(validator).hexdigest
 abort "Simulation validator does not match the checked contract." unless validator_sha256 == expected_validator_sha256
 
@@ -61,6 +67,8 @@ abort "Invalid Ruby syntax in simulation guard scripts." unless ruby_scripts.all
   system(RbConfig.ruby, "-c", script, out: File::NULL, err: File::NULL)
 end
 
+# Keep these duplicated checks aligned with seam-guard. Duplication is
+# intentional: the base-trusted guard must never require candidate code.
 agents = File.read(File.join(root, "AGENTS.md"))
 heading = "## Agent Workflow Configuration"
 section_start = agents.index(heading)
