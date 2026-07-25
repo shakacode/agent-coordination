@@ -107,6 +107,17 @@ class SimulationTemplateTest < Minitest::Test
     refute status.success?
   end
 
+  def test_config_check_rejects_invalid_test_script_syntax
+    File.open(File.join(@repo, ".agents/bin/test"), "a") { |file| file << "\nif\n" }
+    git("add", ".agents/bin/test")
+    git("commit", "-qm", "invalid test script")
+
+    _out, err, status = config_check
+
+    refute status.success?
+    assert_includes err, "Invalid shell syntax in simulation command scripts."
+  end
+
   def test_validate_rejects_undocumented_config_contract
     readme = File.join(@repo, ".agents/bin/README.md")
     File.write(readme, File.read(readme).sub("| `config-check` |", "| `unchecked-config` |"))

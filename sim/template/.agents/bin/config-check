@@ -45,7 +45,7 @@ unexpected_paths = non_task_paths - allowed_paths
 abort "Unexpected config-only paths: #{unexpected_paths.join(', ')}" unless unexpected_paths.empty?
 
 scripts = [validator, File.join(root, ".agents/bin/ci"), File.join(root, ".agents/bin/test")]
-abort "Invalid shell syntax in simulation command scripts." unless system("bash", "-n", *scripts)
+abort "Invalid shell syntax in simulation command scripts." unless scripts.all? { |script| system("bash", "-n", script) }
 abort "Invalid Ruby syntax in config-check." unless system(
   RbConfig.ruby, "-c", __FILE__, out: File::NULL, err: File::NULL
 )

@@ -3,7 +3,7 @@ set -euo pipefail
 root="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
 cd "$root"
 
-expected_config_check_sha256="7869920b5c0894944e3a1c84e48d7806dbd7eb3a53af154c81930176da240f04"
+expected_config_check_sha256="07069288664cfda74ae7f442a72e05ec265074abe38d8bddbe146fdd8899cca1"
 actual_config_check_sha256="$(ruby -rdigest -e 'print Digest::SHA256.file(ARGV.fetch(0)).hexdigest' \
   "$root/.agents/bin/config-check")"
 if [ "$actual_config_check_sha256" != "$expected_config_check_sha256" ]; then
