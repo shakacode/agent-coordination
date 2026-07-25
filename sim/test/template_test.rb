@@ -165,6 +165,16 @@ class SimulationTemplateTest < Minitest::Test
     refute status.success?
   end
 
+  def test_validate_rejects_non_executable_validator
+    validator = File.join(@repo, ".agents/bin/validate")
+    File.chmod(0o644, validator)
+
+    _out, err, status = validate
+
+    refute status.success?
+    assert_includes err, "Simulation command scripts must remain executable."
+  end
+
   def test_config_check_rejects_invalid_test_script_syntax
     File.open(File.join(@repo, ".agents/bin/test"), "a") { |file| file << "\nif\n" }
     git("add", ".agents/bin/test")
@@ -174,6 +184,27 @@ class SimulationTemplateTest < Minitest::Test
 
     refute status.success?
     assert_includes err, "Invalid shell syntax in simulation command scripts."
+  end
+
+  def test_config_check_ignores_base_only_changes_for_stale_task_branch
+    git("branch", "task-change")
+    File.open(File.join(@repo, ".agents/agent-workflow.yml"), "a") do |file|
+      file << "repo_prefix: ACSA\n"
+    end
+    git("add", ".agents/agent-workflow.yml")
+    git("commit", "-qm", "base policy")
+    base_commit = git_output("rev-parse", "HEAD")
+
+    git("checkout", "-q", "task-change")
+    task = File.join(@repo, "lib/task_one.rb")
+    File.write(task, File.read(task).sub("numbers.sum", "numbers.reject(&:negative?).sum"))
+    git("add", "lib/task_one.rb")
+    git("commit", "-qm", "task change")
+
+    out, err, status = config_check(base_commit)
+
+    assert status.success?, err
+    assert_includes out, "TASK_ONLY"
   end
 
   def test_validate_rejects_undocumented_config_contract
@@ -240,10 +271,10 @@ class SimulationTemplateTest < Minitest::Test
     )
   end
 
-  def config_check
+  def config_check(base_ref = "HEAD")
     Open3.capture3(
       File.join(@repo, ".agents/bin/config-check"),
-      "HEAD",
+      base_ref,
       chdir: @repo
     )
   end

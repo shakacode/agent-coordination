@@ -23,9 +23,11 @@ expected_validator_sha256 = "c56a7aea6284034237e7352b8de4739aea909739c5a5f81905d
 
 base_commit, base_status = Open3.capture2("git", "-C", root, "rev-parse", "--verify", "#{base_ref}^{commit}")
 abort "Could not resolve config-check base ref." unless base_status.success?
+merge_base, merge_base_status = Open3.capture2("git", "-C", root, "merge-base", base_commit.strip, "HEAD")
+abort "Could not resolve config-check merge base." unless merge_base_status.success?
 
 changed_output, changed_status = Open3.capture2(
-  "git", "-C", root, "diff", "--name-only", "-z", base_commit.strip
+  "git", "-C", root, "diff", "--name-only", "-z", merge_base.strip
 )
 abort "Could not inspect simulation changes." unless changed_status.success?
 
@@ -51,8 +53,10 @@ scripts = [
   File.join(root, ".agents/bin/ci"),
   File.join(root, ".agents/bin/test")
 ]
+abort "Simulation command scripts must remain executable." unless scripts.all? { |script| File.executable?(script) }
 abort "Invalid shell syntax in simulation command scripts." unless scripts.all? { |script| system("bash", "-n", script) }
 ruby_scripts = [__FILE__, File.join(root, ".agents/bin/seam-guard")]
+abort "Simulation guard scripts must remain executable." unless ruby_scripts.all? { |script| File.executable?(script) }
 abort "Invalid Ruby syntax in simulation guard scripts." unless ruby_scripts.all? do |script|
   system(RbConfig.ruby, "-c", script, out: File::NULL, err: File::NULL)
 end
