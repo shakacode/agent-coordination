@@ -1,35 +1,54 @@
 #!/usr/bin/env ruby
 # frozen_string_literal: true
 
+require "digest"
 require "open3"
 require "rbconfig"
 require "yaml"
 
 root = File.expand_path("../..", __dir__)
-base_ref = ARGV.fetch(0)
+base_ref = ARGV[0] or abort "usage: config-check <base_ref>"
 allowed_paths = %w[
   .agents/agent-workflow.yml
   .agents/bin/README.md
+  .agents/bin/ci
   .agents/bin/config-check
   .agents/bin/validate
   AGENTS.md
 ]
+task_path = %r{\Alib/task_[[:alnum:]_]+\.rb\z}
+expected_validator_sha256 = "c56a7aea6284034237e7352b8de4739aea909739c5a5f81905d5722c6a12d47b"
 
-changed_output, changed_status = Open3.capture2("git", "-C", root, "diff", "--name-only", base_ref)
-abort "Could not inspect config-only changes." unless changed_status.success?
+base_commit, base_status = Open3.capture2("git", "-C", root, "rev-parse", "--verify", "#{base_ref}^{commit}")
+abort "Could not resolve config-check base ref." unless base_status.success?
 
-changed_paths = changed_output.lines.map(&:strip).reject(&:empty?)
-unexpected_paths = changed_paths - allowed_paths
-abort "Unexpected config-only paths: #{unexpected_paths.join(', ')}" unless unexpected_paths.empty?
+changed_output, changed_status = Open3.capture2(
+  "git", "-C", root, "diff", "--name-only", "-z", base_commit.strip
+)
+abort "Could not inspect simulation changes." unless changed_status.success?
+
+changed_paths = changed_output.split("\0")
+task_paths, non_task_paths = changed_paths.partition { |path| path.match?(task_path) }
 
 validator = File.join(root, ".agents/bin/validate")
+validator_sha256 = Digest::SHA256.file(validator).hexdigest
+abort "Simulation validator does not match the checked contract." unless validator_sha256 == expected_validator_sha256
+
+unless task_paths.empty?
+  abort "Task changes cannot be combined with config or unrelated paths: #{non_task_paths.join(', ')}" unless non_task_paths.empty?
+
+  puts "TASK_ONLY"
+  exit 0
+end
+
+unexpected_paths = non_task_paths - allowed_paths
+abort "Unexpected config-only paths: #{unexpected_paths.join(', ')}" unless unexpected_paths.empty?
+
 scripts = [validator, File.join(root, ".agents/bin/ci"), File.join(root, ".agents/bin/test")]
 abort "Invalid shell syntax in simulation command scripts." unless system("bash", "-n", *scripts)
-abort "Invalid Ruby syntax in config-check." unless system(RbConfig.ruby, "-c", __FILE__, out: File::NULL)
-
-validator_content = File.read(validator)
-required_dispatch = '"$root/.agents/bin/config-check" "$base_ref"'
-abort "Simulation validator does not dispatch config-only changes to config-check." unless validator_content.include?(required_dispatch)
+abort "Invalid Ruby syntax in config-check." unless system(
+  RbConfig.ruby, "-c", __FILE__, out: File::NULL, err: File::NULL
+)
 
 agents = File.read(File.join(root, "AGENTS.md"))
 heading = "## Agent Workflow Configuration"
@@ -55,3 +74,5 @@ required_readme_rows = [
   "| `config-check` | Validate allowed config-only paths, canonical seam content, policy YAML, and script syntax. |"
 ]
 abort "Simulation command README does not document config-only validation." unless required_readme_rows.all? { |row| readme.include?(row) }
+
+puts changed_paths.empty? ? "NO_CHANGES" : "CONFIG_ONLY"

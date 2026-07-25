@@ -69,20 +69,34 @@ class SimulationTemplateTest < Minitest::Test
     assert_includes err, "Agent Workflow Configuration pointer is not canonical."
   end
 
-  def test_config_check_rejects_validator_without_config_dispatch
+  def test_ci_rejects_malicious_validator_that_exits_early
     validator = File.join(@repo, ".agents/bin/validate")
-    File.write(
-      validator,
-      File.read(validator).sub(
-        '"$root/.agents/bin/config-check" "$base_ref"',
-        "true"
-      )
-    )
+    File.write(validator, "#!/usr/bin/env bash\nexit 0\n")
 
-    _out, err, status = config_check
+    _out, err, status = validate
 
     refute status.success?
-    assert_includes err, "Simulation validator does not dispatch config-only changes to config-check."
+    assert_includes err, "Simulation validator does not match the checked contract."
+  end
+
+  def test_ci_rejects_modified_config_check
+    File.open(File.join(@repo, ".agents/bin/config-check"), "a") { |file| file << "\n# bypass\n" }
+
+    _out, err, status = validate
+
+    refute status.success?
+    assert_includes err, "config-check does not match the CI-pinned contract."
+  end
+
+  def test_config_check_reports_usage_without_base_ref
+    _out, err, status = Open3.capture3(
+      File.join(@repo, ".agents/bin/config-check"),
+      chdir: @repo
+    )
+
+    refute status.success?
+    assert_includes err, "usage: config-check <base_ref>"
+    refute_includes err, "IndexError"
   end
 
   def test_validate_rejects_invalid_validator_syntax
@@ -119,7 +133,7 @@ class SimulationTemplateTest < Minitest::Test
     _out, err, status = validate
 
     refute status.success?
-    assert_includes err, "Unexpected changed files for single-task validation:"
+    assert_includes err, "Unexpected config-only paths:"
     assert_includes err, "README.md"
   end
 
@@ -131,7 +145,7 @@ class SimulationTemplateTest < Minitest::Test
     _out, err, status = validate
 
     refute status.success?
-    assert_includes err, "Unexpected changed files for single-task validation:"
+    assert_includes err, "Task changes cannot be combined with config or unrelated paths:"
     assert_includes err, "AGENTS.md"
   end
 
@@ -145,7 +159,7 @@ class SimulationTemplateTest < Minitest::Test
   def validate
     Open3.capture3(
       { "AGENT_SIM_BASE_REF" => "HEAD" },
-      File.join(@repo, ".agents/bin/validate"),
+      File.join(@repo, ".agents/bin/ci"),
       chdir: @repo
     )
   end

@@ -24,14 +24,6 @@ if [ -n "$base_ref" ]; then
   test_count="$(printf '%s\n' "$tests" | sed '/^$/d' | wc -l | tr -d ' ')"
 
   if [ "$changed_count" -gt 0 ]; then
-    config_only_invalid="$(printf '%s\n' "$changed" |
-      sed '/^$/d' |
-      grep -Ev '^(AGENTS\.md|\.agents/agent-workflow\.yml|\.agents/bin/(README\.md|config-check|validate))$' || true)"
-    if [ -z "$config_only_invalid" ]; then
-      "$root/.agents/bin/config-check" "$base_ref"
-      exit $?
-    fi
-
     invalid="$(printf '%s\n' "$changed" |
       sed '/^$/d' |
       grep -Ev '^lib/task_[[:alnum:]_]+\.rb$' || true)"
