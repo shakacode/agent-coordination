@@ -4,9 +4,11 @@
 require "open3"
 require "yaml"
 
-root = File.expand_path(ENV.fetch("AGENT_SIM_REPO_ROOT", File.expand_path("../..", __dir__)))
-base_ref = ARGV[0] or abort "usage: seam-guard <base_ref> <head_ref>"
-head_ref = ARGV[1] or abort "usage: seam-guard <base_ref> <head_ref>"
+usage = "usage: seam-guard <repo_root> <base_ref> <head_ref>"
+root_arg = ARGV[0] or abort usage
+base_ref = ARGV[1] or abort usage
+head_ref = ARGV[2] or abort usage
+root = File.expand_path(root_arg)
 
 def git_capture(root, *args)
   output, status = Open3.capture2("git", "-C", root, *args)

@@ -27,4 +27,4 @@ jobs:
           git fetch --no-tags origin \
             "+refs/pull/${PR_NUMBER}/head:refs/remotes/origin/pr-head"
           test "$(git rev-parse refs/remotes/origin/pr-head)" = "$HEAD_SHA"
-          .agents/bin/seam-guard "$BASE_SHA" "$HEAD_SHA"
+          .agents/bin/seam-guard . "$BASE_SHA" "$HEAD_SHA"

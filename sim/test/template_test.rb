@@ -222,8 +222,8 @@ class SimulationTemplateTest < Minitest::Test
 
   def seam_guard(base_ref, head_ref)
     Open3.capture3(
-      { "AGENT_SIM_REPO_ROOT" => @repo },
       File.join(TEMPLATE, ".agents/bin/seam-guard"),
+      @repo,
       base_ref,
       head_ref,
       chdir: @repo
