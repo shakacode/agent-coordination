@@ -1,0 +1,57 @@
+#!/usr/bin/env ruby
+# frozen_string_literal: true
+
+require "open3"
+require "rbconfig"
+require "yaml"
+
+root = File.expand_path("../..", __dir__)
+base_ref = ARGV.fetch(0)
+allowed_paths = %w[
+  .agents/agent-workflow.yml
+  .agents/bin/README.md
+  .agents/bin/config-check
+  .agents/bin/validate
+  AGENTS.md
+]
+
+changed_output, changed_status = Open3.capture2("git", "-C", root, "diff", "--name-only", base_ref)
+abort "Could not inspect config-only changes." unless changed_status.success?
+
+changed_paths = changed_output.lines.map(&:strip).reject(&:empty?)
+unexpected_paths = changed_paths - allowed_paths
+abort "Unexpected config-only paths: #{unexpected_paths.join(', ')}" unless unexpected_paths.empty?
+
+validator = File.join(root, ".agents/bin/validate")
+scripts = [validator, File.join(root, ".agents/bin/ci"), File.join(root, ".agents/bin/test")]
+abort "Invalid shell syntax in simulation command scripts." unless system("bash", "-n", *scripts)
+abort "Invalid Ruby syntax in config-check." unless system(RbConfig.ruby, "-c", __FILE__, out: File::NULL)
+
+validator_content = File.read(validator)
+required_dispatch = '"$root/.agents/bin/config-check" "$base_ref"'
+abort "Simulation validator does not dispatch config-only changes to config-check." unless validator_content.include?(required_dispatch)
+
+agents = File.read(File.join(root, "AGENTS.md"))
+heading = "## Agent Workflow Configuration"
+section_start = agents.index(heading)
+abort "Missing canonical Agent Workflow Configuration pointer." unless section_start
+
+expected_pointer = <<~MARKDOWN.chomp
+  ## Agent Workflow Configuration
+
+  Portable shared skills resolve this repo's commands and policy through:
+  - **Commands** — run `.agents/bin/<name>` (`setup`, `validate`, `test`, ...); see `.agents/bin/README.md`. A missing script means that capability is n/a here.
+  - **Policy / config** — `.agents/agent-workflow.yml`.
+MARKDOWN
+actual_pointer = agents[section_start..].rstrip
+abort "Agent Workflow Configuration pointer is not canonical." unless actual_pointer == expected_pointer
+
+policy = YAML.safe_load(File.read(File.join(root, ".agents/agent-workflow.yml")), aliases: false)
+abort "Agent workflow policy must be a YAML mapping." unless policy.is_a?(Hash)
+
+readme = File.read(File.join(root, ".agents/bin/README.md"))
+required_readme_rows = [
+  "| `validate` | Sim-aware gate: one task file runs its matching test; task/config mixes and unrelated diffs are rejected. |",
+  "| `config-check` | Validate allowed config-only paths, canonical seam content, policy YAML, and script syntax. |"
+]
+abort "Simulation command README does not document config-only validation." unless required_readme_rows.all? { |row| readme.include?(row) }
