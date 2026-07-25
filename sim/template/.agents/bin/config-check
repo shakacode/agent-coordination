@@ -13,7 +13,9 @@ allowed_paths = %w[
   .agents/bin/README.md
   .agents/bin/ci
   .agents/bin/config-check
+  .agents/bin/seam-guard
   .agents/bin/validate
+  .github/workflows/seam-guard.yml
   AGENTS.md
 ]
 task_path = %r{\Alib/task_[[:alnum:]_]+\.rb\z}
@@ -44,11 +46,16 @@ end
 unexpected_paths = non_task_paths - allowed_paths
 abort "Unexpected config-only paths: #{unexpected_paths.join(', ')}" unless unexpected_paths.empty?
 
-scripts = [validator, File.join(root, ".agents/bin/ci"), File.join(root, ".agents/bin/test")]
+scripts = [
+  validator,
+  File.join(root, ".agents/bin/ci"),
+  File.join(root, ".agents/bin/test")
+]
 abort "Invalid shell syntax in simulation command scripts." unless scripts.all? { |script| system("bash", "-n", script) }
-abort "Invalid Ruby syntax in config-check." unless system(
-  RbConfig.ruby, "-c", __FILE__, out: File::NULL, err: File::NULL
-)
+ruby_scripts = [__FILE__, File.join(root, ".agents/bin/seam-guard")]
+abort "Invalid Ruby syntax in simulation guard scripts." unless ruby_scripts.all? do |script|
+  system(RbConfig.ruby, "-c", script, out: File::NULL, err: File::NULL)
+end
 
 agents = File.read(File.join(root, "AGENTS.md"))
 heading = "## Agent Workflow Configuration"
@@ -71,7 +78,8 @@ abort "Agent workflow policy must be a YAML mapping." unless policy.is_a?(Hash)
 readme = File.read(File.join(root, ".agents/bin/README.md"))
 required_readme_rows = [
   "| `validate` | Sim-aware gate: one task file runs its matching test; task/config mixes and unrelated diffs are rejected. |",
-  "| `config-check` | Validate allowed config-only paths, canonical seam content, policy YAML, and script syntax. |"
+  "| `config-check` | Validate allowed config-only paths, canonical seam content, policy YAML, and script syntax. |",
+  "| `seam-guard` | Base-trusted pull-request guard; rejects changes to CI and validator entrypoints before head code runs. |"
 ]
 abort "Simulation command README does not document config-only validation." unless required_readme_rows.all? { |row| readme.include?(row) }
 

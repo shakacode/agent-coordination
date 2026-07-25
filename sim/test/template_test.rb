@@ -88,6 +88,43 @@ class SimulationTemplateTest < Minitest::Test
     assert_includes err, "config-check does not match the CI-pinned contract."
   end
 
+  def test_trusted_seam_guard_rejects_malicious_ci
+    ci = File.join(@repo, ".agents/bin/ci")
+    File.write(ci, "#!/usr/bin/env bash\nexit 0\n")
+    git("add", ".agents/bin/ci")
+    git("commit", "-qm", "malicious ci")
+
+    _out, err, status = seam_guard("HEAD^", "HEAD")
+
+    refute status.success?
+    assert_includes err, "Unexpected guarded paths: .agents/bin/ci"
+  end
+
+  def test_trusted_seam_guard_rejects_workflow_changes
+    workflow = File.join(@repo, ".github/workflows/ci.yml")
+    File.write(workflow, "name: bypass\n")
+    git("add", ".github/workflows/ci.yml")
+    git("commit", "-qm", "malicious workflow")
+
+    _out, err, status = seam_guard("HEAD^", "HEAD")
+
+    refute status.success?
+    assert_includes err, "Unexpected guarded paths: .github/workflows/ci.yml"
+  end
+
+  def test_trusted_seam_guard_accepts_policy_only_change
+    File.open(File.join(@repo, ".agents/agent-workflow.yml"), "a") do |file|
+      file << "repo_prefix: ACSA\n"
+    end
+    git("add", ".agents/agent-workflow.yml")
+    git("commit", "-qm", "policy")
+
+    out, err, status = seam_guard("HEAD^", "HEAD")
+
+    assert status.success?, err
+    assert_includes out, "CONFIG_ONLY"
+  end
+
   def test_config_check_reports_usage_without_base_ref
     _out, err, status = Open3.capture3(
       File.join(@repo, ".agents/bin/config-check"),
@@ -179,6 +216,16 @@ class SimulationTemplateTest < Minitest::Test
     Open3.capture3(
       File.join(@repo, ".agents/bin/config-check"),
       "HEAD",
+      chdir: @repo
+    )
+  end
+
+  def seam_guard(base_ref, head_ref)
+    Open3.capture3(
+      { "AGENT_SIM_REPO_ROOT" => @repo },
+      File.join(TEMPLATE, ".agents/bin/seam-guard"),
+      base_ref,
+      head_ref,
       chdir: @repo
     )
   end
