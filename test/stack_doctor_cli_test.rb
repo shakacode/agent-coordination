@@ -22,7 +22,7 @@ module StackDoctorTestFixtures
       exit 0
     when "api repos/example/coordination"
       puts JSON.generate("archived" => false)
-    when %r{\Aapi repos/example/coordination/git/trees/state\?recursive=1\z}
+    when %r{\Aapi repos/example/coordination/git/trees/(?:state|configured-ref)\?recursive=1\z}
       puts JSON.generate(
         "tree" => [
           { "path" => "claims", "type" => "tree" },
@@ -30,7 +30,7 @@ module StackDoctorTestFixtures
           { "path" => "heartbeats/unrequested.json", "type" => "blob" }
         ]
       )
-    when %r{\Aapi repos/example/coordination/contents/heartbeats/unrequested\.json\?ref=state\z}
+    when %r{\Aapi repos/example/coordination/contents/heartbeats/unrequested\.json\?ref=(?:state|configured-ref)\z}
       puts JSON.generate("content" => Base64.strict_encode64("{"), "sha" => "broken")
     else
       warn "unexpected gh command: #{command}"
@@ -48,16 +48,22 @@ end
 module StackDoctorCliTestHarness
   ROOT = File.expand_path("..", __dir__)
   BIN = File.join(ROOT, "bin", "agent-coord")
+  ISOLATED_CONFIG_HOME = Dir.mktmpdir("agent-coord-stack-doctor-config")
+  Minitest.after_run { FileUtils.rm_rf(ISOLATED_CONFIG_HOME) }
   CLEAN_ENV = {
     "AGENT_COORD_API_TOKEN" => nil,
     "AGENT_COORD_API_URL" => nil,
     "AGENT_COORD_BACKEND" => nil,
     "AGENT_COORD_ENV_FILE" => nil,
+    "AGENT_COORD_LOCAL" => nil,
     "AGENT_COORD_MACHINE_ID" => nil,
+    "AGENT_COORD_POLICY" => nil,
+    "AGENT_COORD_REF" => nil,
     "AGENT_COORD_SESSION_ID" => nil,
     "AGENT_COORD_STATE_ROOT" => nil,
     "AGENT_COORD_STATUS_STATE_ROOT" => nil,
-    "CODEX_THREAD_ID" => nil
+    "CODEX_THREAD_ID" => nil,
+    "XDG_CONFIG_HOME" => ISOLATED_CONFIG_HOME
   }.freeze
 
   def run_doctor(*, env: {})
@@ -588,6 +594,30 @@ class ExplicitBackendPrecedenceStackDoctorTest < Minitest::Test
       assert_nil backend_check.dig("details", "backend_url")
       assert_nil backend_check.dig("details", "state_root")
       assert_includes File.readlines(log_path, chomp: true), "repo view example/coordination"
+    end
+  end
+
+  def test_explicit_github_stack_selector_uses_configured_process_ref
+    Dir.mktmpdir("agent-coord-stack-doctor") do |root|
+      fake_bin = File.join(root, "bin")
+      log_path = File.join(root, "gh.log")
+      FileUtils.mkdir_p(fake_bin)
+      StackDoctorTestFixtures.write_fake_github(fake_bin)
+
+      result = run_doctor(
+        "--stack-json", "--backend", "example/coordination",
+        env: {
+          "AGENT_COORD_REF" => "configured-ref",
+          "GH_LOG" => log_path,
+          "PATH" => [fake_bin, File.dirname(RbConfig.ruby), "/usr/bin", "/bin"].join(File::PATH_SEPARATOR)
+        }
+      )
+
+      assert_equal 0, result.fetch(:status).exitstatus, result.fetch(:stderr)
+      assert_includes(
+        File.readlines(log_path, chomp: true),
+        "api repos/example/coordination/git/trees/configured-ref?recursive=1"
+      )
     end
   end
 

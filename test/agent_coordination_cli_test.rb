@@ -109,13 +109,14 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
 
   # In-process runners read the real process ENV, so keep them off the developer's
   # consumer env file, which would otherwise trip the split-brain guard.
-  CONSUMER_ENV_KEYS = %w[AGENT_COORD_ENV_FILE AGENT_COORD_LOCAL XDG_CONFIG_HOME].freeze
+  CONSUMER_ENV_KEYS = (
+    AgentCoord::USER_CONFIG_ENV_KEYS + %w[AGENT_COORD_ENV_FILE XDG_CONFIG_HOME]
+  ).uniq.freeze
 
   def setup
     @state_root = Dir.mktmpdir("agent-coord-test")
     @saved_consumer_env = CONSUMER_ENV_KEYS.to_h { |key| [key, ENV.fetch(key, nil)] }
-    ENV.delete("AGENT_COORD_ENV_FILE")
-    ENV.delete("AGENT_COORD_LOCAL")
+    CONSUMER_ENV_KEYS.each { |key| ENV.delete(key) }
     ENV["XDG_CONFIG_HOME"] = ISOLATED_CONFIG_HOME
   end
 
@@ -1446,6 +1447,68 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     end
   end
 
+  def test_config_set_rejects_empty_token_stdin_cleanly
+    with_private_config_tmpdir("agent-coord-empty-token") do |root|
+      config_home = File.join(root, "config")
+      result = run_command(
+        { "XDG_CONFIG_HOME" => config_home },
+        RbConfig.ruby,
+        BIN,
+        "config",
+        "set",
+        "--api-url",
+        "https://coordination.example",
+        "--token-stdin",
+        stdin_data: ""
+      )
+
+      assert_equal 1, result.status.exitstatus
+      assert_includes result.stderr, "--token-stdin requires a non-empty token"
+      refute_includes result.stderr, "NoMethodError"
+      refute_path_exists File.join(config_home, "agent-coord", "env")
+    end
+  end
+
+  def test_config_set_rejects_non_loopback_plain_http_url
+    with_private_config_tmpdir("agent-coord-insecure-api-url") do |root|
+      config_home = File.join(root, "config")
+      result = run_command(
+        { "XDG_CONFIG_HOME" => config_home },
+        RbConfig.ruby,
+        BIN,
+        "config",
+        "set",
+        "--api-url",
+        "http://coordination.example"
+      )
+
+      assert_equal 1, result.status.exitstatus
+      assert_includes result.stderr, "must use https unless it points at localhost"
+      refute_path_exists File.join(config_home, "agent-coord", "env")
+    end
+  end
+
+  def test_config_set_accepts_loopback_plain_http_url
+    with_private_config_tmpdir("agent-coord-loopback-api-url") do |root|
+      config_home = File.join(root, "config")
+      result = run_command(
+        { "XDG_CONFIG_HOME" => config_home },
+        RbConfig.ruby,
+        BIN,
+        "config",
+        "set",
+        "--api-url",
+        "http://127.0.0.1:8787"
+      )
+
+      assert_equal 0, result.status.exitstatus, result.stderr
+      assert_includes(
+        File.read(File.join(config_home, "agent-coord", "env")),
+        "AGENT_COORD_API_URL=http://127.0.0.1:8787"
+      )
+    end
+  end
+
   def test_legacy_policy_file_is_read_only_fallback
     with_private_config_tmpdir("agent-coord-legacy-policy") do |root|
       config_home = File.join(root, "config")
@@ -1571,6 +1634,79 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
       end
     end
     # rubocop:enable Metrics/BlockLength
+  end
+
+  def test_secure_directory_lstat_accepts_a_concurrent_creator
+    with_private_config_tmpdir("agent-coord-concurrent-config-parent") do |root|
+      path = File.join(root, "new-config")
+      runner = AgentCoord::Runner.new([])
+      original_mkdir = Dir.method(:mkdir)
+
+      Dir.define_singleton_method(:mkdir) do |candidate, mode = 0o777|
+        if candidate == path
+          original_mkdir.call(candidate, mode)
+          raise Errno::EEXIST, candidate
+        end
+
+        original_mkdir.call(candidate, mode)
+      end
+
+      stat = runner.send(:secure_directory_lstat, path, create: true)
+      assert stat.directory?
+      assert_equal 0o700, stat.mode & 0o777
+    ensure
+      Dir.define_singleton_method(:mkdir, original_mkdir) if original_mkdir
+    end
+  end
+
+  def test_config_read_lock_does_not_retry_an_enoent_from_the_reader
+    with_private_user_config("AGENT_COORD_POLICY=required\n") do |config_home|
+      lock_path = File.join(config_home, "agent-coord", ".config.lock")
+      File.write(lock_path, "")
+      File.chmod(0o600, lock_path)
+      runner = AgentCoord::Runner.new([])
+      runner.instance_variable_set(:@user_config_path, File.join(config_home, "agent-coord", "env"))
+      calls = 0
+
+      assert_raises(Errno::ENOENT) do
+        runner.send(:with_optional_config_read_lock) do
+          calls += 1
+          raise Errno::ENOENT, "reader failure"
+        end
+      end
+      assert_equal 1, calls
+    end
+  end
+
+  def test_config_read_lock_closes_the_descriptor_when_unlock_fails
+    with_private_user_config("AGENT_COORD_POLICY=required\n") do |config_home|
+      lock_path = File.join(config_home, "agent-coord", ".config.lock")
+      File.write(lock_path, "")
+      File.chmod(0o600, lock_path)
+      runner = AgentCoord::Runner.new([])
+      runner.instance_variable_set(:@user_config_path, File.join(config_home, "agent-coord", "env"))
+      original_open = File.method(:open)
+      opened_lock = nil
+
+      File.define_singleton_method(:open) do |path, *args, &block|
+        next original_open.call(path, *args, &block) unless path == lock_path && block.nil?
+
+        opened_lock = original_open.call(path, *args)
+        original_flock = opened_lock.method(:flock)
+        opened_lock.define_singleton_method(:flock) do |operation|
+          raise Errno::EIO, "injected unlock failure" if operation == File::LOCK_UN
+
+          original_flock.call(operation)
+        end
+        opened_lock
+      end
+
+      assert_raises(Errno::EIO) { runner.send(:with_optional_config_read_lock) { :read } }
+      assert opened_lock.closed?
+    ensure
+      File.define_singleton_method(:open, original_open) if original_open
+      opened_lock&.close unless opened_lock&.closed?
+    end
   end
 
   def test_user_config_is_never_evaluated_as_shell
@@ -1774,6 +1910,32 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
       coordination = JSON.parse(show_result.stdout).fetch("coordination")
       assert_equal "disabled", coordination.fetch("policy")
       assert_equal "process_env", coordination.dig("source", "policy")
+    end
+  end
+
+  def test_invalid_process_policy_fails_closed_for_non_config_commands
+    result = run_agent_coord(
+      "status",
+      "--json",
+      env: { "AGENT_COORD_POLICY" => "requried" }
+    )
+
+    assert_equal 2, result.status.exitstatus
+    assert_includes result.stderr, "invalid coordination policy"
+  end
+
+  def test_blank_process_machine_id_uses_and_then_restores_persisted_identity
+    with_private_user_config("AGENT_COORD_MACHINE_ID=m1\n") do |config_home|
+      runner = AgentCoord::Runner.new([])
+      with_process_env(
+        "XDG_CONFIG_HOME" => config_home,
+        "AGENT_COORD_MACHINE_ID" => ""
+      ) do
+        runner.send(:load_user_configuration!)
+        assert_equal "m1", AgentCoord.environment_machine_id
+        runner.send(:restore_injected_user_configuration!)
+        assert_equal "", ENV.fetch("AGENT_COORD_MACHINE_ID")
+      end
     end
   end
 
@@ -7182,6 +7344,8 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     "AGENT_COORD_ENV_FILE" => nil,
     "AGENT_COORD_LOCAL" => nil,
     "AGENT_COORD_MACHINE_ID" => nil,
+    "AGENT_COORD_POLICY" => nil,
+    "AGENT_COORD_REF" => nil,
     "AGENT_COORD_SESSION_ID" => nil,
     "AGENT_COORD_STATE_ROOT" => nil,
     "AGENT_COORD_STATUS_STATE_ROOT" => nil,

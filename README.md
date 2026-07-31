@@ -294,6 +294,9 @@ current-user-owned directories with no group or world write permission, and the
 An explicitly selected missing file, an insecure file, duplicate keys, or
 ambiguous syntax is an operational failure rather than a fallback to another
 backend.
+This hardened config path requires a POSIX-compatible Ruby/filesystem with
+no-follow opens, ownership/mode checks, and `flock`; native Windows Ruby is not
+a supported runtime for this CLI.
 
 Backend selection follows this precedence:
 
@@ -824,6 +827,10 @@ env file as backend and identity settings:
 agent-coord config set --policy required
 ```
 
+The CLI validates and reports this policy but does not make repository workflow
+decisions from it. Workflow entrypoints consume `config show --json` and enforce
+`required` or `disabled` according to their repository coordination seam.
+
 To install or repair the endpoint, token, and machine identity without putting
 the token in command history, pipe only the token to stdin:
 
@@ -845,6 +852,9 @@ keys; readers use a shared lock once the lock file exists.
 A saved URL cannot be changed while preserving its old token:
 `--token-stdin` is required in the same transaction. The command never prints
 token values.
+`config set` rewrites the file as a canonical list of supported
+`AGENT_COORD_*` assignments. Comments, blank lines, and unrelated assignments
+in that dedicated file are intentionally not preserved.
 A process `AGENT_COORD_POLICY` overrides the persisted policy for one
 invocation. The old sibling `agent-coord/policy` file remains a read-only
 legacy fallback only when neither the process nor canonical env file supplies a

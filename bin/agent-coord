@@ -44,6 +44,11 @@ module AgentCoord
   CODEX_THREAD_ID_ENV = "CODEX_THREAD_ID"
   POLICY_ENV = "AGENT_COORD_POLICY"
   COORDINATION_POLICIES = %w[required optional disabled].freeze
+  BACKEND_SELECTOR_ENV_KEYS = %w[
+    AGENT_COORD_API_URL
+    AGENT_COORD_STATE_ROOT
+    AGENT_COORD_BACKEND
+  ].freeze
   USER_CONFIG_ENV_KEYS = %w[
     AGENT_COORD_API_URL
     AGENT_COORD_API_TOKEN
@@ -372,6 +377,8 @@ module AgentCoord
 
     def load_user_configuration!
       @process_config = USER_CONFIG_ENV_KEYS.to_h { |key| [key, ENV.fetch(key, nil)] }
+      process_policy = @process_config.fetch(POLICY_ENV, nil)
+      validate_policy!(process_policy, "process environment:#{POLICY_ENV}") unless process_policy.to_s.empty?
       @user_config_path, explicit = selected_user_config_path
       @policy_file_path = File.join(File.dirname(@user_config_path), "policy") if @user_config_path
       @user_config = {}
@@ -384,12 +391,12 @@ module AgentCoord
 
       @user_config.each do |key, value|
         next if key == "AGENT_COORD_API_TOKEN"
-        next unless @process_config[key].nil?
+        next unless @process_config[key].to_s.empty?
 
         ENV[key] = value
         @injected_user_config_keys << key
       end
-      return unless @process_config[POLICY_ENV].nil? &&
+      return unless @process_config[POLICY_ENV].to_s.empty? &&
                     @user_config.fetch(POLICY_ENV, nil).to_s.empty? &&
                     @policy_file_value
 
@@ -398,7 +405,10 @@ module AgentCoord
     end
 
     def restore_injected_user_configuration!
-      Array(@injected_user_config_keys).each { |key| ENV.delete(key) }
+      Array(@injected_user_config_keys).each do |key|
+        process_value = @process_config&.fetch(key, nil)
+        process_value.nil? ? ENV.delete(key) : ENV[key] = process_value
+      end
       @injected_user_config_keys = []
     end
 
@@ -510,22 +520,24 @@ module AgentCoord
 
     def effective_config_value(key)
       process_value = @process_config&.fetch(key, nil)
-      return process_value unless process_value.nil?
+      return process_value unless process_value.to_s.empty?
 
       @user_config&.fetch(key, nil)
     end
 
+    def process_selects_backend?
+      BACKEND_SELECTOR_ENV_KEYS.any? do |key|
+        !@process_config&.fetch(key, nil).to_s.empty?
+      end
+    end
+
     def effective_backend_env_value(key)
-      process_selectors = %w[AGENT_COORD_API_URL AGENT_COORD_STATE_ROOT AGENT_COORD_BACKEND]
-                          .any? { |candidate| !@process_config&.fetch(candidate, nil).to_s.empty? }
-      source = process_selectors ? @process_config : @user_config
+      source = process_selects_backend? ? @process_config : @user_config
       source&.fetch(key, nil)
     end
 
     def backend_env_source
-      process_selected = %w[AGENT_COORD_API_URL AGENT_COORD_STATE_ROOT AGENT_COORD_BACKEND]
-                         .any? { |key| !@process_config&.fetch(key, nil).to_s.empty? }
-      process_selected ? "process_env" : "user_config"
+      process_selects_backend? ? "process_env" : "user_config"
     end
 
     def effective_policy
@@ -902,7 +914,10 @@ module AgentCoord
     end
 
     def resolve_backend_env(options)
-      return if options[:stack_json] && options[:explicit_backend]
+      if options[:stack_json] && options[:explicit_backend]
+        options[:ref] = effective_config_value("AGENT_COORD_REF") || DEFAULT_REF unless options[:ref_cli]
+        return
+      end
 
       cli_api = options[:api_url] if options[:api_url_cli]
       env_api = effective_backend_env_value("AGENT_COORD_API_URL")
@@ -1940,7 +1955,7 @@ module AgentCoord
       policy = options[:policy] if options[:policy_given]
       validate_policy!(policy, "--policy") if policy
       updates[POLICY_ENV] = policy if policy
-      raise Error, "config set requires at least one setting" if updates.empty? && !policy
+      raise Error, "config set requires at least one setting" if updates.empty?
 
       with_config_write_lock do
         current = read_user_env_file(@user_config_path, required: false)
@@ -1964,15 +1979,18 @@ module AgentCoord
 
     def validate_config_api_url!(value)
       uri = URI.parse(value)
-      return if %w[http https].include?(uri.scheme) && uri.host && !uri.host.empty?
-
-      raise Error, "--api-url must be an absolute HTTP(S) URL"
+      unless %w[http https].include?(uri.scheme) && uri.host && !uri.host.empty?
+        raise Error, "--api-url must be an absolute HTTP(S) URL"
+      end
+      if uri.scheme == "http" && !HttpStore::LOOPBACK_HOSTS.include?(uri.host)
+        raise Error, "--api-url must use https unless it points at localhost"
+      end
     rescue URI::InvalidURIError
       raise Error, "--api-url must be an absolute HTTP(S) URL"
     end
 
     def read_token_from_stdin
-      token = @stdin.read(65_537)
+      token = @stdin.read(65_537).to_s
       raise Error, "--token-stdin input is too large" if token.bytesize > 65_536
 
       token = token.sub(/\r?\n\z/, "")
@@ -1995,19 +2013,37 @@ module AgentCoord
       return yield unless @user_config_path
 
       lock_path = File.join(File.dirname(@user_config_path), ".config.lock")
-      File.open(lock_path, File::RDONLY | File::NOFOLLOW) do |lock|
+      lock = begin
+        File.open(lock_path, File::RDONLY | File::NOFOLLOW)
+      rescue Errno::ENOENT
+        nil
+      rescue Errno::ELOOP
+        raise OperationalError, "config lock must not be a symlink: #{lock_path}"
+      rescue SystemCallError => e
+        raise OperationalError, "cannot acquire config read lock #{lock_path}: #{e.message}"
+      end
+      return yield unless lock
+
+      begin
         validate_private_config_file!(lock, lock_path)
-        lock.flock(File::LOCK_SH)
+        raise OperationalError, "cannot acquire config read lock: #{lock_path}" unless lock.flock(File::LOCK_SH)
+      rescue SystemCallError => e
+        lock.close
+        raise OperationalError, "cannot acquire config read lock #{lock_path}: #{e.message}"
+      rescue StandardError
+        lock.close
+        raise
+      end
+
+      begin
         yield
       ensure
-        lock&.flock(File::LOCK_UN)
+        begin
+          lock.flock(File::LOCK_UN)
+        ensure
+          lock.close
+        end
       end
-    rescue Errno::ENOENT
-      yield
-    rescue Errno::ELOOP
-      raise OperationalError, "config lock must not be a symlink: #{lock_path}"
-    rescue SystemCallError => e
-      raise OperationalError, "cannot acquire config read lock #{lock_path}: #{e.message}"
     end
 
     def with_config_write_lock
@@ -2061,7 +2097,11 @@ module AgentCoord
     rescue Errno::ENOENT
       raise unless create
 
-      Dir.mkdir(path, 0o700)
+      begin
+        Dir.mkdir(path, 0o700)
+      rescue Errno::EEXIST
+        nil
+      end
       File.lstat(path)
     end
 
@@ -4920,7 +4960,7 @@ module AgentCoord
         state_root: @process_config&.fetch("AGENT_COORD_STATE_ROOT", nil),
         backend: @process_config&.fetch("AGENT_COORD_BACKEND", nil)
       }
-      return process_values.merge(source: "process_env") if process_values.values.any? { |value| !value.to_s.empty? }
+      return process_values.merge(source: "process_env") if process_selects_backend?
 
       {
         api_url: @user_config&.fetch("AGENT_COORD_API_URL", nil),

@@ -439,9 +439,9 @@ class HttpEnvTestCase < Minitest::Test
   # ~/.config/agent-coord/env, which would otherwise trip the split-brain guard.
   ISOLATED_CONFIG_HOME = Dir.mktmpdir("agent-coord-isolated-config")
   Minitest.after_run { FileUtils.rm_rf(ISOLATED_CONFIG_HOME) }
-  CLEAN_ENV = IDENTITY_ENV_KEYS.to_h { |key| [key, nil] }.merge(
-    "AGENT_COORD_ENV_FILE" => nil,
-    "AGENT_COORD_LOCAL" => nil,
+  CLEAN_ENV = (
+    AgentCoord::USER_CONFIG_ENV_KEYS + IDENTITY_ENV_KEYS + %w[AGENT_COORD_ENV_FILE]
+  ).uniq.to_h { |key| [key, nil] }.merge(
     "XDG_CONFIG_HOME" => ISOLATED_CONFIG_HOME
   ).freeze
 
@@ -714,7 +714,7 @@ class HttpBackendSelectionTest < HttpEnvTestCase # rubocop:disable Metrics/Class
                "HOME" => File.join(root, "home"),
                "TMPDIR" => File.join(root, "tmp")) do
         [nil, ""].each do |api_url|
-          with_env("AGENT_COORD_API_URL" => api_url) do
+          with_env("AGENT_COORD_API_URL" => api_url, "AGENT_COORD_API_TOKEN" => "token-without-url") do
             [
               ["status", "--json"],
               ["claim", "--agent-id", "worker-a", "--repo", "demo/example", "--target", "1"]

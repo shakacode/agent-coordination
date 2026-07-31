@@ -4,6 +4,7 @@ require "fileutils"
 require "json"
 require "minitest/autorun"
 require "open3"
+require "rbconfig"
 require "tmpdir"
 
 class VerifyBatchTest < Minitest::Test
@@ -11,7 +12,13 @@ class VerifyBatchTest < Minitest::Test
   LOCAL_COORDINATION_ENV = {
     "AGENT_COORD_API_URL" => nil,
     "AGENT_COORD_API_TOKEN" => nil,
-    "AGENT_COORD_BACKEND" => nil
+    "AGENT_COORD_BACKEND" => nil,
+    "AGENT_COORD_ENV_FILE" => nil,
+    "AGENT_COORD_LOCAL" => nil,
+    "AGENT_COORD_MACHINE_ID" => nil,
+    "AGENT_COORD_POLICY" => nil,
+    "AGENT_COORD_REF" => nil,
+    "AGENT_COORD_STATUS_STATE_ROOT" => nil
   }.freeze
 
   def write(state, path, data)
@@ -158,7 +165,11 @@ class VerifyBatchTest < Minitest::Test
   private
 
   def local_coordination_env(state)
-    LOCAL_COORDINATION_ENV.merge("AGENT_COORD_STATE_ROOT" => state)
+    LOCAL_COORDINATION_ENV.merge(
+      "AGENT_COORD_STATE_ROOT" => state,
+      "XDG_CONFIG_HOME" => File.join(File.dirname(state), "xdg-config"),
+      "PATH" => [File.dirname(RbConfig.ruby), ENV.fetch("PATH")].join(File::PATH_SEPARATOR)
+    )
   end
 
   def with_fake_gh(check_buckets: ["pass"], checks_stdout: nil, checks_exit: nil, open_empty: false, multi_prs: false)
@@ -168,7 +179,7 @@ class VerifyBatchTest < Minitest::Test
       File.write(gh, fake_gh_script)
       FileUtils.chmod(0o755, gh)
       env = {
-        "PATH" => "#{dir}:#{ENV.fetch('PATH')}",
+        "PATH" => [dir, File.dirname(RbConfig.ruby), ENV.fetch("PATH")].join(File::PATH_SEPARATOR),
         "GH_ARGS_LOG" => log,
         "GH_CHECK_BUCKETS" => check_buckets.join(","),
         "GH_OPEN_EMPTY" => open_empty ? "1" : "0",
