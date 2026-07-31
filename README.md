@@ -286,7 +286,11 @@ canonical user file from `AGENT_COORD_ENV_FILE` when explicitly set, otherwise
 from `$XDG_CONFIG_HOME/agent-coord/env` (falling back to
 `$HOME/.config/agent-coord/env`). It parses assignments without evaluating the
 file as shell code, accepts only the documented `AGENT_COORD_*` allowlist, and
-requires a regular current-user-owned file with no group or world permissions.
+opens it with no-follow semantics, then validates and reads that same descriptor.
+The file must be regular, current-user-owned, and have no group or world
+permissions. Its resolved parent chain may contain only root- or
+current-user-owned directories with no group or world write permission, and the
+`agent-coord` leaf directory must be current-user-owned with mode `0700`.
 An explicitly selected missing file, an insecure file, duplicate keys, or
 ambiguous syntax is an operational failure rather than a fallback to another
 backend.
@@ -831,9 +835,16 @@ printf '%s\n' "$AGENT_COORD_API_TOKEN" |
     --policy required
 ```
 
-`config set` atomically replaces the selected user files with mode `0600`,
-preserves unspecified supported keys, and never prints token values. A process
-`AGENT_COORD_POLICY` overrides the persisted policy for one invocation.
+`config set` validates or securely creates the full parent chain, atomically
+replaces the selected user files with mode `0600`, syncs the containing
+directory, preserves unspecified supported keys, and never prints token values.
+A process `AGENT_COORD_POLICY` overrides the persisted policy for one
+invocation.
+
+A token read from the user file is credential-bound to that file's saved API
+URL. A differing `--api-url` or process `AGENT_COORD_API_URL` requires a
+process-scoped `AGENT_COORD_API_TOKEN`; the CLI never forwards the persisted
+token to an override endpoint.
 
 Default `doctor` verifies the current
 backend without writing state or parsing every record; `doctor --deep` adds full

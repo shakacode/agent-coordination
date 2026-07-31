@@ -450,7 +450,7 @@ class HttpEnvTestCase < Minitest::Test
   end
 end
 
-class HttpBackendSelectionTest < HttpEnvTestCase
+class HttpBackendSelectionTest < HttpEnvTestCase # rubocop:disable Metrics/ClassLength
   CONSUMER_ENV_CONTENT = "AGENT_COORD_API_URL=https://agent-coord.example\nAGENT_COORD_API_TOKEN=secret\n"
 
   def claim_args(*extra)
@@ -625,6 +625,44 @@ class HttpBackendSelectionTest < HttpEnvTestCase
       assert_equal 2, code
       assert_includes err, "AGENT_COORD_API_TOKEN"
     end
+  end
+
+  def test_saved_token_is_not_sent_to_cli_or_process_endpoint_override
+    # rubocop:disable Metrics/BlockLength
+    Dir.mktmpdir("agent-coord-token-provenance") do |root|
+      config_home = File.join(root, "config")
+      env_file = File.join(config_home, "agent-coord", "env")
+      FileUtils.mkdir_p(File.dirname(env_file))
+      File.chmod(0o700, File.dirname(env_file))
+      File.write(
+        env_file,
+        "AGENT_COORD_API_URL=https://saved.example\nAGENT_COORD_API_TOKEN=saved-private-token\n"
+      )
+      File.chmod(0o600, env_file)
+
+      [%w[status --api-url], %w[status]].each do |args|
+        attacker = HttpStoreStub.new([])
+        command = args.length == 2 ? [*args, attacker.base_url] : args
+        process_url = args.length == 1 ? attacker.base_url : nil
+        env = {
+          "XDG_CONFIG_HOME" => config_home,
+          "AGENT_COORD_API_URL" => process_url,
+          "AGENT_COORD_API_TOKEN" => nil,
+          "AGENT_COORD_STATE_ROOT" => nil,
+          "AGENT_COORD_BACKEND" => nil
+        }
+        with_env(env) do
+          code, _out, err = run_cli(command, env)
+
+          assert_equal 2, code
+          assert_includes err, "process-scoped AGENT_COORD_API_TOKEN"
+          assert_empty attacker.requests, "saved token must never reach an override endpoint"
+        end
+      ensure
+        attacker&.shutdown
+      end
+    end
+    # rubocop:enable Metrics/BlockLength
   end
 
   def test_malformed_api_url_is_operational_error

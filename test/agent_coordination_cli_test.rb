@@ -1401,6 +1401,7 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
       env_file = File.join(config_home, "agent-coord", "env")
       marker = File.join(root, "must-not-exist")
       FileUtils.mkdir_p(File.dirname(env_file))
+      File.chmod(0o700, File.dirname(env_file))
       File.write(
         env_file,
         "AGENT_COORD_API_URL=$(touch #{marker})\nAGENT_COORD_API_TOKEN=private-token\n"
@@ -1442,6 +1443,130 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
       assert_includes result.stderr, "permissions are insecure"
       refute_includes result.stdout, "private-token"
       refute_includes result.stderr, "private-token"
+    end
+  end
+
+  # rubocop:disable Metrics/MethodLength
+  def test_user_config_swap_after_open_reads_and_validates_the_opened_descriptor
+    # rubocop:disable Metrics/BlockLength
+    Dir.mktmpdir("agent-coord-config-swap") do |root|
+      config_home = File.join(root, "config")
+      env_file = File.join(config_home, "agent-coord", "env")
+      trusted_backup = "#{env_file}.trusted"
+      attacker_file = File.join(root, "attacker-env")
+      FileUtils.mkdir_p(File.dirname(env_file))
+      File.chmod(0o700, File.dirname(env_file))
+      File.write(
+        env_file,
+        "AGENT_COORD_API_URL=https://trusted.example\nAGENT_COORD_API_TOKEN=trusted-token\n"
+      )
+      File.chmod(0o600, env_file)
+      File.write(
+        attacker_file,
+        "AGENT_COORD_API_URL=https://attacker.example\nAGENT_COORD_API_TOKEN=attacker-token\n"
+      )
+      File.chmod(0o644, attacker_file)
+
+      runner = AgentCoord::Runner.new([])
+      swapped = false
+      swap_path = lambda do
+        next if swapped
+
+        File.rename(env_file, trusted_backup)
+        File.symlink(attacker_file, env_file)
+        swapped = true
+      end
+      original_validation = runner.method(:validate_private_config_file!)
+      runner.define_singleton_method(:validate_private_config_file!) do |*args|
+        original_validation.call(*args)
+        swap_path.call
+      end
+      with_process_env(
+        "XDG_CONFIG_HOME" => config_home,
+        "AGENT_COORD_API_URL" => nil,
+        "AGENT_COORD_API_TOKEN" => nil
+      ) do
+        runner.send(:load_user_configuration!)
+        assert_nil ENV.fetch("AGENT_COORD_API_TOKEN", nil), "persisted credentials must not be injected into ENV"
+      ensure
+        runner.send(:restore_injected_user_configuration!)
+      end
+
+      assert swapped, "fixture must replace the checked pathname"
+      user_config = runner.instance_variable_get(:@user_config)
+      assert_equal "https://trusted.example", user_config.fetch("AGENT_COORD_API_URL")
+      assert_equal "trusted-token", user_config.fetch("AGENT_COORD_API_TOKEN")
+      refute_includes user_config.values, "attacker-token"
+    end
+    # rubocop:enable Metrics/BlockLength
+  end
+  # rubocop:enable Metrics/MethodLength
+
+  def test_user_config_symlink_is_rejected_without_reading_target_secret
+    Dir.mktmpdir("agent-coord-config-symlink") do |root|
+      target = File.join(root, "attacker-env")
+      selected = File.join(root, "selected-env")
+      File.write(target, "AGENT_COORD_API_URL=https://attacker.example\nAGENT_COORD_API_TOKEN=attacker-token\n")
+      File.chmod(0o644, target)
+      File.symlink(target, selected)
+
+      result = run_command(
+        { "AGENT_COORD_ENV_FILE" => selected },
+        RbConfig.ruby,
+        BIN,
+        "config",
+        "show",
+        "--json"
+      )
+
+      assert_equal 2, result.status.exitstatus
+      refute_includes result.stdout, "attacker-token"
+      refute_includes result.stderr, "attacker-token"
+    end
+  end
+
+  def test_config_set_rejects_symlinked_config_parent
+    Dir.mktmpdir("agent-coord-parent-symlink") do |root|
+      actual = File.join(root, "actual")
+      selected = File.join(root, "selected")
+      FileUtils.mkdir_p(actual)
+      File.symlink(actual, selected)
+
+      result = run_command(
+        { "XDG_CONFIG_HOME" => selected },
+        RbConfig.ruby,
+        BIN,
+        "config",
+        "set",
+        "--policy",
+        "required"
+      )
+
+      assert_equal 2, result.status.exitstatus
+      refute_path_exists File.join(actual, "agent-coord", "policy")
+    end
+  end
+
+  def test_config_set_rejects_group_writable_config_ancestor
+    Dir.mktmpdir("agent-coord-parent-mode") do |root|
+      unsafe = File.join(root, "unsafe")
+      FileUtils.mkdir_p(unsafe)
+      File.chmod(0o770, unsafe)
+      config_home = File.join(unsafe, "config")
+
+      result = run_command(
+        { "XDG_CONFIG_HOME" => config_home },
+        RbConfig.ruby,
+        BIN,
+        "config",
+        "set",
+        "--policy",
+        "required"
+      )
+
+      assert_equal 2, result.status.exitstatus
+      assert_includes result.stderr, "permissions are unsafe"
+      refute_path_exists File.join(config_home, "agent-coord", "policy")
     end
   end
 
@@ -8225,10 +8350,19 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
       config_home = File.join(root, "config")
       env_file = File.join(config_home, "agent-coord", "env")
       FileUtils.mkdir_p(File.dirname(env_file))
+      File.chmod(0o700, File.dirname(env_file))
       File.write(env_file, contents)
       File.chmod(0o600, env_file)
       yield config_home
     end
+  end
+
+  def with_process_env(values)
+    saved = values.to_h { |key, _value| [key, ENV.fetch(key, nil)] }
+    values.each { |key, value| value.nil? ? ENV.delete(key) : ENV[key] = value }
+    yield
+  ensure
+    saved.each { |key, value| value.nil? ? ENV.delete(key) : ENV[key] = value }
   end
 
   def with_identity_env(values)

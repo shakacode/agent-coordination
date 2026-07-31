@@ -379,6 +379,7 @@ module AgentCoord
       @injected_user_config_keys = []
 
       @user_config.each do |key, value|
+        next if key == "AGENT_COORD_API_TOKEN"
         next unless @process_config[key].nil?
 
         ENV[key] = value
@@ -418,26 +419,36 @@ module AgentCoord
     end
 
     def read_user_env_file(path, required:)
-      unless File.exist?(path) || File.symlink?(path)
-        raise OperationalError, "configured user env file does not exist: #{path}" if required
+      contents = read_private_config_file(path, required:)
+      return {} unless contents
 
-        return {}
-      end
-
-      validate_private_config_file!(path)
-      parse_user_env(File.readlines(path, chomp: true), path)
-    rescue SystemCallError => e
-      raise OperationalError, "cannot read user env file #{path}: #{e.message}"
+      parse_user_env(contents.lines(chomp: true), path)
     end
 
-    def validate_private_config_file!(path)
-      stat = File.lstat(path)
-      raise OperationalError, "user config must be a regular file, not a symlink: #{path}" if stat.symlink?
+    def read_private_config_file(path, required:)
+      File.open(path, File::RDONLY | File::NOFOLLOW) do |file|
+        validate_private_config_file!(file, path)
+        file.read
+      end
+    rescue Errno::ENOENT
+      raise OperationalError, "configured user env file does not exist: #{path}" if required
+
+      nil
+    rescue Errno::ELOOP
+      raise OperationalError, "user config must be a regular file, not a symlink: #{path}"
+    rescue SystemCallError => e
+      raise OperationalError, "cannot read user config #{path}: #{e.message}"
+    end
+
+    def validate_private_config_file!(file, path)
+      stat = file.stat
       raise OperationalError, "user config must be a regular file: #{path}" unless stat.file?
       raise OperationalError, "user config is not owned by the current user: #{path}" unless stat.uid == Process.uid
-      return if stat.mode.nobits?(0o077)
+      unless stat.mode.nobits?(0o077)
+        raise OperationalError, "user config permissions are insecure (expected 0600): #{path}"
+      end
 
-      raise OperationalError, "user config permissions are insecure (expected 0600): #{path}"
+      validate_secure_directory_chain!(File.dirname(path), create: false)
     end
 
     def parse_user_env(lines, path)
@@ -476,14 +487,12 @@ module AgentCoord
     end
 
     def read_policy_file(path)
-      return nil unless File.exist?(path) || File.symlink?(path)
+      contents = read_private_config_file(path, required: false)
+      return nil unless contents
 
-      validate_private_config_file!(path)
-      value = File.read(path).strip
+      value = contents.strip
       validate_policy!(value, path)
       value
-    rescue SystemCallError => e
-      raise OperationalError, "cannot read coordination policy file #{path}: #{e.message}"
     end
 
     def validate_policy!(value, source)
@@ -1127,7 +1136,7 @@ module AgentCoord
         return
       end
 
-      unless ENV.fetch("AGENT_COORD_API_TOKEN", "").empty?
+      if configured_api_token?
         raise OperationalError,
               "AGENT_COORD_API_TOKEN is set but AGENT_COORD_API_URL is missing or empty; " \
               "set AGENT_COORD_API_URL or unset AGENT_COORD_API_TOKEN"
@@ -1967,17 +1976,72 @@ module AgentCoord
       "#{lines.join("\n")}\n"
     end
 
+    def validate_secure_directory_chain!(directory, create:)
+      expanded = File.expand_path(directory)
+      current = File::SEPARATOR
+      validate_secure_directory_component!(File.lstat(current), current, leaf: expanded == current)
+      components = expanded.split(File::SEPARATOR).reject(&:empty?)
+
+      components.each_with_index do |component, index|
+        candidate = File.join(current, component)
+        stat = secure_directory_lstat(candidate, create:)
+        leaf = index == components.length - 1
+        if stat.symlink?
+          unless stat.uid.zero? && stat.mode.nobits?(0o022)
+            raise OperationalError, "config parent must not contain a user-controlled symlink: #{candidate}"
+          end
+
+          current = File.realpath(candidate)
+          stat = File.lstat(current)
+          validate_secure_directory_component!(stat, current, leaf:)
+          next
+        end
+
+        validate_secure_directory_component!(stat, candidate, leaf:)
+        current = candidate
+      end
+      current
+    rescue SystemCallError => e
+      raise OperationalError, "cannot validate config parent #{directory}: #{e.message}"
+    end
+
+    def secure_directory_lstat(path, create:)
+      File.lstat(path)
+    rescue Errno::ENOENT
+      raise unless create
+
+      Dir.mkdir(path, 0o700)
+      File.lstat(path)
+    end
+
+    def validate_secure_directory_component!(stat, path, leaf:)
+      raise OperationalError, "config parent component is not a directory: #{path}" unless stat.directory?
+      unless [0, Process.uid].include?(stat.uid)
+        raise OperationalError, "config parent component has an unsafe owner: #{path}"
+      end
+      raise OperationalError, "config parent permissions are unsafe: #{path}" unless stat.mode.nobits?(0o022)
+      return unless leaf
+
+      raise OperationalError, "config parent leaf is not owned by the current user: #{path}" if stat.uid != Process.uid
+      return if stat.mode.nobits?(0o077)
+
+      raise OperationalError, "config parent leaf permissions are unsafe (expected 0700): #{path}"
+    end
+
     def write_private_config_file(path, contents)
-      directory = File.dirname(path)
-      FileUtils.mkdir_p(directory, mode: 0o700)
+      directory = validate_secure_directory_chain!(File.dirname(path), create: true)
+      destination = File.join(directory, File.basename(path))
       temp_path = File.join(directory, ".#{File.basename(path)}.tmp-#{Process.pid}-#{SecureRandom.hex(6)}")
-      File.open(temp_path, File::WRONLY | File::CREAT | File::EXCL, 0o600) do |file|
+      File.open(temp_path, File::WRONLY | File::CREAT | File::EXCL | File::NOFOLLOW, 0o600) do |file|
         file.write(contents)
         file.flush
         file.fsync
       end
-      File.rename(temp_path, path)
-      File.chmod(0o600, path)
+      File.rename(temp_path, destination)
+      File.open(directory, File::RDONLY | File::NOFOLLOW) do |directory_file|
+        validate_secure_directory_component!(directory_file.stat, directory, leaf: true)
+        directory_file.fsync
+      end
     rescue SystemCallError => e
       raise OperationalError, "cannot persist user configuration #{path}: #{e.message}"
     ensure
@@ -4475,8 +4539,7 @@ module AgentCoord
       return LocalStore.new(options.fetch(:state_root)) if options[:state_root]
 
       if options[:api_url]
-        token = ENV.fetch("AGENT_COORD_API_TOKEN", nil)
-        raise OperationalError, "AGENT_COORD_API_TOKEN is required when using the HTTP backend" if token.to_s.empty?
+        token = resolved_http_token(options.fetch(:api_url))
 
         return HttpStore.new(base_url: options[:api_url], token: token)
       end
@@ -4484,6 +4547,24 @@ module AgentCoord
       raise OperationalError, missing_backend_message if options[:backend].to_s.empty?
 
       GitHubStore.new(backend: options.fetch(:backend), ref: options.fetch(:ref))
+    end
+
+    def configured_api_token?
+      !@process_config&.fetch("AGENT_COORD_API_TOKEN", nil).to_s.empty? ||
+        !@user_config&.fetch("AGENT_COORD_API_TOKEN", nil).to_s.empty?
+    end
+
+    def resolved_http_token(selected_url)
+      process_token = @process_config&.fetch("AGENT_COORD_API_TOKEN", nil)
+      return process_token unless process_token.to_s.empty?
+
+      saved_token = @user_config&.fetch("AGENT_COORD_API_TOKEN", nil)
+      saved_url = @user_config&.fetch("AGENT_COORD_API_URL", nil)
+      return saved_token if !saved_token.to_s.empty? && selected_url == saved_url
+      raise OperationalError, "AGENT_COORD_API_TOKEN is required when using the HTTP backend" if saved_token.to_s.empty?
+
+      raise OperationalError,
+            "process-scoped AGENT_COORD_API_TOKEN is required when the selected API URL differs from user config"
     end
 
     def close_store(store)
