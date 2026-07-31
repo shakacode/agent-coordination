@@ -817,7 +817,8 @@ network probe, so consumers must run `doctor` before treating the backend as
 available.
 
 The durable user policy is `required`, `optional`, or `disabled`; it defaults
-to `optional`. Persist it separately from credentials:
+to `optional`. New writes persist `AGENT_COORD_POLICY` in the same canonical
+env file as backend and identity settings:
 
 ```bash
 agent-coord config set --policy required
@@ -835,17 +836,19 @@ printf '%s\n' "$AGENT_COORD_API_TOKEN" |
     --policy required
 ```
 
-`config set` validates or securely creates the full parent chain, atomically
-stages the selected user files with mode `0600`, syncs them, renames them under
-an exclusive config lock, and syncs the containing directory. Each setter
+`config set` validates or securely creates the full parent chain, stages one
+canonical mode-`0600` file, syncs it, atomically renames it under an exclusive
+config lock, and syncs the containing directory. Endpoint, token, identity, and
+policy therefore become visible together through one rename. Each setter
 re-reads under the lock, so concurrent updates preserve unspecified supported
-keys. For a combined env-and-policy update, the policy rename is the final
-commit marker; readers use a shared lock once the lock file exists.
+keys; readers use a shared lock once the lock file exists.
 A saved URL cannot be changed while preserving its old token:
 `--token-stdin` is required in the same transaction. The command never prints
 token values.
 A process `AGENT_COORD_POLICY` overrides the persisted policy for one
-invocation.
+invocation. The old sibling `agent-coord/policy` file remains a read-only
+legacy fallback only when neither the process nor canonical env file supplies a
+policy; `config set` never updates or deletes that legacy file.
 
 A token read from the user file is credential-bound to that file's saved API
 URL. A differing `--api-url` or process `AGENT_COORD_API_URL` requires a

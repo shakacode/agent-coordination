@@ -1328,7 +1328,7 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     end
   end
 
-  def test_config_set_persists_policy_separately_and_config_show_resolves_it
+  def test_config_set_persists_policy_in_canonical_env_and_config_show_resolves_it
     # rubocop:disable Metrics/BlockLength
     Dir.mktmpdir("agent-coord-config-set-policy") do |root|
       config_home = File.join(root, "config")
@@ -1343,9 +1343,10 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
       )
 
       assert_equal 0, set_result.status.exitstatus, set_result.stderr
-      policy_file = File.join(config_home, "agent-coord", "policy")
-      assert_equal "required\n", File.read(policy_file)
-      assert_equal 0o600, File.stat(policy_file).mode & 0o777
+      env_file = File.join(config_home, "agent-coord", "env")
+      assert_includes File.read(env_file), "AGENT_COORD_POLICY=required"
+      assert_equal 0o600, File.stat(env_file).mode & 0o777
+      refute_path_exists File.join(config_home, "agent-coord", "policy")
 
       show_result = run_command(
         { "XDG_CONFIG_HOME" => config_home },
@@ -1358,16 +1359,20 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
       assert_equal 0, show_result.status.exitstatus, show_result.stderr
       coordination = JSON.parse(show_result.stdout).fetch("coordination")
       assert_equal "required", coordination.fetch("policy")
-      assert_equal "policy_file", coordination.dig("source", "policy")
+      assert_equal "user_config", coordination.dig("source", "policy")
     end
     # rubocop:enable Metrics/BlockLength
   end
 
+  # rubocop:disable Metrics/MethodLength
   def test_config_set_updates_private_env_atomically_from_token_stdin_and_preserves_unspecified_keys
     # rubocop:disable Metrics/BlockLength
     with_private_user_config(
       "AGENT_COORD_REF=existing-ref\nAGENT_COORD_API_TOKEN=old-private-token\n"
     ) do |config_home|
+      legacy_policy = File.join(config_home, "agent-coord", "policy")
+      File.write(legacy_policy, "disabled\n")
+      File.chmod(0o600, legacy_policy)
       result = run_command(
         { "XDG_CONFIG_HOME" => config_home },
         RbConfig.ruby,
@@ -1394,11 +1399,25 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
       assert_includes contents, "AGENT_COORD_API_URL=https://coordination.example"
       assert_includes contents, "AGENT_COORD_API_TOKEN=new-private-token"
       assert_includes contents, "AGENT_COORD_MACHINE_ID=m1"
+      assert_includes contents, "AGENT_COORD_POLICY=required"
       refute_includes contents, "old-private-token"
-      assert_equal "required\n", File.read(File.join(config_home, "agent-coord", "policy"))
+      assert_equal "disabled\n", File.read(legacy_policy), "legacy fallback is read-only"
+
+      show_result = run_command(
+        { "XDG_CONFIG_HOME" => config_home },
+        RbConfig.ruby,
+        BIN,
+        "config",
+        "show",
+        "--json"
+      )
+      coordination = JSON.parse(show_result.stdout).fetch("coordination")
+      assert_equal "required", coordination.fetch("policy")
+      assert_equal "user_config", coordination.dig("source", "policy")
     end
     # rubocop:enable Metrics/BlockLength
   end
+  # rubocop:enable Metrics/MethodLength
 
   def test_config_set_rejects_url_change_without_replacement_token
     with_private_user_config(
@@ -1422,6 +1441,81 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
       refute_includes result.stdout, "old-private-token"
       refute_includes result.stderr, "old-private-token"
     end
+  end
+
+  def test_legacy_policy_file_is_read_only_fallback
+    Dir.mktmpdir("agent-coord-legacy-policy") do |root|
+      config_home = File.join(root, "config")
+      directory = File.join(config_home, "agent-coord")
+      policy_file = File.join(directory, "policy")
+      FileUtils.mkdir_p(directory)
+      File.chmod(0o700, directory)
+      File.write(policy_file, "required\n")
+      File.chmod(0o600, policy_file)
+
+      result = run_command(
+        { "XDG_CONFIG_HOME" => config_home },
+        RbConfig.ruby,
+        BIN,
+        "config",
+        "show",
+        "--json"
+      )
+
+      assert_equal 0, result.status.exitstatus, result.stderr
+      coordination = JSON.parse(result.stdout).fetch("coordination")
+      assert_equal "required", coordination.fetch("policy")
+      assert_equal "policy_file", coordination.dig("source", "policy")
+    end
+  end
+
+  def test_failed_canonical_config_rename_preserves_all_old_values
+    # rubocop:disable Metrics/BlockLength
+    with_private_user_config(
+      "AGENT_COORD_API_URL=https://old.example\n" \
+      "AGENT_COORD_API_TOKEN=old-token\n" \
+      "AGENT_COORD_MACHINE_ID=old-machine\n" \
+      "AGENT_COORD_POLICY=required\n"
+    ) do |config_home|
+      env_file = File.join(config_home, "agent-coord", "env")
+      original_contents = File.read(env_file)
+      resolved_env_file = File.join(File.realpath(File.dirname(env_file)), "env")
+      runner = AgentCoord::Runner.new([], stdout: StringIO.new, stderr: StringIO.new)
+      original_rename = File.method(:rename)
+
+      with_process_env(
+        "XDG_CONFIG_HOME" => config_home,
+        "AGENT_COORD_API_URL" => nil,
+        "AGENT_COORD_API_TOKEN" => nil,
+        "AGENT_COORD_MACHINE_ID" => nil,
+        "AGENT_COORD_POLICY" => nil
+      ) do
+        runner.send(:load_user_configuration!)
+        File.define_singleton_method(:rename) do |source, destination|
+          raise Errno::EIO, "injected rename failure" if destination == resolved_env_file
+
+          original_rename.call(source, destination)
+        end
+
+        error = assert_raises(AgentCoord::OperationalError) do
+          runner.send(
+            :persist_config,
+            machine_id_given: true,
+            machine_id: "new-machine",
+            policy_given: true,
+            policy: "disabled"
+          )
+        end
+        assert_includes error.message, "injected rename failure"
+      ensure
+        File.define_singleton_method(:rename, original_rename)
+        runner.send(:restore_injected_user_configuration!)
+      end
+
+      assert_equal original_contents, File.read(env_file)
+      assert_empty Dir.glob(File.join(File.dirname(env_file), ".env.tmp-*"))
+    end
+    # rubocop:enable Metrics/BlockLength
   end
 
   def test_concurrent_config_set_preserves_both_writers_unspecified_keys

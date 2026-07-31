@@ -389,7 +389,9 @@ module AgentCoord
         ENV[key] = value
         @injected_user_config_keys << key
       end
-      return unless @process_config[POLICY_ENV].nil? && @policy_file_value
+      return unless @process_config[POLICY_ENV].nil? &&
+                    @user_config.fetch(POLICY_ENV, nil).to_s.empty? &&
+                    @policy_file_value
 
       ENV[POLICY_ENV] = @policy_file_value
       @injected_user_config_keys << POLICY_ENV unless @injected_user_config_keys.include?(POLICY_ENV)
@@ -529,10 +531,10 @@ module AgentCoord
     def effective_policy
       process_policy = @process_config&.fetch(POLICY_ENV, nil)
       return [process_policy, "process_env"] unless process_policy.to_s.empty?
-      return [@policy_file_value, "policy_file"] if @policy_file_value
 
       user_policy = @user_config&.fetch(POLICY_ENV, nil)
       return [user_policy, "user_config"] unless user_policy.to_s.empty?
+      return [@policy_file_value, "policy_file"] if @policy_file_value
 
       %w[optional default]
     end
@@ -1937,21 +1939,17 @@ module AgentCoord
       end
       policy = options[:policy] if options[:policy_given]
       validate_policy!(policy, "--policy") if policy
+      updates[POLICY_ENV] = policy if policy
       raise Error, "config set requires at least one setting" if updates.empty? && !policy
 
       with_config_write_lock do
         current = read_user_env_file(@user_config_path, required: false)
         validate_api_url_token_transition!(current, updates)
-        writes = {}
-        writes[@user_config_path] = render_user_env(current.merge(updates)) unless updates.empty?
-        # The policy rename is deliberately last: it is the commit marker for a
-        # combined env+policy update while the exclusive config lock is held.
-        writes[@policy_file_path] = "#{policy}\n" if policy
-        write_private_config_transaction(writes)
+        write_canonical_config_file(@user_config_path, render_user_env(current.merge(updates)))
       end
       @stdout.puts "updated user configuration: #{@user_config_path} (#{updates.keys.sort.join(', ')})" \
         unless updates.empty?
-      @stdout.puts "updated coordination policy: #{@policy_file_path}" if policy
+      @stdout.puts "updated coordination policy in canonical config: #{@user_config_path}" if policy
       0
     end
 
@@ -2081,29 +2079,20 @@ module AgentCoord
       raise OperationalError, "config parent leaf permissions are unsafe (expected 0700): #{path}"
     end
 
-    def write_private_config_transaction(writes)
-      return if writes.empty?
-
-      directory = validate_secure_directory_chain!(File.dirname(writes.keys.first), create: true)
-      destinations = writes.to_h do |path, contents|
-        unless File.dirname(path) == File.dirname(writes.keys.first)
-          raise OperationalError, "config transaction paths must share one directory"
-        end
-
-        destination = File.join(directory, File.basename(path))
-        temp_path = File.join(directory, ".#{File.basename(path)}.tmp-#{Process.pid}-#{SecureRandom.hex(6)}")
-        write_private_config_temp_file(temp_path, contents)
-        [destination, temp_path]
-      end
-      destinations.each { |destination, temp_path| File.rename(temp_path, destination) }
+    def write_canonical_config_file(path, contents)
+      directory = validate_secure_directory_chain!(File.dirname(path), create: true)
+      destination = File.join(directory, File.basename(path))
+      temp_path = File.join(directory, ".#{File.basename(path)}.tmp-#{Process.pid}-#{SecureRandom.hex(6)}")
+      write_private_config_temp_file(temp_path, contents)
+      File.rename(temp_path, destination)
       File.open(directory, File::RDONLY | File::NOFOLLOW) do |directory_file|
         validate_secure_directory_component!(directory_file.stat, directory, leaf: true)
         directory_file.fsync
       end
     rescue SystemCallError => e
-      raise OperationalError, "cannot persist user configuration transaction: #{e.message}"
+      raise OperationalError, "cannot persist canonical user configuration: #{e.message}"
     ensure
-      destinations&.each_value { |temp_path| FileUtils.rm_f(temp_path) }
+      FileUtils.rm_f(temp_path) if temp_path
     end
 
     def write_private_config_temp_file(path, contents)
