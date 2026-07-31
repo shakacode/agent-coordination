@@ -9,9 +9,15 @@ SIM_ROOT = File.expand_path("..", __dir__) unless defined?(SIM_ROOT)
 WORKER = File.join(SIM_ROOT, "bin", "scripted-worker") unless defined?(WORKER)
 
 class RaceTest < Minitest::Test
+  LOCAL_COORDINATION_ENV = {
+    "AGENT_COORD_API_URL" => nil,
+    "AGENT_COORD_API_TOKEN" => nil,
+    "AGENT_COORD_BACKEND" => nil
+  }.freeze
+
   def test_concurrent_workers_one_winner
     with_seeded_origin do |dir, state, origin|
-      env = { "AGENT_COORD_STATE_ROOT" => state }
+      env = LOCAL_COORDINATION_ENV.merge("AGENT_COORD_STATE_ROOT" => state)
       results = Array.new(3)
       threads = results.each_index.map do |i|
         Thread.new do

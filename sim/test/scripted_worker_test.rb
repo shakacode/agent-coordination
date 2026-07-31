@@ -10,6 +10,12 @@ SIM_ROOT = File.expand_path("..", __dir__) unless defined?(SIM_ROOT)
 WORKER = File.join(SIM_ROOT, "bin", "scripted-worker") unless defined?(WORKER)
 
 class ScriptedWorkerTest < Minitest::Test
+  LOCAL_COORDINATION_ENV = {
+    "AGENT_COORD_API_URL" => nil,
+    "AGENT_COORD_API_TOKEN" => nil,
+    "AGENT_COORD_BACKEND" => nil
+  }.freeze
+
   def setup
     @dir = Dir.mktmpdir
     @state = File.join(@dir, "state")
@@ -32,7 +38,7 @@ class ScriptedWorkerTest < Minitest::Test
   end
 
   def run_worker(agent_id, issue_key: "task_one", clone_url: @origin)
-    env = { "AGENT_COORD_STATE_ROOT" => @state }
+    env = LOCAL_COORDINATION_ENV.merge("AGENT_COORD_STATE_ROOT" => @state)
     Open3.capture3(
       env, WORKER,
       "--agent-id", agent_id, "--repo-slug", "sim/local",
@@ -42,7 +48,7 @@ class ScriptedWorkerTest < Minitest::Test
   end
 
   def test_missing_flag_value_exits_with_contract_code
-    env = { "AGENT_COORD_STATE_ROOT" => @state }
+    env = LOCAL_COORDINATION_ENV.merge("AGENT_COORD_STATE_ROOT" => @state)
     stdout, _stderr, status = Open3.capture3(env, WORKER, "--workdir")
 
     assert_equal 2, status.exitstatus
@@ -71,7 +77,7 @@ class ScriptedWorkerTest < Minitest::Test
   end
 
   def test_second_worker_is_refused_while_first_holds_claim
-    env = { "AGENT_COORD_STATE_ROOT" => @state }
+    env = LOCAL_COORDINATION_ENV.merge("AGENT_COORD_STATE_ROOT" => @state)
     system(
       env, File.expand_path("../../bin/agent-coord", __dir__),
       "claim", "--agent-id", "holder", "--repo", "sim/local",

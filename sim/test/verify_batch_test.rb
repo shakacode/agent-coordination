@@ -8,6 +8,11 @@ require "tmpdir"
 
 class VerifyBatchTest < Minitest::Test
   VERIFY = File.expand_path("../bin/verify-batch", __dir__)
+  LOCAL_COORDINATION_ENV = {
+    "AGENT_COORD_API_URL" => nil,
+    "AGENT_COORD_API_TOKEN" => nil,
+    "AGENT_COORD_BACKEND" => nil
+  }.freeze
 
   def write(state, path, data)
     full = File.join(state, path)
@@ -35,7 +40,7 @@ class VerifyBatchTest < Minitest::Test
         write(state, "claims/sim/verify/#{target}.json", released_claim(target))
       end
       stdout, _stderr, status = Open3.capture3(
-        { "AGENT_COORD_STATE_ROOT" => state }, VERIFY, "--repo-slug", "sim/verify"
+        local_coordination_env(state), VERIFY, "--repo-slug", "sim/verify"
       )
       assert_equal 0, status.exitstatus, stdout
       assert_includes stdout, "SCORE 3/3"
@@ -46,7 +51,7 @@ class VerifyBatchTest < Minitest::Test
     Dir.mktmpdir do |state|
       write(state, "claims/sim/verify/task_one.json", released_claim("task_one"))
       stdout, _stderr, status = Open3.capture3(
-        { "AGENT_COORD_STATE_ROOT" => state }, VERIFY, "--repo-slug", "sim/verify"
+        local_coordination_env(state), VERIFY, "--repo-slug", "sim/verify"
       )
       assert_equal 1, status.exitstatus
       assert_includes stdout, "FAIL task_two"
@@ -62,7 +67,7 @@ class VerifyBatchTest < Minitest::Test
 
       with_fake_gh do |env, log|
         stdout, _stderr, status = Open3.capture3(
-          env.merge("AGENT_COORD_STATE_ROOT" => state),
+          local_coordination_env(state).merge(env),
           VERIFY, "--repo-slug", "sim/verify", "--live"
         )
         assert_equal 0, status.exitstatus, stdout
@@ -80,7 +85,7 @@ class VerifyBatchTest < Minitest::Test
 
       with_fake_gh(check_buckets: ["pending"]) do |env, _log|
         stdout, _stderr, status = Open3.capture3(
-          env.merge("AGENT_COORD_STATE_ROOT" => state),
+          local_coordination_env(state).merge(env),
           VERIFY, "--repo-slug", "sim/verify", "--live"
         )
         assert_equal 1, status.exitstatus
@@ -97,7 +102,7 @@ class VerifyBatchTest < Minitest::Test
 
       with_fake_gh(check_buckets: ["cancel"]) do |env, _log|
         stdout, _stderr, status = Open3.capture3(
-          env.merge("AGENT_COORD_STATE_ROOT" => state),
+          local_coordination_env(state).merge(env),
           VERIFY, "--repo-slug", "sim/verify", "--live"
         )
         assert_equal 1, status.exitstatus
@@ -106,7 +111,7 @@ class VerifyBatchTest < Minitest::Test
 
       with_fake_gh(check_buckets: []) do |env, _log|
         stdout, _stderr, status = Open3.capture3(
-          env.merge("AGENT_COORD_STATE_ROOT" => state),
+          local_coordination_env(state).merge(env),
           VERIFY, "--repo-slug", "sim/verify", "--live"
         )
         assert_equal 1, status.exitstatus
@@ -123,7 +128,7 @@ class VerifyBatchTest < Minitest::Test
 
       with_fake_gh(checks_stdout: "not json", checks_exit: 8) do |env, _log|
         stdout, _stderr, status = Open3.capture3(
-          env.merge("AGENT_COORD_STATE_ROOT" => state),
+          local_coordination_env(state).merge(env),
           VERIFY, "--repo-slug", "sim/verify", "--live"
         )
         assert_equal 1, status.exitstatus
@@ -141,7 +146,7 @@ class VerifyBatchTest < Minitest::Test
 
       with_fake_gh(open_empty: true, multi_prs: true) do |env, _log|
         stdout, _stderr, status = Open3.capture3(
-          env.merge("AGENT_COORD_STATE_ROOT" => state),
+          local_coordination_env(state).merge(env),
           VERIFY, "--repo-slug", "sim/verify", "--live"
         )
         assert_equal 0, status.exitstatus, stdout
@@ -151,6 +156,10 @@ class VerifyBatchTest < Minitest::Test
   end
 
   private
+
+  def local_coordination_env(state)
+    LOCAL_COORDINATION_ENV.merge("AGENT_COORD_STATE_ROOT" => state)
+  end
 
   def with_fake_gh(check_buckets: ["pass"], checks_stdout: nil, checks_exit: nil, open_empty: false, multi_prs: false)
     Dir.mktmpdir do |dir|

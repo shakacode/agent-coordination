@@ -928,7 +928,7 @@ class StackDoctorCliTest < Minitest::Test
     Dir.mktmpdir("agent-coord-stack-doctor") do |root|
       state_root = File.join(root, "state")
       config_home = File.join(root, "config")
-      env_file = File.join(config_home, "agent-coord", "env")
+      env_file = File.join(config_home, "agent-coord", "http-env.sh")
       FileUtils.mkdir_p(state_root)
       FileUtils.mkdir_p(File.dirname(env_file))
       File.write(env_file, "AGENT_COORD_API_URL=https://coordination.example\n")

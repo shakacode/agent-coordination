@@ -281,22 +281,36 @@ carries the same tuple as an `identity.machine` component check: `failed` on a
 mismatch (driving exit `2`), `healthy` on a verified match, and `skipped` when
 no authenticated token machine is available to compare.
 
-Backend selection follows this rule:
+Backend selection is global and shell-independent. The CLI safely reads the
+canonical user file from `AGENT_COORD_ENV_FILE` when explicitly set, otherwise
+from `$XDG_CONFIG_HOME/agent-coord/env` (falling back to
+`$HOME/.config/agent-coord/env`). It parses assignments without evaluating the
+file as shell code, accepts only the documented `AGENT_COORD_*` allowlist, and
+requires a regular current-user-owned file with no group or world permissions.
+An explicitly selected missing file, an insecure file, duplicate keys, or
+ambiguous syntax is an operational failure rather than a fallback to another
+backend.
 
-1. `--state-root` flag -> `LocalStore`
-2. `--api-url` flag or `AGENT_COORD_API_URL` env -> `HttpStore`
-3. `AGENT_COORD_STATE_ROOT` env -> `LocalStore`
-4. `--backend` flag or `AGENT_COORD_BACKEND` env -> legacy `GitHubStore`
-5. otherwise -> labeled local store at the zero-config path above
+Backend selection follows this precedence:
+
+1. explicit CLI backend flags (`--state-root`, `--api-url`, or `--backend`)
+2. backend selectors already present in the process environment
+3. backend selectors in the canonical user file
+4. otherwise, the labeled local store at the zero-config path above
+
+Within an environment tier, `AGENT_COORD_API_URL` selects `HttpStore`,
+`AGENT_COORD_STATE_ROOT` selects `LocalStore`, and `AGENT_COORD_BACKEND`
+selects the legacy `GitHubStore`. Existing process values also override
+same-named user-file values for authentication and identity.
 
 When both `AGENT_COORD_API_URL` and `AGENT_COORD_STATE_ROOT` are set, the CLI
 uses the HTTP backend and warns once. Pass `--state-root` only for an explicit
 local smoke check.
 
-Selection 5 is *implicit* local. When a consumer env file
-(`AGENT_COORD_ENV_FILE`, `$XDG_CONFIG_HOME/agent-coord/env`, or
-`$XDG_CONFIG_HOME/agent-coord/http-env.sh`) configures `AGENT_COORD_API_URL`
-but that file was never sourced, an implicit local run is a split-brain
+The last selection is *implicit* local. The canonical user file is loaded
+automatically. When the older compatibility file
+`$XDG_CONFIG_HOME/agent-coord/http-env.sh` configures
+`AGENT_COORD_API_URL` but the canonical file does not, an implicit local run is a split-brain
 configuration: writes would land on a local state root the fleet never reads.
 `claim`, `release`, `heartbeat`, `record-event`, and `register-batch` therefore
 hard stop with exit `2` and name the offending env file. Read commands
@@ -792,7 +806,36 @@ old holder's record. For planned ownership moves, include `--handoff-to` and
 `--handoff-note` on the original release, then have the next worker claim the
 same repo/target and continue on the recorded branch/PR.
 `version` prints the CLI contract version. `config show --json` prints runtime
-defaults and machine-readable exit codes. Default `doctor` verifies the current
+defaults, machine-readable exit codes, and a `coordination` object containing
+the effective `policy`, selected `backend`, `configured` state, source
+provenance, and `available: null`. Configuration inspection never performs a
+network probe, so consumers must run `doctor` before treating the backend as
+available.
+
+The durable user policy is `required`, `optional`, or `disabled`; it defaults
+to `optional`. Persist it separately from credentials:
+
+```bash
+agent-coord config set --policy required
+```
+
+To install or repair the endpoint, token, and machine identity without putting
+the token in command history, pipe only the token to stdin:
+
+```bash
+printf '%s\n' "$AGENT_COORD_API_TOKEN" |
+  agent-coord config set \
+    --api-url https://coordination.example \
+    --token-stdin \
+    --machine-id m1 \
+    --policy required
+```
+
+`config set` atomically replaces the selected user files with mode `0600`,
+preserves unspecified supported keys, and never prints token values. A process
+`AGENT_COORD_POLICY` overrides the persisted policy for one invocation.
+
+Default `doctor` verifies the current
 backend without writing state or parsing every record; `doctor --deep` adds full
 JSON validation. For HTTP tokens whose read scope does not overlap `claims`, use
 `doctor --doctor-prefix <read-prefix>` to verify that scoped read path.

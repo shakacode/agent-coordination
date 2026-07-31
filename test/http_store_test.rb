@@ -478,7 +478,7 @@ class HttpBackendSelectionTest < HttpEnvTestCase
   def with_split_brain_config(extra_env = {})
     Dir.mktmpdir("agent-coord-consumer-env") do |root|
       config_home = File.join(root, "config")
-      env_file = File.join(config_home, "agent-coord", "env")
+      env_file = File.join(config_home, "agent-coord", "http-env.sh")
       state_home = File.join(root, "state")
       FileUtils.mkdir_p(File.dirname(env_file))
       FileUtils.mkdir_p(state_home)
@@ -779,7 +779,7 @@ class HttpBackendSelectionTest < HttpEnvTestCase
 
   def test_status_warns_when_consumer_env_file_points_remote_but_cli_uses_local
     Dir.mktmpdir("agent-coord-xdg-config") do |config_home|
-      env_file = File.join(config_home, "agent-coord", "env")
+      env_file = File.join(config_home, "agent-coord", "http-env.sh")
       FileUtils.mkdir_p(File.dirname(env_file))
       File.write(env_file, "AGENT_COORD_API_URL=https://agent-coord.example\nAGENT_COORD_API_TOKEN=secret\n")
 
@@ -801,7 +801,7 @@ class HttpBackendSelectionTest < HttpEnvTestCase
 
   def test_status_ignores_consumer_env_file_with_invalid_encoding
     Dir.mktmpdir("agent-coord-xdg-config") do |config_home|
-      env_file = File.join(config_home, "agent-coord", "env")
+      env_file = File.join(config_home, "agent-coord", "http-env.sh")
       FileUtils.mkdir_p(File.dirname(env_file))
       File.binwrite(env_file, "\xFFAGENT_COORD_API_URL=https://agent-coord.example\n".b)
 
