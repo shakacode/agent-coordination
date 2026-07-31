@@ -373,9 +373,13 @@ module AgentCoord
     def load_user_configuration!
       @process_config = USER_CONFIG_ENV_KEYS.to_h { |key| [key, ENV.fetch(key, nil)] }
       @user_config_path, explicit = selected_user_config_path
-      @user_config = @user_config_path ? read_user_env_file(@user_config_path, required: explicit) : {}
       @policy_file_path = File.join(File.dirname(@user_config_path), "policy") if @user_config_path
-      @policy_file_value = read_policy_file(@policy_file_path) if @policy_file_path
+      @user_config = {}
+      @policy_file_value = nil
+      with_optional_config_read_lock do
+        @user_config = @user_config_path ? read_user_env_file(@user_config_path, required: explicit) : {}
+        @policy_file_value = read_policy_file(@policy_file_path) if @policy_file_path
+      end
       @injected_user_config_keys = []
 
       @user_config.each do |key, value|
@@ -1935,16 +1939,29 @@ module AgentCoord
       validate_policy!(policy, "--policy") if policy
       raise Error, "config set requires at least one setting" if updates.empty? && !policy
 
-      unless updates.empty?
-        values = @user_config.merge(updates)
-        write_private_config_file(@user_config_path, render_user_env(values))
-        @stdout.puts "updated user configuration: #{@user_config_path} (#{updates.keys.sort.join(', ')})"
+      with_config_write_lock do
+        current = read_user_env_file(@user_config_path, required: false)
+        validate_api_url_token_transition!(current, updates)
+        writes = {}
+        writes[@user_config_path] = render_user_env(current.merge(updates)) unless updates.empty?
+        # The policy rename is deliberately last: it is the commit marker for a
+        # combined env+policy update while the exclusive config lock is held.
+        writes[@policy_file_path] = "#{policy}\n" if policy
+        write_private_config_transaction(writes)
       end
-      if policy
-        write_private_config_file(@policy_file_path, "#{policy}\n")
-        @stdout.puts "updated coordination policy: #{@policy_file_path}"
-      end
+      @stdout.puts "updated user configuration: #{@user_config_path} (#{updates.keys.sort.join(', ')})" \
+        unless updates.empty?
+      @stdout.puts "updated coordination policy: #{@policy_file_path}" if policy
       0
+    end
+
+    def validate_api_url_token_transition!(current, updates)
+      return unless updates.key?("AGENT_COORD_API_URL")
+      return if updates.key?("AGENT_COORD_API_TOKEN")
+      return if current.fetch("AGENT_COORD_API_URL", nil) == updates.fetch("AGENT_COORD_API_URL")
+      return if current.fetch("AGENT_COORD_API_TOKEN", "").empty?
+
+      raise Error, "--token-stdin is required when changing an API URL that has a saved token"
     end
 
     def validate_config_api_url!(value)
@@ -1974,6 +1991,42 @@ module AgentCoord
         "#{key}=#{Shellwords.escape(values.fetch(key))}"
       end
       "#{lines.join("\n")}\n"
+    end
+
+    def with_optional_config_read_lock
+      return yield unless @user_config_path
+
+      lock_path = File.join(File.dirname(@user_config_path), ".config.lock")
+      File.open(lock_path, File::RDONLY | File::NOFOLLOW) do |lock|
+        validate_private_config_file!(lock, lock_path)
+        lock.flock(File::LOCK_SH)
+        yield
+      ensure
+        lock&.flock(File::LOCK_UN)
+      end
+    rescue Errno::ENOENT
+      yield
+    rescue Errno::ELOOP
+      raise OperationalError, "config lock must not be a symlink: #{lock_path}"
+    rescue SystemCallError => e
+      raise OperationalError, "cannot acquire config read lock #{lock_path}: #{e.message}"
+    end
+
+    def with_config_write_lock
+      directory = validate_secure_directory_chain!(File.dirname(@user_config_path), create: true)
+      lock_path = File.join(directory, ".config.lock")
+      File.open(lock_path, File::RDWR | File::CREAT | File::NOFOLLOW, 0o600) do |lock|
+        validate_private_config_file!(lock, lock_path)
+        raise OperationalError, "cannot acquire config write lock: #{lock_path}" unless lock.flock(File::LOCK_EX)
+
+        yield
+      ensure
+        lock&.flock(File::LOCK_UN)
+      end
+    rescue Errno::ELOOP
+      raise OperationalError, "config lock must not be a symlink: #{lock_path}"
+    rescue SystemCallError => e
+      raise OperationalError, "cannot acquire config write lock #{lock_path}: #{e.message}"
     end
 
     def validate_secure_directory_chain!(directory, create:)
@@ -2028,24 +2081,37 @@ module AgentCoord
       raise OperationalError, "config parent leaf permissions are unsafe (expected 0700): #{path}"
     end
 
-    def write_private_config_file(path, contents)
-      directory = validate_secure_directory_chain!(File.dirname(path), create: true)
-      destination = File.join(directory, File.basename(path))
-      temp_path = File.join(directory, ".#{File.basename(path)}.tmp-#{Process.pid}-#{SecureRandom.hex(6)}")
-      File.open(temp_path, File::WRONLY | File::CREAT | File::EXCL | File::NOFOLLOW, 0o600) do |file|
-        file.write(contents)
-        file.flush
-        file.fsync
+    def write_private_config_transaction(writes)
+      return if writes.empty?
+
+      directory = validate_secure_directory_chain!(File.dirname(writes.keys.first), create: true)
+      destinations = writes.to_h do |path, contents|
+        unless File.dirname(path) == File.dirname(writes.keys.first)
+          raise OperationalError, "config transaction paths must share one directory"
+        end
+
+        destination = File.join(directory, File.basename(path))
+        temp_path = File.join(directory, ".#{File.basename(path)}.tmp-#{Process.pid}-#{SecureRandom.hex(6)}")
+        write_private_config_temp_file(temp_path, contents)
+        [destination, temp_path]
       end
-      File.rename(temp_path, destination)
+      destinations.each { |destination, temp_path| File.rename(temp_path, destination) }
       File.open(directory, File::RDONLY | File::NOFOLLOW) do |directory_file|
         validate_secure_directory_component!(directory_file.stat, directory, leaf: true)
         directory_file.fsync
       end
     rescue SystemCallError => e
-      raise OperationalError, "cannot persist user configuration #{path}: #{e.message}"
+      raise OperationalError, "cannot persist user configuration transaction: #{e.message}"
     ensure
-      File.unlink(temp_path) if temp_path && File.exist?(temp_path)
+      destinations&.each_value { |temp_path| FileUtils.rm_f(temp_path) }
+    end
+
+    def write_private_config_temp_file(path, contents)
+      File.open(path, File::WRONLY | File::CREAT | File::EXCL | File::NOFOLLOW, 0o600) do |file|
+        file.write(contents)
+        file.flush
+        file.fsync
+      end
     end
 
     def default_backend_text

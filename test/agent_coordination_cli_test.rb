@@ -1364,6 +1364,7 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
   end
 
   def test_config_set_updates_private_env_atomically_from_token_stdin_and_preserves_unspecified_keys
+    # rubocop:disable Metrics/BlockLength
     with_private_user_config(
       "AGENT_COORD_REF=existing-ref\nAGENT_COORD_API_TOKEN=old-private-token\n"
     ) do |config_home|
@@ -1378,6 +1379,8 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
         "--token-stdin",
         "--machine-id",
         "m1",
+        "--policy",
+        "required",
         stdin_data: "new-private-token\n"
       )
 
@@ -1392,7 +1395,85 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
       assert_includes contents, "AGENT_COORD_API_TOKEN=new-private-token"
       assert_includes contents, "AGENT_COORD_MACHINE_ID=m1"
       refute_includes contents, "old-private-token"
+      assert_equal "required\n", File.read(File.join(config_home, "agent-coord", "policy"))
     end
+    # rubocop:enable Metrics/BlockLength
+  end
+
+  def test_config_set_rejects_url_change_without_replacement_token
+    with_private_user_config(
+      "AGENT_COORD_API_URL=https://old.example\nAGENT_COORD_API_TOKEN=old-private-token\n"
+    ) do |config_home|
+      env_file = File.join(config_home, "agent-coord", "env")
+      original = File.read(env_file)
+      result = run_command(
+        { "XDG_CONFIG_HOME" => config_home },
+        RbConfig.ruby,
+        BIN,
+        "config",
+        "set",
+        "--api-url",
+        "https://new.example"
+      )
+
+      assert_equal 1, result.status.exitstatus
+      assert_includes result.stderr, "--token-stdin is required when changing"
+      assert_equal original, File.read(env_file)
+      refute_includes result.stdout, "old-private-token"
+      refute_includes result.stderr, "old-private-token"
+    end
+  end
+
+  def test_concurrent_config_set_preserves_both_writers_unspecified_keys
+    # rubocop:disable Metrics/BlockLength
+    with_private_user_config("AGENT_COORD_REF=existing-ref\n") do |config_home|
+      with_process_env(
+        "XDG_CONFIG_HOME" => config_home,
+        "AGENT_COORD_API_URL" => nil,
+        "AGENT_COORD_API_TOKEN" => nil,
+        "AGENT_COORD_MACHINE_ID" => nil
+      ) do
+        api_runner = AgentCoord::Runner.new([], stdout: StringIO.new, stderr: StringIO.new)
+        machine_runner = AgentCoord::Runner.new([], stdout: StringIO.new, stderr: StringIO.new)
+        [api_runner, machine_runner].each { |runner| runner.send(:load_user_configuration!) }
+
+        ready = Queue.new
+        start = Queue.new
+        errors = Queue.new
+        workers = [
+          Thread.new do
+            ready << true
+            start.pop
+            api_runner.send(:persist_config, api_url_cli: true, api_url: "https://new.example")
+          rescue StandardError => e
+            errors << e
+          end,
+          Thread.new do
+            ready << true
+            start.pop
+            machine_runner.send(:persist_config, machine_id_given: true, machine_id: "m1")
+          rescue StandardError => e
+            errors << e
+          end
+        ]
+        2.times { ready.pop }
+        2.times { start << true }
+        workers.each(&:join)
+        worker_error = errors.pop unless errors.empty?
+        assert_nil worker_error, worker_error&.full_message
+
+        env_file = File.join(config_home, "agent-coord", "env")
+        contents = File.read(env_file)
+        assert_includes contents, "AGENT_COORD_REF=existing-ref"
+        assert_includes contents, "AGENT_COORD_API_URL=https://new.example"
+        assert_includes contents, "AGENT_COORD_MACHINE_ID=m1"
+      ensure
+        [api_runner, machine_runner].compact.each do |runner|
+          runner.send(:restore_injected_user_configuration!)
+        end
+      end
+    end
+    # rubocop:enable Metrics/BlockLength
   end
 
   def test_user_config_is_never_evaluated_as_shell

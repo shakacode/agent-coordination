@@ -836,8 +836,14 @@ printf '%s\n' "$AGENT_COORD_API_TOKEN" |
 ```
 
 `config set` validates or securely creates the full parent chain, atomically
-replaces the selected user files with mode `0600`, syncs the containing
-directory, preserves unspecified supported keys, and never prints token values.
+stages the selected user files with mode `0600`, syncs them, renames them under
+an exclusive config lock, and syncs the containing directory. Each setter
+re-reads under the lock, so concurrent updates preserve unspecified supported
+keys. For a combined env-and-policy update, the policy rename is the final
+commit marker; readers use a shared lock once the lock file exists.
+A saved URL cannot be changed while preserving its old token:
+`--token-stdin` is required in the same transaction. The command never prints
+token values.
 A process `AGENT_COORD_POLICY` overrides the persisted policy for one
 invocation.
 
