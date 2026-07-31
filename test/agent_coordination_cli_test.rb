@@ -25,6 +25,9 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
   end
   ROOT = File.expand_path("..", __dir__)
   BIN = File.join(ROOT, "bin", "agent-coord")
+  PRIVATE_CONFIG_TMP_PARENT = Dir.mktmpdir("agent-coord-private-fixtures-", ROOT)
+  File.chmod(0o700, PRIVATE_CONFIG_TMP_PARENT)
+  Minitest.after_run { FileUtils.rm_rf(PRIVATE_CONFIG_TMP_PARENT) }
   HTTP_INTEGRATION_BIN = File.join(ROOT, "bin", "test-http-integration")
   LAUNCHD_HEARTBEAT_TEMPLATE = File.join(ROOT, "launchd", "com.shakacode.agent-coord-heartbeat.plist.example")
   SYSTEMD_TEMPLATE = File.join(ROOT, "systemd", "agent-coord-heartbeat.service.example")
@@ -1330,7 +1333,7 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
 
   def test_config_set_persists_policy_in_canonical_env_and_config_show_resolves_it
     # rubocop:disable Metrics/BlockLength
-    Dir.mktmpdir("agent-coord-config-set-policy") do |root|
+    with_private_config_tmpdir("agent-coord-config-set-policy") do |root|
       config_home = File.join(root, "config")
       set_result = run_command(
         { "XDG_CONFIG_HOME" => config_home },
@@ -1444,7 +1447,7 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
   end
 
   def test_legacy_policy_file_is_read_only_fallback
-    Dir.mktmpdir("agent-coord-legacy-policy") do |root|
+    with_private_config_tmpdir("agent-coord-legacy-policy") do |root|
       config_home = File.join(root, "config")
       directory = File.join(config_home, "agent-coord")
       policy_file = File.join(directory, "policy")
@@ -1571,7 +1574,7 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
   end
 
   def test_user_config_is_never_evaluated_as_shell
-    Dir.mktmpdir("agent-coord-no-shell-eval") do |root|
+    with_private_config_tmpdir("agent-coord-no-shell-eval") do |root|
       config_home = File.join(root, "config")
       env_file = File.join(config_home, "agent-coord", "env")
       marker = File.join(root, "must-not-exist")
@@ -1624,7 +1627,7 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
   # rubocop:disable Metrics/MethodLength
   def test_user_config_swap_after_open_reads_and_validates_the_opened_descriptor
     # rubocop:disable Metrics/BlockLength
-    Dir.mktmpdir("agent-coord-config-swap") do |root|
+    with_private_config_tmpdir("agent-coord-config-swap") do |root|
       config_home = File.join(root, "config")
       env_file = File.join(config_home, "agent-coord", "env")
       trusted_backup = "#{env_file}.trusted"
@@ -1746,7 +1749,7 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
   end
 
   def test_process_policy_overrides_persisted_policy
-    Dir.mktmpdir("agent-coord-process-policy") do |root|
+    with_private_config_tmpdir("agent-coord-process-policy") do |root|
       config_home = File.join(root, "config")
       set_result = run_command(
         { "XDG_CONFIG_HOME" => config_home },
@@ -8521,7 +8524,7 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
   end
 
   def with_private_user_config(contents)
-    Dir.mktmpdir("agent-coord-private-config") do |root|
+    with_private_config_tmpdir("agent-coord-private-config") do |root|
       config_home = File.join(root, "config")
       env_file = File.join(config_home, "agent-coord", "env")
       FileUtils.mkdir_p(File.dirname(env_file))
@@ -8530,6 +8533,10 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
       File.chmod(0o600, env_file)
       yield config_home
     end
+  end
+
+  def with_private_config_tmpdir(prefix, &)
+    Dir.mktmpdir(prefix, PRIVATE_CONFIG_TMP_PARENT, &)
   end
 
   def with_process_env(values)

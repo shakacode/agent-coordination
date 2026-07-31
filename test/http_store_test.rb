@@ -430,6 +430,11 @@ end
 
 class HttpEnvTestCase < Minitest::Test
   IDENTITY_ENV_KEYS = %w[AGENT_COORD_MACHINE_ID AGENT_COORD_SESSION_ID CODEX_THREAD_ID].freeze
+  PRIVATE_CONFIG_TMP_PARENT = Dir.mktmpdir(
+    "agent-coord-http-private-fixtures-", File.expand_path("..", __dir__)
+  )
+  File.chmod(0o700, PRIVATE_CONFIG_TMP_PARENT)
+  Minitest.after_run { FileUtils.rm_rf(PRIVATE_CONFIG_TMP_PARENT) }
   # An empty XDG config home keeps the suite off the developer's real
   # ~/.config/agent-coord/env, which would otherwise trip the split-brain guard.
   ISOLATED_CONFIG_HOME = Dir.mktmpdir("agent-coord-isolated-config")
@@ -447,6 +452,10 @@ class HttpEnvTestCase < Minitest::Test
     yield
   ensure
     saved.each { |key, value| value.nil? ? ENV.delete(key) : ENV[key] = value }
+  end
+
+  def with_private_config_tmpdir(prefix, &)
+    Dir.mktmpdir(prefix, PRIVATE_CONFIG_TMP_PARENT, &)
   end
 end
 
@@ -629,7 +638,7 @@ class HttpBackendSelectionTest < HttpEnvTestCase # rubocop:disable Metrics/Class
 
   def test_saved_token_is_not_sent_to_cli_or_process_endpoint_override
     # rubocop:disable Metrics/BlockLength
-    Dir.mktmpdir("agent-coord-token-provenance") do |root|
+    with_private_config_tmpdir("agent-coord-token-provenance") do |root|
       config_home = File.join(root, "config")
       env_file = File.join(config_home, "agent-coord", "env")
       FileUtils.mkdir_p(File.dirname(env_file))
