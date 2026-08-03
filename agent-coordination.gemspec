@@ -36,6 +36,12 @@ Gem::Specification.new do |spec|
     docs/adr/0012-batch-completion-state-contract.md
     docs/adr/0013-batch-blocker-state-contract.md
     docs/protocol-curl.md
+    docs/telemetry-ledger.md
+    lib/agent_coordination/harvester.rb
+    lib/agent_coordination/host_adapters.rb
+    lib/agent_coordination/ledger.rb
+    lib/agent_coordination/pricing.rb
+    lib/agent_coordination/scorecards.rb
     schema/state/v1/batch-blocker/batch-blocker.schema.json
     schema/state/v1/batch-blocker/fixtures/invalid/blocker-decision-not-string.json
     schema/state/v1/batch-blocker/fixtures/invalid/blocker-empty-decision-string.json
@@ -70,7 +76,6 @@ Gem::Specification.new do |spec|
     schema/state/v1/batch-completion/fixtures/valid/completion-minimal-archive-ready.json
     schema/state/v1/batch-completion/fixtures/valid/completion-outcomes-plain-text.json
     schema/state/v1/batch-completion/fixtures/valid/completion-verdict-findings.json
-    docs/telemetry-ledger.md
     schema/state/v1/capacity-reservation/capacity-profile.schema.json
     schema/state/v1/capacity-reservation/capacity-reservation.schema.json
     schema/state/v1/capacity-reservation/fixtures/invalid/capacity-profile-zero.json
@@ -146,11 +151,6 @@ Gem::Specification.new do |spec|
     schema/state/v1/usage/fixtures/valid/usage-unknown-metrics.json
     schema/state/v1/usage/usage-record.schema.json
     schema/telemetry-ledger/0001_initial.sql
-    lib/agent_coordination/harvester.rb
-    lib/agent_coordination/host_adapters.rb
-    lib/agent_coordination/ledger.rb
-    lib/agent_coordination/pricing.rb
-    lib/agent_coordination/scorecards.rb
     schema/telemetry-ledger/0002_host_usage.sql
     schema/telemetry-ledger/0003_pricing_scorecards.sql
   ]
