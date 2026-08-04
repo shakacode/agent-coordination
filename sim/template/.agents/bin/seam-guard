@@ -1,0 +1,83 @@
+#!/usr/bin/env ruby
+# frozen_string_literal: true
+
+require "open3"
+require "yaml"
+
+usage = "usage: seam-guard <repo_root> <base_ref> <head_ref>"
+root_arg = ARGV[0] or abort usage
+base_ref = ARGV[1] or abort usage
+head_ref = ARGV[2] or abort usage
+root = File.expand_path(root_arg)
+
+def git_capture(root, *args)
+  output, status = Open3.capture2("git", "-C", root, *args)
+  abort "Could not inspect simulation revisions." unless status.success?
+
+  output
+end
+
+def head_file(root, head_commit, path)
+  output, status = Open3.capture2("git", "-C", root, "show", "#{head_commit}:#{path}")
+  abort "Missing required simulation file: #{path}" unless status.success?
+
+  output
+end
+
+base_commit = git_capture(root, "rev-parse", "--verify", "#{base_ref}^{commit}").strip
+head_commit = git_capture(root, "rev-parse", "--verify", "#{head_ref}^{commit}").strip
+merge_base = git_capture(root, "merge-base", base_commit, head_commit).strip
+abort "Could not resolve the simulation merge base." if merge_base.empty?
+
+changed_output = git_capture(root, "diff", "--name-only", "-z", merge_base, head_commit)
+changed_paths = changed_output.split("\0")
+
+task_path = %r{\Alib/task_[[:alnum:]_]+\.rb\z}
+# Steady-state changes are deliberately narrow. Updates to this guard, CI, or
+# validators require an explicit bootstrap PR; see .agents/bin/README.md.
+config_paths = %w[
+  .agents/agent-workflow.yml
+  .agents/bin/README.md
+  AGENTS.md
+]
+task_paths, non_task_paths = changed_paths.partition { |path| path.match?(task_path) }
+
+unless task_paths.empty?
+  abort "Task changes cannot be combined with config or unrelated paths: #{non_task_paths.join(', ')}" unless non_task_paths.empty?
+
+  puts "TASK_ONLY"
+  exit 0
+end
+
+unexpected_paths = non_task_paths - config_paths
+abort "Unexpected guarded paths: #{unexpected_paths.join(', ')}" unless unexpected_paths.empty?
+
+# Keep these duplicated checks aligned with config-check. Duplication is
+# intentional: this base-trusted guard must never require candidate code.
+agents = head_file(root, head_commit, "AGENTS.md")
+heading = "## Agent Workflow Configuration"
+section_start = agents.index(heading)
+abort "Missing canonical Agent Workflow Configuration pointer." unless section_start
+
+expected_pointer = <<~MARKDOWN.chomp
+  ## Agent Workflow Configuration
+
+  Portable shared skills resolve this repo's commands and policy through:
+  - **Commands** — run `.agents/bin/<name>` (`setup`, `validate`, `test`, ...); see `.agents/bin/README.md`. A missing script means that capability is n/a here.
+  - **Policy / config** — `.agents/agent-workflow.yml`.
+MARKDOWN
+actual_pointer = agents[section_start..].rstrip
+abort "Agent Workflow Configuration pointer is not canonical." unless actual_pointer == expected_pointer
+
+policy = YAML.safe_load(head_file(root, head_commit, ".agents/agent-workflow.yml"), aliases: false)
+abort "Agent workflow policy must be a YAML mapping." unless policy.is_a?(Hash)
+
+readme = head_file(root, head_commit, ".agents/bin/README.md")
+required_readme_rows = [
+  "| `validate` | Sim-aware gate: one task file runs its matching test; task/config mixes and unrelated diffs are rejected. |",
+  "| `config-check` | Validate allowed config-only paths, canonical seam content, policy YAML, and script syntax. |",
+  "| `seam-guard` | Base-trusted pull-request guard; rejects changes to CI and validator entrypoints before head code runs. |"
+]
+abort "Simulation command README does not document guarded validation." unless required_readme_rows.all? { |row| readme.include?(row) }
+
+puts changed_paths.empty? ? "NO_CHANGES" : "CONFIG_ONLY"
