@@ -130,6 +130,67 @@ class TelemetryHarvesterTest < Minitest::Test
     end
   end
 
+  def test_named_batch_harvest_recomputes_outcomes_for_all_refreshed_github_rows # rubocop:disable Metrics/MethodLength
+    Dir.mktmpdir("agent-coordination-ledger-github-refresh") do |dir| # rubocop:disable Metrics/BlockLength
+      source_path = File.join(dir, "coordination.json")
+      github_path = File.join(dir, "github.json")
+      ledger_path = File.join(dir, "telemetry.sqlite3")
+      coordination = JSON.parse(File.read(File.join(FIXTURES, "coordination.json")))
+      coordination.fetch("batches") << {
+        "batch_id" => "batch-second",
+        "repo" => "shakacode/agent-coordination",
+        "status" => "completed",
+        "registered_at" => "2026-07-18T03:00:00Z",
+        "updated_at" => "2026-07-18T04:00:00Z",
+        "lanes" => [{
+          "name" => "second-maker", "targets" => ["80"], "status" => "done",
+          "pr_url" => "https://github.com/shakacode/agent-coordination/pull/180"
+        }]
+      }
+      File.write(source_path, JSON.pretty_generate(coordination))
+      github = JSON.parse(File.read(File.join(FIXTURES, "github.json")))
+      github.fetch("pull_requests") << {
+        "batch_id" => "batch-second",
+        "repo" => "shakacode/agent-coordination",
+        "target" => "80",
+        "number" => 180,
+        "url" => "https://github.com/shakacode/agent-coordination/pull/180",
+        "state" => "open"
+      }
+      File.write(github_path, JSON.pretty_generate(github))
+
+      _stdout, stderr, status = Open3.capture3(
+        CLI, "harvest", "--ledger", ledger_path,
+        "--coordination-json", source_path, "--github-json", github_path,
+        "--from", "2026-07-18", "--to", "2026-07-18"
+      )
+      assert status.success?, stderr
+      assert_equal ["open|open-pr"], sqlite_query(
+        ledger_path,
+        "SELECT github_prs.state, target_units.outcome FROM target_units " \
+        "JOIN target_pr_links ON target_pr_links.target_unit_id = target_units.id " \
+        "JOIN github_prs ON github_prs.id = target_pr_links.github_pr_id " \
+        "WHERE target_units.batch_id = 'batch-second'"
+      )
+
+      github.fetch("pull_requests").last["state"] = "merged"
+      File.write(github_path, JSON.pretty_generate(github))
+      _stdout, stderr, status = Open3.capture3(
+        CLI, "harvest", "--ledger", ledger_path,
+        "--coordination-json", source_path, "--github-json", github_path,
+        "--batch-id", "batch-fixture"
+      )
+      assert status.success?, stderr
+      assert_equal ["merged|merged"], sqlite_query(
+        ledger_path,
+        "SELECT github_prs.state, target_units.outcome FROM target_units " \
+        "JOIN target_pr_links ON target_pr_links.target_unit_id = target_units.id " \
+        "JOIN github_prs ON github_prs.id = target_pr_links.github_pr_id " \
+        "WHERE target_units.batch_id = 'batch-second'"
+      )
+    end
+  end
+
   def test_host_adapters_store_only_incremental_aggregate_metadata_and_exact_links # rubocop:disable Metrics/MethodLength
     Dir.mktmpdir("agent-coordination-ledger-hosts") do |dir| # rubocop:disable Metrics/BlockLength
       source_path = File.join(dir, "coordination.json")
@@ -331,6 +392,85 @@ class TelemetryHarvesterTest < Minitest::Test
       assert_equal "UNKNOWN", scorecard.dig("review_economics", "cost_per_actionable_finding_microusd")
       refute_includes File.binread(ledger_path), finding_secret
       refute_includes scorecard_out, finding_secret
+    end
+  end
+
+  def test_linked_session_without_usage_is_allocated_as_unknown_cost
+    Dir.mktmpdir("agent-coordination-ledger-empty-usage") do |dir| # rubocop:disable Metrics/BlockLength
+      source_path = File.join(dir, "coordination.json")
+      ledger_path = File.join(dir, "telemetry.sqlite3")
+      codex_root = File.join(dir, "codex")
+      log_dir = File.join(codex_root, "sessions", "2026", "07", "18")
+      FileUtils.cp(File.join(FIXTURES, "coordination.json"), source_path)
+      FileUtils.mkdir_p(log_dir)
+      File.write(
+        File.join(log_dir, "linked.jsonl"),
+        [
+          { "type" => "session_meta", "payload" => {
+            "id" => "codex-fixture-session", "timestamp" => "2026-07-18T01:00:00Z",
+            "cwd" => "/redacted/worktrees/ac-d-78-harvester", "pricing_profile" => "standard"
+          } },
+          { "type" => "turn_context", "payload" => { "model" => "gpt-5.6-sol", "effort" => "xhigh" } }
+        ].map { |row| JSON.generate(row) }.join("\n")
+      )
+
+      stdout, stderr, status = Open3.capture3(
+        CLI, "harvest", "--ledger", ledger_path,
+        "--coordination-json", source_path, "--codex-root", codex_root,
+        "--batch-id", "batch-fixture"
+      )
+      assert status.success?, "harvest failed:\n#{stdout}\n#{stderr}"
+      assert_empty stderr
+      assert_equal ["exact|0|unknown|1"], sqlite_query(
+        ledger_path,
+        "SELECT host_sessions.link_status, COUNT(usage_calls.id), allocated_costs.pricing_status, " \
+        "allocated_costs.cost_microusd IS NULL FROM host_sessions " \
+        "LEFT JOIN usage_calls ON usage_calls.host_session_id = host_sessions.id " \
+        "JOIN allocated_costs ON allocated_costs.host_session_id = host_sessions.id " \
+        "GROUP BY host_sessions.id"
+      )
+      assert_equal ["0|1|1"], sqlite_query(
+        ledger_path,
+        "SELECT known_cost_microusd, allocated_sessions, unknown_cost_sessions FROM cost_scorecard"
+      )
+    end
+  end
+
+  def test_coordination_refresh_without_optional_host_root_preserves_session_allocation
+    Dir.mktmpdir("agent-coordination-ledger-optional-host-refresh") do |dir| # rubocop:disable Metrics/BlockLength
+      source_path = File.join(dir, "coordination.json")
+      ledger_path = File.join(dir, "telemetry.sqlite3")
+      codex_root = File.join(dir, "codex")
+      FileUtils.cp(File.join(FIXTURES, "coordination.json"), source_path)
+      FileUtils.cp_r(File.join(FIXTURES, "codex"), codex_root)
+
+      _stdout, stderr, status = Open3.capture3(
+        CLI, "harvest", "--ledger", ledger_path,
+        "--coordination-json", source_path, "--codex-root", codex_root,
+        "--batch-id", "batch-fixture"
+      )
+      assert status.success?, stderr
+      _stdout, stderr, status = Open3.capture3(
+        CLI, "harvest", "--ledger", ledger_path,
+        "--coordination-json", source_path, "--batch-id", "batch-fixture"
+      )
+      assert status.success?, stderr
+
+      assert_equal ["exact|1|1|8278"], sqlite_query(
+        ledger_path,
+        "SELECT host_sessions.link_status, COUNT(DISTINCT session_lane_links.host_session_id), " \
+        "COUNT(DISTINCT allocated_costs.host_session_id), allocated_costs.cost_microusd " \
+        "FROM host_sessions " \
+        "LEFT JOIN session_lane_links ON session_lane_links.host_session_id = host_sessions.id " \
+        "LEFT JOIN allocated_costs ON allocated_costs.host_session_id = host_sessions.id " \
+        "WHERE host_sessions.cwd_basename = 'ac-d-78-harvester' " \
+        "GROUP BY host_sessions.id"
+      )
+      assert_equal ["8278|1|0"], sqlite_query(
+        ledger_path,
+        "SELECT known_cost_microusd, allocated_sessions, unknown_cost_sessions " \
+        "FROM cost_scorecard WHERE batch_id = 'batch-fixture'"
+      )
     end
   end
 

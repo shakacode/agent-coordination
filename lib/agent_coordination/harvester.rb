@@ -113,7 +113,13 @@ module AgentCoord
           create_target_units(observations)
           ingest_github(github) if github
           usage_count = ingest_host_roots
-          selected_ids.each { |batch_id| recompute_outcomes(batch_id) }
+          relink_orphaned_host_sessions
+          outcome_batch_ids = if github
+                                @ledger.rows("SELECT batch_id FROM batches").map { |row| row.fetch("batch_id") }
+                              else
+                                selected_ids
+                              end
+          outcome_batch_ids.each { |batch_id| recompute_outcomes(batch_id) }
         end
         {
           "batches" => selected_ids.length,
@@ -164,6 +170,21 @@ module AgentCoord
           parsed.fetch("sessions").sum do |session|
             insert_host_session(session, artifact_id)
           end
+        end
+      end
+
+      def relink_orphaned_host_sessions
+        @ledger.rows(
+          <<~SQL
+            SELECT host_sessions.id, host_sessions.session_ref, host_sessions.host_family
+            FROM host_sessions
+            LEFT JOIN session_lane_links ON session_lane_links.host_session_id = host_sessions.id
+            WHERE session_lane_links.host_session_id IS NULL
+          SQL
+        ).each do |session|
+          host_session_id = session.fetch("id")
+          link_host_session(host_session_id, session)
+          allocate_session_cost(host_session_id)
         end
       end
 
@@ -269,7 +290,7 @@ module AgentCoord
           "SELECT pricing_status, total_cost_microusd FROM usage_calls WHERE host_session_id = ?",
           [host_session_id]
         )
-        priced = calls.all? { |call| call["pricing_status"] == "priced" }
+        priced = calls.any? && calls.all? { |call| call["pricing_status"] == "priced" }
         allocated_values = [
           link.fetch("target_unit_id"),
           host_session_id,
