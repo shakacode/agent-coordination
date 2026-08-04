@@ -474,6 +474,55 @@ class TelemetryHarvesterTest < Minitest::Test
     end
   end
 
+  def test_new_batch_with_same_session_reference_invalidates_prior_exact_allocation
+    Dir.mktmpdir("agent-coordination-ledger-new-ambiguity") do |dir| # rubocop:disable Metrics/BlockLength
+      source_path = File.join(dir, "coordination.json")
+      ledger_path = File.join(dir, "telemetry.sqlite3")
+      codex_root = File.join(dir, "codex")
+      coordination = JSON.parse(File.read(File.join(FIXTURES, "coordination.json")))
+      File.write(source_path, JSON.pretty_generate(coordination))
+      FileUtils.cp_r(File.join(FIXTURES, "codex"), codex_root)
+
+      _stdout, stderr, status = Open3.capture3(
+        CLI, "harvest", "--ledger", ledger_path,
+        "--coordination-json", source_path, "--codex-root", codex_root,
+        "--batch-id", "batch-fixture"
+      )
+      assert status.success?, stderr
+      coordination.fetch("batches") << {
+        "batch_id" => "batch-second",
+        "repo" => "shakacode/agent-coordination",
+        "status" => "completed",
+        "registered_at" => "2026-07-18T03:00:00Z",
+        "updated_at" => "2026-07-18T04:00:00Z",
+        "lanes" => [{
+          "name" => "second-maker", "targets" => ["80"], "status" => "done",
+          "host" => "codex", "session_id" => "codex-fixture-session"
+        }]
+      }
+      File.write(source_path, JSON.pretty_generate(coordination))
+      _stdout, stderr, status = Open3.capture3(
+        CLI, "harvest", "--ledger", ledger_path,
+        "--coordination-json", source_path, "--batch-id", "batch-second"
+      )
+      assert status.success?, stderr
+
+      assert_equal ["ambiguous|0|0"], sqlite_query(
+        ledger_path,
+        "SELECT host_sessions.link_status, COUNT(DISTINCT session_lane_links.host_session_id), " \
+        "COUNT(DISTINCT allocated_costs.host_session_id) FROM host_sessions " \
+        "LEFT JOIN session_lane_links ON session_lane_links.host_session_id = host_sessions.id " \
+        "LEFT JOIN allocated_costs ON allocated_costs.host_session_id = host_sessions.id " \
+        "WHERE host_sessions.cwd_basename = 'ac-d-78-harvester' " \
+        "GROUP BY host_sessions.id"
+      )
+      assert_equal ["0|0", "0|0"], sqlite_query(
+        ledger_path,
+        "SELECT allocated_sessions, unknown_cost_sessions FROM cost_scorecard ORDER BY batch_id"
+      )
+    end
+  end
+
   def test_cross_repo_and_multiple_pr_evidence_cannot_invent_target_outcomes # rubocop:disable Metrics/MethodLength
     Dir.mktmpdir("agent-coordination-ledger-outcome-edges") do |dir| # rubocop:disable Metrics/BlockLength
       source_path = File.join(dir, "coordination.json")

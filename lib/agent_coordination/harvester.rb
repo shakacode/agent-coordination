@@ -113,7 +113,7 @@ module AgentCoord
           create_target_units(observations)
           ingest_github(github) if github
           usage_count = ingest_host_roots
-          relink_orphaned_host_sessions
+          relink_host_sessions
           outcome_batch_ids = if github
                                 @ledger.rows("SELECT batch_id FROM batches").map { |row| row.fetch("batch_id") }
                               else
@@ -173,13 +173,13 @@ module AgentCoord
         end
       end
 
-      def relink_orphaned_host_sessions
+      def relink_host_sessions
+        @ledger.execute("DELETE FROM allocated_costs")
+        @ledger.execute("DELETE FROM session_lane_links")
         @ledger.rows(
           <<~SQL
             SELECT host_sessions.id, host_sessions.session_ref, host_sessions.host_family
             FROM host_sessions
-            LEFT JOIN session_lane_links ON session_lane_links.host_session_id = host_sessions.id
-            WHERE session_lane_links.host_session_id IS NULL
           SQL
         ).each do |session|
           host_session_id = session.fetch("id")
