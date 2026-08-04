@@ -171,7 +171,7 @@ class PackagingTest < Minitest::Test
   def isolated_gem_env(gem_home, tmpdir)
     unbundled_env.merge(
       "GEM_HOME" => gem_home,
-      "GEM_PATH" => [gem_home, Gem.default_dir].join(File::PATH_SEPARATOR),
+      "GEM_PATH" => ([gem_home] + Gem.path).uniq.join(File::PATH_SEPARATOR),
       "HOME" => File.join(tmpdir, "home"),
       "PATH" => [File.dirname(RbConfig.ruby), ENV.fetch("PATH", "")].join(File::PATH_SEPARATOR),
       "XDG_CONFIG_HOME" => File.join(tmpdir, "xdg-config"),
