@@ -3,15 +3,32 @@
 require "fileutils"
 require "minitest/autorun"
 require "open3"
+require "rbconfig"
 require "tmpdir"
 
 SIM_ROOT = File.expand_path("..", __dir__) unless defined?(SIM_ROOT)
 WORKER = File.join(SIM_ROOT, "bin", "scripted-worker") unless defined?(WORKER)
 
 class RaceTest < Minitest::Test
+  LOCAL_COORDINATION_ENV = {
+    "AGENT_COORD_API_URL" => nil,
+    "AGENT_COORD_API_TOKEN" => nil,
+    "AGENT_COORD_BACKEND" => nil,
+    "AGENT_COORD_ENV_FILE" => nil,
+    "AGENT_COORD_LOCAL" => nil,
+    "AGENT_COORD_MACHINE_ID" => nil,
+    "AGENT_COORD_POLICY" => nil,
+    "AGENT_COORD_REF" => nil,
+    "AGENT_COORD_STATUS_STATE_ROOT" => nil
+  }.freeze
+
   def test_concurrent_workers_one_winner
     with_seeded_origin do |dir, state, origin|
-      env = { "AGENT_COORD_STATE_ROOT" => state }
+      env = LOCAL_COORDINATION_ENV.merge(
+        "AGENT_COORD_STATE_ROOT" => state,
+        "XDG_CONFIG_HOME" => File.join(dir, "xdg-config"),
+        "PATH" => [File.dirname(RbConfig.ruby), ENV.fetch("PATH")].join(File::PATH_SEPARATOR)
+      )
       results = Array.new(3)
       threads = results.each_index.map do |i|
         Thread.new do

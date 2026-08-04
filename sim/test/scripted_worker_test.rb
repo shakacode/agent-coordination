@@ -4,12 +4,25 @@ require "fileutils"
 require "json"
 require "minitest/autorun"
 require "open3"
+require "rbconfig"
 require "tmpdir"
 
 SIM_ROOT = File.expand_path("..", __dir__) unless defined?(SIM_ROOT)
 WORKER = File.join(SIM_ROOT, "bin", "scripted-worker") unless defined?(WORKER)
 
 class ScriptedWorkerTest < Minitest::Test
+  LOCAL_COORDINATION_ENV = {
+    "AGENT_COORD_API_URL" => nil,
+    "AGENT_COORD_API_TOKEN" => nil,
+    "AGENT_COORD_BACKEND" => nil,
+    "AGENT_COORD_ENV_FILE" => nil,
+    "AGENT_COORD_LOCAL" => nil,
+    "AGENT_COORD_MACHINE_ID" => nil,
+    "AGENT_COORD_POLICY" => nil,
+    "AGENT_COORD_REF" => nil,
+    "AGENT_COORD_STATUS_STATE_ROOT" => nil
+  }.freeze
+
   def setup
     @dir = Dir.mktmpdir
     @state = File.join(@dir, "state")
@@ -32,7 +45,7 @@ class ScriptedWorkerTest < Minitest::Test
   end
 
   def run_worker(agent_id, issue_key: "task_one", clone_url: @origin)
-    env = { "AGENT_COORD_STATE_ROOT" => @state }
+    env = local_coordination_env
     Open3.capture3(
       env, WORKER,
       "--agent-id", agent_id, "--repo-slug", "sim/local",
@@ -42,7 +55,7 @@ class ScriptedWorkerTest < Minitest::Test
   end
 
   def test_missing_flag_value_exits_with_contract_code
-    env = { "AGENT_COORD_STATE_ROOT" => @state }
+    env = local_coordination_env
     stdout, _stderr, status = Open3.capture3(env, WORKER, "--workdir")
 
     assert_equal 2, status.exitstatus
@@ -71,7 +84,7 @@ class ScriptedWorkerTest < Minitest::Test
   end
 
   def test_second_worker_is_refused_while_first_holds_claim
-    env = { "AGENT_COORD_STATE_ROOT" => @state }
+    env = local_coordination_env
     system(
       env, File.expand_path("../../bin/agent-coord", __dir__),
       "claim", "--agent-id", "holder", "--repo", "sim/local",
@@ -83,6 +96,14 @@ class ScriptedWorkerTest < Minitest::Test
     stdout, _stderr, status = run_worker("w2")
     assert_equal 3, status.exitstatus
     assert_equal "WORKER_REFUSED task_one\n", stdout
+  end
+
+  def local_coordination_env
+    LOCAL_COORDINATION_ENV.merge(
+      "AGENT_COORD_STATE_ROOT" => @state,
+      "XDG_CONFIG_HOME" => File.join(@dir, "xdg-config"),
+      "PATH" => [File.dirname(RbConfig.ruby), ENV.fetch("PATH")].join(File::PATH_SEPARATOR)
+    )
   end
 
   def test_unknown_issue_key_fails_before_claim

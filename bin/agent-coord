@@ -42,6 +42,24 @@ module AgentCoord
   MACHINE_ID_ENV = "AGENT_COORD_MACHINE_ID"
   SESSION_ID_ENV = "AGENT_COORD_SESSION_ID"
   CODEX_THREAD_ID_ENV = "CODEX_THREAD_ID"
+  POLICY_ENV = "AGENT_COORD_POLICY"
+  COORDINATION_POLICIES = %w[required optional disabled].freeze
+  BACKEND_SELECTOR_ENV_KEYS = %w[
+    AGENT_COORD_API_URL
+    AGENT_COORD_STATE_ROOT
+    AGENT_COORD_BACKEND
+  ].freeze
+  USER_CONFIG_ENV_KEYS = %w[
+    AGENT_COORD_API_URL
+    AGENT_COORD_API_TOKEN
+    AGENT_COORD_MACHINE_ID
+    AGENT_COORD_BACKEND
+    AGENT_COORD_REF
+    AGENT_COORD_STATE_ROOT
+    AGENT_COORD_STATUS_STATE_ROOT
+    AGENT_COORD_LOCAL
+    AGENT_COORD_POLICY
+  ].freeze
   SESSION_SOURCE_AGENT_COORD = "agent_coord_session_id"
   SESSION_SOURCE_CODEX = "codex_thread_id"
   SESSION_SOURCE_UNSET = "unset"
@@ -302,6 +320,7 @@ module AgentCoord
   class Runner # rubocop:disable Metrics/ClassLength
     def initialize(argv, stdout: $stdout, stderr: $stderr, clock: Time, backend_conflict_warnings: true)
       @argv = argv
+      @stdin = $stdin
       @stdout = stdout
       @stderr = stderr
       @clock = clock
@@ -311,6 +330,7 @@ module AgentCoord
     def run # rubocop:disable Metrics/CyclomaticComplexity
       return print_help if @argv.empty? || help_request?(@argv.first)
 
+      load_user_configuration!
       command = @argv.shift
       case command
       when "claim"
@@ -332,8 +352,12 @@ module AgentCoord
       when "version"
         render_version(parse_options(command, @argv))
       when "config"
-        @argv.shift if @argv.first == "show"
-        render_config(parse_options(command, @argv))
+        config_action = %w[show set].include?(@argv.first) ? @argv.shift : "show"
+        if config_action == "set"
+          persist_config(parse_options("config-set", @argv))
+        else
+          render_config(parse_options(command, @argv))
+        end
       when "doctor"
         run_doctor_command(command)
       when "bootstrap"
@@ -345,9 +369,187 @@ module AgentCoord
       end
     rescue OptionParser::ParseError => e
       raise Error, e.message
+    ensure
+      restore_injected_user_configuration!
     end
 
     private
+
+    def load_user_configuration!
+      @process_config = USER_CONFIG_ENV_KEYS.to_h { |key| [key, ENV.fetch(key, nil)] }
+      process_policy = @process_config.fetch(POLICY_ENV, nil)
+      validate_policy!(process_policy, "process environment:#{POLICY_ENV}") unless process_policy.to_s.empty?
+      @user_config_path, explicit = selected_user_config_path
+      @policy_file_path = File.join(File.dirname(@user_config_path), "policy") if @user_config_path
+      @user_config = {}
+      @policy_file_value = nil
+      with_optional_config_read_lock do
+        @user_config = @user_config_path ? read_user_env_file(@user_config_path, required: explicit) : {}
+        @policy_file_value = read_policy_file(@policy_file_path) if @policy_file_path
+      end
+      @injected_user_config_keys = []
+
+      @user_config.each do |key, value|
+        next if key == "AGENT_COORD_API_TOKEN"
+        next unless @process_config[key].to_s.empty?
+
+        ENV[key] = value
+        @injected_user_config_keys << key
+      end
+      return unless @process_config[POLICY_ENV].to_s.empty? &&
+                    @user_config.fetch(POLICY_ENV, nil).to_s.empty? &&
+                    @policy_file_value
+
+      ENV[POLICY_ENV] = @policy_file_value
+      @injected_user_config_keys << POLICY_ENV unless @injected_user_config_keys.include?(POLICY_ENV)
+    end
+
+    def restore_injected_user_configuration!
+      Array(@injected_user_config_keys).each do |key|
+        process_value = @process_config&.fetch(key, nil)
+        process_value.nil? ? ENV.delete(key) : ENV[key] = process_value
+      end
+      @injected_user_config_keys = []
+    end
+
+    def selected_user_config_path
+      configured = ENV.fetch("AGENT_COORD_ENV_FILE", "")
+      unless configured.empty?
+        unless Pathname.new(configured).absolute?
+          raise OperationalError, "AGENT_COORD_ENV_FILE must be an absolute path"
+        end
+
+        return [File.expand_path(configured), true]
+      end
+
+      config_home = ENV.fetch("XDG_CONFIG_HOME", "")
+      if config_home.empty?
+        home = ENV.fetch("HOME", "")
+        return [nil, false] if home.empty?
+
+        config_home = File.join(home, ".config")
+      end
+      raise OperationalError, "XDG_CONFIG_HOME must be an absolute path" unless Pathname.new(config_home).absolute?
+
+      [File.join(File.expand_path(config_home), "agent-coord", "env"), false]
+    end
+
+    def read_user_env_file(path, required:)
+      contents = read_private_config_file(path, required:)
+      return {} unless contents
+
+      parse_user_env(contents.lines(chomp: true), path)
+    end
+
+    def read_private_config_file(path, required:)
+      File.open(path, File::RDONLY | File::NOFOLLOW) do |file|
+        validate_private_config_file!(file, path)
+        file.read
+      end
+    rescue Errno::ENOENT
+      raise OperationalError, "configured user env file does not exist: #{path}" if required
+
+      nil
+    rescue Errno::ELOOP
+      raise OperationalError, "user config must be a regular file, not a symlink: #{path}"
+    rescue SystemCallError => e
+      raise OperationalError, "cannot read user config #{path}: #{e.message}"
+    end
+
+    def validate_private_config_file!(file, path)
+      stat = file.stat
+      raise OperationalError, "user config must be a regular file: #{path}" unless stat.file?
+      raise OperationalError, "user config is not owned by the current user: #{path}" unless stat.uid == Process.uid
+      unless stat.mode.nobits?(0o077)
+        raise OperationalError, "user config permissions are insecure (expected 0600): #{path}"
+      end
+
+      validate_secure_directory_chain!(File.dirname(path), create: false)
+    end
+
+    def parse_user_env(lines, path)
+      values = {}
+      lines.each_with_index do |line, index|
+        stripped = line.strip
+        next if stripped.empty? || stripped.start_with?("#")
+
+        assignment = stripped.sub(/\Aexport\s+/, "")
+        match = assignment.match(/\A([A-Z][A-Z0-9_]*)=(.*)\z/)
+        raise OperationalError, "unsafe user config syntax at #{path}:#{index + 1}" unless match
+
+        key = match[1]
+        unless USER_CONFIG_ENV_KEYS.include?(key)
+          next unless key.start_with?("AGENT_COORD_")
+
+          raise OperationalError, "unsupported agent-coord key at #{path}:#{index + 1}: #{key}"
+        end
+        raise OperationalError, "duplicate user config key at #{path}:#{index + 1}: #{key}" if values.key?(key)
+
+        values[key] = parse_env_assignment_value(match[2], path, index + 1)
+      end
+      validate_policy!(values[POLICY_ENV], "#{path}:AGENT_COORD_POLICY") if values.key?(POLICY_ENV)
+      values
+    end
+
+    def parse_env_assignment_value(raw, path, line_number)
+      return "" if raw.empty?
+
+      words = Shellwords.shellsplit(raw)
+      raise OperationalError, "ambiguous user config value at #{path}:#{line_number}" unless words.length == 1
+
+      words.first
+    rescue ArgumentError
+      raise OperationalError, "unsafe user config value at #{path}:#{line_number}"
+    end
+
+    def read_policy_file(path)
+      contents = read_private_config_file(path, required: false)
+      return nil unless contents
+
+      value = contents.strip
+      validate_policy!(value, path)
+      value
+    end
+
+    def validate_policy!(value, source)
+      return if COORDINATION_POLICIES.include?(value)
+
+      raise OperationalError,
+            "invalid coordination policy in #{source}: expected #{COORDINATION_POLICIES.join(', ')}"
+    end
+
+    def effective_config_value(key)
+      process_value = @process_config&.fetch(key, nil)
+      return process_value unless process_value.to_s.empty?
+
+      @user_config&.fetch(key, nil)
+    end
+
+    def process_selects_backend?
+      BACKEND_SELECTOR_ENV_KEYS.any? do |key|
+        !@process_config&.fetch(key, nil).to_s.empty?
+      end
+    end
+
+    def effective_backend_env_value(key)
+      source = process_selects_backend? ? @process_config : @user_config
+      source&.fetch(key, nil)
+    end
+
+    def backend_env_source
+      process_selects_backend? ? "process_env" : "user_config"
+    end
+
+    def effective_policy
+      process_policy = @process_config&.fetch(POLICY_ENV, nil)
+      return [process_policy, "process_env"] unless process_policy.to_s.empty?
+
+      user_policy = @user_config&.fetch(POLICY_ENV, nil)
+      return [user_policy, "user_config"] unless user_policy.to_s.empty?
+      return [@policy_file_value, "policy_file"] if @policy_file_value
+
+      %w[optional default]
+    end
 
     def run_doctor_command(command)
       doctor_argv = @argv.dup
@@ -380,7 +582,7 @@ module AgentCoord
                      report per-lane lifecycle-event completeness for a batch
           gc         archive and purge terminal coordination state
           version    print CLI contract version
-          config     print runtime defaults and exit-code contract
+          config     inspect or safely persist global user configuration
           doctor     verify backend access and state layout
           bootstrap  install the agent-coord command
           demo       run an isolated claim and takeover walkthrough
@@ -431,6 +633,7 @@ module AgentCoord
       add_gc_options(opts, options, command)
       add_status_options(opts, options, command)
       add_bootstrap_options(opts, options)
+      add_config_set_options(opts, options, command)
       add_help_option(opts)
       [parser, opts]
     end
@@ -439,17 +642,23 @@ module AgentCoord
       opts.on("--backend OWNER/REPO", "backend repository") do |value|
         options[:backend] = value
         options[:explicit_backend] = true
+        options[:backend_cli] = true
         parse_state[:backend_selector_count] += 1
         parse_state[:empty_backend_selector] = true if value.empty?
       end
-      opts.on("--ref REF", "backend branch/ref") { |value| options[:ref] = value }
+      opts.on("--ref REF", "backend branch/ref") do |value|
+        options[:ref] = value
+        options[:ref_cli] = true
+      end
       opts.on("--state-root PATH", "use local files instead of GitHub API") do |value|
         options[:state_root] = value
+        options[:state_root_cli] = true
         parse_state[:backend_selector_count] += 1
         parse_state[:empty_backend_selector] = true if value.empty?
       end
       opts.on("--api-url URL", "use the HTTP backend at URL") do |value|
         options[:api_url] = value
+        options[:api_url_cli] = true
         parse_state[:backend_selector_count] += 1
         parse_state[:empty_backend_selector] = true if value.empty?
       end
@@ -611,6 +820,22 @@ module AgentCoord
       opts.on("--no-profile", "do not update shell profile during bootstrap") { options[:no_profile] = true }
     end
 
+    def add_config_set_options(opts, options, command)
+      return unless command == "config-set"
+
+      opts.on("--token-stdin", "read the HTTP API token from stdin without echoing it") do
+        options[:token_stdin] = true
+      end
+      opts.on("--machine-id ID", "persist the machine identity") do |value|
+        options[:machine_id] = value
+        options[:machine_id_given] = true
+      end
+      opts.on("--policy POLICY", COORDINATION_POLICIES, "persist required, optional, or disabled policy") do |value|
+        options[:policy] = value
+        options[:policy_given] = true
+      end
+    end
+
     def add_help_option(opts)
       opts.on("-h", "--help", "show command help") do
         @stdout.puts opts
@@ -680,8 +905,8 @@ module AgentCoord
 
     def default_options
       {
-        backend: ENV.fetch("AGENT_COORD_BACKEND", DEFAULT_BACKEND),
-        ref: ENV.fetch("AGENT_COORD_REF", DEFAULT_REF),
+        backend: DEFAULT_BACKEND,
+        ref: DEFAULT_REF,
         state_root: nil,
         api_url: nil,
         status: "in_progress"
@@ -689,15 +914,25 @@ module AgentCoord
     end
 
     def resolve_backend_env(options)
-      return if options[:stack_json] && options[:explicit_backend]
+      if options[:stack_json] && options[:explicit_backend]
+        options[:ref] = effective_config_value("AGENT_COORD_REF") || DEFAULT_REF unless options[:ref_cli]
+        return
+      end
 
-      cli_api = options[:api_url]
-      env_api = ENV.fetch("AGENT_COORD_API_URL", nil)
-      env_root = ENV.fetch("AGENT_COORD_STATE_ROOT", nil)
+      cli_api = options[:api_url] if options[:api_url_cli]
+      env_api = effective_backend_env_value("AGENT_COORD_API_URL")
+      env_root = effective_backend_env_value("AGENT_COORD_STATE_ROOT")
+      env_backend = effective_backend_env_value("AGENT_COORD_BACKEND")
       env_api = nil if env_api == ""
       env_root = nil if env_root == ""
 
-      if options[:state_root]
+      return if resolve_cli_backend?(options, cli_api, env_api)
+
+      resolve_configured_backend(options, env_api, env_root, env_backend)
+    end
+
+    def resolve_cli_backend?(options, cli_api, env_api)
+      if options[:state_root_cli]
         if cli_api
           emit_backend_conflict_warning(
             "warning: --api-url and --state-root are both set; using the local backend.", options:
@@ -707,21 +942,51 @@ module AgentCoord
             "warning: AGENT_COORD_API_URL and --state-root are both set; using the local backend.", options:
           )
         end
-        return
+        options[:backend_source] = "cli"
+        return true
       end
 
-      options[:api_url] ||= env_api
-      if options[:api_url]
-        if env_root
-          api_source = cli_api ? "--api-url" : "AGENT_COORD_API_URL"
+      if cli_api
+        env_root = effective_backend_env_value("AGENT_COORD_STATE_ROOT")
+        unless env_root.to_s.empty?
           emit_backend_conflict_warning(
-            "warning: #{api_source} and AGENT_COORD_STATE_ROOT are both set; " \
+            "warning: --api-url and AGENT_COORD_STATE_ROOT are both set; " \
+            "using the HTTP backend. Pass --state-root to force local.", options:
+          )
+        end
+        options[:backend_source] = "cli"
+        return true
+      end
+
+      return false unless options[:backend_cli]
+
+      options[:backend_source] = "cli"
+      options[:ref] = effective_config_value("AGENT_COORD_REF") || DEFAULT_REF unless options[:ref_cli]
+      true
+    end
+
+    def resolve_configured_backend(options, env_api, env_root, env_backend)
+      options[:api_url] = env_api
+      if env_api
+        options[:backend_source] = backend_env_source
+        if env_root
+          emit_backend_conflict_warning(
+            "warning: AGENT_COORD_API_URL and AGENT_COORD_STATE_ROOT are both set; " \
             "using the HTTP backend. Pass --state-root to force local.", options:
           )
         end
         return
       end
-      options[:state_root] = env_root if env_root
+      if env_root
+        options[:state_root] = env_root
+        options[:backend_source] = backend_env_source
+        return
+      end
+      return unless env_backend
+
+      options[:backend] = env_backend
+      options[:ref] = effective_config_value("AGENT_COORD_REF") || DEFAULT_REF unless options[:ref_cli]
+      options[:backend_source] = backend_env_source
     end
 
     def emit_backend_conflict_warning(message, options:)
@@ -892,7 +1157,7 @@ module AgentCoord
         return
       end
 
-      unless ENV.fetch("AGENT_COORD_API_TOKEN", "").empty?
+      if configured_api_token?
         raise OperationalError,
               "AGENT_COORD_API_TOKEN is set but AGENT_COORD_API_URL is missing or empty; " \
               "set AGENT_COORD_API_URL or unset AGENT_COORD_API_TOKEN"
@@ -1648,7 +1913,7 @@ module AgentCoord
     end
 
     def render_config(options)
-      payload = config_payload
+      payload = config_payload(options)
       emit_payload(payload, options) do
         @stdout.puts "agent-coord config"
         @stdout.puts "version: #{payload.fetch('version')}"
@@ -1664,8 +1929,218 @@ module AgentCoord
         @stdout.puts "heartbeat_working_statuses: #{payload.dig('heartbeat_status_vocabulary', 'working').join(',')}"
         @stdout.puts "heartbeat_terminal_statuses: #{payload.dig('heartbeat_status_vocabulary', 'terminal').join(',')}"
         @stdout.puts "exit_codes: #{payload.fetch('exit_codes').map { |name, code| "#{name}=#{code}" }.join(',')}"
+        coordination = payload.fetch("coordination")
+        @stdout.puts "coordination_policy: #{coordination.fetch('policy')}"
+        @stdout.puts "coordination_backend: #{coordination.fetch('backend')}"
+        @stdout.puts "coordination_configured: #{coordination.fetch('configured')}"
       end
       0
+    end
+
+    def persist_config(options)
+      unless @user_config_path
+        raise OperationalError, "cannot persist user config; set XDG_CONFIG_HOME, HOME, or AGENT_COORD_ENV_FILE"
+      end
+
+      updates = {}
+      if options[:api_url_cli]
+        validate_config_api_url!(options.fetch(:api_url))
+        updates["AGENT_COORD_API_URL"] = options.fetch(:api_url)
+      end
+      updates["AGENT_COORD_API_TOKEN"] = read_token_from_stdin if options[:token_stdin]
+      if options[:machine_id_given]
+        AgentCoord.validate_segment!(options.fetch(:machine_id), "machine-id")
+        updates[MACHINE_ID_ENV] = options.fetch(:machine_id)
+      end
+      policy = options[:policy] if options[:policy_given]
+      validate_policy!(policy, "--policy") if policy
+      updates[POLICY_ENV] = policy if policy
+      raise Error, "config set requires at least one setting" if updates.empty?
+
+      with_config_write_lock do
+        current = read_user_env_file(@user_config_path, required: false)
+        validate_api_url_token_transition!(current, updates)
+        write_canonical_config_file(@user_config_path, render_user_env(current.merge(updates)))
+      end
+      @stdout.puts "updated user configuration: #{@user_config_path} (#{updates.keys.sort.join(', ')})" \
+        unless updates.empty?
+      @stdout.puts "updated coordination policy in canonical config: #{@user_config_path}" if policy
+      0
+    end
+
+    def validate_api_url_token_transition!(current, updates)
+      return unless updates.key?("AGENT_COORD_API_URL")
+      return if updates.key?("AGENT_COORD_API_TOKEN")
+      return if current.fetch("AGENT_COORD_API_URL", nil) == updates.fetch("AGENT_COORD_API_URL")
+      return if current.fetch("AGENT_COORD_API_TOKEN", "").empty?
+
+      raise Error, "--token-stdin is required when changing an API URL that has a saved token"
+    end
+
+    def validate_config_api_url!(value)
+      uri = URI.parse(value)
+      unless %w[http https].include?(uri.scheme) && uri.host && !uri.host.empty?
+        raise Error, "--api-url must be an absolute HTTP(S) URL"
+      end
+      if uri.scheme == "http" && !HttpStore::LOOPBACK_HOSTS.include?(uri.host)
+        raise Error, "--api-url must use https unless it points at localhost"
+      end
+    rescue URI::InvalidURIError
+      raise Error, "--api-url must be an absolute HTTP(S) URL"
+    end
+
+    def read_token_from_stdin
+      token = @stdin.read(65_537).to_s
+      raise Error, "--token-stdin input is too large" if token.bytesize > 65_536
+
+      token = token.sub(/\r?\n\z/, "")
+      raise Error, "--token-stdin requires a non-empty token" if token.empty?
+      raise Error, "--token-stdin token must be one line" if token.match?(/[\r\n\0]/)
+
+      token
+    end
+
+    def render_user_env(values)
+      lines = USER_CONFIG_ENV_KEYS.filter_map do |key|
+        next unless values.key?(key)
+
+        "#{key}=#{Shellwords.escape(values.fetch(key))}"
+      end
+      "#{lines.join("\n")}\n"
+    end
+
+    def with_optional_config_read_lock
+      return yield unless @user_config_path
+
+      lock_path = File.join(File.dirname(@user_config_path), ".config.lock")
+      lock = begin
+        File.open(lock_path, File::RDONLY | File::NOFOLLOW)
+      rescue Errno::ENOENT
+        nil
+      rescue Errno::ELOOP
+        raise OperationalError, "config lock must not be a symlink: #{lock_path}"
+      rescue SystemCallError => e
+        raise OperationalError, "cannot acquire config read lock #{lock_path}: #{e.message}"
+      end
+      return yield unless lock
+
+      begin
+        validate_private_config_file!(lock, lock_path)
+        raise OperationalError, "cannot acquire config read lock: #{lock_path}" unless lock.flock(File::LOCK_SH)
+      rescue SystemCallError => e
+        lock.close
+        raise OperationalError, "cannot acquire config read lock #{lock_path}: #{e.message}"
+      rescue StandardError
+        lock.close
+        raise
+      end
+
+      begin
+        yield
+      ensure
+        begin
+          lock.flock(File::LOCK_UN)
+        ensure
+          lock.close
+        end
+      end
+    end
+
+    def with_config_write_lock
+      directory = validate_secure_directory_chain!(File.dirname(@user_config_path), create: true)
+      lock_path = File.join(directory, ".config.lock")
+      File.open(lock_path, File::RDWR | File::CREAT | File::NOFOLLOW, 0o600) do |lock|
+        validate_private_config_file!(lock, lock_path)
+        raise OperationalError, "cannot acquire config write lock: #{lock_path}" unless lock.flock(File::LOCK_EX)
+
+        yield
+      ensure
+        lock&.flock(File::LOCK_UN)
+      end
+    rescue Errno::ELOOP
+      raise OperationalError, "config lock must not be a symlink: #{lock_path}"
+    rescue SystemCallError => e
+      raise OperationalError, "cannot acquire config write lock #{lock_path}: #{e.message}"
+    end
+
+    def validate_secure_directory_chain!(directory, create:)
+      expanded = File.expand_path(directory)
+      current = File::SEPARATOR
+      validate_secure_directory_component!(File.lstat(current), current, leaf: expanded == current)
+      components = expanded.split(File::SEPARATOR).reject(&:empty?)
+
+      components.each_with_index do |component, index|
+        candidate = File.join(current, component)
+        stat = secure_directory_lstat(candidate, create:)
+        leaf = index == components.length - 1
+        if stat.symlink?
+          unless stat.uid.zero? && stat.mode.nobits?(0o022)
+            raise OperationalError, "config parent must not contain a user-controlled symlink: #{candidate}"
+          end
+
+          current = File.realpath(candidate)
+          stat = File.lstat(current)
+          validate_secure_directory_component!(stat, current, leaf:)
+          next
+        end
+
+        validate_secure_directory_component!(stat, candidate, leaf:)
+        current = candidate
+      end
+      current
+    rescue SystemCallError => e
+      raise OperationalError, "cannot validate config parent #{directory}: #{e.message}"
+    end
+
+    def secure_directory_lstat(path, create:)
+      File.lstat(path)
+    rescue Errno::ENOENT
+      raise unless create
+
+      begin
+        Dir.mkdir(path, 0o700)
+      rescue Errno::EEXIST
+        nil
+      end
+      File.lstat(path)
+    end
+
+    def validate_secure_directory_component!(stat, path, leaf:)
+      raise OperationalError, "config parent component is not a directory: #{path}" unless stat.directory?
+      unless [0, Process.uid].include?(stat.uid)
+        raise OperationalError, "config parent component has an unsafe owner: #{path}"
+      end
+      raise OperationalError, "config parent permissions are unsafe: #{path}" unless stat.mode.nobits?(0o022)
+      return unless leaf
+
+      raise OperationalError, "config parent leaf is not owned by the current user: #{path}" if stat.uid != Process.uid
+      return if stat.mode.nobits?(0o077)
+
+      raise OperationalError, "config parent leaf permissions are unsafe (expected 0700): #{path}"
+    end
+
+    def write_canonical_config_file(path, contents)
+      directory = validate_secure_directory_chain!(File.dirname(path), create: true)
+      destination = File.join(directory, File.basename(path))
+      temp_path = File.join(directory, ".#{File.basename(path)}.tmp-#{Process.pid}-#{SecureRandom.hex(6)}")
+      write_private_config_temp_file(temp_path, contents)
+      File.rename(temp_path, destination)
+      File.open(directory, File::RDONLY | File::NOFOLLOW) do |directory_file|
+        validate_secure_directory_component!(directory_file.stat, directory, leaf: true)
+        directory_file.fsync
+      end
+    rescue SystemCallError => e
+      raise OperationalError, "cannot persist canonical user configuration: #{e.message}"
+    ensure
+      FileUtils.rm_f(temp_path) if temp_path
+    end
+
+    def write_private_config_temp_file(path, contents)
+      File.open(path, File::WRONLY | File::CREAT | File::EXCL | File::NOFOLLOW, 0o600) do |file|
+        file.write(contents)
+        file.flush
+        file.fsync
+      end
     end
 
     def default_backend_text
@@ -4159,8 +4634,7 @@ module AgentCoord
       return LocalStore.new(options.fetch(:state_root)) if options[:state_root]
 
       if options[:api_url]
-        token = ENV.fetch("AGENT_COORD_API_TOKEN", nil)
-        raise OperationalError, "AGENT_COORD_API_TOKEN is required when using the HTTP backend" if token.to_s.empty?
+        token = resolved_http_token(options.fetch(:api_url))
 
         return HttpStore.new(base_url: options[:api_url], token: token)
       end
@@ -4168,6 +4642,24 @@ module AgentCoord
       raise OperationalError, missing_backend_message if options[:backend].to_s.empty?
 
       GitHubStore.new(backend: options.fetch(:backend), ref: options.fetch(:ref))
+    end
+
+    def configured_api_token?
+      !@process_config&.fetch("AGENT_COORD_API_TOKEN", nil).to_s.empty? ||
+        !@user_config&.fetch("AGENT_COORD_API_TOKEN", nil).to_s.empty?
+    end
+
+    def resolved_http_token(selected_url)
+      process_token = @process_config&.fetch("AGENT_COORD_API_TOKEN", nil)
+      return process_token unless process_token.to_s.empty?
+
+      saved_token = @user_config&.fetch("AGENT_COORD_API_TOKEN", nil)
+      saved_url = @user_config&.fetch("AGENT_COORD_API_URL", nil)
+      return saved_token if !saved_token.to_s.empty? && selected_url == saved_url
+      raise OperationalError, "AGENT_COORD_API_TOKEN is required when using the HTTP backend" if saved_token.to_s.empty?
+
+      raise OperationalError,
+            "process-scoped AGENT_COORD_API_TOKEN is required when the selected API URL differs from user config"
     end
 
     def close_store(store)
@@ -4404,7 +4896,7 @@ module AgentCoord
       Time.iso8601(value).utc
     end
 
-    def config_payload
+    def config_payload(options = {})
       {
         "version" => VERSION,
         "schema_version" => SCHEMA_VERSION,
@@ -4426,7 +4918,55 @@ module AgentCoord
           "terminal" => HEARTBEAT_TERMINAL_STATUSES,
           "aliases" => HEARTBEAT_STATUS_ALIASES
         },
-        "exit_codes" => EXIT_CODES
+        "exit_codes" => EXIT_CODES,
+        "coordination" => coordination_config_payload(options)
+      }
+    end
+
+    def coordination_config_payload(options)
+      backend, configured, source = selected_coordination_backend(options)
+      policy, policy_source = effective_policy
+      validate_policy!(policy, policy_source)
+      {
+        "policy" => policy,
+        "configured" => configured,
+        "backend" => backend,
+        "source" => {
+          "backend" => source,
+          "policy" => policy_source
+        },
+        # config show is intentionally non-networking. Consumers must use
+        # doctor before treating a configured backend as available.
+        "available" => nil
+      }
+    end
+
+    def selected_coordination_backend(options)
+      return ["local", true, "cli"] if options[:state_root_cli]
+      return ["http", true, "cli"] if options[:api_url_cli]
+      return ["github", true, "cli"] if options[:backend_cli]
+
+      selectors = effective_backend_selector_set
+      return ["http", true, selectors.fetch(:source)] unless selectors.fetch(:api_url).to_s.empty?
+      return ["local", true, selectors.fetch(:source)] unless selectors.fetch(:state_root).to_s.empty?
+      return ["github", true, selectors.fetch(:source)] unless selectors.fetch(:backend).to_s.empty?
+
+      ["local", false, "default"]
+    end
+
+    def effective_backend_selector_set
+      process_values = {
+        api_url: @process_config&.fetch("AGENT_COORD_API_URL", nil),
+        state_root: @process_config&.fetch("AGENT_COORD_STATE_ROOT", nil),
+        backend: @process_config&.fetch("AGENT_COORD_BACKEND", nil)
+      }
+      return process_values.merge(source: "process_env") if process_selects_backend?
+
+      {
+        api_url: @user_config&.fetch("AGENT_COORD_API_URL", nil),
+        state_root: @user_config&.fetch("AGENT_COORD_STATE_ROOT", nil),
+        backend: @user_config&.fetch("AGENT_COORD_BACKEND", nil),
+        source: "user_config"
       }
     end
 

@@ -430,13 +430,18 @@ end
 
 class HttpEnvTestCase < Minitest::Test
   IDENTITY_ENV_KEYS = %w[AGENT_COORD_MACHINE_ID AGENT_COORD_SESSION_ID CODEX_THREAD_ID].freeze
+  PRIVATE_CONFIG_TMP_PARENT = Dir.mktmpdir(
+    "agent-coord-http-private-fixtures-", File.expand_path("..", __dir__)
+  )
+  File.chmod(0o700, PRIVATE_CONFIG_TMP_PARENT)
+  Minitest.after_run { FileUtils.rm_rf(PRIVATE_CONFIG_TMP_PARENT) }
   # An empty XDG config home keeps the suite off the developer's real
   # ~/.config/agent-coord/env, which would otherwise trip the split-brain guard.
   ISOLATED_CONFIG_HOME = Dir.mktmpdir("agent-coord-isolated-config")
   Minitest.after_run { FileUtils.rm_rf(ISOLATED_CONFIG_HOME) }
-  CLEAN_ENV = IDENTITY_ENV_KEYS.to_h { |key| [key, nil] }.merge(
-    "AGENT_COORD_ENV_FILE" => nil,
-    "AGENT_COORD_LOCAL" => nil,
+  CLEAN_ENV = (
+    AgentCoord::USER_CONFIG_ENV_KEYS + IDENTITY_ENV_KEYS + %w[AGENT_COORD_ENV_FILE]
+  ).uniq.to_h { |key| [key, nil] }.merge(
     "XDG_CONFIG_HOME" => ISOLATED_CONFIG_HOME
   ).freeze
 
@@ -448,9 +453,13 @@ class HttpEnvTestCase < Minitest::Test
   ensure
     saved.each { |key, value| value.nil? ? ENV.delete(key) : ENV[key] = value }
   end
+
+  def with_private_config_tmpdir(prefix, &)
+    Dir.mktmpdir(prefix, PRIVATE_CONFIG_TMP_PARENT, &)
+  end
 end
 
-class HttpBackendSelectionTest < HttpEnvTestCase
+class HttpBackendSelectionTest < HttpEnvTestCase # rubocop:disable Metrics/ClassLength
   CONSUMER_ENV_CONTENT = "AGENT_COORD_API_URL=https://agent-coord.example\nAGENT_COORD_API_TOKEN=secret\n"
 
   def claim_args(*extra)
@@ -478,7 +487,7 @@ class HttpBackendSelectionTest < HttpEnvTestCase
   def with_split_brain_config(extra_env = {})
     Dir.mktmpdir("agent-coord-consumer-env") do |root|
       config_home = File.join(root, "config")
-      env_file = File.join(config_home, "agent-coord", "env")
+      env_file = File.join(config_home, "agent-coord", "http-env.sh")
       state_home = File.join(root, "state")
       FileUtils.mkdir_p(File.dirname(env_file))
       FileUtils.mkdir_p(state_home)
@@ -627,6 +636,44 @@ class HttpBackendSelectionTest < HttpEnvTestCase
     end
   end
 
+  def test_saved_token_is_not_sent_to_cli_or_process_endpoint_override
+    # rubocop:disable Metrics/BlockLength
+    with_private_config_tmpdir("agent-coord-token-provenance") do |root|
+      config_home = File.join(root, "config")
+      env_file = File.join(config_home, "agent-coord", "env")
+      FileUtils.mkdir_p(File.dirname(env_file))
+      File.chmod(0o700, File.dirname(env_file))
+      File.write(
+        env_file,
+        "AGENT_COORD_API_URL=https://saved.example\nAGENT_COORD_API_TOKEN=saved-private-token\n"
+      )
+      File.chmod(0o600, env_file)
+
+      [%w[status --api-url], %w[status]].each do |args|
+        attacker = HttpStoreStub.new([])
+        command = args.length == 2 ? [*args, attacker.base_url] : args
+        process_url = args.length == 1 ? attacker.base_url : nil
+        env = {
+          "XDG_CONFIG_HOME" => config_home,
+          "AGENT_COORD_API_URL" => process_url,
+          "AGENT_COORD_API_TOKEN" => nil,
+          "AGENT_COORD_STATE_ROOT" => nil,
+          "AGENT_COORD_BACKEND" => nil
+        }
+        with_env(env) do
+          code, _out, err = run_cli(command, env)
+
+          assert_equal 2, code
+          assert_includes err, "process-scoped AGENT_COORD_API_TOKEN"
+          assert_empty attacker.requests, "saved token must never reach an override endpoint"
+        end
+      ensure
+        attacker&.shutdown
+      end
+    end
+    # rubocop:enable Metrics/BlockLength
+  end
+
   def test_malformed_api_url_is_operational_error
     with_env("AGENT_COORD_API_URL" => "http://[bad", "AGENT_COORD_API_TOKEN" => "tok") do
       code, _, err = run_cli(["status"], {})
@@ -667,7 +714,7 @@ class HttpBackendSelectionTest < HttpEnvTestCase
                "HOME" => File.join(root, "home"),
                "TMPDIR" => File.join(root, "tmp")) do
         [nil, ""].each do |api_url|
-          with_env("AGENT_COORD_API_URL" => api_url) do
+          with_env("AGENT_COORD_API_URL" => api_url, "AGENT_COORD_API_TOKEN" => "token-without-url") do
             [
               ["status", "--json"],
               ["claim", "--agent-id", "worker-a", "--repo", "demo/example", "--target", "1"]
@@ -779,7 +826,7 @@ class HttpBackendSelectionTest < HttpEnvTestCase
 
   def test_status_warns_when_consumer_env_file_points_remote_but_cli_uses_local
     Dir.mktmpdir("agent-coord-xdg-config") do |config_home|
-      env_file = File.join(config_home, "agent-coord", "env")
+      env_file = File.join(config_home, "agent-coord", "http-env.sh")
       FileUtils.mkdir_p(File.dirname(env_file))
       File.write(env_file, "AGENT_COORD_API_URL=https://agent-coord.example\nAGENT_COORD_API_TOKEN=secret\n")
 
@@ -801,7 +848,7 @@ class HttpBackendSelectionTest < HttpEnvTestCase
 
   def test_status_ignores_consumer_env_file_with_invalid_encoding
     Dir.mktmpdir("agent-coord-xdg-config") do |config_home|
-      env_file = File.join(config_home, "agent-coord", "env")
+      env_file = File.join(config_home, "agent-coord", "http-env.sh")
       FileUtils.mkdir_p(File.dirname(env_file))
       File.binwrite(env_file, "\xFFAGENT_COORD_API_URL=https://agent-coord.example\n".b)
 
