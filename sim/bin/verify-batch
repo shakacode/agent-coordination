@@ -52,7 +52,7 @@ if telemetry_ledger
     puts "TELEMETRY batch=#{scorecard.fetch('batch_id')} target_units=#{target_units} " \
          "cost_microusd=#{costs.fetch('known_cost_microusd')} " \
          "unknown_cost_sessions=#{costs.fetch('unknown_cost_sessions')}"
-  rescue JSON::ParserError, KeyError, NoMethodError
+  rescue JSON::ParserError, KeyError, NoMethodError, TypeError
     abort "telemetry scorecard invalid"
   end
 end

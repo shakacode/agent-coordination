@@ -74,7 +74,7 @@ Replace `VERSION` with the version in the filename printed by `gem build`.
 ```bash
 gem install --local ./agent-coordination-VERSION.gem
 agent-coord version --json
-agent-coord-harvest scorecard --ledger ./telemetry.sqlite3 --batch-id batch-example
+agent-coord-harvest --help
 rm ./agent-coordination-VERSION.gem
 ```
 

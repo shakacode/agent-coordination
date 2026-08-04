@@ -175,7 +175,7 @@ module AgentCoord
       end
 
       def migration_paths
-        Dir.glob(File.join(@migrations_path, "*.sql"))
+        Dir.glob(File.join(@migrations_path, "*.sql"), sort: true)
       end
 
       def verify_applied_versions_present!(paths)

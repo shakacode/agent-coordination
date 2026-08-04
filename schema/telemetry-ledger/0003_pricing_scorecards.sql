@@ -147,16 +147,26 @@ SELECT
         AND review_findings.disposition = 'should_fix'
     ) = 0 THEN NULL
     ELSE (
-      SELECT SUM(review_receipts.cost_microusd) FROM review_receipts
-      JOIN target_units ON target_units.id = review_receipts.target_unit_id
-      WHERE target_units.batch_id = batches.batch_id
-        AND review_receipts.pricing_status = 'priced'
+      2 * (
+        SELECT SUM(review_receipts.cost_microusd) FROM review_receipts
+        JOIN target_units ON target_units.id = review_receipts.target_unit_id
+        WHERE target_units.batch_id = batches.batch_id
+          AND review_receipts.pricing_status = 'priced'
+      ) + (
+        SELECT COUNT(*) FROM review_findings
+        JOIN review_receipts ON review_receipts.id = review_findings.review_receipt_id
+        JOIN target_units ON target_units.id = review_receipts.target_unit_id
+        WHERE target_units.batch_id = batches.batch_id
+          AND review_findings.disposition = 'should_fix'
+      )
     ) / (
-      SELECT COUNT(*) FROM review_findings
-      JOIN review_receipts ON review_receipts.id = review_findings.review_receipt_id
-      JOIN target_units ON target_units.id = review_receipts.target_unit_id
-      WHERE target_units.batch_id = batches.batch_id
-        AND review_findings.disposition = 'should_fix'
+      2 * (
+        SELECT COUNT(*) FROM review_findings
+        JOIN review_receipts ON review_receipts.id = review_findings.review_receipt_id
+        JOIN target_units ON target_units.id = review_receipts.target_unit_id
+        WHERE target_units.batch_id = batches.batch_id
+          AND review_findings.disposition = 'should_fix'
+      )
     )
   END AS cost_per_actionable_finding_microusd
 FROM batches;

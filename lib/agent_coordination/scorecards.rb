@@ -27,7 +27,7 @@ module AgentCoord
               "SELECT COUNT(*) AS count FROM target_observations WHERE batch_id = ? AND join_status != 'exact'",
               [batch_id]
             ).fetch("count"),
-            "unlinked_host_sessions" => @ledger.first(
+            "unlinked_host_sessions_ledger_wide" => @ledger.first(
               "SELECT COUNT(*) AS count FROM host_sessions WHERE link_status != 'exact'"
             ).fetch("count")
           }

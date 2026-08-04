@@ -86,7 +86,7 @@ module AgentCoord
         batches = Array(source.fetch("document")["batches"]).select do |batch|
           batch.is_a?(Hash) && timestamp_date(batch["registered_at"])&.between?(from, to)
         end
-        harvest_batches(source, batches, date_range: [from_date, to_date])
+        harvest_batches(source, batches, date_range: [from.iso8601, to.iso8601])
       rescue Date::Error
         raise Error, "date range must use YYYY-MM-DD"
       end
@@ -101,16 +101,20 @@ module AgentCoord
         @ledger.transaction do
           @pricing.persist(@ledger)
           coordination_artifact_id = upsert_artifact(source)
-          reconcile_date_range(coordination_artifact_id, date_range) if date_range
+          reconciled_ids = date_range ? reconcile_date_range(coordination_artifact_id, date_range) : []
+          refreshed_ids = (reconciled_ids + selected_ids).uniq
+          preserved_pr_links = github ? [] : snapshot_target_pr_links(refreshed_ids)
+          delete_coordination_rows(refreshed_ids)
+          refreshed_ids.each { |batch_id| @ledger.delete_batch(batch_id) }
           batches.each do |batch|
             batch_id = known(batch["batch_id"])
             next unless batch_id
 
-            @ledger.delete_batch(batch_id)
             observations.concat(insert_batch(batch, coordination_artifact_id))
           end
           insert_coordination_rows(source.fetch("document"), coordination_artifact_id, selected_ids)
           create_target_units(observations)
+          restore_target_pr_links(preserved_pr_links)
           ingest_github(github) if github
           usage_count = ingest_host_roots
           relink_host_sessions
@@ -130,7 +134,7 @@ module AgentCoord
 
       def reconcile_date_range(source_artifact_id, date_range)
         from_date, to_date = date_range
-        prior_batch_ids = @ledger.rows(
+        @ledger.rows(
           <<~SQL, [source_artifact_id, from_date, to_date]
             SELECT batch_id
             FROM batches
@@ -138,7 +142,58 @@ module AgentCoord
               AND date(registered_at) BETWEEN ? AND ?
           SQL
         ).map { |row| row.fetch("batch_id") }
-        prior_batch_ids.each { |batch_id| @ledger.delete_batch(batch_id) }
+      end
+
+      def delete_coordination_rows(batch_ids)
+        return if batch_ids.empty?
+
+        placeholders = (["?"] * batch_ids.length).join(", ")
+        @ledger.execute("DELETE FROM claims WHERE batch_id IN (#{placeholders})", batch_ids)
+        @ledger.execute("DELETE FROM events WHERE batch_id IN (#{placeholders})", batch_ids)
+      end
+
+      def snapshot_target_pr_links(batch_ids)
+        return [] if batch_ids.empty?
+
+        placeholders = (["?"] * batch_ids.length).join(", ")
+        @ledger.rows(
+          <<~SQL, batch_ids
+            SELECT target_units.batch_id, target_units.repo, target_units.target,
+                   target_pr_links.github_pr_id, target_pr_links.link_status,
+                   target_pr_links.source_record_sha256
+            FROM target_units
+            JOIN target_pr_links ON target_pr_links.target_unit_id = target_units.id
+            WHERE target_units.batch_id IN (#{placeholders})
+          SQL
+        )
+      end
+
+      def restore_target_pr_links(links)
+        restored = links.filter_map do |link|
+          target = @ledger.first(
+            "SELECT id FROM target_units WHERE batch_id = ? AND repo = ? AND target = ?",
+            link.values_at("batch_id", "repo", "target")
+          )
+          next unless target
+
+          target_unit_id = target.fetch("id")
+          @ledger.execute(
+            <<~SQL, [target_unit_id, *link.values_at("github_pr_id", "link_status", "source_record_sha256")]
+              INSERT INTO target_pr_links (
+                target_unit_id, github_pr_id, link_status, source_record_sha256
+              ) VALUES (?, ?, ?, ?)
+            SQL
+          )
+          [link.fetch("github_pr_id"), target_unit_id, link.fetch("link_status")]
+        end
+        restored.group_by(&:first).each do |github_pr_id, rows|
+          exact_target_ids = rows.filter_map { |_, target_unit_id, status| target_unit_id if status == "exact" }.uniq
+          target_unit_id = exact_target_ids.one? ? exact_target_ids.first : nil
+          @ledger.execute(
+            "UPDATE review_receipts SET target_unit_id = ? WHERE github_pr_id = ?",
+            [target_unit_id, github_pr_id]
+          )
+        end
       end
 
       def ingest_host_roots
@@ -287,14 +342,16 @@ module AgentCoord
         return unless link
 
         calls = @ledger.rows(
-          "SELECT pricing_status, total_cost_microusd FROM usage_calls WHERE host_session_id = ?",
+          "SELECT pricing_snapshot_id, pricing_status, total_cost_microusd " \
+          "FROM usage_calls WHERE host_session_id = ?",
           [host_session_id]
         )
-        priced = calls.any? && calls.all? { |call| call["pricing_status"] == "priced" }
+        snapshot_ids = calls.filter_map { |call| call["pricing_snapshot_id"] }.uniq
+        priced = calls.any? && snapshot_ids.one? && calls.all? { |call| call["pricing_status"] == "priced" }
         allocated_values = [
           link.fetch("target_unit_id"),
           host_session_id,
-          @pricing.snapshot_id,
+          snapshot_ids.one? ? snapshot_ids.first : nil,
           priced ? "priced" : "unknown",
           priced ? calls.sum { |call| call.fetch("total_cost_microusd") } : nil
         ]
@@ -558,7 +615,7 @@ module AgentCoord
             "total_tokens" => nonnegative_integer(usage["total_tokens"])
           }
           cost = @pricing.cost(receipt_usage)
-          review_ref = opaque_value(review["id"] || "#{github_pr_id}:#{review_index}")
+          review_ref = opaque_value(review["id"]) || "#{github_pr_id}:#{review_index}"
           target_unit_id = linked_ids.one? ? linked_ids.first : nil
           receipt_row = {
             "github_pr_id" => github_pr_id,
@@ -608,7 +665,7 @@ module AgentCoord
 
           finding_row = {
             "review_receipt_id" => review_receipt_id,
-            "finding_ref" => opaque_value(finding["id"] || "#{review_receipt_id}:#{finding_index}"),
+            "finding_ref" => opaque_value(finding["id"]) || "#{review_receipt_id}:#{finding_index}",
             "severity" => enum(finding["severity"], %w[P0 P1 P2 P3]),
             "disposition" => enum(finding["disposition"], REVIEW_DISPOSITIONS),
             "verification_status" => enum(finding["verification_status"], VERIFICATION_STATUSES),
@@ -639,6 +696,12 @@ module AgentCoord
               "SELECT status, terminal FROM claims WHERE batch_id = ? AND repo = ? AND target = ?",
               unit.values_at("batch_id", "repo", "target")
             ).flat_map { |row| [STATUS_OUTCOMES[row["terminal"]], STATUS_OUTCOMES[row["status"]]] }.compact
+          )
+          statuses.concat(
+            @ledger.rows(
+              "SELECT terminal FROM events WHERE batch_id = ? AND repo = ? AND target = ?",
+              unit.values_at("batch_id", "repo", "target")
+            ).filter_map { |row| STATUS_OUTCOMES[row["terminal"]] }
           )
           statuses.uniq!
           pr_links = @ledger.rows(
@@ -672,11 +735,10 @@ module AgentCoord
       end
 
       def outcome_for(statuses, pr_states)
-        return %w[merged exact] if pr_states.include?("merged")
-
         exceptional = statuses & EXCEPTIONAL_OUTCOMES
         return [exceptional.first, "exact"] if exceptional.one?
         return %w[conflicting-observations conflicting] if exceptional.length > 1
+        return %w[merged exact] if pr_states.include?("merged")
         return %w[conflicting-observations conflicting] if pr_states.length > 1
         return %w[open-pr exact] if pr_states == ["open"]
         return %w[closed-unmerged exact] if pr_states == ["closed"]

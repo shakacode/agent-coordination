@@ -32,13 +32,18 @@ module AgentCoord
           raise Error, "pricing contract is invalid"
         end
         raise Error, "pricing currency is unsupported" unless document["currency"] == "USD"
+        raise Error, "pricing unit is unsupported" unless document["unit"] == "microusd_per_million_tokens"
 
         @document = document
         @source_sha256 = source_sha256
         @snapshot_id = document.fetch("snapshot_id")
-        @definitions = Array(document["rates"]).to_h do |rate|
+        @definitions = {}
+        Array(document["rates"]).each do |rate|
           validate_rate!(rate)
-          [[rate.fetch("model"), rate.fetch("profile")], rate]
+          key = [rate.fetch("model"), rate.fetch("profile")]
+          raise Error, "pricing model/profile is duplicated" if @definitions.key?(key)
+
+          @definitions[key] = rate
         end
       end
 

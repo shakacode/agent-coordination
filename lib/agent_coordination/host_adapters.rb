@@ -92,7 +92,7 @@ module AgentCoord
           }
           merge_known!(session, record_metadata)
           session.fetch("usage") << usage_row(
-            message.fetch("usage"), ordinal, session.merge(record_metadata),
+            message.fetch("usage"), ordinal, session,
             cache_read_keys: %w[cache_read_input_tokens],
             cache_write_keys: %w[cache_creation_input_tokens],
             reasoning_keys: %w[reasoning_output_tokens]
