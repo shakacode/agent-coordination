@@ -690,22 +690,13 @@ module AgentCoord
 
       def recompute_outcomes(batch_id)
         @ledger.rows("SELECT * FROM target_units WHERE batch_id = ?", [batch_id]).each do |unit| # rubocop:disable Metrics/BlockLength
+          target_key = unit.values_at("batch_id", "repo", "target")
           statuses = @ledger.rows(
             "SELECT status FROM target_observations WHERE batch_id = ? AND repo = ? AND target = ?",
-            unit.values_at("batch_id", "repo", "target")
+            target_key
           ).filter_map { |row| STATUS_OUTCOMES[row["status"]] }.uniq
-          statuses.concat(
-            @ledger.rows(
-              "SELECT status, terminal FROM claims WHERE batch_id = ? AND repo = ? AND target = ?",
-              unit.values_at("batch_id", "repo", "target")
-            ).flat_map { |row| [STATUS_OUTCOMES[row["terminal"]], STATUS_OUTCOMES[row["status"]]] }.compact
-          )
-          statuses.concat(
-            @ledger.rows(
-              "SELECT terminal FROM events WHERE batch_id = ? AND repo = ? AND target = ?",
-              unit.values_at("batch_id", "repo", "target")
-            ).filter_map { |row| STATUS_OUTCOMES[row["terminal"]] }
-          )
+          coordination_statuses, terminal_statuses = coordination_statuses_for(target_key)
+          statuses.concat(coordination_statuses)
           statuses.uniq!
           pr_links = @ledger.rows(
             <<~SQL, [unit.fetch("id")]
@@ -719,7 +710,7 @@ module AgentCoord
             row.fetch("state") if row.fetch("link_status") == "exact"
           end.uniq
           repo_mismatch = pr_links.any? { |row| row.fetch("link_status") == "repo_mismatch" }
-          outcome, evidence_status = outcome_for(statuses, pr_states)
+          outcome, evidence_status = outcome_for(statuses, pr_states, terminal_statuses)
           pr_join_status = if pr_states.empty?
                              repo_mismatch ? "repo_mismatch" : unit.fetch("pr_join_status")
                            elsif pr_states.length == 1
@@ -737,7 +728,26 @@ module AgentCoord
         end
       end
 
-      def outcome_for(statuses, pr_states)
+      def coordination_statuses_for(target_key)
+        claims = @ledger.rows(
+          "SELECT status, terminal FROM claims WHERE batch_id = ? AND repo = ? AND target = ?", target_key
+        )
+        terminal_statuses = claims.filter_map { |row| STATUS_OUTCOMES[row["terminal"]] }
+        claim_statuses = claims.filter_map { |row| STATUS_OUTCOMES[row["status"]] }
+        terminal_statuses.concat(
+          @ledger.rows(
+            "SELECT terminal FROM events WHERE batch_id = ? AND repo = ? AND target = ?", target_key
+          ).filter_map { |row| STATUS_OUTCOMES[row["terminal"]] }
+        )
+        [claim_statuses + terminal_statuses, terminal_statuses]
+      end
+
+      def outcome_for(statuses, pr_states, terminal_statuses)
+        terminal = terminal_statuses.uniq
+        terminal = ["merged"] if (terminal - %w[done merged]).empty? && terminal.include?("merged")
+        return [terminal.first, "exact"] if terminal.one?
+        return %w[conflicting-observations conflicting] if terminal.length > 1
+
         exceptional = statuses & EXCEPTIONAL_OUTCOMES
         return [exceptional.first, "exact"] if exceptional.one?
         return %w[conflicting-observations conflicting] if exceptional.length > 1

@@ -128,7 +128,7 @@ class TelemetryHarvesterTest < Minitest::Test # rubocop:disable Metrics/ClassLen
       )
       assert status.success?, stderr
 
-      assert_equal ["78|merged|1", "79|open-pr|0"], sqlite_query(
+      assert_equal ["78|done|1", "79|open-pr|0"], sqlite_query(
         ledger_path,
         "SELECT target_units.target, target_units.outcome, COUNT(review_receipts.id) " \
         "FROM target_units " \
@@ -169,7 +169,8 @@ class TelemetryHarvesterTest < Minitest::Test # rubocop:disable Metrics/ClassLen
       assert status.success?, stderr
       assert_equal ["2|1"], sqlite_query(
         ledger_path,
-        "SELECT COUNT(*), review_receipts.target_unit_id IS NULL FROM target_pr_links, review_receipts"
+        "SELECT (SELECT COUNT(*) FROM target_pr_links), " \
+        "(SELECT COUNT(*) FROM review_receipts WHERE target_unit_id IS NULL)"
       )
 
       _stdout, stderr, status = Open3.capture3(
@@ -179,7 +180,8 @@ class TelemetryHarvesterTest < Minitest::Test # rubocop:disable Metrics/ClassLen
       assert status.success?, stderr
       assert_equal ["2|1"], sqlite_query(
         ledger_path,
-        "SELECT COUNT(*), review_receipts.target_unit_id IS NULL FROM target_pr_links, review_receipts"
+        "SELECT (SELECT COUNT(*) FROM target_pr_links), " \
+        "(SELECT COUNT(*) FROM review_receipts WHERE target_unit_id IS NULL)"
       )
     end
   end
@@ -194,9 +196,9 @@ class TelemetryHarvesterTest < Minitest::Test # rubocop:disable Metrics/ClassLen
         "name" => "event-terminal", "targets" => ["80"], "status" => "done"
       }
       coordination.fetch("events") << {
-        "id" => "event-terminal-failed", "batch_id" => "batch-fixture",
+        "id" => "event-terminal-done", "batch_id" => "batch-fixture",
         "repo" => "shakacode/agent-coordination", "target" => "80",
-        "type" => "lane_closed", "terminal" => "failed", "at" => "2026-07-18T02:00:00Z"
+        "type" => "lane_closed", "terminal" => "done", "at" => "2026-07-18T02:00:00Z"
       }
       File.write(source_path, JSON.pretty_generate(coordination))
       github = JSON.parse(File.read(File.join(FIXTURES, "github.json")))
@@ -224,7 +226,7 @@ class TelemetryHarvesterTest < Minitest::Test # rubocop:disable Metrics/ClassLen
       assert_equal ["1|2"], sqlite_query(
         ledger_path, "SELECT (SELECT COUNT(*) FROM claims), (SELECT COUNT(*) FROM events)"
       )
-      assert_equal ["78|failed", "80|failed"], sqlite_query(
+      assert_equal ["78|failed", "80|done"], sqlite_query(
         ledger_path, "SELECT target, outcome FROM target_units WHERE target IN ('78', '80') ORDER BY target"
       )
     end
@@ -246,7 +248,7 @@ class TelemetryHarvesterTest < Minitest::Test # rubocop:disable Metrics/ClassLen
       assert status.success?, "harvest failed:\n#{stdout}\n#{stderr}"
       assert_empty stderr
 
-      assert_equal ["78|merged|exact", "79|open-pr|exact"], sqlite_query(
+      assert_equal ["78|done|exact", "79|open-pr|exact"], sqlite_query(
         ledger_path, "SELECT target, outcome, join_status FROM target_units ORDER BY target"
       )
       assert_equal ["78|checker", "78|maker", "79|open-lane"], sqlite_query(
@@ -535,7 +537,7 @@ class TelemetryHarvesterTest < Minitest::Test # rubocop:disable Metrics/ClassLen
       )
       assert scorecard_status.success?, scorecard_err
       scorecard = JSON.parse(scorecard_out)
-      assert_equal({ "merged" => 1, "open-pr" => 1 }, scorecard.fetch("outcomes"))
+      assert_equal({ "done" => 1, "open-pr" => 1 }, scorecard.fetch("outcomes"))
       assert_equal 14_678, scorecard.dig("costs", "known_cost_microusd")
       assert_equal "UNKNOWN", scorecard.dig("review_economics", "cost_per_actionable_finding_microusd")
       refute_includes File.binread(ledger_path), finding_secret

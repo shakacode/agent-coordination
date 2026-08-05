@@ -76,10 +76,12 @@ Lane membership is normalized in `lane_memberships`.
 Host sessions allocate cost only when their opaque session reference maps to
 one exact lane membership. Unmatched or ambiguous sessions remain queryable but
 are excluded from `allocated_costs`. Same-repository GitHub PR evidence may
-classify an outcome; cross-repository evidence is retained as `repo_mismatch`
-and cannot override coordination state. Conflicting exact PR states or
-incompatible structured statuses produce `conflicting-observations`. Missing
-outcomes stay SQL `NULL` and render as literal `UNKNOWN` in scorecard output.
+classify an outcome only when no claim or event declares a protocol terminal
+state. Protocol terminal state is authoritative over GitHub-derived state.
+Cross-repository evidence is retained as `repo_mismatch` and cannot override
+coordination state. Conflicting exact PR states or incompatible structured
+statuses produce `conflicting-observations`. Missing outcomes stay SQL `NULL`
+and render as literal `UNKNOWN` in scorecard output.
 
 ## Costs and scorecards
 
