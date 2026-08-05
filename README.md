@@ -302,8 +302,10 @@ Selection 5 is *implicit* local. When a consumer env file
 but that file was never sourced, an implicit local run is a split-brain
 configuration: writes would land on a local state root the fleet never reads.
 `claim`, `release`, `heartbeat`, `record-event`, and `register-batch` therefore
-hard stop with exit `2` and name the offending env file. Read commands
-(`status`, `batch-audit`) keep the advisory warning and still succeed. Choose a
+hard stop with exit `2` and name the offending env file — and, per the detection
+rules below, do the same when that file merely *could* configure one in a way the
+CLI cannot prove inert. Read commands (`status`, `batch-audit`) keep the advisory
+warning, which stays limited to a proven assignment, and still succeed. Choose a
 backend explicitly to proceed: source the env file for fleet writes, pass
 `--state-root PATH` (or set `AGENT_COORD_STATE_ROOT`) for an explicit local
 root, or set `AGENT_COORD_LOCAL=1` to opt into implicit local mode.
@@ -312,26 +314,45 @@ value, including empty and `0`, is not an opt-in. The opt-in also silences the
 advisory warning for read commands. The same hard stop is documented in
 `--help` for each write command (`Backend safety:`) and in `doctor --help`.
 
-The env-file probe reads assignments the way a shell would and follows a
-`source`/`.` include **one level deep**, so a wrapper file whose assignment
-lives in a sourced fragment still counts as configuring a fleet URL:
+The env-file probe reads your env files **as text**: it never sources or
+evaluates them, because running operator shell as a side effect of every
+`agent-coord` invocation is not a trade this CLI makes. It folds each file the
+way a shell would — assignments take effect in order and the **last one wins**,
+so a file that sets a URL and later blanks or unsets it configures nothing — and
+it follows a `source`/`.` include **one level deep**, so a wrapper file whose
+assignment lives in a sourced fragment still counts as configuring a fleet URL:
 
 ```sh
 # ~/.config/agent-coord/env
 . "$HOME/.config/agent-coord/backend.env"   # AGENT_COORD_API_URL lives here
 ```
 
-Include resolution is deliberately bounded: only `$HOME` and
-`$XDG_CONFIG_HOME` expand, the target must be absolute and must resolve — after
-symlink and `..` resolution — inside the user's config directory, and the
-included file's own includes are never followed. When the guard cannot prove
-what an include does (unreadable, relative, unexpanded variable or `~`, outside
-the config directory, or nested), it does *not* hard stop: writes are permitted
-exactly as before, and `doctor` lists the include under
-`unresolved_env_includes` so the operator can see what was not proven. Blocking
-valid work on an unproven include would break every operator whose wrapper
-genuinely configures nothing, so the hard stop stays reserved for a proven fleet
-URL.
+Include resolution is deliberately bounded: only `$HOME` and `$XDG_CONFIG_HOME`
+expand, the target must be absolute and must resolve — after symlink and `..`
+resolution — inside the user's config directory, and the included file's own
+includes are never followed.
+
+**The probe fails closed on anything it cannot prove inert.** Reading text
+cannot decide every file, and for a mutual-exclusion guard a loud false positive
+that an explicit local-mode selection clears beats a silent false negative that
+permits an invisible-lease write. So these all hard stop exactly like a proven
+fleet URL, naming the file and the exact construct:
+
+| Construct | Example |
+| --- | --- |
+| include the CLI cannot read | `. "$XDG_CONFIG_HOME/agent-coord/missing.env"` |
+| include outside the config directory | `. /etc/agent-coord/backend.env` |
+| include that is relative, `~`-rooted, or uses another variable | `. backend.env` |
+| include inside an include (past the one-level bound) | `. "$XDG_CONFIG_HOME/agent-coord/level-two.env"` |
+| value from an unresolved expansion or command substitution | `AGENT_COORD_API_URL="${FLEET_URL:-}"` |
+| the variable named outside a plain assignment | `[ -n "$F" ] && AGENT_COORD_API_URL="$F"` |
+| `eval`, or a command substitution that is not confined to another variable's value | `eval "$(fleet-env)"` |
+
+Lines that cannot reach the variable stay inert, so ordinary env files are
+unaffected: comments, a different variable, and a substitution confined to
+another variable's value (`MACHINE_ID=$(hostname)`, which runs in a subshell)
+never trip the guard. `doctor` reports which construct decided the verdict in
+`split_brain_reason` and `split_brain_construct`.
 
 React on Rails workflow docs assume `agent-coord` is available on `PATH`.
 `bin/agent-coord bootstrap` installs `agent-coord` into `$HOME/.local/bin` by
@@ -361,10 +382,10 @@ that configuration, it emits its full report with `status: split_brain` plus a
 explicit opt-ins that unblock writes (`--state-root`, `AGENT_COORD_STATE_ROOT`,
 `AGENT_COORD_LOCAL=1`) return it to `ok` and exit `0`. `doctor --help` states
 all of this, so the operator who hits the hard stop can find it from the CLI.
-An include the probe could not prove is reported separately as
-`unresolved_env_includes` (an `env_file`/`include`/`reason` triple per entry,
-also printed in text mode); that list is advisory and never changes the exit
-code. If an explicitly
+The payload also carries `split_brain_reason` and `split_brain_construct` (plus
+`split_brain_construct_file` when the deciding line lives in a sourced fragment),
+which name the construct behind the verdict — `configured_api_url` for a proven
+assignment, or the specific cannot-prove class otherwise. If an explicitly
 configured backend fails, agents should report
 coordination state
 as `UNKNOWN` and use the public claim-comment fallback until the operator fixes

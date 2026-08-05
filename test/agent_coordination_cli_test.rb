@@ -1177,7 +1177,12 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     assert_includes result.stdout, "--state-root PATH"
     assert_includes result.stdout, "AGENT_COORD_STATE_ROOT"
     assert_includes result.stdout, "AGENT_COORD_LOCAL=1"
-    assert_includes result.stdout, "unresolved_env_includes"
+    # The fail-closed half: what it refuses on, and what it reports.
+    assert_includes result.stdout, "never sources or evaluates"
+    assert_includes result.stdout, "cannot prove inert"
+    assert_includes result.stdout, "split_brain_reason"
+    assert_includes result.stdout, "split_brain_construct"
+    assert_includes result.stdout, "last assignment wins"
   end
 
   # Every command that can now exit 2 for the same reason documents it; read
@@ -1189,6 +1194,7 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
       assert_equal 0, result.status.exitstatus, result.stderr
       assert_includes result.stdout, "Backend safety:", command
       assert_includes result.stdout, "split_brain", command
+      assert_includes result.stdout, "cannot", command
       assert_includes result.stdout, "AGENT_COORD_LOCAL=1", command
     end
 
@@ -1229,11 +1235,11 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     end
   end
 
-  # The cannot-prove policy: an include the guard cannot resolve inside the
-  # config directory keeps today's conservative permit and is surfaced by doctor
-  # instead of hard stopping, because a false positive on a hard stop breaks the
-  # CLI for every operator whose wrapper genuinely configures nothing.
-  def test_write_command_permits_unprovable_include_and_doctor_surfaces_it
+  # The cannot-prove policy, per the maintainer's recorded direction on #99: an
+  # include whose effect the probe cannot prove inert fails closed, naming the
+  # construct, rather than permitting a possibly invisible write. The escape
+  # hatches are what make that tolerable.
+  def test_write_command_hard_stops_for_include_it_cannot_prove_inert
     with_consumer_env_config do |root, agent_dir, env|
       env_file = File.join(agent_dir, "env")
       outside = File.join(root, "outside", "backend.env")
@@ -1241,48 +1247,69 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
       File.write(outside, "AGENT_COORD_API_URL=https://fleet.example\n")
       FileUtils.ln_s(outside, File.join(agent_dir, "escape.env"))
 
-      unprovable_includes(outside).each_with_index do |(include_line, reason), index|
+      cannot_prove_includes(outside).each_with_index do |(include_line, reason), index|
         File.write(env_file, "#{include_line}\n")
 
         claim = run_consumer_env_cli(env, *split_brain_claim_args(index))
-        assert_equal 0, claim.status.exitstatus, "#{include_line}: #{claim.stderr}"
-        refute_includes claim.stderr, "split-brain", include_line
+        assert_equal 2, claim.status.exitstatus, "#{include_line}: #{claim.stderr}"
+        assert_includes claim.stderr, "may configure AGENT_COORD_API_URL", include_line
+        assert_includes claim.stderr, include_line.strip, include_line
+        assert_includes claim.stderr, "--state-root PATH", include_line
+        assert_includes claim.stderr, "AGENT_COORD_LOCAL=1", include_line
 
-        doctor = run_consumer_env_cli(env, "doctor", "--json")
-        assert_equal 0, doctor.status.exitstatus, doctor.stderr
-        payload = JSON.parse(doctor.stdout)
-        assert_equal "ok", payload.fetch("status"), include_line
-        entry = payload.fetch("unresolved_env_includes").fetch(0)
-        assert_equal env_file, entry.fetch("env_file"), include_line
-        assert_equal reason, entry.fetch("reason"), include_line
+        assert_doctor_reports_split_brain(env, env_file, reason, include_line)
       end
     end
   end
 
-  # Bounded at one level: the include is followed, but the included file's own
-  # includes are reported rather than followed, so resolution cannot recurse.
-  def test_write_command_follows_consumer_env_includes_exactly_one_level_deep
+  # Constructs that are not includes and are still not decidable from the file
+  # text: the value depends on the environment at source time, or the variable is
+  # reachable by a route the probe does not parse.
+  def test_write_command_hard_stops_for_constructs_it_cannot_prove_inert
     with_consumer_env_config do |_root, agent_dir, env|
-      File.write(File.join(agent_dir, "env"), %(. "$XDG_CONFIG_HOME/agent-coord/level-one.env"\n))
+      env_file = File.join(agent_dir, "env")
+
+      cannot_prove_lines.each_with_index do |(line, reason), index|
+        File.write(env_file, "#{line}\n")
+
+        claim = run_consumer_env_cli(env, *split_brain_claim_args(index))
+        assert_equal 2, claim.status.exitstatus, "#{line}: #{claim.stderr}"
+        assert_includes claim.stderr, "may configure AGENT_COORD_API_URL", line
+        assert_includes claim.stderr, line.strip, line
+
+        assert_doctor_reports_split_brain(env, env_file, reason, line)
+      end
+    end
+  end
+
+  # Bounded at one level: an include inside an include is not followed, and under
+  # fail-closed that unfollowed level is itself a stop rather than a silent miss.
+  def test_write_command_hard_stops_for_an_include_inside_an_include
+    with_consumer_env_config do |_root, agent_dir, env|
+      env_file = File.join(agent_dir, "env")
+      File.write(env_file, %(. "$XDG_CONFIG_HOME/agent-coord/level-one.env"\n))
       File.write(File.join(agent_dir, "level-one.env"), %(. "$XDG_CONFIG_HOME/agent-coord/level-two.env"\n))
       File.write(File.join(agent_dir, "level-two.env"), "AGENT_COORD_API_URL=https://fleet.example\n")
 
       claim = run_consumer_env_cli(env, *split_brain_claim_args(0))
-      assert_equal 0, claim.status.exitstatus, claim.stderr
+      assert_equal 2, claim.status.exitstatus, claim.stderr
+      assert_includes claim.stderr, "level-two.env"
+      assert_includes claim.stderr, File.realpath(File.join(agent_dir, "level-one.env"))
 
       doctor = run_consumer_env_cli(env, "doctor", "--json")
-      assert_equal 0, doctor.status.exitstatus, doctor.stderr
+      assert_equal 2, doctor.status.exitstatus
       payload = JSON.parse(doctor.stdout)
-      assert_equal "ok", payload.fetch("status")
-      entry = payload.fetch("unresolved_env_includes").fetch(0)
-      assert_equal File.realpath(File.join(agent_dir, "level-one.env")), entry.fetch("env_file")
-      assert_equal "nested_include", entry.fetch("reason")
-      assert_includes entry.fetch("include"), "level-two.env"
+      assert_equal "split_brain", payload.fetch("status")
+      assert_equal env_file, payload.fetch("split_brain_env_file")
+      assert_equal "nested_include", payload.fetch("split_brain_reason")
+      assert_equal File.realpath(File.join(agent_dir, "level-one.env")),
+                   payload.fetch("split_brain_construct_file")
     end
   end
 
-  # A resolved include that a shell would leave empty is proven inert: no hard
-  # stop, and nothing for the operator to investigate in doctor either.
+  # A readable, contained include is provable, which is why following includes
+  # beats a blanket stop on every env file that has one: this wrapper resolves to
+  # an assignment a shell would leave empty, so the write proceeds.
   def test_write_command_ignores_resolved_include_that_configures_nothing
     with_consumer_env_config do |_root, agent_dir, env|
       File.write(File.join(agent_dir, "env"), %(source "$XDG_CONFIG_HOME/agent-coord/backend.env"\n))
@@ -1296,7 +1323,91 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
       assert_equal 0, doctor.status.exitstatus, doctor.stderr
       payload = JSON.parse(doctor.stdout)
       assert_equal "ok", payload.fetch("status")
-      refute_includes payload.keys, "unresolved_env_includes"
+      refute_includes payload.keys, "split_brain_env_file"
+    end
+  end
+
+  # A shell keeps the *last* assignment, so a file that sets a URL and then
+  # blanks or unsets it configures nothing. The probe used to take the first
+  # match and refuse a valid implicit-local write (issue #99).
+  def test_write_command_ignores_env_file_whose_last_assignment_leaves_no_url
+    with_consumer_env_config do |_root, agent_dir, env|
+      env_file = File.join(agent_dir, "env")
+      ["AGENT_COORD_API_URL=https://fleet.example\nAGENT_COORD_API_URL=\n",
+       %(AGENT_COORD_API_URL=https://fleet.example\nAGENT_COORD_API_URL=""\n),
+       "export AGENT_COORD_API_URL=https://fleet.example\nAGENT_COORD_API_URL= # disabled today\n",
+       "AGENT_COORD_API_URL=https://fleet.example\nunset AGENT_COORD_API_URL\n"].each_with_index do |body, index|
+        File.write(env_file, body)
+
+        claim = run_consumer_env_cli(env, *split_brain_claim_args(index))
+        assert_equal 0, claim.status.exitstatus, "#{body.inspect}: #{claim.stderr}"
+        refute_includes claim.stderr, "split-brain", body.inspect
+      end
+    end
+  end
+
+  # The reverse order still stops: the last assignment is the fleet URL.
+  def test_write_command_hard_stops_when_the_last_assignment_sets_the_url
+    with_consumer_env_config do |_root, agent_dir, env|
+      File.write(
+        File.join(agent_dir, "env"),
+        "AGENT_COORD_API_URL=\nAGENT_COORD_API_URL=https://fleet.example\n"
+      )
+
+      claim = run_consumer_env_cli(env, *split_brain_claim_args(0))
+
+      assert_equal 2, claim.status.exitstatus
+      assert_includes claim.stderr, "configures AGENT_COORD_API_URL"
+    end
+  end
+
+  # Fail-closed must not fire on lines that cannot reach the variable at all,
+  # or every operator with an ordinary env file loses the CLI.
+  def test_write_command_ignores_env_lines_that_cannot_reach_the_api_url
+    with_consumer_env_config do |_root, agent_dir, env|
+      env_file = File.join(agent_dir, "env")
+      # A substitution confined to another variable's value runs in a subshell;
+      # a commented-out assignment, a different variable, and a name this one is
+      # only a prefix of are all inert too.
+      ["MACHINE_ID=$(hostname)\n",
+       "# AGENT_COORD_API_URL=https://fleet.example\n",
+       "AGENT_COORD_API_TOKEN=secret\n",
+       "export AGENT_COORD_STATUS_STATE_ROOT=/tmp/status-state\n",
+       "AGENT_COORD_API_URL_BACKUP=https://fleet.example\n",
+       "umask 077\n"].each_with_index do |body, index|
+        File.write(env_file, body)
+
+        claim = run_consumer_env_cli(env, *split_brain_claim_args(index))
+        assert_equal 0, claim.status.exitstatus, "#{body.inspect}: #{claim.stderr}"
+        refute_includes claim.stderr, "split-brain", body.inspect
+      end
+    end
+  end
+
+  # The escape hatches are what make fail-closed tolerable, so every stop class
+  # has to clear under an explicit local-mode selection.
+  def test_local_mode_opt_in_clears_every_split_brain_stop_class
+    with_consumer_env_config do |root, agent_dir, env|
+      env_file = File.join(agent_dir, "env")
+      outside = File.join(root, "outside", "backend.env")
+      FileUtils.mkdir_p(File.dirname(outside))
+      File.write(outside, "AGENT_COORD_API_URL=https://fleet.example\n")
+      opt_in = env.merge("AGENT_COORD_LOCAL" => "1")
+
+      ["AGENT_COORD_API_URL=https://fleet.example\n",
+       ". #{outside}\n",
+       %(AGENT_COORD_API_URL="${AGENT_COORD_FLEET_URL:-}"\n),
+       "eval \"$(fleet-env)\"\n"].each_with_index do |body, index|
+        File.write(env_file, body)
+
+        claim = run_consumer_env_cli(opt_in, *split_brain_claim_args(index))
+        assert_equal 0, claim.status.exitstatus, "#{body.inspect}: #{claim.stderr}"
+        refute_includes claim.stderr, "split-brain", body.inspect
+
+        doctor = run_consumer_env_cli(opt_in, "doctor", "--json")
+        assert_equal 0, doctor.status.exitstatus, doctor.stderr
+        assert_equal "ok", JSON.parse(doctor.stdout).fetch("status"), body.inspect
+      end
     end
   end
 
@@ -8220,19 +8331,42 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     ["claim", "--agent-id", "worker-a", "--repo", "demo/example", "--target", (index + 1).to_s]
   end
 
-  # Include forms whose effect the guard cannot prove, and the reason each is
-  # reported with. All of them point at a file that really does set the URL, so
-  # the permit is a deliberate policy choice rather than a parse miss.
-  def unprovable_includes(outside)
+  # Include forms whose effect the probe cannot prove, and the reason each stops
+  # with. Every one of them points at a file that really does set the URL, which
+  # is the case fail-closed exists for.
+  def cannot_prove_includes(outside)
     {
-      ". #{outside}" => "outside_config_dir",
-      '. "$XDG_CONFIG_HOME/agent-coord/escape.env"' => "outside_config_dir",
-      '. "$XDG_CONFIG_HOME/agent-coord/../../outside/backend.env"' => "outside_config_dir",
+      ". #{outside}" => "include_outside_config_dir",
+      '. "$XDG_CONFIG_HOME/agent-coord/escape.env"' => "include_outside_config_dir",
+      '. "$XDG_CONFIG_HOME/agent-coord/../../outside/backend.env"' => "include_outside_config_dir",
       ". backend.env" => "relative_include",
       '. "$AGENT_COORD_FLEET_ENV/backend.env"' => "unexpanded_variable",
       '. "~/.config/agent-coord/backend.env"' => "unexpanded_tilde",
-      '. "$XDG_CONFIG_HOME/agent-coord/missing.env"' => "unreadable"
+      '. "$XDG_CONFIG_HOME/agent-coord/missing.env"' => "unreadable_include"
     }
+  end
+
+  # Non-include constructs the probe cannot prove inert. The first two are the
+  # `${VAR:-}` and command-substitution values from the issue's own comments.
+  def cannot_prove_lines
+    {
+      %(AGENT_COORD_API_URL="${AGENT_COORD_FLEET_URL:-}") => "unresolved_expansion",
+      "AGENT_COORD_API_URL=$(fleet-url)" => "unresolved_expansion",
+      '[ -n "$FLEET" ] && AGENT_COORD_API_URL="$FLEET"' => "opaque_api_url_reference",
+      "export AGENT_COORD_API_URL" => "opaque_api_url_reference",
+      'eval "$(fleet-env)"' => "eval",
+      "$(fleet-env)" => "command_substitution"
+    }
+  end
+
+  def assert_doctor_reports_split_brain(env, env_file, reason, label)
+    doctor = run_consumer_env_cli(env, "doctor", "--json")
+
+    assert_equal 2, doctor.status.exitstatus, "#{label}: #{doctor.stderr}"
+    payload = JSON.parse(doctor.stdout)
+    assert_equal "split_brain", payload.fetch("status"), label
+    assert_equal env_file, payload.fetch("split_brain_env_file"), label
+    assert_equal reason, payload.fetch("split_brain_reason"), label
   end
 
   def run_agent_coord(*, state_root: @state_root, stdin_data: nil, env: {})

@@ -39,11 +39,43 @@ module AgentCoord
   # split-brain advisory and the write hard stop.
   LOCAL_MODE_ENV = "AGENT_COORD_LOCAL"
   LOCAL_MODE_TRUE_VALUES = %w[1 true yes].freeze
-  # Consumer env-file probe: an AGENT_COORD_API_URL assignment, a `source`/`.`
-  # include directive, and the only two variables an include target may expand.
+  # Consumer env-file probe. The scanner proves inertness only for the constructs
+  # it recognizes: a plain AGENT_COORD_API_URL assignment, an `unset` of it, a
+  # `source`/`.` include it can resolve inside the config directory, a comment or
+  # blank line, and a line that cannot reach the variable at all. Everything else
+  # is a fail-closed "cannot prove" (issue #99).
   CONSUMER_API_URL_ASSIGNMENT = /^\s*(?:export\s+)?AGENT_COORD_API_URL=(.*)$/
+  CONSUMER_API_URL_UNSET = /^\s*unset\s+(?:-v\s+)?AGENT_COORD_API_URL\s*$/
+  # The variable named anywhere else: an assignment the anchored pattern cannot
+  # read (`[ -n "$F" ] && AGENT_COORD_API_URL=$F`), a bare `export` of it, and so on.
+  CONSUMER_API_URL_MENTION = /AGENT_COORD_API_URL(?![A-Za-z0-9_])/
+  CONSUMER_ENV_INERT_LINE = /\A\s*(?:#|\z)/
   CONSUMER_INCLUDE_DIRECTIVE = /^\s*(?:source|\.)\s+(\S.*)$/
   CONSUMER_INCLUDE_EXPANSION = /\$(?:\{(HOME|XDG_CONFIG_HOME)\}|(HOME|XDG_CONFIG_HOME)\b)/
+  CONSUMER_COMMAND_SUBSTITUTION = /\$\(|`/
+  CONSUMER_EVAL = %r{(?<![\w./-])eval(?![\w-])}
+  CONSUMER_OTHER_ASSIGNMENT = /\A\s*(?:export\s+)?[A-Za-z_][A-Za-z0-9_]*=/
+  CONSUMER_STATEMENT_SEPARATOR = /[;&|]/
+  REASON_CONFIGURED = "configured_api_url"
+  # Operator-facing sentence per finding: the message has to explain a refusal
+  # that may be blocking valid work, so each reason says what could not be proven.
+  CONSUMER_SPLIT_BRAIN_REASONS = {
+    REASON_CONFIGURED => "configures AGENT_COORD_API_URL",
+    "unresolved_expansion" => "assigns AGENT_COORD_API_URL from a variable or command this CLI cannot evaluate",
+    "opaque_api_url_reference" => "names AGENT_COORD_API_URL outside a plain assignment this CLI can read",
+    "command_substitution" => "runs a command substitution that could set AGENT_COORD_API_URL",
+    "eval" => "evaluates text that could set AGENT_COORD_API_URL",
+    "unreadable_include" => "sources a file this CLI cannot read",
+    "include_outside_config_dir" => "sources a file outside your config directory, which this CLI will not read",
+    "relative_include" => "sources a relative path, which depends on the sourcing shell's working directory",
+    "unexpanded_variable" => "sources a path with a variable this CLI does not expand " \
+                             "(only $HOME and $XDG_CONFIG_HOME)",
+    "unexpanded_tilde" => "sources a path starting with ~, which this CLI does not expand",
+    "nested_include" => "sources a file that itself sources another file, which this CLI does not follow",
+    "empty_include" => "sources an empty target",
+    "config_dir_unresolvable" => "sources a file that cannot be checked because your config directory " \
+                                 "could not be resolved"
+  }.freeze
   MACHINE_ID_ENV = "AGENT_COORD_MACHINE_ID"
   SESSION_ID_ENV = "AGENT_COORD_SESSION_ID"
   CODEX_THREAD_ID_ENV = "CODEX_THREAD_ID"
@@ -309,6 +341,21 @@ module AgentCoord
     end
   end
   DemoResult = Struct.new(:code, :stdout, :stderr, keyword_init: true)
+  # What a consumer env file means for AGENT_COORD_API_URL after folding it in
+  # order: :empty (provably unset or blanked), :configured (a proven fleet URL),
+  # or :unprovable (a construct whose effect could not be proven inert).
+  ConsumerEnvVerdict = Struct.new(:kind, :reason, :construct, :construct_file) do
+    def unprovable?
+      kind == :unprovable
+    end
+
+    # Both a proven URL and an unprovable construct decide the file against an
+    # implicit local write; only :empty permits it.
+    def decided?
+      kind != :empty
+    end
+  end
+  CONSUMER_ENV_INERT = ConsumerEnvVerdict.new(:empty).freeze
 
   class Runner # rubocop:disable Metrics/ClassLength
     def initialize(argv, stdout: $stdout, stderr: $stderr, clock: Time, backend_conflict_warnings: true)
@@ -757,7 +804,10 @@ module AgentCoord
       return unless options[:state_root] && !options[:api_url]
       return unless ENV.fetch("AGENT_COORD_API_URL", "").empty?
 
-      env_file = consumer_env_files.find { |path| consumer_api_url_configured?(path) }
+      # Advisory only, and only for a proven assignment: this path already has an
+      # explicit local root, so it warns rather than refusing and must not turn an
+      # unprovable construct into noise on every read.
+      env_file = consumer_env_files.find { |path| proven_split_brain?(consumer_env_file_finding(path) || {}) }
       return unless env_file
 
       @stderr.puts(
@@ -796,37 +846,67 @@ module AgentCoord
       options[:status_root_local] && ENV.fetch("AGENT_COORD_STATE_ROOT", "").empty?
     end
 
-    def consumer_split_brain_env_file(options)
+    # The finding that drives the hard stop: either a proven AGENT_COORD_API_URL
+    # assignment, or a construct whose effect on it could not be proven inert.
+    def consumer_split_brain_finding(options)
       return nil if options[:stack_json]
       return nil unless split_brain_eligible_local?(options)
       return nil unless ENV.fetch("AGENT_COORD_API_URL", "").empty?
       return nil if local_mode_opt_in?
       # Consulted from the notice, the refusal and the doctor payload in one run;
       # compute it once rather than re-reading the file at each site.
-      return options[:split_brain_env_file] if options.key?(:split_brain_env_file)
+      return options[:split_brain_finding] if options.key?(:split_brain_finding)
 
-      unresolved = []
-      env_file = consumer_env_files.find { |path| consumer_api_url_configured?(path, unresolved: unresolved) }
-      # Includes the guard could not prove inert are reported by doctor rather
-      # than stopping the write; see consumer_api_url_configured?.
-      options[:unresolved_env_includes] = unresolved
-      options[:split_brain_env_file] = env_file
+      options[:split_brain_finding] = consumer_env_files.filter_map { |path| consumer_env_file_finding(path) }.first
     end
 
-    def consumer_split_brain_message(env_file)
-      "split-brain configuration: #{env_file} configures AGENT_COORD_API_URL, but this CLI resolved to the " \
-        "implicit local backend; refusing writes that would land on the local state root while a fleet API URL " \
-        "is configured. Source #{env_file} for fleet writes, pass --state-root PATH to choose a local root " \
-        "explicitly, or set #{LOCAL_MODE_ENV}=1 to opt into local mode."
+    def consumer_split_brain_env_file(options)
+      consumer_split_brain_finding(options)&.fetch("env_file")
+    end
+
+    # Fail closed on an unprovable construct, so the message has to carry enough
+    # for the operator to resolve it without reading source: the exact file, the
+    # exact construct, why the CLI refuses, and the three local-mode selections.
+    def consumer_split_brain_message(finding)
+      env_file = finding.fetch("env_file")
+      "split-brain configuration: #{env_file} #{consumer_split_brain_cause(finding)}, but this CLI resolved to " \
+        "the implicit local backend; refusing writes that #{consumer_split_brain_risk(finding)} while a fleet " \
+        "API URL #{consumer_split_brain_certainty(finding)} configured. Source #{env_file} for fleet writes, " \
+        "pass --state-root PATH to choose a local root explicitly, or set #{LOCAL_MODE_ENV}=1 to opt into " \
+        "local mode."
+    end
+
+    def consumer_split_brain_cause(finding)
+      sentence = CONSUMER_SPLIT_BRAIN_REASONS.fetch(finding.fetch("reason"))
+      construct_file = finding["construct_file"]
+      if proven_split_brain?(finding)
+        return construct_file ? "#{sentence} (in #{construct_file})" : sentence
+      end
+
+      detail = [finding["construct"], construct_file && "in #{construct_file}"].compact.join(" ")
+      "may configure AGENT_COORD_API_URL: it #{sentence} (#{detail})"
+    end
+
+    def consumer_split_brain_risk(finding)
+      proven_split_brain?(finding) ? "would land on the local state root" : "could land on the local state root"
+    end
+
+    def consumer_split_brain_certainty(finding)
+      proven_split_brain?(finding) ? "is" : "may be"
+    end
+
+    # Safe on an absent finding ({}), which the read-command advisory relies on.
+    def proven_split_brain?(finding)
+      finding["reason"] == REASON_CONFIGURED
     end
 
     def refuse_split_brain_write!(command, options)
       return unless split_brain_write_command?(command)
 
-      env_file = consumer_split_brain_env_file(options)
-      return unless env_file
+      finding = consumer_split_brain_finding(options)
+      return unless finding
 
-      raise OperationalError, consumer_split_brain_message(env_file)
+      raise OperationalError, consumer_split_brain_message(finding)
     end
 
     def consumer_env_files
@@ -848,50 +928,123 @@ module AgentCoord
       home.empty? ? "" : File.join(home, ".config")
     end
 
-    # A wrapper env file that delegates the assignment to a `source`/`.` include
-    # still configures a fleet URL, so the include is followed exactly one level
-    # deep (issue #99). Only $HOME/$XDG_CONFIG_HOME expand, the target must be
-    # absolute and resolve inside the user's config directory, and the included
-    # file's own includes are never followed.
+    # What one candidate env file means for AGENT_COORD_API_URL: nil when it is
+    # provably inert, otherwise the finding that drives the hard stop.
     #
-    # When the effect cannot be proven (unexpanded variable or "~", relative
-    # path, unreadable target, target outside the config directory, nested) the
-    # include is recorded for doctor to surface and the write is still permitted.
-    # A false positive on a hard stop would break the CLI for every operator whose
-    # wrapper genuinely configures nothing, which is worse than the false negative
-    # this narrows; #97/#98 hard stop only on proven configuration.
-    def consumer_api_url_configured?(path, unresolved: nil, follow_includes: true)
-      File.foreach(path).any? do |line|
-        # Capture from the "=" without consuming the space after it: in a shell,
-        # `=#x` assigns "#x" while `= #x` assigns nothing, and the value scanner
-        # needs that whitespace to tell them apart.
-        if (match = line.match(CONSUMER_API_URL_ASSIGNMENT))
-          next !consumer_env_assignment_value(match[1].to_s).empty?
-        end
+    # An unreadable or undecodable candidate is not a candidate at all, which
+    # keeps the documented "ignore an env file with invalid encoding" behavior.
+    def consumer_env_file_finding(path)
+      verdict = consumer_env_verdict(path, CONSUMER_ENV_INERT, follow_includes: true)
+      return nil unless verdict.decided?
 
-        include_word = line[CONSUMER_INCLUDE_DIRECTIVE, 1]
-        next false unless include_word
-
-        # Depth bound: the nested scan never follows includes, so no recursion.
-        unless follow_includes
-          record_unresolved_include(unresolved, path, include_word, "nested_include")
-          next false
-        end
-
-        consumer_include_configures?(path, include_word, unresolved)
-      end
+      finding = {
+        "env_file" => path,
+        "reason" => verdict.reason,
+        "construct" => verdict.construct
+      }
+      construct_file = verdict.construct_file
+      finding["construct_file"] = construct_file if construct_file && construct_file != path
+      finding.compact
     rescue SystemCallError, ArgumentError
-      false
+      nil
     end
 
-    def consumer_include_configures?(env_file, raw_target, unresolved)
-      target, reason = consumer_include_path(raw_target)
-      if target.nil?
-        record_unresolved_include(unresolved, env_file, raw_target, reason)
-        return false
+    # Fold a consumer env file the way a shell would: assignments take effect in
+    # order and the last one wins, a followed `source`/`.` include contributes its
+    # assignments in place, and any construct whose effect on AGENT_COORD_API_URL
+    # cannot be proven inert decides the file immediately (issue #99).
+    #
+    # Fail closed on that "cannot prove" case, per the maintainer's recorded
+    # direction on #99: for a mutual-exclusion guard, a loud false positive that
+    # the documented local-mode selections clear is the right trade against a
+    # silent false negative that permits an invisible-lease write. Unprovable is
+    # therefore sticky — a later empty assignment does not clear it, because
+    # whether the earlier construct even ran is exactly what is unknown.
+    def consumer_env_verdict(path, verdict, follow_includes:)
+      File.foreach(path) do |line|
+        next if line.match?(CONSUMER_ENV_INERT_LINE)
+
+        updated = consumer_env_line_verdict(path, line, verdict, follow_includes)
+        next unless updated
+
+        verdict = updated
+        break if verdict.unprovable?
+      end
+      verdict
+    end
+
+    def consumer_env_line_verdict(path, line, verdict, follow_includes)
+      # Capture from the "=" without consuming the space after it: in a shell,
+      # `=#x` assigns "#x" while `= #x` assigns nothing, and the value scanner
+      # needs that whitespace to tell them apart.
+      if (match = line.match(CONSUMER_API_URL_ASSIGNMENT))
+        return consumer_assignment_verdict(path, line, match[1].to_s)
       end
 
-      consumer_api_url_configured?(target, unresolved: unresolved, follow_includes: false)
+      include_word = line[CONSUMER_INCLUDE_DIRECTIVE, 1]
+      return consumer_include_verdict(path, line, include_word, verdict, follow_includes) if include_word
+      return CONSUMER_ENV_INERT if line.match?(CONSUMER_API_URL_UNSET)
+
+      consumer_opaque_line_verdict(path, line)
+    end
+
+    def consumer_assignment_verdict(path, line, raw)
+      value = consumer_env_assignment_value(raw)
+      # A value the shell would expand at source time (`"${FLEET_URL:-}"`, a
+      # command substitution) is not decidable from the file text.
+      return unprovable_verdict(path, line, "unresolved_expansion") if consumer_expanding_value?(value)
+
+      return CONSUMER_ENV_INERT if value.empty?
+
+      ConsumerEnvVerdict.new(:configured, REASON_CONFIGURED, line.strip, path)
+    end
+
+    def consumer_expanding_value?(value)
+      value.include?("$") || value.include?("`")
+    end
+
+    # Includes are followed exactly one level deep: the nested fold is called with
+    # follow_includes: false, so recursion is impossible by construction, and a
+    # nested include is itself a cannot-prove stop rather than a silent miss.
+    def consumer_include_verdict(path, line, raw_target, verdict, follow_includes)
+      return unprovable_verdict(path, line, "nested_include") unless follow_includes
+
+      target, reason = consumer_include_path(raw_target)
+      return unprovable_verdict(path, line, reason) unless target
+
+      consumer_env_verdict(target, verdict, follow_includes: false)
+    rescue SystemCallError, ArgumentError
+      # Readability was checked before the fold; losing the file in between, or
+      # finding it undecodable, leaves its effect unproven.
+      unprovable_verdict(path, line, "unreadable_include")
+    end
+
+    # A line that is neither our assignment, an include, nor an unset is inert
+    # unless it could set the variable by a route the probe does not parse. The
+    # routes that exist are: naming the variable outside a plain assignment,
+    # eval, and a command substitution that is not confined to another
+    # variable's value (a subshell cannot change this shell's environment).
+    def consumer_opaque_line_verdict(path, line)
+      reason = if line.match?(CONSUMER_API_URL_MENTION)
+                 "opaque_api_url_reference"
+               elsif line.match?(CONSUMER_EVAL)
+                 "eval"
+               elsif line.match?(CONSUMER_COMMAND_SUBSTITUTION) && !consumer_contained_substitution?(line)
+                 "command_substitution"
+               end
+      reason && unprovable_verdict(path, line, reason)
+    end
+
+    # A substitution confined to another variable's value runs in a subshell and
+    # cannot change this shell's environment, so `MACHINE_ID=$(hostname)` stays
+    # inert. Any statement separator on the line puts that guarantee out of reach,
+    # so the line is treated as unprovable instead.
+    def consumer_contained_substitution?(line)
+      line.match?(CONSUMER_OTHER_ASSIGNMENT) && !line.match?(CONSUMER_STATEMENT_SEPARATOR)
+    end
+
+    def unprovable_verdict(path, line, reason)
+      ConsumerEnvVerdict.new(:unprovable, reason, line.strip, path)
     end
 
     # The include target the guard is willing to read, or [nil, reason] when its
@@ -915,17 +1068,25 @@ module AgentCoord
     # Symlinks and ".." are resolved before the containment decision, so nothing
     # outside the config directory is read even via a link inside it.
     def consumer_contained_include_path(expanded)
-      config_home = consumer_config_home
-      return [nil, "outside_config_dir"] if config_home.empty?
+      root = consumer_config_root
+      return [nil, "config_dir_unresolvable"] unless root
 
-      root = File.realpath(config_home)
       resolved = File.realpath(expanded)
-      return [nil, "outside_config_dir"] unless resolved.start_with?("#{root}#{File::SEPARATOR}")
-      return [nil, "unreadable"] unless File.file?(resolved) && File.readable?(resolved)
+      return [nil, "include_outside_config_dir"] unless resolved.start_with?("#{root}#{File::SEPARATOR}")
+      return [nil, "unreadable_include"] unless File.file?(resolved) && File.readable?(resolved)
 
       [resolved, nil]
     rescue SystemCallError
-      [nil, "unreadable"]
+      [nil, "unreadable_include"]
+    end
+
+    def consumer_config_root
+      config_home = consumer_config_home
+      return nil if config_home.empty?
+
+      File.realpath(config_home)
+    rescue SystemCallError
+      nil
     end
 
     # Only the two variables the documented env-file locations use expand; any
@@ -940,20 +1101,6 @@ module AgentCoord
       return nil if expanded.include?("$")
 
       expanded
-    end
-
-    # Collected for doctor to report. Callers treat an unproven include as "not
-    # configured" and keep scanning.
-    def record_unresolved_include(unresolved, env_file, raw_target, reason)
-      return if unresolved.nil?
-
-      entry = {
-        "env_file" => env_file,
-        "include" => raw_target.to_s.strip,
-        "reason" => reason
-      }
-      unresolved << entry unless unresolved.include?(entry)
-      nil
     end
 
     # What a shell would actually leave in the variable. Quoted and unquoted
@@ -1076,11 +1223,13 @@ module AgentCoord
       opts.separator ""
       opts.separator "Backend safety:"
       opts.separator "    Exit 2 (doctor status: split_brain) when a consumer env file configures"
-      opts.separator "    AGENT_COORD_API_URL but this CLI resolved to the implicit local root:"
-      opts.separator "    the write would be invisible to the fleet. Source that env file for fleet"
-      opts.separator "    writes, or select local mode explicitly with --state-root PATH,"
-      opts.separator "    AGENT_COORD_STATE_ROOT, or AGENT_COORD_LOCAL=1."
-      opts.separator "    Run agent-coord doctor to see the offending file."
+      opts.separator "    AGENT_COORD_API_URL — or contains a construct that could set it and cannot"
+      opts.separator "    be proven inert — while this CLI resolved to the implicit local root: the"
+      opts.separator "    write would be invisible to the fleet. The CLI never sources or evaluates"
+      opts.separator "    your env files, so it fails closed instead of guessing. The error names the"
+      opts.separator "    file and the construct. Source that env file for fleet writes, or select"
+      opts.separator "    local mode explicitly with --state-root PATH, AGENT_COORD_STATE_ROOT, or"
+      opts.separator "    AGENT_COORD_LOCAL=1."
       opts.separator ""
     end
 
@@ -1097,11 +1246,16 @@ module AgentCoord
       opts.separator "while this CLI resolved to a local root that governs reads only; the JSON payload"
       opts.separator "names it in split_brain_env_file. The same condition hard stops claim, release,"
       opts.separator "heartbeat, record-event, and register-batch."
+      opts.separator "The probe reads your env files as text and never sources or evaluates them, so"
+      opts.separator "it also fails closed on a construct it cannot prove inert: an include it cannot"
+      opts.separator "read, resolve, or contain within your config dir, an include inside an include,"
+      opts.separator "an assignment from an unresolved expansion or command substitution, and any"
+      opts.separator "other line that could set AGENT_COORD_API_URL. split_brain_reason and"
+      opts.separator "split_brain_construct name which construct decided it, and in which file."
+      opts.separator "Provably inert env files still pass: the last assignment wins, so a later"
+      opts.separator "blank assignment or unset leaves no fleet URL configured."
       opts.separator "Select local mode explicitly to return to ok and exit 0: --state-root PATH,"
       opts.separator "AGENT_COORD_STATE_ROOT, or AGENT_COORD_LOCAL=1."
-      opts.separator "unresolved_env_includes lists source/. includes whose effect could not be proven"
-      opts.separator "(unreadable, relative, unexpanded variable or ~, outside the config dir, or nested)."
-      opts.separator "Those are advisory only and never change the exit code."
       opts.separator ""
     end
 
@@ -1850,7 +2004,7 @@ module AgentCoord
         render_doctor_text(payload, doctor_options, section_notes)
       end
       raise_machine_identity_mismatch!(environment_identity) if environment_identity
-      raise_consumer_split_brain!(payload)
+      raise_consumer_split_brain!(payload, doctor_options)
       0
     ensure
       close_store(store)
@@ -1884,11 +2038,10 @@ module AgentCoord
       environment_identity.fetch("machine_match") == MACHINE_MATCH_MISMATCH
     end
 
-    def raise_consumer_split_brain!(payload)
-      env_file = payload["split_brain_env_file"]
-      return unless env_file
+    def raise_consumer_split_brain!(payload, options)
+      return unless payload["split_brain_env_file"]
 
-      raise OperationalError, consumer_split_brain_message(env_file)
+      raise OperationalError, consumer_split_brain_message(consumer_split_brain_finding(options))
     end
 
     def raise_machine_identity_mismatch!(environment_identity)
@@ -2108,15 +2261,16 @@ module AgentCoord
         "deep" => !deep.nil?,
         "status" => "ok"
       }
-      split_brain_file = consumer_split_brain_env_file(options)
-      if split_brain_file
+      # Both a proven assignment and an unprovable construct are reported as
+      # split_brain and exit 2; reason/construct say which, and where.
+      finding = consumer_split_brain_finding(options)
+      if finding
         payload["status"] = "split_brain"
-        payload["split_brain_env_file"] = split_brain_file
+        payload["split_brain_env_file"] = finding.fetch("env_file")
+        payload["split_brain_reason"] = finding.fetch("reason")
+        payload["split_brain_construct"] = finding["construct"] if finding["construct"]
+        payload["split_brain_construct_file"] = finding["construct_file"] if finding["construct_file"]
       end
-      # Reported, not enforced: the guard could not prove what these includes do,
-      # and a false hard stop is worse than the narrowed false negative (#99).
-      unresolved = options[:unresolved_env_includes]
-      payload["unresolved_env_includes"] = unresolved unless unresolved.nil? || unresolved.empty?
       if backend_kind == "http" || doctor_prefix_supplied?(options)
         payload["doctor_prefix"] = doctor_read_prefix(options)
       end
@@ -2148,7 +2302,6 @@ module AgentCoord
       @stdout.puts "mode: #{payload.fetch('deep') ? 'deep' : 'lightweight'}"
       @stdout.puts "status: #{payload.fetch('status')}"
       render_doctor_split_brain(payload)
-      render_doctor_unresolved_env_includes(payload)
       render_doctor_http_details(payload)
       render_doctor_environment_identity(payload)
       return if section_notes.empty?
@@ -2164,18 +2317,11 @@ module AgentCoord
       # The remediation text arrives once, on stderr, from the error raised after
       # the report is emitted.
       @stdout.puts "split_brain_env_file: #{env_file}"
-    end
+      @stdout.puts "split_brain_reason: #{payload.fetch('split_brain_reason')}"
+      @stdout.puts "split_brain_construct: #{payload['split_brain_construct']}" if payload["split_brain_construct"]
+      return unless payload["split_brain_construct_file"]
 
-    # Advisory only: doctor still exits 0 for these, because the guard cannot
-    # prove whether the include configures a fleet URL.
-    def render_doctor_unresolved_env_includes(payload)
-      includes = payload["unresolved_env_includes"]
-      return if includes.nil? || includes.empty?
-
-      @stdout.puts "unresolved_env_includes"
-      includes.each do |entry|
-        @stdout.puts "- #{entry.fetch('env_file')} sources #{entry.fetch('include')} (#{entry.fetch('reason')})"
-      end
+      @stdout.puts "split_brain_construct_file: #{payload.fetch('split_brain_construct_file')}"
     end
 
     def render_doctor_http_details(payload)

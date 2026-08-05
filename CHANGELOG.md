@@ -195,21 +195,36 @@ when releases begin.
   so a wrapper env file whose only content is
   `. "$HOME/.config/agent-coord/backend.env"` no longer reads as configuring
   nothing while sourcing it really does select a fleet backend — the
-  invisible-lease split-brain write the hard stop exists to prevent. Resolution is deliberately bounded: only `$HOME` and
-  `$XDG_CONFIG_HOME` expand, the target must be absolute and resolve (after
-  symlink and `..` resolution) inside the user's config directory, and the
-  included file's own includes are never followed. When the guard cannot prove
-  what an include does (unreadable, relative, unexpanded variable or `~`, outside
-  the config directory, or nested), it keeps the previous conservative permit
-  rather than hard stopping, and `doctor` reports it in a new advisory
-  `unresolved_env_includes` field that never changes the exit code: a false
-  positive on a hard stop would break the CLI for every operator whose wrapper
-  genuinely configures nothing (issue #99). No gem has been published, so no
-  migration is required.
+  invisible-lease split-brain write the hard stop exists to prevent. Two more
+  changes land with it: the **last** assignment wins rather than the first, so a
+  file that sets a URL and later blanks or unsets it is correctly read as
+  unconfigured (previously a false positive that refused valid implicit-local
+  writes); and a construct whose effect on `AGENT_COORD_API_URL` cannot be proven
+  inert now hard stops exactly like a proven fleet URL, naming the file and the
+  exact construct. That covers an include the CLI cannot read, resolve, or
+  contain within the config directory, an include inside an include, a value from
+  an unresolved expansion or command substitution (`"${FLEET_URL:-}"`), the
+  variable named outside a plain assignment, `eval`, and a command substitution
+  that is not confined to another variable's value. The CLI still never sources
+  or evaluates operator shell; include resolution expands only `$HOME` and
+  `$XDG_CONFIG_HOME`, requires an absolute target, and refuses any target that
+  resolves — after symlink and `..` resolution — outside the config directory.
+  For a mutual-exclusion guard, a loud false positive that `--state-root`,
+  `AGENT_COORD_STATE_ROOT`, or `AGENT_COORD_LOCAL=1` clears beats a silent false
+  negative that permits an invisible-lease write. `doctor` reports the deciding
+  construct in `split_brain_reason`/`split_brain_construct` (plus
+  `split_brain_construct_file` when it lives in a sourced fragment) and exits
+  `2`. Lines that cannot reach the variable — comments, other variables, a
+  substitution confined to another variable's value such as
+  `MACHINE_ID=$(hostname)` — stay inert, and the read-command advisory warning
+  stays limited to a proven assignment (issue #99). No gem has been published, so
+  no migration is required.
 - `doctor --help` now documents the `split_brain` status: that `doctor` exits `2`
-  with `status: split_brain` when a consumer env file configures
-  `AGENT_COORD_API_URL` while the CLI resolved to a local root governing reads
-  only, that the JSON payload names the file in `split_brain_env_file`, and that
+  with `status: split_brain` when a consumer env file configures — or cannot be
+  proven not to configure — `AGENT_COORD_API_URL` while the CLI resolved to a
+  local root governing reads only, that the JSON payload names the file in
+  `split_brain_env_file` and the deciding construct in `split_brain_reason` and
+  `split_brain_construct`, and that
   `--state-root PATH`, `AGENT_COORD_STATE_ROOT`, and `AGENT_COORD_LOCAL=1` are
   the explicit local-mode selections that return it to `ok`. The write commands
   that hard stop for the same reason (`claim`, `release`, `heartbeat`,
