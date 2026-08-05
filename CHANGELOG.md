@@ -160,6 +160,15 @@ when releases begin.
 
 ### Changed
 
+- `register-batch` now rejects a lane whose `name`/`id` or `owner`/`agent_id` is
+  the literal `UNKNOWN`, in any case, with an error naming the offending value.
+  `UNKNOWN` is the no-name/no-owner sentinel that `status` rendering and
+  `batch-audit` lane attribution both compare against, so a lane legitimately
+  registered under that value could not be distinguished from a lane with no
+  name or owner and could be misreported by the fail-closed closeout gate
+  (issue #96). Values that merely contain the token, such as `unknown-docs`, are
+  still accepted, and already-registered batches are unaffected. No gem has been
+  published, so no migration is required.
 - Split-brain configuration is now enforced instead of merely advised. When a
   consumer env file configures `AGENT_COORD_API_URL` but was never sourced, and
   the CLI therefore fell back to the *implicit* local state root, the write
@@ -182,6 +191,31 @@ when releases begin.
 
 ### Fixed
 
+- The consumer env-file probe now follows a `source`/`.` include one level deep,
+  so a wrapper env file whose only content is
+  `. "$HOME/.config/agent-coord/backend.env"` no longer reads as configuring
+  nothing while sourcing it really does select a fleet backend — the
+  invisible-lease split-brain write the hard stop exists to prevent. Resolution is deliberately bounded: only `$HOME` and
+  `$XDG_CONFIG_HOME` expand, the target must be absolute and resolve (after
+  symlink and `..` resolution) inside the user's config directory, and the
+  included file's own includes are never followed. When the guard cannot prove
+  what an include does (unreadable, relative, unexpanded variable or `~`, outside
+  the config directory, or nested), it keeps the previous conservative permit
+  rather than hard stopping, and `doctor` reports it in a new advisory
+  `unresolved_env_includes` field that never changes the exit code: a false
+  positive on a hard stop would break the CLI for every operator whose wrapper
+  genuinely configures nothing (issue #99). No gem has been published, so no
+  migration is required.
+- `doctor --help` now documents the `split_brain` status: that `doctor` exits `2`
+  with `status: split_brain` when a consumer env file configures
+  `AGENT_COORD_API_URL` while the CLI resolved to a local root governing reads
+  only, that the JSON payload names the file in `split_brain_env_file`, and that
+  `--state-root PATH`, `AGENT_COORD_STATE_ROOT`, and `AGENT_COORD_LOCAL=1` are
+  the explicit local-mode selections that return it to `ok`. The write commands
+  that hard stop for the same reason (`claim`, `release`, `heartbeat`,
+  `record-event`, `register-batch`) now carry a matching `Backend safety:` note in
+  their own `--help` output, and `register-batch --help` documents the reserved
+  `UNKNOWN` lane identity (issue #100).
 - The consumer env-file probe no longer reads a commented-out assignment such as
   `AGENT_COORD_API_URL= # remote disabled` as a configured fleet URL. Sourcing
   that file leaves the variable empty, so it selects no fleet backend; the value

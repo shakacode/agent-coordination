@@ -1166,6 +1166,140 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     refute_includes result.stdout, "--stack-json"
   end
 
+  # issue #100: the hard-stop error is how operators discover this status, so
+  # doctor's own help has to name it and the way back to ok.
+  def test_doctor_help_documents_split_brain_status_and_local_mode_selections
+    result = run_agent_coord("doctor", "--help", state_root: nil)
+
+    assert_equal 0, result.status.exitstatus, result.stderr
+    assert_includes result.stdout, "status: split_brain"
+    assert_includes result.stdout, "split_brain_env_file"
+    assert_includes result.stdout, "--state-root PATH"
+    assert_includes result.stdout, "AGENT_COORD_STATE_ROOT"
+    assert_includes result.stdout, "AGENT_COORD_LOCAL=1"
+    assert_includes result.stdout, "unresolved_env_includes"
+  end
+
+  # Every command that can now exit 2 for the same reason documents it; read
+  # commands keep the advisory warning and must not claim a hard stop.
+  def test_write_command_help_documents_the_split_brain_hard_stop
+    %w[claim release heartbeat record-event register-batch].each do |command|
+      result = run_agent_coord(command, "--help", state_root: nil)
+
+      assert_equal 0, result.status.exitstatus, result.stderr
+      assert_includes result.stdout, "Backend safety:", command
+      assert_includes result.stdout, "split_brain", command
+      assert_includes result.stdout, "AGENT_COORD_LOCAL=1", command
+    end
+
+    %w[status batch-audit gc doctor].each do |command|
+      result = run_agent_coord(command, "--help", state_root: nil)
+
+      refute_includes result.stdout, "Backend safety:", command
+    end
+  end
+
+  def test_register_batch_help_documents_the_reserved_lane_identity
+    result = run_agent_coord("register-batch", "--help", state_root: nil)
+
+    assert_equal 0, result.status.exitstatus, result.stderr
+    assert_includes result.stdout, "UNKNOWN (any case) is rejected"
+  end
+
+  # issue #99: a wrapper env file that delegates the assignment to a sourced
+  # fragment does configure a fleet URL when sourced, so an unsourced implicit
+  # local write is the same invisible-lease split brain #97/#98 hard stop on.
+  def test_write_command_hard_stops_for_wrapper_env_file_that_sources_the_assignment
+    with_consumer_env_config do |_root, agent_dir, env|
+      env_file = File.join(agent_dir, "env")
+      File.write(File.join(agent_dir, "backend.env"), "AGENT_COORD_API_URL=https://fleet.example\n")
+      ['. "$HOME/.config/agent-coord/backend.env"',
+       'source "$XDG_CONFIG_HOME/agent-coord/backend.env"',
+       "source ${XDG_CONFIG_HOME}/agent-coord/backend.env",
+       ". #{File.join(agent_dir, 'backend.env')}"].each_with_index do |include_line, index|
+        File.write(env_file, "# wrapper: the assignment lives in backend.env\n#{include_line}\n")
+
+        result = run_consumer_env_cli(env, *split_brain_claim_args(index))
+
+        assert_equal 2, result.status.exitstatus, "#{include_line}: #{result.stderr}"
+        assert_includes result.stderr, "split-brain configuration", include_line
+        assert_includes result.stderr, env_file, include_line
+        refute_includes result.stderr, "local mode — single-machine only"
+      end
+    end
+  end
+
+  # The cannot-prove policy: an include the guard cannot resolve inside the
+  # config directory keeps today's conservative permit and is surfaced by doctor
+  # instead of hard stopping, because a false positive on a hard stop breaks the
+  # CLI for every operator whose wrapper genuinely configures nothing.
+  def test_write_command_permits_unprovable_include_and_doctor_surfaces_it
+    with_consumer_env_config do |root, agent_dir, env|
+      env_file = File.join(agent_dir, "env")
+      outside = File.join(root, "outside", "backend.env")
+      FileUtils.mkdir_p(File.dirname(outside))
+      File.write(outside, "AGENT_COORD_API_URL=https://fleet.example\n")
+      FileUtils.ln_s(outside, File.join(agent_dir, "escape.env"))
+
+      unprovable_includes(outside).each_with_index do |(include_line, reason), index|
+        File.write(env_file, "#{include_line}\n")
+
+        claim = run_consumer_env_cli(env, *split_brain_claim_args(index))
+        assert_equal 0, claim.status.exitstatus, "#{include_line}: #{claim.stderr}"
+        refute_includes claim.stderr, "split-brain", include_line
+
+        doctor = run_consumer_env_cli(env, "doctor", "--json")
+        assert_equal 0, doctor.status.exitstatus, doctor.stderr
+        payload = JSON.parse(doctor.stdout)
+        assert_equal "ok", payload.fetch("status"), include_line
+        entry = payload.fetch("unresolved_env_includes").fetch(0)
+        assert_equal env_file, entry.fetch("env_file"), include_line
+        assert_equal reason, entry.fetch("reason"), include_line
+      end
+    end
+  end
+
+  # Bounded at one level: the include is followed, but the included file's own
+  # includes are reported rather than followed, so resolution cannot recurse.
+  def test_write_command_follows_consumer_env_includes_exactly_one_level_deep
+    with_consumer_env_config do |_root, agent_dir, env|
+      File.write(File.join(agent_dir, "env"), %(. "$XDG_CONFIG_HOME/agent-coord/level-one.env"\n))
+      File.write(File.join(agent_dir, "level-one.env"), %(. "$XDG_CONFIG_HOME/agent-coord/level-two.env"\n))
+      File.write(File.join(agent_dir, "level-two.env"), "AGENT_COORD_API_URL=https://fleet.example\n")
+
+      claim = run_consumer_env_cli(env, *split_brain_claim_args(0))
+      assert_equal 0, claim.status.exitstatus, claim.stderr
+
+      doctor = run_consumer_env_cli(env, "doctor", "--json")
+      assert_equal 0, doctor.status.exitstatus, doctor.stderr
+      payload = JSON.parse(doctor.stdout)
+      assert_equal "ok", payload.fetch("status")
+      entry = payload.fetch("unresolved_env_includes").fetch(0)
+      assert_equal File.realpath(File.join(agent_dir, "level-one.env")), entry.fetch("env_file")
+      assert_equal "nested_include", entry.fetch("reason")
+      assert_includes entry.fetch("include"), "level-two.env"
+    end
+  end
+
+  # A resolved include that a shell would leave empty is proven inert: no hard
+  # stop, and nothing for the operator to investigate in doctor either.
+  def test_write_command_ignores_resolved_include_that_configures_nothing
+    with_consumer_env_config do |_root, agent_dir, env|
+      File.write(File.join(agent_dir, "env"), %(source "$XDG_CONFIG_HOME/agent-coord/backend.env"\n))
+      File.write(File.join(agent_dir, "backend.env"), "AGENT_COORD_API_URL= # remote disabled\n")
+
+      claim = run_consumer_env_cli(env, *split_brain_claim_args(0))
+      assert_equal 0, claim.status.exitstatus, claim.stderr
+      refute_includes claim.stderr, "split-brain"
+
+      doctor = run_consumer_env_cli(env, "doctor", "--json")
+      assert_equal 0, doctor.status.exitstatus, doctor.stderr
+      payload = JSON.parse(doctor.stdout)
+      assert_equal "ok", payload.fetch("status")
+      refute_includes payload.keys, "unresolved_env_includes"
+    end
+  end
+
   def test_http_integration_harness_uses_portable_hashing_and_cleans_up_wrangler
     with_fake_http_harness do |env, paths|
       result = run_command(
@@ -6087,6 +6221,56 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     refute_path_exists File.join(@state_root, "batches", "batch-b.json")
   end
 
+  # issue #96: "UNKNOWN" is the no-name sentinel that status rendering and
+  # batch-audit attribution compare against, so it cannot also be a real name.
+  def test_register_batch_rejects_reserved_unknown_lane_name
+    manifest_path = File.join(@state_root, "batch-manifest.json")
+    [{ "name" => "UNKNOWN" }, { "name" => "unknown" }, { "id" => "Unknown" }].each do |identity|
+      lane = identity.merge("owner" => "worker-docs", "targets" => ["3972"])
+      File.write(manifest_path, JSON.pretty_generate("batch_id" => "batch-b", "lanes" => [lane]))
+
+      result = run_agent_coord("register-batch", "--file", manifest_path)
+
+      assert_equal 1, result.status.exitstatus, result.stderr
+      assert_includes result.stderr, "batch lane 1 name #{identity.values.first} is reserved"
+      assert_includes result.stderr, "no-name/no-owner sentinel"
+      refute_path_exists File.join(@state_root, "batches", "batch-b.json")
+    end
+  end
+
+  # Same sentinel on the owner side: lane_owner falls back to "UNKNOWN", and
+  # batch-audit gates its owner attribution on that value.
+  def test_register_batch_rejects_reserved_unknown_lane_owner
+    manifest_path = File.join(@state_root, "batch-manifest.json")
+    [{ "owner" => "UNKNOWN" }, { "owner" => "unknown" }, { "agent_id" => "UNKNOWN" }].each do |identity|
+      lane = identity.merge("name" => "docs", "targets" => ["3972"])
+      File.write(manifest_path, JSON.pretty_generate("batch_id" => "batch-b", "lanes" => [lane]))
+
+      result = run_agent_coord("register-batch", "--file", manifest_path)
+
+      assert_equal 1, result.status.exitstatus, result.stderr
+      assert_includes result.stderr, "batch lane docs owner #{identity.values.first} is reserved"
+      assert_includes result.stderr, "no-name/no-owner sentinel"
+      refute_path_exists File.join(@state_root, "batches", "batch-b.json")
+    end
+  end
+
+  def test_register_batch_still_accepts_lane_identities_that_only_contain_unknown
+    manifest_path = File.join(@state_root, "batch-manifest.json")
+    File.write(
+      manifest_path,
+      JSON.pretty_generate(
+        "batch_id" => "batch-b",
+        "lanes" => [{ "name" => "unknown-docs", "owner" => "worker-unknown", "targets" => ["3972"] }]
+      )
+    )
+
+    result = run_agent_coord("register-batch", "--file", manifest_path)
+
+    assert_equal 0, result.status.exitstatus, result.stderr
+    assert_path_exists File.join(@state_root, "batches", "batch-b.json")
+  end
+
   def test_status_batch_scope_reports_missing_lane_owner_heartbeats
     write_batch(
       "batch-b",
@@ -8007,6 +8191,48 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     matches = events_of_type(batch_id, type)
     assert_equal 1, matches.length, "expected exactly one #{type} event in #{batch_id}"
     matches.first
+  end
+
+  # Isolated HOME/XDG so the consumer env-file probe sees only the files a test
+  # writes, and an implicit-local write lands in the temp tree.
+  def with_consumer_env_config
+    Dir.mktmpdir("agent-coord-consumer-include") do |root|
+      agent_dir = File.join(root, ".config", "agent-coord")
+      FileUtils.mkdir_p(agent_dir)
+      env = {
+        "HOME" => root,
+        "XDG_CONFIG_HOME" => File.join(root, ".config"),
+        "XDG_STATE_HOME" => File.join(root, "state")
+      }
+      yield root, agent_dir, env
+    end
+  end
+
+  # RbConfig.ruby, not "ruby": these runs override HOME, which breaks version
+  # managers that keep per-HOME state in a PATH shim.
+  def run_consumer_env_cli(env, *)
+    run_command(env, RbConfig.ruby, BIN, *)
+  end
+
+  # A distinct target per case, so a successful claim never collides with the
+  # claim the previous case left behind.
+  def split_brain_claim_args(index)
+    ["claim", "--agent-id", "worker-a", "--repo", "demo/example", "--target", (index + 1).to_s]
+  end
+
+  # Include forms whose effect the guard cannot prove, and the reason each is
+  # reported with. All of them point at a file that really does set the URL, so
+  # the permit is a deliberate policy choice rather than a parse miss.
+  def unprovable_includes(outside)
+    {
+      ". #{outside}" => "outside_config_dir",
+      '. "$XDG_CONFIG_HOME/agent-coord/escape.env"' => "outside_config_dir",
+      '. "$XDG_CONFIG_HOME/agent-coord/../../outside/backend.env"' => "outside_config_dir",
+      ". backend.env" => "relative_include",
+      '. "$AGENT_COORD_FLEET_ENV/backend.env"' => "unexpanded_variable",
+      '. "~/.config/agent-coord/backend.env"' => "unexpanded_tilde",
+      '. "$XDG_CONFIG_HOME/agent-coord/missing.env"' => "unreadable"
+    }
   end
 
   def run_agent_coord(*, state_root: @state_root, stdin_data: nil, env: {})

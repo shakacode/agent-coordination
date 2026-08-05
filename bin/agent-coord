@@ -39,6 +39,11 @@ module AgentCoord
   # split-brain advisory and the write hard stop.
   LOCAL_MODE_ENV = "AGENT_COORD_LOCAL"
   LOCAL_MODE_TRUE_VALUES = %w[1 true yes].freeze
+  # Consumer env-file probe: an AGENT_COORD_API_URL assignment, a `source`/`.`
+  # include directive, and the only two variables an include target may expand.
+  CONSUMER_API_URL_ASSIGNMENT = /^\s*(?:export\s+)?AGENT_COORD_API_URL=(.*)$/
+  CONSUMER_INCLUDE_DIRECTIVE = /^\s*(?:source|\.)\s+(\S.*)$/
+  CONSUMER_INCLUDE_EXPANSION = /\$(?:\{(HOME|XDG_CONFIG_HOME)\}|(HOME|XDG_CONFIG_HOME)\b)/
   MACHINE_ID_ENV = "AGENT_COORD_MACHINE_ID"
   SESSION_ID_ENV = "AGENT_COORD_SESSION_ID"
   CODEX_THREAD_ID_ENV = "CODEX_THREAD_ID"
@@ -48,6 +53,12 @@ module AgentCoord
   MACHINE_MATCH_MATCH = "match"
   MACHINE_MATCH_MISMATCH = "mismatch"
   MACHINE_MATCH_UNVERIFIED = "unverified"
+  # The no-name/no-owner sentinel that lane_name/lane_owner emit and that status
+  # rendering and batch-audit attribution compare against. register-batch rejects
+  # it as a lane name or owner so a registered value can never be mistaken for
+  # "absent". The existing comparison sites keep the equivalent literal; naming
+  # the token here does not change any of them.
+  LANE_IDENTITY_UNKNOWN = "UNKNOWN"
   JSON_PREFIXES = %w[claims heartbeats batches].freeze
   STATE_PREFIXES = (JSON_PREFIXES + %w[events archive]).freeze
   STATE_PATH_PATTERN = %r{\A(?:
@@ -794,7 +805,12 @@ module AgentCoord
       # compute it once rather than re-reading the file at each site.
       return options[:split_brain_env_file] if options.key?(:split_brain_env_file)
 
-      options[:split_brain_env_file] = consumer_env_files.find { |path| consumer_api_url_configured?(path) }
+      unresolved = []
+      env_file = consumer_env_files.find { |path| consumer_api_url_configured?(path, unresolved: unresolved) }
+      # Includes the guard could not prove inert are reported by doctor rather
+      # than stopping the write; see consumer_api_url_configured?.
+      options[:unresolved_env_includes] = unresolved
+      options[:split_brain_env_file] = env_file
     end
 
     def consumer_split_brain_message(env_file)
@@ -815,11 +831,7 @@ module AgentCoord
 
     def consumer_env_files
       configured = ENV.fetch("AGENT_COORD_ENV_FILE", "")
-      config_home = ENV.fetch("XDG_CONFIG_HOME", "")
-      if config_home.empty?
-        home = ENV.fetch("HOME", "")
-        config_home = File.join(home, ".config") unless home.empty?
-      end
+      config_home = consumer_config_home
       conventional = if config_home.empty?
                        []
                      else
@@ -828,18 +840,120 @@ module AgentCoord
       ([configured] + conventional).reject(&:empty?).uniq
     end
 
-    def consumer_api_url_configured?(path)
+    def consumer_config_home
+      config_home = ENV.fetch("XDG_CONFIG_HOME", "")
+      return config_home unless config_home.empty?
+
+      home = ENV.fetch("HOME", "")
+      home.empty? ? "" : File.join(home, ".config")
+    end
+
+    # A wrapper env file that delegates the assignment to a `source`/`.` include
+    # still configures a fleet URL, so the include is followed exactly one level
+    # deep (issue #99). Only $HOME/$XDG_CONFIG_HOME expand, the target must be
+    # absolute and resolve inside the user's config directory, and the included
+    # file's own includes are never followed.
+    #
+    # When the effect cannot be proven (unexpanded variable or "~", relative
+    # path, unreadable target, target outside the config directory, nested) the
+    # include is recorded for doctor to surface and the write is still permitted.
+    # A false positive on a hard stop would break the CLI for every operator whose
+    # wrapper genuinely configures nothing, which is worse than the false negative
+    # this narrows; #97/#98 hard stop only on proven configuration.
+    def consumer_api_url_configured?(path, unresolved: nil, follow_includes: true)
       File.foreach(path).any? do |line|
         # Capture from the "=" without consuming the space after it: in a shell,
         # `=#x` assigns "#x" while `= #x` assigns nothing, and the value scanner
         # needs that whitespace to tell them apart.
-        match = line.match(/^\s*(?:export\s+)?AGENT_COORD_API_URL=(.*)$/)
-        next false unless match
+        if (match = line.match(CONSUMER_API_URL_ASSIGNMENT))
+          next !consumer_env_assignment_value(match[1].to_s).empty?
+        end
 
-        !consumer_env_assignment_value(match[1].to_s).empty?
+        include_word = line[CONSUMER_INCLUDE_DIRECTIVE, 1]
+        next false unless include_word
+
+        # Depth bound: the nested scan never follows includes, so no recursion.
+        unless follow_includes
+          record_unresolved_include(unresolved, path, include_word, "nested_include")
+          next false
+        end
+
+        consumer_include_configures?(path, include_word, unresolved)
       end
     rescue SystemCallError, ArgumentError
       false
+    end
+
+    def consumer_include_configures?(env_file, raw_target, unresolved)
+      target, reason = consumer_include_path(raw_target)
+      if target.nil?
+        record_unresolved_include(unresolved, env_file, raw_target, reason)
+        return false
+      end
+
+      consumer_api_url_configured?(target, unresolved: unresolved, follow_includes: false)
+    end
+
+    # The include target the guard is willing to read, or [nil, reason] when its
+    # effect cannot be proven from the file text plus $HOME/$XDG_CONFIG_HOME.
+    def consumer_include_path(raw_target)
+      word = consumer_env_assignment_value(raw_target)
+      return [nil, "empty_include"] if word.empty?
+      # A shell expands a bare leading "~" but leaves a quoted one alone, and the
+      # scanned word no longer says which it was.
+      return [nil, "unexpanded_tilde"] if word.start_with?("~")
+
+      expanded = consumer_expanded_include_path(word)
+      return [nil, "unexpanded_variable"] unless expanded
+      # A relative include resolves against the sourcing shell's working
+      # directory, which this process cannot know.
+      return [nil, "relative_include"] unless Pathname.new(expanded).absolute?
+
+      consumer_contained_include_path(expanded)
+    end
+
+    # Symlinks and ".." are resolved before the containment decision, so nothing
+    # outside the config directory is read even via a link inside it.
+    def consumer_contained_include_path(expanded)
+      config_home = consumer_config_home
+      return [nil, "outside_config_dir"] if config_home.empty?
+
+      root = File.realpath(config_home)
+      resolved = File.realpath(expanded)
+      return [nil, "outside_config_dir"] unless resolved.start_with?("#{root}#{File::SEPARATOR}")
+      return [nil, "unreadable"] unless File.file?(resolved) && File.readable?(resolved)
+
+      [resolved, nil]
+    rescue SystemCallError
+      [nil, "unreadable"]
+    end
+
+    # Only the two variables the documented env-file locations use expand; any
+    # other expansion leaves the path unproven.
+    def consumer_expanded_include_path(word)
+      expanded = word.gsub(CONSUMER_INCLUDE_EXPANSION) do
+        value = ENV.fetch(Regexp.last_match(1) || Regexp.last_match(2), "")
+        return nil if value.empty?
+
+        value
+      end
+      return nil if expanded.include?("$")
+
+      expanded
+    end
+
+    # Collected for doctor to report. Callers treat an unproven include as "not
+    # configured" and keep scanning.
+    def record_unresolved_include(unresolved, env_file, raw_target, reason)
+      return if unresolved.nil?
+
+      entry = {
+        "env_file" => env_file,
+        "include" => raw_target.to_s.strip,
+        "reason" => reason
+      }
+      unresolved << entry unless unresolved.include?(entry)
+      nil
     end
 
     # What a shell would actually leave in the variable. Quoted and unquoted
@@ -928,13 +1042,7 @@ module AgentCoord
         opts.separator "Exit 2 means coordination state for that command is UNKNOWN."
         opts.separator ""
       when "doctor"
-        opts.separator ""
-        opts.separator "Doctor modes:"
-        opts.separator "    default  lightweight auth, ref, and layout checks without reading every JSON file"
-        opts.separator "    --deep   parse every claim, heartbeat, and batch JSON file"
-        opts.separator "    --stack-json  emit the versioned component report for stack aggregators"
-        opts.separator "Exit 2 means coordination state is UNKNOWN until backend access is fixed."
-        opts.separator ""
+        add_doctor_command_help(opts)
       when "gc"
         add_gc_command_help(opts)
       when "register-batch"
@@ -942,6 +1050,8 @@ module AgentCoord
         opts.separator "Batch registration:"
         opts.separator "    --file PATH           JSON manifest with batch_id and lanes"
         opts.separator "    --launch-prompt PATH|-  prompt file or stdin (overrides manifest)"
+        opts.separator "A lane name or owner of UNKNOWN (any case) is rejected: it is the reserved"
+        opts.separator "no-name/no-owner sentinel in status and batch-audit output."
         opts.separator ""
       when "record-event"
         add_record_event_command_help(opts)
@@ -956,6 +1066,43 @@ module AgentCoord
         opts.separator "    --pr-state STATE            final pull request state"
         opts.separator ""
       end
+      add_split_brain_command_help(opts) if split_brain_write_command?(command)
+    end
+
+    # claim/heartbeat have no command-specific help section, so the note is
+    # attached by write-command class rather than per branch: every command that
+    # can now fail with exit 2 for this reason documents it identically.
+    def add_split_brain_command_help(opts)
+      opts.separator ""
+      opts.separator "Backend safety:"
+      opts.separator "    Exit 2 (doctor status: split_brain) when a consumer env file configures"
+      opts.separator "    AGENT_COORD_API_URL but this CLI resolved to the implicit local root:"
+      opts.separator "    the write would be invisible to the fleet. Source that env file for fleet"
+      opts.separator "    writes, or select local mode explicitly with --state-root PATH,"
+      opts.separator "    AGENT_COORD_STATE_ROOT, or AGENT_COORD_LOCAL=1."
+      opts.separator "    Run agent-coord doctor to see the offending file."
+      opts.separator ""
+    end
+
+    def add_doctor_command_help(opts)
+      opts.separator ""
+      opts.separator "Doctor modes:"
+      opts.separator "    default  lightweight auth, ref, and layout checks without reading every JSON file"
+      opts.separator "    --deep   parse every claim, heartbeat, and batch JSON file"
+      opts.separator "    --stack-json  emit the versioned component report for stack aggregators"
+      opts.separator "Exit 2 means coordination state is UNKNOWN until backend access is fixed."
+      opts.separator "Exit 2 with status: split_brain means a consumer env file (AGENT_COORD_ENV_FILE,"
+      opts.separator "$XDG_CONFIG_HOME/agent-coord/env, $XDG_CONFIG_HOME/agent-coord/http-env.sh, or a"
+      opts.separator "source/. include one level inside the config dir) configures AGENT_COORD_API_URL"
+      opts.separator "while this CLI resolved to a local root that governs reads only; the JSON payload"
+      opts.separator "names it in split_brain_env_file. The same condition hard stops claim, release,"
+      opts.separator "heartbeat, record-event, and register-batch."
+      opts.separator "Select local mode explicitly to return to ok and exit 0: --state-root PATH,"
+      opts.separator "AGENT_COORD_STATE_ROOT, or AGENT_COORD_LOCAL=1."
+      opts.separator "unresolved_env_includes lists source/. includes whose effect could not be proven"
+      opts.separator "(unreadable, relative, unexpanded variable or ~, outside the config dir, or nested)."
+      opts.separator "Those are advisory only and never change the exit code."
+      opts.separator ""
     end
 
     def add_record_event_command_help(opts)
@@ -1966,6 +2113,10 @@ module AgentCoord
         payload["status"] = "split_brain"
         payload["split_brain_env_file"] = split_brain_file
       end
+      # Reported, not enforced: the guard could not prove what these includes do,
+      # and a false hard stop is worse than the narrowed false negative (#99).
+      unresolved = options[:unresolved_env_includes]
+      payload["unresolved_env_includes"] = unresolved unless unresolved.nil? || unresolved.empty?
       if backend_kind == "http" || doctor_prefix_supplied?(options)
         payload["doctor_prefix"] = doctor_read_prefix(options)
       end
@@ -1997,6 +2148,7 @@ module AgentCoord
       @stdout.puts "mode: #{payload.fetch('deep') ? 'deep' : 'lightweight'}"
       @stdout.puts "status: #{payload.fetch('status')}"
       render_doctor_split_brain(payload)
+      render_doctor_unresolved_env_includes(payload)
       render_doctor_http_details(payload)
       render_doctor_environment_identity(payload)
       return if section_notes.empty?
@@ -2012,6 +2164,18 @@ module AgentCoord
       # The remediation text arrives once, on stderr, from the error raised after
       # the report is emitted.
       @stdout.puts "split_brain_env_file: #{env_file}"
+    end
+
+    # Advisory only: doctor still exits 0 for these, because the guard cannot
+    # prove whether the include configures a fleet URL.
+    def render_doctor_unresolved_env_includes(payload)
+      includes = payload["unresolved_env_includes"]
+      return if includes.nil? || includes.empty?
+
+      @stdout.puts "unresolved_env_includes"
+      includes.each do |entry|
+        @stdout.puts "- #{entry.fetch('env_file')} sources #{entry.fetch('include')} (#{entry.fetch('reason')})"
+      end
     end
 
     def render_doctor_http_details(payload)
@@ -4122,16 +4286,22 @@ module AgentCoord
     end
 
     def lane_name(lane)
-      lane["name"] || lane["id"] || "UNKNOWN"
+      lane["name"] || lane["id"] || LANE_IDENTITY_UNKNOWN
     end
 
     def malformed_lane_name?(name)
       name.to_s.include?(":")
     end
 
+    # register-batch refuses to register this token (any case) as a lane name or
+    # owner, so a lane that renders as UNKNOWN really has no name/owner.
+    def reserved_lane_identity?(value)
+      value.to_s.casecmp?(LANE_IDENTITY_UNKNOWN)
+    end
+
     def lane_owner(lane)
       owner = lane["owner"] || lane["agent_id"]
-      owner.to_s.empty? ? "UNKNOWN" : owner
+      owner.to_s.empty? ? LANE_IDENTITY_UNKNOWN : owner
     end
 
     def lane_status(lane, heartbeat)
@@ -4367,6 +4537,7 @@ module AgentCoord
       raise Error, "batch lane #{position} missing name" if name.nil?
       raise Error, "batch lane #{position} name must be a string" unless name.is_a?(String)
       raise Error, "batch lane #{position} missing name" if name.empty?
+      raise Error, reserved_lane_identity_error("#{position} name", name) if reserved_lane_identity?(name)
 
       name
     end
@@ -4376,8 +4547,14 @@ module AgentCoord
       raise Error, "batch lane #{name} missing owner" if owner.nil?
       raise Error, "batch lane #{name} owner must be a string" unless owner.is_a?(String)
       raise Error, "batch lane #{name} missing owner" if owner.empty?
+      raise Error, reserved_lane_identity_error("#{name} owner", owner) if reserved_lane_identity?(owner)
 
       owner
+    end
+
+    def reserved_lane_identity_error(subject, value)
+      "batch lane #{subject} #{value} is reserved: #{LANE_IDENTITY_UNKNOWN} (any case) is the no-name/no-owner " \
+        "sentinel in status and batch-audit output; choose a different value"
     end
 
     def require_options(options, *names)

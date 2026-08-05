@@ -309,7 +309,29 @@ backend explicitly to proceed: source the env file for fleet writes, pass
 root, or set `AGENT_COORD_LOCAL=1` to opt into implicit local mode.
 `AGENT_COORD_LOCAL` accepts `1`, `true`, or `yes` (case-insensitive); any other
 value, including empty and `0`, is not an opt-in. The opt-in also silences the
-advisory warning for read commands.
+advisory warning for read commands. The same hard stop is documented in
+`--help` for each write command (`Backend safety:`) and in `doctor --help`.
+
+The env-file probe reads assignments the way a shell would and follows a
+`source`/`.` include **one level deep**, so a wrapper file whose assignment
+lives in a sourced fragment still counts as configuring a fleet URL:
+
+```sh
+# ~/.config/agent-coord/env
+. "$HOME/.config/agent-coord/backend.env"   # AGENT_COORD_API_URL lives here
+```
+
+Include resolution is deliberately bounded: only `$HOME` and
+`$XDG_CONFIG_HOME` expand, the target must be absolute and must resolve — after
+symlink and `..` resolution — inside the user's config directory, and the
+included file's own includes are never followed. When the guard cannot prove
+what an include does (unreadable, relative, unexpanded variable or `~`, outside
+the config directory, or nested), it does *not* hard stop: writes are permitted
+exactly as before, and `doctor` lists the include under
+`unresolved_env_includes` so the operator can see what was not proven. Blocking
+valid work on an unproven include would break every operator whose wrapper
+genuinely configures nothing, so the hard stop stays reserved for a proven fleet
+URL.
 
 React on Rails workflow docs assume `agent-coord` is available on `PATH`.
 `bin/agent-coord bootstrap` installs `agent-coord` into `$HOME/.local/bin` by
@@ -337,7 +359,12 @@ warning. When `doctor` itself resolved to the *implicit* local backend under
 that configuration, it emits its full report with `status: split_brain` plus a
 `split_brain_env_file` field naming the env file, then exits `2`; the same
 explicit opt-ins that unblock writes (`--state-root`, `AGENT_COORD_STATE_ROOT`,
-`AGENT_COORD_LOCAL=1`) return it to `ok` and exit `0`. If an explicitly
+`AGENT_COORD_LOCAL=1`) return it to `ok` and exit `0`. `doctor --help` states
+all of this, so the operator who hits the hard stop can find it from the CLI.
+An include the probe could not prove is reported separately as
+`unresolved_env_includes` (an `env_file`/`include`/`reason` triple per entry,
+also printed in text mode); that list is advisory and never changes the exit
+code. If an explicitly
 configured backend fails, agents should report
 coordination state
 as `UNKNOWN` and use the public claim-comment fallback until the operator fixes
@@ -444,7 +471,12 @@ read the exact coordination prompt from a file, or `--launch-prompt -` to read i
 from stdin; the explicit option overrides any `launch_prompt` already present in
 the manifest. Registration stamps `schema_version`, `registered_at`, and
 `updated_at`, preserves optional operator/dashboard/thread metadata, and rejects
-malformed lane names or owner/target fields before workers claim lanes.
+malformed lane names or owner/target fields before workers claim lanes. A lane
+name or owner of `UNKNOWN` (in any case) is rejected: `UNKNOWN` is the reserved
+no-name/no-owner sentinel that `status` rendering and `batch-audit` attribution
+compare against, so registering it would make a real lane indistinguishable from
+a lane with no name or owner. Values that merely contain the token, such as
+`unknown-docs`, are fine.
 `--synthetic --synthetic-kind KIND` stamps batch-level simulation provenance;
 re-registration preserves those fields when a later manifest and command omit
 them, so completed synthetic batches retain the one-day GC window.
@@ -557,7 +589,9 @@ lanes **and the event's target belongs to that lane** (or the event carries no
 target). This is what links the auto-emitted `claim.acquired`/`claim.released`
 events (which carry `agent_id` and `target` but no `lane` field) to their lane —
 while a unique owner doing unrelated work on a different target under the same
-batch-id does not complete the lane. `register-batch` enforces unique lane *names*
+batch-id does not complete the lane. The lane-name and owner paths skip the
+reserved `UNKNOWN` sentinel, which `register-batch` refuses to register as a lane
+name or owner for exactly that reason. `register-batch` enforces unique lane *names*
 but not unique targets or owners, so when two lanes share a target or an owner that
 shared key is ambiguous and is not used on its own for attribution; a lane whose
 only keys are ambiguous and was never touched by a lane-name-tagged event correctly
