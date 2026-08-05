@@ -1,0 +1,100 @@
+{
+  "contract": "telemetry-pricing-v1",
+  "version": 1,
+  "snapshot_id": "telemetry-pricing-2026-07-21-v1",
+  "currency": "USD",
+  "published_at": "2026-07-21T00:00:00Z",
+  "unit": "microusd_per_million_tokens",
+  "rates": [
+    {
+      "provider": "openai",
+      "model": "gpt-5.6-sol",
+      "profile": "standard",
+      "components": {
+        "input": 5000000,
+        "cache_read": 500000,
+        "cache_write": 6250000,
+        "output": 30000000,
+        "reasoning_output": 30000000
+      },
+      "long_context": {
+        "threshold_input_tokens": 272000,
+        "input_multiplier_numerator": 2,
+        "input_multiplier_denominator": 1,
+        "output_multiplier_numerator": 3,
+        "output_multiplier_denominator": 2
+      }
+    },
+    {
+      "provider": "openai",
+      "model": "gpt-5.6-terra",
+      "profile": "standard",
+      "components": {
+        "input": 2500000,
+        "cache_read": 250000,
+        "cache_write": 3125000,
+        "output": 15000000,
+        "reasoning_output": 15000000
+      },
+      "long_context": {
+        "threshold_input_tokens": 272000,
+        "input_multiplier_numerator": 2,
+        "input_multiplier_denominator": 1,
+        "output_multiplier_numerator": 3,
+        "output_multiplier_denominator": 2
+      }
+    },
+    {
+      "provider": "openai",
+      "model": "gpt-5.6-luna",
+      "profile": "standard",
+      "components": {
+        "input": 1000000,
+        "cache_read": 100000,
+        "cache_write": 1250000,
+        "output": 6000000,
+        "reasoning_output": 6000000
+      },
+      "long_context": {
+        "threshold_input_tokens": 272000,
+        "input_multiplier_numerator": 2,
+        "input_multiplier_denominator": 1,
+        "output_multiplier_numerator": 3,
+        "output_multiplier_denominator": 2
+      }
+    },
+    {
+      "provider": "anthropic",
+      "model": "claude-opus-4-6",
+      "profile": "standard",
+      "components": {
+        "input": 5000000,
+        "cache_read": 500000,
+        "cache_write": 6250000,
+        "output": 25000000
+      }
+    },
+    {
+      "provider": "anthropic",
+      "model": "claude-opus-4-7",
+      "profile": "standard",
+      "components": {
+        "input": 5000000,
+        "cache_read": 500000,
+        "cache_write": 6250000,
+        "output": 25000000
+      }
+    },
+    {
+      "provider": "anthropic",
+      "model": "claude-opus-4-8",
+      "profile": "standard",
+      "components": {
+        "input": 5000000,
+        "cache_read": 500000,
+        "cache_write": 6250000,
+        "output": 25000000
+      }
+    }
+  ]
+}

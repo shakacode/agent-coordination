@@ -87,6 +87,11 @@ when releases begin.
   fabricated as zero; conformance, discipline, aggregation replay, and
   duplicate-key procedural fixtures live beside the schema, while runtime
   reporting and pricing remain deferred.
+- An idempotent local `agent-coord-harvest` pipeline that projects allowlisted
+  coordination, GitHub, Codex, and Claude aggregate metadata into a versioned
+  SQLite ledger with normalized joins, conservative target outcomes, integer
+  micro-USD pricing, exact-lane cost allocation, review-economics scorecards,
+  transcript-safe error handling, and an opt-in simulation verifier rollup.
 - A canonical heartbeat/event status vocabulary enforced at the CLI write
   path: snake_case working and terminal sets with a known-alias map (terminal
   synonyms such as `completed`, hyphen/case twins such as

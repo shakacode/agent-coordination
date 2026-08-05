@@ -1,0 +1,62 @@
+{
+  "batches": [
+    {
+      "batch_id": "batch-fixture",
+      "repo": "shakacode/agent-coordination",
+      "status": "completed",
+      "registered_at": "2026-07-18T01:00:00Z",
+      "updated_at": "2026-07-18T02:00:00Z",
+      "lanes": [
+        {
+          "name": "maker",
+          "owner": "worker-fixture",
+          "targets": ["78"],
+          "status": "done",
+          "host": "codex",
+          "session_id": "codex-fixture-session",
+          "pr_url": "https://github.com/shakacode/agent-coordination/pull/178"
+        },
+        {
+          "name": "checker",
+          "owner": "checker-fixture",
+          "targets": ["78"],
+          "status": "done",
+          "host": "claude",
+          "session_id": "claude-fixture-session"
+        },
+        {
+          "name": "open-lane",
+          "owner": "worker-open",
+          "targets": ["79"],
+          "status": "done",
+          "pr_url": "https://github.com/shakacode/agent-coordination/pull/179"
+        },
+        {
+          "name": "unknown-target",
+          "owner": "worker-unknown",
+          "status": "waiting"
+        }
+      ]
+    }
+  ],
+  "claims": [
+    {
+      "batch_id": "batch-fixture",
+      "repo": "shakacode/agent-coordination",
+      "target": "78",
+      "status": "released",
+      "terminal": "done",
+      "pr_url": "https://github.com/shakacode/agent-coordination/pull/178"
+    }
+  ],
+  "events": [
+    {
+      "id": "event-fixture-1",
+      "batch_id": "batch-fixture",
+      "repo": "shakacode/agent-coordination",
+      "target": "78",
+      "type": "model-escalation",
+      "at": "2026-07-18T01:30:00Z"
+    }
+  ]
+}
