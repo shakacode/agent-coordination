@@ -17,7 +17,7 @@ measurable so nobody plans against a metric that is never emitted.
 
 ## The pipeline
 
-```
+```text
 record-event / claim / release        ->  events/<batch-id>/*.json
         |
         v
@@ -61,11 +61,15 @@ vocabulary the retro depends on:
 | `human_intervention` | `--kind` | `takeover`, `supersede`, `manual-fix`, `drain` |
 
 `--type` itself is not a closed enum: any string is accepted, and only the four
-above have enforced fields. Emitting friction as free-form types silently opts
-that friction out of every downstream rollup, so **use the typed forms**. This
-is the single highest-leverage discipline in the loop, because the archived
-baseline shows that untyped intervention events were the reason interventions
-could only be classified by string-matching after the fact (see
+above have enforced fields. **Use the typed forms.** Their value today is at the
+raw-record layer: the enforced fields make severity, category, reason, and kind
+reliably present in the event JSON, which is what the retro actually reads. They
+do *not* currently reach the telemetry ledger with their type intact — see the
+[gap register](#gap-register-what-is-not-measured-yet), which is the thing to fix
+if cluster ranking is to become mechanical. Typing is still the higher-leverage
+discipline, because the archived baseline shows that untyped intervention events
+were the reason interventions could only be classified by string-matching after
+the fact (see
 [the 2026-07-18 historical batch baseline](archive/reports/2026-07-18-historical-batch-baseline.md),
 which recovered 16 intervention events out of 1,011 total events only by
 allowlisting 7 distinct type spellings for the same three underlying classes).
@@ -115,13 +119,15 @@ rerunning it converges the ledger to the current inputs.
 
 ## Metric vocabulary
 
-These are the only fields the scorecard emits. They come from
+These are the metric paths inside the scorecard document. They come from
 [`lib/agent_coordination/scorecards.rb`](../lib/agent_coordination/scorecards.rb)
 over the views in
 [`0001_initial.sql`](../schema/telemetry-ledger/0001_initial.sql) and
 [`0003_pricing_scorecards.sql`](../schema/telemetry-ledger/0003_pricing_scorecards.sql).
-A kaizen target metric **must** be a dotted path into this document; anything
-else is not measurable and must not be accepted as a hypothesis target.
+The scorecard also emits a top-level `batch_id`, which is identity metadata
+rather than a metric and is not a valid hypothesis target. A kaizen target
+metric **must** be a dotted path from the table below; anything else is not
+measurable and must not be accepted as a hypothesis target.
 
 | Path | Meaning |
 | --- | --- |
@@ -168,18 +174,37 @@ emits them today, and a plan that assumes otherwise will produce a permanently
   scorecard exposes no such field. The archived baseline could reconstruct
   claim-to-merge duration for only 1 of 107 merged PRs, and that limit has not
   been lifted.
-- **No error or friction cluster rollup.** The ledger's `events` table stores
-  `event_ref`, `batch_id`, `repo`, `target`, `event_type`, `observed_at`,
-  `terminal`, and `join_status` — and nothing else. The `--severity` and
-  `--category` fields that `record-event --type error` validates at write time
-  are **not** carried into the ledger, and no view groups by `event_type`.
-  Ranking error clusters therefore requires reading raw event records via
-  `agent-coord status --batch-id ID --json`, not the scorecard.
+- **No error or friction cluster rollup, and the friction events do not survive
+  ingest at all.** This gap is worse than a missing view. Two separate losses
+  compound:
+  1. The ledger's `events` table has no severity, category, or kind column. The
+     `--severity` and `--category` fields that `record-event --type error`
+     validates at write time are **not** carried into the ledger.
+  2. The harvester clamps `event_type` through an `EVENT_TYPES` allowlist
+     (`lib/agent_coordination/harvester.rb`), and `enum` returns `nil` for any
+     value outside it — so a non-allowlisted type is stored as SQL `NULL`. That
+     allowlist contains `claim`, `release`, and `lane_closed`, but the CLI
+     actually emits the dotted forms `claim.acquired`, `claim.released`, and
+     `phase.changed`, and none of the four typed friction values appear in it at
+     all. **Of every event type this CLI writes today, only `lane_closed`
+     survives ingest with a non-`NULL` `event_type`.** `help_requested`,
+     `escalation_requested`, `error`, `human_intervention`, `claim.acquired`,
+     `claim.released`, and `phase.changed` all land as `NULL`. The remaining
+     allowlist entries match the historical spellings catalogued in the archived
+     2026-07-18 baseline, not current CLI output.
+
+  So the type itself is lost, not merely its attributes, and no view groups by
+  `event_type` in any case. Ranking error and friction clusters therefore
+  requires reading raw event records via `agent-coord status --batch-id ID
+  --json`, not the scorecard or the ledger. Note this does **not** affect
+  `batch-audit`, which reads raw coordination state rather than the ledger.
 - **No intervention counter.** `human_intervention` events are written and are
-  visible in raw state, but no scorecard field counts them and the ledger keeps
-  no `kind`.
+  visible in raw state, but no scorecard field counts them, the ledger keeps no
+  `kind`, and per the clamp above the ledger does not even retain the type.
 - **No rework, retry, or review-round counter.**
-- **No `pack_sha`.** The term appears nowhere in this repo's tracked files.
+- **No `pack_sha`.** No code, schema, state contract, or batch manifest in this
+  repo defines or emits it; the only occurrences are in this document and the
+  ledger's column contract.
   Grouping before/after by prompt-pack revision is the premise of the ledger's
   `pack_sha` column, but that field must be recorded as `UNKNOWN` until batch
   manifests actually carry it. Until then, before/after comparisons rest on

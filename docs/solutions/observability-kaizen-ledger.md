@@ -1,8 +1,11 @@
 # Observability Kaizen Ledger
 
 The committed record of accepted improvements and whether they actually worked.
-One row per change, appended in date order, never rewritten except to fill in a
-verdict at its checkpoint.
+One row per change, appended in date order. A row is amended only to advance it
+through its own lifecycle: `date` when the change lands, then `pack_sha`,
+`after`, `evidence`, and `verdict` when its checkpoint is reached. Rewriting a
+row for any other reason — restating a `before` value, softening a `refuted`
+verdict, reordering history — is prohibited.
 
 This is the verification half of the loop described in
 [Observability and the Feedback Loop](../observability-and-feedback-loop.md).
@@ -62,7 +65,7 @@ a guess, or a plausible-looking placeholder is not.
 | change | date | pack_sha | metric | before | after | verdict | evidence |
 | --- | --- | --- | --- | --- | --- | --- | --- |
 | Emit structured severity-bearing review-finding metadata so review economics becomes computable (#79 follow-up; not yet filed) | pending | UNKNOWN | `review_economics.cost_per_actionable_finding_microusd` | `UNKNOWN` (denominator `review_economics.actionable_findings` = 0) | pending | pending | Baseline is a structural zero, measured two ways. (1) Fixture run of the real scorecard path emits `"actionable_findings":0` and `"cost_per_actionable_finding_microusd":"UNKNOWN"` — reproduce with `agent-coord-harvest harvest`/`scorecard` over `test/fixtures/telemetry/` for `--batch-id batch-fixture`. (2) Over real batches, [the 2026-07-18 baseline](../archive/reports/2026-07-18-historical-batch-baseline.md) found no severity-bearing structured finding block on 134 of 134 resolved PRs, and recorded all severities as `UNKNOWN` with the explicit caveat that absence is not zero findings. Checkpoint: 5 batches after the emitting change lands. Weakness: (2) used a bespoke archived script, not `agent-coord-harvest`, so it establishes only that the input does not exist — the first harvester-measured baseline is still to be captured. |
-| Gate batch closeout on `agent-coord batch-audit` exit 0 (#79 follow-up; not yet filed) | pending | UNKNOWN | `outcomes.UNKNOWN` share of target units | `UNKNOWN` under the harvester; nearest real measurement 102 of 392 target units (26.0%) unresolved | pending | pending | The 102/392 figure is from [the 2026-07-18 baseline](../archive/reports/2026-07-18-historical-batch-baseline.md) (`no_terminal_outcome_observed`, 102/392; overall evidence coverage 1,050/1,332 = 78.8%). It is **not** an `outcomes.UNKNOWN` reading: that report predates the telemetry ledger and used a different instrument, so per rule 2 it cannot serve as the `before` side of a `confirmed` verdict. Recorded here as the honest order-of-magnitude only. Action before this row can resolve: capture a real `outcomes.UNKNOWN` baseline from `agent-coord-harvest scorecard` over a window of real batches. Checkpoint: 5 batches after that baseline exists. |
+| Gate batch closeout on `agent-coord batch-audit` exit 0 (#79 follow-up; not yet filed) | pending | UNKNOWN | `outcomes.UNKNOWN` | `UNKNOWN` under the harvester — no scorecard-measured baseline exists yet | pending | pending | Two figures in [the 2026-07-18 baseline](../archive/reports/2026-07-18-historical-batch-baseline.md) bracket this metric, and a later reader should pick the right one. The **closer analogue** is that report's final-state distribution, where `UNKNOWN` is 57 of 392 target units (14.5%, report line 58) — that is a resolved-state count, like `outcomes.UNKNOWN`. The wider figure is 102 of 392 (26.0%, `no_terminal_outcome_observed`, report line 35), which counts *reconstruction* gaps and so overstates what `outcomes.UNKNOWN` would show; overall evidence coverage there was 1,050/1,332 = 78.8%. Neither is an `outcomes.UNKNOWN` reading: that report predates the telemetry ledger and used a bespoke reconstruction script, so per rule 2 neither can serve as the `before` side of a `confirmed` verdict. Action before this row can resolve: capture a real `outcomes.UNKNOWN` baseline from `agent-coord-harvest scorecard` over a window of real batches. Checkpoint: 5 batches after that baseline exists. |
 
 Both seed rows are deliberately baseline-only. No `after` value exists yet
 because no improvement has landed and been re-measured, and inventing one to
@@ -80,3 +83,9 @@ The 2026-07-18 report is a committed, replayable snapshot over 100 batches, 421
 lane rows, and 392 target units, captured at `2026-07-19T05:27:48Z`. Its own
 framing is that it is an evidence-coverage baseline, not a worker-quality or
 batch-success rate. Read it that way when citing it.
+
+One caveat the report's own framing does not surface: of those 100 batches, 99
+are real and 1 is synthetic (`sim-task_one`, repo `sim/local`, recorded as
+`synthetic_batches: 1` in the summary JSON). It is a rounding-level effect on the
+percentages above, but a harvester-measured baseline should exclude synthetic
+batches rather than inherit this framing.
