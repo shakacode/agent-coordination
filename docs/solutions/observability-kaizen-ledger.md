@@ -2,10 +2,12 @@
 
 The committed record of accepted improvements and whether they actually worked.
 One row per change, appended in date order. A row is amended only to advance it
-through its own lifecycle: `date` when the change lands, then `pack_sha`,
-`after`, `evidence`, and `verdict` when its checkpoint is reached. Rewriting a
-row for any other reason — restating a `before` value, softening a `refuted`
-verdict, reordering history — is prohibited.
+through its own lifecycle: `date` when the change lands, and `pack_sha`,
+`after`, and `verdict` when its checkpoint is reached. `evidence` is written at
+landing — it must already name the checkpoint, per the `pending` verdict rule
+below — and is appended to at the checkpoint to record how `after` was obtained.
+Rewriting a row for any other reason — restating a `before` value, softening a
+`refuted` verdict, reordering history — is prohibited.
 
 This is the verification half of the loop described in
 [Observability and the Feedback Loop](../observability-and-feedback-loop.md).
@@ -27,7 +29,7 @@ a guess, or a plausible-looking placeholder is not.
 | `before` | baseline value, with the command or committed artifact it came from |
 | `after` | value at the checkpoint, same instrument as `before`; `pending` until the checkpoint is reached |
 | `verdict` | `confirmed`, `refuted`, `inconclusive`, or `pending` |
-| `evidence` | how `after` was obtained, and anything that makes the comparison weaker than it looks |
+| `evidence` | at landing: where `before` came from and the checkpoint this row is due at. At the checkpoint, appended with how `after` was obtained. Either way, anything that makes the comparison weaker than it looks belongs here |
 
 ### Verdicts
 

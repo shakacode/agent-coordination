@@ -186,12 +186,15 @@ emits them today, and a plan that assumes otherwise will produce a permanently
      allowlist contains `claim`, `release`, and `lane_closed`, but the CLI
      actually emits the dotted forms `claim.acquired`, `claim.released`, and
      `phase.changed`, and none of the four typed friction values appear in it at
-     all. **Of every event type this CLI writes today, only `lane_closed`
-     survives ingest with a non-`NULL` `event_type`.** `help_requested`,
-     `escalation_requested`, `error`, `human_intervention`, `claim.acquired`,
-     `claim.released`, and `phase.changed` all land as `NULL`. The remaining
-     allowlist entries match the historical spellings catalogued in the archived
-     2026-07-18 baseline, not current CLI output.
+     all. **Of the event types this CLI generates on its own — the four typed
+     friction values, the three auto-emitted lifecycle types, and `lane_closed`
+     — only `lane_closed` survives ingest with a non-`NULL` `event_type`.**
+     `help_requested`, `escalation_requested`, `error`, `human_intervention`,
+     `claim.acquired`, `claim.released`, and `phase.changed` all land as `NULL`.
+     Because `--type` is an open string, an operator who passes a value that
+     happens to match the allowlist — `replacement`, say — would survive ingest;
+     the allowlist was fitted to the historical spellings catalogued in the
+     archived 2026-07-18 baseline, not to current CLI output.
 
   So the type itself is lost, not merely its attributes, and no view groups by
   `event_type` in any case. Ranking error and friction clusters therefore
@@ -204,7 +207,7 @@ emits them today, and a plan that assumes otherwise will produce a permanently
 - **No rework, retry, or review-round counter.**
 - **No `pack_sha`.** No code, schema, state contract, or batch manifest in this
   repo defines or emits it; the only occurrences are in this document and the
-  ledger's column contract.
+  kaizen ledger.
   Grouping before/after by prompt-pack revision is the premise of the ledger's
   `pack_sha` column, but that field must be recorded as `UNKNOWN` until batch
   manifests actually carry it. Until then, before/after comparisons rest on
