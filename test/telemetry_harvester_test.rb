@@ -139,6 +139,51 @@ class TelemetryHarvesterTest < Minitest::Test # rubocop:disable Metrics/ClassLen
     end
   end
 
+  def test_partial_refresh_preserves_ambiguous_shared_pr_review_attribution
+    Dir.mktmpdir("agent-coordination-ledger-shared-pr-refresh") do |dir| # rubocop:disable Metrics/BlockLength
+      source_path = File.join(dir, "coordination.json")
+      github_path = File.join(dir, "github.json")
+      ledger_path = File.join(dir, "telemetry.sqlite3")
+      source = coordination_fixture
+      shared_url = "https://github.com/shakacode/agent-coordination/pull/178"
+      source.fetch("batches").first.fetch("lanes").first["pr_url"] = shared_url
+      second = Marshal.load(Marshal.dump(source.fetch("batches").first))
+      second["batch_id"] = "batch-second"
+      second.fetch("lanes").first["targets"] = ["79"]
+      source.fetch("batches") << second
+      File.write(source_path, JSON.pretty_generate(source))
+      github_document = {
+        "pull_requests" => [{
+          "batch_id" => "batch-fixture", "repo" => "shakacode/agent-coordination", "target" => "78",
+          "number" => 178, "url" => shared_url, "state" => "open",
+          "reviews" => [{ "id" => "shared-review", "findings" => [] }]
+        }]
+      }
+      File.write(github_path, JSON.pretty_generate(github_document))
+
+      _stdout, stderr, status = Open3.capture3(
+        CLI, "harvest", "--ledger", ledger_path,
+        "--coordination-json", source_path, "--github-json", github_path,
+        "--from", "2026-07-18", "--to", "2026-07-18"
+      )
+      assert status.success?, stderr
+      assert_equal ["2|1"], sqlite_query(
+        ledger_path,
+        "SELECT COUNT(*), review_receipts.target_unit_id IS NULL FROM target_pr_links, review_receipts"
+      )
+
+      _stdout, stderr, status = Open3.capture3(
+        CLI, "harvest", "--ledger", ledger_path,
+        "--coordination-json", source_path, "--batch-id", "batch-fixture"
+      )
+      assert status.success?, stderr
+      assert_equal ["2|1"], sqlite_query(
+        ledger_path,
+        "SELECT COUNT(*), review_receipts.target_unit_id IS NULL FROM target_pr_links, review_receipts"
+      )
+    end
+  end
+
   def test_refresh_replaces_claims_and_events_and_terminal_state_outranks_merged_pr
     Dir.mktmpdir("agent-coordination-ledger-coordination-refresh") do |dir| # rubocop:disable Metrics/BlockLength
       source_path = File.join(dir, "coordination.json")
@@ -873,6 +918,22 @@ class TelemetryHarvesterTest < Minitest::Test # rubocop:disable Metrics/ClassLen
       AgentCoord::Telemetry::PricingCatalog.new(duplicate, "b" * 64)
     end
     assert_equal "pricing model/profile is duplicated", error.message
+
+    Dir.mktmpdir("agent-coordination-pricing-snapshot") do |dir|
+      ledger = AgentCoord::Telemetry::Ledger.new(File.join(dir, "telemetry.sqlite3"))
+      AgentCoord::Telemetry::PricingCatalog.new(document, "a" * 64).persist(ledger)
+      changed = Marshal.load(Marshal.dump(document))
+      changed.fetch("rates").first.fetch("components")["input"] *= 2
+      error = assert_raises(AgentCoord::Telemetry::Error) do
+        AgentCoord::Telemetry::PricingCatalog.new(changed, "b" * 64).persist(ledger)
+      end
+      assert_equal "pricing snapshot source hash mismatch", error.message
+      assert_equal 5_000_000, ledger.first(
+        "SELECT rate_microusd_per_million_tokens AS rate FROM pricing_rates " \
+        "WHERE snapshot_id = ? AND model = ? AND profile = ? AND component = ?",
+        [document.fetch("snapshot_id"), "gpt-5.6-sol", "standard", "input"]
+      ).fetch("rate")
+    end
   end
 
   private

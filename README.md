@@ -74,7 +74,7 @@ Replace `VERSION` with the version in the filename printed by `gem build`.
 ```bash
 gem install --local ./agent-coordination-VERSION.gem
 agent-coord version --json
-agent-coord-harvest --help
+agent-coord-harvest harvest --help
 rm ./agent-coordination-VERSION.gem
 ```
 

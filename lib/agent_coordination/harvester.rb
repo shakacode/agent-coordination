@@ -186,8 +186,11 @@ module AgentCoord
           )
           [link.fetch("github_pr_id"), target_unit_id, link.fetch("link_status")]
         end
-        restored.group_by(&:first).each do |github_pr_id, rows|
-          exact_target_ids = rows.filter_map { |_, target_unit_id, status| target_unit_id if status == "exact" }.uniq
+        restored.map(&:first).uniq.each do |github_pr_id|
+          exact_target_ids = @ledger.rows(
+            "SELECT target_unit_id FROM target_pr_links WHERE github_pr_id = ? AND link_status = 'exact'",
+            [github_pr_id]
+          ).map { |row| row.fetch("target_unit_id") }.uniq
           target_unit_id = exact_target_ids.one? ? exact_target_ids.first : nil
           @ledger.execute(
             "UPDATE review_receipts SET target_unit_id = ? WHERE github_pr_id = ?",

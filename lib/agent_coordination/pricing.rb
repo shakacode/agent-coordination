@@ -48,6 +48,14 @@ module AgentCoord
       end
 
       def persist(ledger) # rubocop:disable Metrics/MethodLength
+        existing = ledger.first(
+          "SELECT source_sha256 FROM pricing_snapshots WHERE snapshot_id = ?",
+          [snapshot_id]
+        )
+        if existing && existing.fetch("source_sha256") != @source_sha256
+          raise Error, "pricing snapshot source hash mismatch"
+        end
+
         snapshot_values = [
           snapshot_id,
           @document.fetch("version"),
