@@ -112,6 +112,9 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
   # In-process runners read the real process ENV, so keep them off the developer's
   # consumer env file, which would otherwise trip the split-brain guard.
   CONSUMER_ENV_KEYS = %w[AGENT_COORD_ENV_FILE AGENT_COORD_LOCAL XDG_CONFIG_HOME].freeze
+  # Secrets planted in the credential-bearing env fixtures. A leak of either on any
+  # surface is the failure the output-safety scan exists to catch.
+  CREDENTIAL_FIXTURES = %w[SUPERSECRETsklive9f3a dXNlcjpwYXNzd29yZA].freeze
 
   def setup
     @state_root = Dir.mktmpdir("agent-coord-test")
@@ -1181,9 +1184,12 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     assert_includes result.stdout, "never sources or evaluates"
     assert_includes result.stdout, "cannot prove inert"
     assert_includes result.stdout, "split_brain_reason"
-    assert_includes result.stdout, "split_brain_construct"
-    # Every payload field the report can emit is documented, not just two of three.
-    assert_includes result.stdout, "split_brain_construct_file"
+    assert_includes result.stdout, "brace expansion"
+    # The output-safety guarantee and the honest detection bound are both stated,
+    # and no construct field is advertised because none is emitted.
+    assert_includes result.stdout, "Nothing from the"
+    assert_includes result.stdout, "conservative, not exhaustive"
+    refute_includes result.stdout, "split_brain_construct"
     assert_includes result.stdout, "last assignment wins"
   end
 
@@ -1265,7 +1271,9 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
         claim = run_consumer_env_cli(env, *split_brain_claim_args(index))
         assert_equal 2, claim.status.exitstatus, "#{include_line}: #{claim.stderr}"
         assert_includes claim.stderr, "may configure AGENT_COORD_API_URL", include_line
-        assert_includes claim.stderr, include_line.strip, include_line
+        # The include target is not echoed — a path read out of the file can carry a
+        # credential, so the reason class and the env file are the whole report.
+        refute_includes claim.stderr, include_line.strip, include_line
         assert_includes claim.stderr, "--state-root PATH", include_line
         assert_includes claim.stderr, "AGENT_COORD_LOCAL=1", include_line
 
@@ -1333,8 +1341,9 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
 
       claim = run_consumer_env_cli(env, *split_brain_claim_args(0))
       assert_equal 2, claim.status.exitstatus, claim.stderr
-      assert_includes claim.stderr, "level-two.env"
-      assert_includes claim.stderr, File.realpath(File.join(agent_dir, "level-one.env"))
+      # The nested target is not named: the report carries the reason class and the
+      # candidate env file, never text read out of a file.
+      refute_includes claim.stderr, "level-two.env"
 
       doctor = run_consumer_env_cli(env, "doctor", "--json")
       assert_equal 2, doctor.status.exitstatus
@@ -1342,8 +1351,6 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
       assert_equal "split_brain", payload.fetch("status")
       assert_equal env_file, payload.fetch("split_brain_env_file")
       assert_equal "nested_include", payload.fetch("split_brain_reason")
-      assert_equal File.realpath(File.join(agent_dir, "level-one.env")),
-                   payload.fetch("split_brain_construct_file")
     end
   end
 
@@ -1408,11 +1415,14 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
       assert_equal 2, survives.status.exitstatus
       assert_includes survives.stderr, "configures AGENT_COORD_API_URL"
 
-      # The outer file blanks it and the include sets it afterwards: configured.
+      # The outer file blanks it and the include sets it afterwards: configured. The
+      # sourced file is not named in the report — only the candidate env file is.
       File.write(env_file, %(AGENT_COORD_API_URL=\n. "$XDG_CONFIG_HOME/agent-coord/fleet.env"\n))
       reset = run_consumer_env_cli(env, *split_brain_claim_args(2))
       assert_equal 2, reset.status.exitstatus
-      assert_includes reset.stderr, File.realpath(File.join(agent_dir, "fleet.env"))
+      assert_includes reset.stderr, "configures AGENT_COORD_API_URL"
+      assert_includes reset.stderr, env_file
+      refute_includes reset.stderr, "fleet.env"
     end
   end
 
@@ -1484,98 +1494,41 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     end
   end
 
-  # A fleet API URL can carry credentials, and `doctor --json` lands in CI logs and
-  # support bundles, so no output may echo an assigned value — only the construct
-  # up to the "=". Asserted on the credential itself rather than on the redaction
-  # text, so the property holds however the construct is rendered.
-  def test_split_brain_output_never_echoes_an_assigned_value
+  # The output-safety guarantee, ported from the QA harness that found the leaks a
+  # per-word redactor could not close: for each construct, no surface an operator or
+  # a CI log sees may contain the credential. The report is the reason class plus the
+  # env file path and nothing from the file's contents, so this holds by
+  # construction rather than by a predicate over file bytes.
+  def test_split_brain_output_never_carries_file_contents
     with_consumer_env_config do |_root, agent_dir, env|
-      secret = "s3cret-token"
-      File.write(File.join(agent_dir, "env"),
-                 "AGENT_COORD_API_URL=https://user:#{secret}@fleet.example/api?key=#{secret}\n")
+      credential_bearing_env_bodies.each do |label, body|
+        write_env_fixture(File.join(agent_dir, "env"), body)
 
-      claim = run_consumer_env_cli(env, *split_brain_claim_args(0))
-      assert_equal 2, claim.status.exitstatus, claim.stderr
-      refute_includes claim.stderr, secret, "the refusal must not echo the assigned value"
-      refute_includes claim.stdout, secret
+        payload = assert_no_surface_echoes(env, CREDENTIAL_FIXTURES, label)
+        refute_includes payload.keys, "split_brain_construct", label
+        refute_includes payload.keys, "split_brain_construct_file", label
+      end
+    end
+  end
+
+  # The payload names the class and the file, which is what locates the problem.
+  def test_split_brain_payload_reports_reason_and_env_file_only
+    with_consumer_env_config do |_root, agent_dir, env|
+      env_file = File.join(agent_dir, "env")
+      File.write(env_file, "AGENT_COORD_API_URL=https://user:tok@fleet.example\n")
 
       doctor = run_consumer_env_cli(env, "doctor", "--json")
-      assert_equal 2, doctor.status.exitstatus
-      refute_includes doctor.stdout, secret, "doctor --json must not echo the assigned value"
-      refute_includes doctor.stderr, secret
-      payload = JSON.parse(doctor.stdout)
-      assert_equal "configured_api_url", payload.fetch("split_brain_reason")
-      assert_equal "AGENT_COORD_API_URL=<redacted>", payload.fetch("split_brain_construct")
 
-      # A decoy assignment first: the construct must still name the variable the
-      # refusal is about, and still surrender neither value.
-      File.write(File.join(agent_dir, "env"),
-                 "X=decoy-#{secret} AGENT_COORD_API_URL=https://user:#{secret}@fleet.example\n")
-      prefixed = run_consumer_env_cli(env, "doctor", "--json")
-      assert_equal 2, prefixed.status.exitstatus
-      refute_includes prefixed.stdout, secret
-      assert_equal "X=<redacted> AGENT_COORD_API_URL=<redacted>",
-                   JSON.parse(prefixed.stdout).fetch("split_brain_construct")
+      assert_equal 2, doctor.status.exitstatus
+      payload = JSON.parse(doctor.stdout)
+      assert_equal "split_brain", payload.fetch("status")
+      assert_equal env_file, payload.fetch("split_brain_env_file")
+      assert_equal "configured_api_url", payload.fetch("split_brain_reason")
+      assert_empty payload.keys.grep(/construct/)
 
       text = run_consumer_env_cli(env, "doctor")
-      refute_includes text.stdout, secret, "doctor text output must not echo the assigned value"
-      refute_includes text.stderr, secret
-    end
-  end
-
-  # A quoted value carries through its own spaces, so redaction has to run to the
-  # end of the shell word rather than to the first space — otherwise the tail of a
-  # credential survives in the message and the payload.
-  def test_split_brain_output_redacts_quoted_values_containing_spaces
-    with_consumer_env_config do |_root, agent_dir, env|
-      secret = "s3cret-token"
-      { %(AGENT_COORD_API_URL="https://user:pa #{secret}@fleet.example"\n) =>
-          "AGENT_COORD_API_URL=<redacted>",
-        %(export "AGENT_COORD_API_URL=https://user:#{secret}@fleet.example"\n) =>
-          %("AGENT_COORD_API_URL=<redacted>) }.each do |body, construct|
-        File.write(File.join(agent_dir, "env"), body)
-
-        doctor = run_consumer_env_cli(env, "doctor", "--json")
-
-        assert_equal 2, doctor.status.exitstatus, body
-        refute_includes doctor.stdout, secret, body
-        assert_includes JSON.parse(doctor.stdout).fetch("split_brain_construct"), construct, body
-      end
-    end
-  end
-
-  # A value can span several shell words — a command substitution with arguments is
-  # one word to a shell but several to a naive splitter — so redaction runs to the
-  # end of the value region. Asserted across every surface an operator or a CI log
-  # would see, on the credential itself rather than on the redaction text.
-  def test_split_brain_output_redacts_values_that_span_words
-    with_consumer_env_config do |_root, agent_dir, env|
-      secret = "SEKRET"
-      ["AGENT_COORD_API_URL=$(vault read -field=url secret/fleet/#{secret})\n",
-       "AGENT_COORD_API_URL=`vault read -field=url secret/fleet/#{secret}`\n",
-       "AGENT_COORD_API_URL=${FLEET_URL:-https://u:#{secret}@h}\n",
-       %(AGENT_COORD_API_URL="https://u:#{secret}@h/a?k=#{secret}"\n)].each do |body|
-        File.write(File.join(agent_dir, "env"), body)
-
-        assert_no_surface_echoes(env, secret, body)
-      end
-    end
-  end
-
-  # A line with no assignment used to be echoed whole, so a credential sitting in an
-  # unparsed construct reached the same surfaces. The construct now carries only the
-  # classification: shell syntax, the variable's own name, and nothing else.
-  def test_split_brain_output_omits_unrecognized_words
-    with_consumer_env_config do |_root, agent_dir, env|
-      secret = "SEKRET"
-      { "echo AGENT_COORD_API_URL https://u:#{secret}@h\n" =>
-          "<omitted> AGENT_COORD_API_URL <omitted>",
-        %(eval "$(fleet-env --token #{secret})"\n) => "eval <omitted>" }.each do |body, construct|
-        File.write(File.join(agent_dir, "env"), body)
-
-        payload = assert_no_surface_echoes(env, secret, body)
-        assert_equal construct, payload.fetch("split_brain_construct"), body
-      end
+      assert_includes text.stdout, "split_brain_reason: configured_api_url"
+      refute_includes text.stdout, "split_brain_construct"
     end
   end
 
@@ -8610,20 +8563,49 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     stdout.strip
   end
 
-  # Every surface a refusal reaches — the write command's own output, doctor --json,
-  # and doctor's text report — must be free of the assigned value. Returns the
-  # doctor payload so a caller can also pin the construct.
-  def assert_no_surface_echoes(env, secret, label)
-    claim = run_consumer_env_cli(env, *split_brain_claim_args(0))
-    assert_equal 2, claim.status.exitstatus, "#{label}: #{claim.stderr}"
-    refute_includes claim.stderr, secret, "claim stderr: #{label}"
-    refute_includes claim.stdout, secret, "claim stdout: #{label}"
+  # Constructs that carry credential-shaped text in places a per-word redactor
+  # cannot reason about: an include path, a trailing comment, a here-doc body, a
+  # word ending in "=", a word whose prefix is the secret, a secret beside the
+  # variable's own name, and base64 padding that looks like an assignment.
+  def credential_bearing_env_bodies
+    token, base64 = CREDENTIAL_FIXTURES
+    {
+      "source target carries a token" => ". /tmp/fleet-#{token}.env\n",
+      "quoted source target" => %(. "/tmp/fleet-#{token}.env"\n),
+      "mention word carries a secret" => %(echo "$AGENT_COORD_API_URL:#{token}"\n),
+      "base64 credential in a quoted word" =>
+        %(curl -H "Authorization: Basic #{base64}==" "$AGENT_COORD_API_URL/x"\n),
+      "base64 credential in a comment" => %(eval "$SETUP"  # rotate #{base64}== yearly\n),
+      "here-doc body line" =>
+        "cat <<EOF\nAuthorization: Basic #{base64}== $AGENT_COORD_API_URL\nEOF\n",
+      "bare word ending in =" => "eval #{token}=\n",
+      "secret before the first =" => "eval #{token}=1\n",
+      "secret beside the variable name" => %(eval "AGENT_COORD_API_URL #{token}"\n),
+      "value is a vault call" => "export AGENT_COORD_API_URL=$(vault read -field=url secret/#{token})\n",
+      "value has inline credentials" => %(AGENT_COORD_API_URL="https://user:#{token}@host"\n),
+      "here-doc delimiter is a secret" => "cat <<#{token}=x\neval y\n#{token}=x\n",
+      "base64 in a source path" => ". /tmp/#{base64}==.env\n",
+      "unparsed flag value" => "eval --token=#{token}\n"
+    }
+  end
 
+  # Every surface a refusal reaches — the write command's own output, doctor --json,
+  # and doctor's text report — must be free of every planted secret. Returns the
+  # doctor payload so a caller can also assert on its shape.
+  # The verdict is deliberately not asserted here: some of these fixtures only
+  # *reference* the variable and are correctly permitted. What must hold either way
+  # is that no surface carries the secret.
+  def assert_no_surface_echoes(env, secrets, label)
+    claim = run_consumer_env_cli(env, *split_brain_claim_args(0))
     json = run_consumer_env_cli(env, "doctor", "--json")
     text = run_consumer_env_cli(env, "doctor")
-    [json, text].each_with_index do |result, index|
-      refute_includes result.stdout, secret, "doctor[#{index}] stdout: #{label}"
-      refute_includes result.stderr, secret, "doctor[#{index}] stderr: #{label}"
+    surfaces = { "claim.stdout" => claim.stdout, "claim.stderr" => claim.stderr,
+                 "json.stdout" => json.stdout, "json.stderr" => json.stderr,
+                 "text.stdout" => text.stdout, "text.stderr" => text.stderr }
+    Array(secrets).each do |secret|
+      surfaces.each do |name, content|
+        refute_includes content, secret, "#{label}: #{secret} leaked on #{name}"
+      end
     end
     JSON.parse(json.stdout)
   end
@@ -8671,7 +8653,21 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
       "builtin before a quoted name" => %(builtin export "AGENT_COORD_API_URL=https://fleet.example"\n),
       "prefix assignment before a quoted name" =>
         %(FOO=1 export "AGENT_COORD_API_URL=https://fleet.example"\n),
-      "brace expansion in the name" => %(export "AGENT_COORD_API_URL"{,}=https://fleet.example\n),
+      "brace expansion after the name" => %(export "AGENT_COORD_API_URL"{,}=https://fleet.example\n),
+      "three prefix assignments" => %(X=1 Y=2 Z=3 export AGENT_COORD_API_URL=https://fleet.example\n),
+      "append with +=" => "export AGENT_COORD_API_URL+=https://fleet.example\n",
+      # Brace expansion *inside* the name, which a shell resolves before assigning.
+      # Only a declaration builtin reaches the variable this way; see the inert list
+      # for the same shape without one.
+      "brace expansion inside the name" => %(export AGENT_COORD_API{_URL,}=https://fleet.example\n),
+      "brace expansion at the tail" => %(export AGENT_COORD_API_UR{L,}=https://fleet.example\n),
+      "quoted stem then brace tail" => %(export "AGENT_COORD_API"{_URL,}=https://fleet.example\n),
+      "brace expansion at the stem" => %(export AGENT_COORD{_API_URL,}=https://fleet.example\n),
+      "declare -x with brace in the name" => %(declare -x AGENT_COORD_API{_URL,}=https://fleet.example\n),
+      # An escaped quote in a prefix assignment used to close the span and hide the
+      # quoted name behind it.
+      "escaped quote prefix then quoted name" =>
+        %(X="a\\"b" export "AGENT_COORD_API_URL"=https://fleet.example\n),
       # A shell removes backslash-newline before tokenizing, so neither physical
       # line carries the whole identifier yet the variable is still set.
       "identifier split by a continuation" => "AGENT_COORD_API\\\n_URL=https://fleet.example\n",
@@ -8708,6 +8704,17 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
       # line is not a continuation of this one.
       "literal trailing backslash" => "NOTE=ends-with-two\\\\\nAGENT_COORD_API_TOKEN=secret\n",
       "escaped quote in another value" => %(X="a\\"b" MACHINE_ID=host-1\n),
+      # Without a declaration builtin a shell recognizes the assignment word before
+      # brace expansion, so this sets a variable literally named with braces —
+      # nothing reaches AGENT_COORD_API_URL, and refusing would be over-blocking.
+      "brace in the name, no declaration" => %(AGENT_COORD_API{_URL,}=https://fleet.example\n),
+      "brace after the value" => "export FOO={a,b}\n",
+      "different variable, suffix" => "AGENT_COORD_API_URL_EXTRA=https://fleet.example\n",
+      "unset -v on its own" => "unset -v AGENT_COORD_API_URL\n",
+      "quoted empty value" => %(export AGENT_COORD_API_URL=""\n),
+      "single-quoted empty value" => "AGENT_COORD_API_URL=''\n",
+      "unrelated export" => "export FOO=bar\n",
+      "comment mention after an assignment" => "FOO=bar # see AGENT_COORD_API_URL docs\n",
       "bareword escaped quotes only" => %(echo \\"disabled\\"\n),
       # Single quotes have no escapes, so the backslash is literal content.
       "backslash inside single quotes" => %(NOTE='keep \\ this'\nMACHINE_ID=host-1\n)

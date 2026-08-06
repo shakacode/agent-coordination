@@ -212,7 +212,11 @@ when releases begin.
   refused too — `export "AGENT_COORD_API_URL"=x`, `export AGENT_COORD_API"_URL"=x`,
   `export $'AGENT_COORD_API_URL'=x`, `export AGENT_COORD_API\_URL=x`,
   `declare -x`/`typeset -x`/`export --`, and a declared name that only exists
-  after an expansion (`export ${N}=x`). Physical lines joined by a
+  after an expansion (`export ${N}=x`), and a declaration builtin whose assigned
+  name is split across brace expansion (`export AGENT_COORD_API{_URL,}=x`, which a
+  shell resolves to this variable; without a declaration builtin the assignment word
+  is recognized first, so that shape is genuinely inert and stays permitted).
+  Physical lines joined by a
   backslash-newline are folded into one logical line first, since a shell removes
   that continuation before tokenizing and an identifier split across two lines
   carries the whole name on neither. An env file that exists but is not valid
@@ -227,14 +231,17 @@ when releases begin.
   negative that permits an invisible-lease write. `doctor` reports the deciding
   construct in `split_brain_reason`/`split_brain_construct` (plus
   `split_brain_construct_file` when it lives in a sourced fragment) and exits
-  `2`, and `split_brain_construct` never carries file content that could be a
-  credential: an assignment keeps its name and surrenders its value to the end of
-  the value region (including a `$(…)`, `${…}`, or backtick expansion that spans
-  spaces), a `source`/`.` target is kept as a path, shell syntax and the variable's
-  own name are kept, and every other word is reported as `<omitted>`. A fleet API
-  URL can embed basic-auth credentials or a token parameter, and `doctor --json`
-  lands in CI logs, so the same reduction applies to the write commands' refusal
-  message. Lines that cannot reach the variable — comments, other variables
+  `2`. No output reports anything read out of an env file: `split_brain_reason`
+  names the class of construct and `split_brain_env_file` names the file, and the
+  offending line itself — including an include target — is never quoted, on any
+  surface, because a fleet API URL can embed basic-auth credentials or a token
+  parameter and `doctor --json` lands in CI logs. Reducing the line before printing
+  it was tried and abandoned: deciding which bytes are a secret got base64 padding,
+  words ending in `=`, tokens sharing a word with the variable name, and
+  token-bearing include paths wrong. Detection is likewise conservative rather than
+  exhaustive — it refuses what it cannot prove inert and does not claim to
+  enumerate every construct a shell could use. Lines that cannot reach the
+  variable — comments, other variables
   (including one this name is only a prefix of, such as `MY_AGENT_COORD_API_URL`),
   a compound statement that sources nothing, and a substitution confined to
   another variable's value such as `MACHINE_ID=$(hostname)` — stay inert, and the

@@ -75,18 +75,10 @@ module AgentCoord
     (?:(?:!|time|command|builtin|exec|nohup|env|[A-Za-z_][A-Za-z0-9_]*=\S*)\s+)*
     (?:(?:export|declare|typeset|readonly)\s+(?:-{1,2}[A-Za-z]*\s+)*)?\z
   /x
-  # Words that may appear verbatim in an operator-facing construct: shell syntax,
-  # option flags, and the variable's own name. Anything else is omitted, because a
-  # construct must never carry file content that could be a credential.
-  CONSUMER_CONSTRUCT_OMITTED = "<omitted>"
-  CONSUMER_SAFE_CONSTRUCT_WORD = /
-    \A(?:
-      [;&|(){}\[\]!]+ | -{1,2}[A-Za-z]* |
-      source|\.|export|declare|typeset|readonly|unset|eval|time|command|builtin|exec|env|nohup|
-      if|then|else|elif|fi|while|until|do|done|case|esac|in
-    )\z
-  /x
-  CONSUMER_INCLUDE_WORD = /\A(?:source|\.)\z/
+  # A declaration builtin whose assigned name contains brace expansion before the
+  # "=" (`export AGENT_COORD_API{_URL,}=x` sets AGENT_COORD_API_URL). Braces are
+  # never expanded here — the construct is refused instead.
+  CONSUMER_BRACE_OPEN = "{"
   # A declaration builtin whose name position is an expansion (`export ${N}=x`):
   # the name is not in the file text, so its effect cannot be proven.
   CONSUMER_DECLARATION_BUILTIN = /\A\s*(?:export|declare|typeset|readonly)\s+(\S.*)\z/
@@ -123,6 +115,8 @@ module AgentCoord
     "command_substitution" => "runs a command substitution that could set AGENT_COORD_API_URL",
     "eval" => "evaluates text that could set AGENT_COORD_API_URL",
     "indirect_declaration" => "declares a variable whose name comes from an expansion this CLI cannot evaluate",
+    "brace_expanded_declaration" => "declares a variable whose name is split across brace expansion, which " \
+                                    "this CLI does not expand",
     "undecodable_env_file" => "is not valid UTF-8, so this CLI cannot read what the rest of it does",
     "unreadable_env_file" => "exists but cannot be read by this CLI",
     "guarded_include" => "sources a file from a compound statement, so whether that include runs — " \
@@ -406,7 +400,11 @@ module AgentCoord
   # What a consumer env file means for AGENT_COORD_API_URL after folding it in
   # order: :empty (provably unset or blanked), :configured (a proven fleet URL),
   # or :unprovable (a construct whose effect could not be proven inert).
-  ConsumerEnvVerdict = Struct.new(:kind, :reason, :construct, :construct_file) do
+  # Deliberately carries no text from the file. Reporting a construct meant
+  # reporting file bytes, and no predicate over those bytes could be trusted to
+  # find every credential in them, so the reason class plus the env file path are
+  # the whole report.
+  ConsumerEnvVerdict = Struct.new(:kind, :reason) do
     def unprovable?
       kind == :unprovable
     end
@@ -929,9 +927,9 @@ module AgentCoord
       consumer_split_brain_finding(options)&.fetch("env_file")
     end
 
-    # Fail closed on an unprovable construct, so the message has to carry enough
-    # for the operator to resolve it without reading source: the exact file, the
-    # exact construct, why the CLI refuses, and the three local-mode selections.
+    # Fail closed on an unprovable construct. The message names the file, the class
+    # of construct, and the three local-mode selections — never text from the file,
+    # since a line the probe could not parse may carry a credential.
     def consumer_split_brain_message(finding)
       env_file = finding.fetch("env_file")
       "split-brain configuration: #{env_file} #{consumer_split_brain_cause(finding)}, but this CLI resolved to " \
@@ -943,15 +941,9 @@ module AgentCoord
 
     def consumer_split_brain_cause(finding)
       sentence = CONSUMER_SPLIT_BRAIN_REASONS.fetch(finding.fetch("reason"))
-      construct_file = finding["construct_file"]
-      if proven_split_brain?(finding)
-        return construct_file ? "#{sentence} (in #{construct_file})" : sentence
-      end
+      return sentence if proven_split_brain?(finding)
 
-      detail = [finding["construct"], construct_file && "in #{construct_file}"].compact.join(" ")
-      return "may configure AGENT_COORD_API_URL: it #{sentence}" if detail.empty?
-
-      "may configure AGENT_COORD_API_URL: it #{sentence} (#{detail})"
+      "may configure AGENT_COORD_API_URL: it #{sentence}"
     end
 
     def consumer_split_brain_risk(finding)
@@ -1006,14 +998,7 @@ module AgentCoord
       verdict = consumer_env_verdict(path, CONSUMER_ENV_INERT, follow_includes: true)
       return nil unless verdict.decided?
 
-      finding = {
-        "env_file" => path,
-        "reason" => verdict.reason,
-        "construct" => verdict.construct
-      }
-      construct_file = verdict.construct_file
-      finding["construct_file"] = construct_file if construct_file && construct_file != path
-      finding.compact
+      { "env_file" => path, "reason" => verdict.reason }
     rescue Errno::ENOENT, Errno::ENOTDIR
       nil
     rescue ArgumentError
@@ -1037,7 +1022,7 @@ module AgentCoord
       consumer_env_logical_lines(path) do |line|
         next if line.match?(CONSUMER_ENV_INERT_LINE)
 
-        updated = consumer_env_line_verdict(path, line, verdict, follow_includes)
+        updated = consumer_env_line_verdict(line, verdict, follow_includes)
         next unless updated
 
         verdict = updated
@@ -1066,7 +1051,7 @@ module AgentCoord
       yield pending unless pending.nil?
     end
 
-    def consumer_env_line_verdict(path, line, verdict, follow_includes)
+    def consumer_env_line_verdict(line, verdict, follow_includes)
       # Every structural check below reads statement shape, so none of them may
       # see a trailing comment: `MACHINE_ID=$(hostname) # one per host; audit` is
       # inert, and a `;` inside that comment must not make it look otherwise.
@@ -1076,22 +1061,20 @@ module AgentCoord
       # Capture from the "=" without consuming the space after it: in a shell,
       # `=#x` assigns "#x" while `= #x` assigns nothing, and the value scanner
       # needs that whitespace to tell them apart.
-      if (match = code.match(CONSUMER_API_URL_ASSIGNMENT))
-        return consumer_assignment_verdict(path, line, code, match[1].to_s)
-      end
+      return consumer_assignment_verdict(code, code.match(CONSUMER_API_URL_ASSIGNMENT)[1].to_s) if code.match?(
+        CONSUMER_API_URL_ASSIGNMENT
+      )
 
-      # An assignment the anchored pattern cannot read because quoting or a
-      # backslash falls inside the name or around the "=". The shell removes those
-      # before assigning, so the variable really is set.
-      return unprovable_verdict(path, line, "opaque_api_url_reference") if consumer_effective_assignment?(code)
-      return unprovable_verdict(path, line, "indirect_declaration") if consumer_indirect_declaration?(code)
-
-      return consumer_include_verdict(path, line, code, verdict, follow_includes) if code[
-        CONSUMER_INCLUDE_DIRECTIVE, 1
-      ]
+      # An assignment the anchored pattern cannot read because quoting, a
+      # backslash, or brace expansion falls inside the name or around the "=".
+      # The shell resolves all of those before assigning, so the variable is set.
+      return unprovable_verdict("opaque_api_url_reference") if consumer_effective_assignment?(code)
+      return unprovable_verdict("indirect_declaration") if consumer_indirect_declaration?(code)
+      return unprovable_verdict("brace_expanded_declaration") if consumer_brace_expanded_declaration?(code)
+      return consumer_include_verdict(code, verdict, follow_includes) if code[CONSUMER_INCLUDE_DIRECTIVE, 1]
       return CONSUMER_ENV_INERT if code.match?(CONSUMER_API_URL_UNSET)
 
-      consumer_opaque_line_verdict(path, line, code)
+      consumer_opaque_line_verdict(code)
     end
 
     # The part of a line a shell would run: everything before an unquoted `#` that
@@ -1133,22 +1116,22 @@ module AgentCoord
       ['"', "'"].include?(char) ? char : nil
     end
 
-    def consumer_assignment_verdict(path, line, code, raw)
+    def consumer_assignment_verdict(code, raw)
       # The value scanner stops at the first unquoted separator, so a second
       # assignment after one (`URL=https://x; URL=`) would be invisible to it and
       # the last-assignment-wins rule could not be applied to the line.
-      if consumer_unquoted_text(code).match?(CONSUMER_SECOND_ASSIGNMENT)
-        return unprovable_verdict(path, line, "opaque_api_url_reference")
-      end
+      return unprovable_verdict("opaque_api_url_reference") if consumer_unquoted_text(code).match?(
+        CONSUMER_SECOND_ASSIGNMENT
+      )
 
       value = consumer_env_assignment_value(raw)
       # A value the shell would expand at source time (`"${FLEET_URL:-}"`, a
       # command substitution) is not decidable from the file text.
-      return unprovable_verdict(path, line, "unresolved_expansion") if consumer_expanding_value?(value)
+      return unprovable_verdict("unresolved_expansion") if consumer_expanding_value?(value)
 
       return CONSUMER_ENV_INERT if value.empty?
 
-      ConsumerEnvVerdict.new(:configured, REASON_CONFIGURED, consumer_redacted_construct(line), path)
+      ConsumerEnvVerdict.new(:configured, REASON_CONFIGURED)
     end
 
     def consumer_expanding_value?(value)
@@ -1158,24 +1141,24 @@ module AgentCoord
     # Includes are followed exactly one level deep: the nested fold is called with
     # follow_includes: false, so recursion is impossible by construction, and a
     # nested include is itself a cannot-prove stop rather than a silent miss.
-    def consumer_include_verdict(path, line, code, verdict, follow_includes)
-      return unprovable_verdict(path, line, "nested_include") unless follow_includes
+    def consumer_include_verdict(code, verdict, follow_includes)
+      return unprovable_verdict("nested_include") unless follow_includes
       # Only a line that is *just* an include may be followed. Anything after the
       # include word — a second include (`. a || . b`), or an assignment
       # (`. a; URL=https://x`) — is invisible to the include fold, so following it
       # would silently drop whatever else the line does.
-      if consumer_unquoted_text(code).match?(CONSUMER_STATEMENT_SEPARATOR)
-        return unprovable_verdict(path, line, "guarded_include")
-      end
+      return unprovable_verdict("guarded_include") if consumer_unquoted_text(code).match?(
+        CONSUMER_STATEMENT_SEPARATOR
+      )
 
       target, reason = consumer_include_path(code[CONSUMER_INCLUDE_DIRECTIVE, 1])
-      return unprovable_verdict(path, line, reason) unless target
+      return unprovable_verdict(reason) unless target
 
       consumer_env_verdict(target, verdict, follow_includes: false)
     rescue SystemCallError, ArgumentError
       # Readability was checked before the fold; losing the file in between, or
       # finding it undecodable, leaves its effect unproven.
-      unprovable_verdict(path, line, "unreadable_include")
+      unprovable_verdict("unreadable_include")
     end
 
     # A line that is neither our assignment, a leading include, nor an unset is
@@ -1189,7 +1172,7 @@ module AgentCoord
     # options"` and `DOC_URL="see AGENT_COORD_API_URL.md"` are ordinary values, not
     # shell syntax. Command substitution is the exception — double quotes do not
     # stop it running — so that one is matched against the quoted text.
-    def consumer_opaque_line_verdict(path, line, code)
+    def consumer_opaque_line_verdict(code)
       structure = consumer_unquoted_text(code)
       reason = if structure.match?(CONSUMER_API_URL_MENTION)
                  "opaque_api_url_reference"
@@ -1200,7 +1183,7 @@ module AgentCoord
                elsif code.match?(CONSUMER_COMMAND_SUBSTITUTION) && !consumer_contained_substitution?(code)
                  "command_substitution"
                end
-      reason && unprovable_verdict(path, line, reason)
+      reason && unprovable_verdict(reason)
     end
 
     # A substitution confined to another variable's value runs in a subshell and
@@ -1233,20 +1216,32 @@ module AgentCoord
       index = 0
       while index < code.length
         char = code[index]
+        # An escaped character is a literal and must not reach the quote tracker —
+        # advancing by one let `\"` close a double-quoted span, which misattributed
+        # the rest of the line to inside-quotes. The sibling scanners advance by two;
+        # this one also has to emit the escaped character itself.
         if consumer_escape?(quote, char)
-          index += 1
+          consumer_append_normalized(text, boundary, code[index + 1], quote)
+          index += 2
           next
         end
 
         state = consumer_next_quote_state(quote, char)
-        unless ['"', "'"].include?(char) && (state.nil? || quote.nil?)
-          text << char
-          boundary << (quote ? "_" : char)
-        end
+        delimiter = ['"', "'"].include?(char) && (state.nil? || quote.nil?)
+        consumer_append_normalized(text, boundary, char, quote) unless delimiter
         quote = state
         index += 1
       end
       [text, boundary]
+    end
+
+    # The character goes into the text view as-is; the boundary view sees "_" when
+    # it came from inside quotes, so quoted content cannot pose as shell structure.
+    def consumer_append_normalized(text, boundary, char, quote)
+      return if char.nil?
+
+      text << char
+      boundary << (quote ? "_" : char)
     end
 
     # True when the line assigns this variable for real: the name (which may be
@@ -1298,101 +1293,29 @@ module AgentCoord
       unquoted
     end
 
-    def unprovable_verdict(path, line, reason)
-      ConsumerEnvVerdict.new(:unprovable, reason, consumer_redacted_construct(line), path)
+    # No file text: a verdict carries a classification, nothing more.
+    def unprovable_verdict(reason)
+      ConsumerEnvVerdict.new(:unprovable, reason)
     end
 
-    # The construct is operator-facing and `doctor --json` lands in CI logs and
-    # support bundles, so an assigned value never appears in it: a fleet API URL
-    # can carry basic-auth credentials or a token query parameter. Everything up to
-    # the first "=" is kept, which is what identifies the construct; a line with no
-    # assignment (an include, `eval`, a command substitution) is unchanged.
-    # Redaction is per shell word, so a quoted value carries through its own spaces
-    # (`URL="https://user:pa ss@host"` surrenders all of it, not just up to the
-    # space) and every assignment on the line is covered, which keeps a prefix
-    # assignment naming the variable the refusal is about.
-    def consumer_redacted_construct(line)
-      text = line.strip
-      out = +""
-      index = 0
-      previous = nil
-      while index < text.length
-        if text[index].match?(/\s/)
-          out << text[index]
-          index += 1
-          next
-        end
+    # `export AGENT_COORD_API{_URL,}=x` assigns AGENT_COORD_API_URL, and so does any
+    # other split of the name across brace expansion. Braces are never expanded
+    # here; a declaration builtin whose assigned name carries an unquoted brace
+    # before its "=" is refused instead. Judged on the boundary view, so a brace
+    # that came from inside quotes — where a shell does not expand it — does not
+    # count. Without a declaration builtin the shell recognizes the assignment word
+    # before brace expansion, so that case is genuinely inert and stays permitted.
+    def consumer_brace_expanded_declaration?(code)
+      _, boundary = consumer_name_normalized_pair(code)
+      args = boundary.strip[CONSUMER_DECLARATION_BUILTIN, 1]
+      return false unless args
 
-        word_end = consumer_word_end(text, index)
-        word = text[index...word_end]
-        out << consumer_construct_word(word, after_include: previous&.match?(CONSUMER_INCLUDE_WORD))
-        previous = word
-        index = word_end
-      end
-      out
-    end
+      word = args.split(/\s+/).drop_while { |candidate| candidate.match?(CONSUMER_OPTION_WORD) }.first
+      return false unless word
 
-    # What a word contributes to the construct. An assignment keeps its name and
-    # surrenders its value; a source directive's target is kept, being a path of the
-    # same kind the report already names; shell syntax and the variable's own name
-    # are kept. Everything else is omitted rather than echoed, because file content
-    # this probe did not parse may be a credential — the reason says which kind of
-    # construct stopped the write, and the env file says where it is.
-    def consumer_construct_word(word, after_include:)
+      brace = word.index(CONSUMER_BRACE_OPEN)
       assign = word.index("=")
-      return "#{word[0..assign]}<redacted>" if assign && assign < word.length - 1
-      return word if assign || after_include
-      return word if word.match?(CONSUMER_SAFE_CONSTRUCT_WORD) || word.match?(CONSUMER_API_URL_MENTION)
-
-      CONSUMER_CONSTRUCT_OMITTED
-    end
-
-    # Index just past the shell word starting at index. Unquoted whitespace ends
-    # it, while a quoted span, a `$(…)`/`${…}` expansion, or a backtick span all
-    # carry through spaces — a value like `$(vault read -field=url secret/x)` is one
-    # word, so redacting per word covers all of it rather than the first fragment.
-    def consumer_word_end(text, index)
-      quote = nil
-      depth = 0
-      while index < text.length
-        char = text[index]
-        if consumer_escape?(quote, char)
-          index += 2
-          next
-        end
-
-        if quote.nil?
-          skipped = consumer_expansion_skip(text, index, depth) { |change| depth += change }
-          if skipped
-            index = skipped
-            next
-          end
-
-          break if depth.zero? && char.match?(/\s/)
-        end
-        quote = consumer_next_quote_state(quote, char)
-        index += 1
-      end
-      index
-    end
-
-    # Advances past expansion syntax, returning the new index, or nil when the
-    # character is not expansion syntax. `depth` tracks open `$(`/`${` nesting so a
-    # closing bracket only counts inside one.
-    def consumer_expansion_skip(text, index, depth)
-      char = text[index]
-      if char == "$" && ["(", "{"].include?(text[index + 1].to_s)
-        yield 1
-        return index + 2
-      end
-      if char == "`"
-        close = text.index("`", index + 1)
-        return close ? close + 1 : text.length
-      end
-      return nil unless depth.positive? && [")", "}"].include?(char)
-
-      yield(-1)
-      index + 1
+      !brace.nil? && (assign.nil? || brace < assign)
     end
 
     # The include target the guard is willing to read, or [nil, reason] when its
@@ -1571,7 +1494,7 @@ module AgentCoord
       opts.separator ""
       opts.separator "Backend safety:"
       opts.separator "    Exit 2 (doctor status: split_brain) when a consumer env file configures"
-      opts.separator "    AGENT_COORD_API_URL — or contains a construct that could set it and cannot"
+      opts.separator "    AGENT_COORD_API_URL — or carries a construct that could set it and cannot"
       opts.separator "    be proven inert — while this CLI resolved to the implicit local root: the"
       opts.separator "    write would be invisible to the fleet. The CLI never sources or evaluates"
       opts.separator "    your env files, so it fails closed instead of guessing. The error names the"
@@ -1599,15 +1522,19 @@ module AgentCoord
       opts.separator "read, resolve, or contain within your config dir, an include inside an include,"
       opts.separator "an include that is not the first statement on its line (`[ -f x ] && . x`),"
       opts.separator "an assignment from an unresolved expansion or command substitution, an"
-      opts.separator "assignment whose name carries quoting or a backslash (a shell removes those"
-      opts.separator "before assigning, so `export \"AGENT_COORD_API_URL\"=x` does configure it), a"
-      opts.separator "declared name that only exists after an expansion, an assignment split across"
-      opts.separator "lines by a backslash-newline, an env file that exists but"
-      opts.separator "is not valid UTF-8 or cannot be read, and any other line that could set"
-      opts.separator "AGENT_COORD_API_URL. split_brain_reason and"
-      opts.separator "split_brain_construct name which construct decided it (with assigned values"
-      opts.separator "redacted and unrecognized words omitted, so no output carries a credential), and"
-      opts.separator "split_brain_construct_file names the sourced file when it is not the env file."
+      opts.separator "assignment whose name carries quoting, a backslash, or brace expansion (a shell"
+      opts.separator "resolves those before assigning, so `export \"AGENT_COORD_API_URL\"=x` and"
+      opts.separator "`export AGENT_COORD_API{_URL,}=x` both configure it), a declared name that only"
+      opts.separator "exists after an expansion, an assignment split across lines by a"
+      opts.separator "backslash-newline, an env file that exists but is not valid UTF-8 or cannot be"
+      opts.separator "read, and any other line that could set AGENT_COORD_API_URL."
+      opts.separator "split_brain_reason names which class of construct decided it. Nothing from the"
+      opts.separator "file's contents is reported — not the line, not an include target — because a"
+      opts.separator "line the probe could not parse may carry a credential and no output should."
+      opts.separator "The reason plus split_brain_env_file are what locate it."
+      opts.separator "Detection is conservative, not exhaustive: it refuses everything it cannot prove"
+      opts.separator "inert, and a name produced only by expansion at source time is refused where it"
+      opts.separator "is visible rather than resolved."
       opts.separator "Provably inert env files still pass: the last assignment wins, so a later"
       opts.separator "blank assignment or unset leaves no fleet URL configured."
       opts.separator "Select local mode explicitly to return to ok and exit 0: --state-root PATH,"
@@ -2618,14 +2545,13 @@ module AgentCoord
         "status" => "ok"
       }
       # Both a proven assignment and an unprovable construct are reported as
-      # split_brain and exit 2; reason/construct say which, and where.
+      # split_brain and exit 2. The report is the reason class and the env file, and
+      # deliberately nothing from the file's contents.
       finding = consumer_split_brain_finding(options)
       if finding
         payload["status"] = "split_brain"
         payload["split_brain_env_file"] = finding.fetch("env_file")
         payload["split_brain_reason"] = finding.fetch("reason")
-        payload["split_brain_construct"] = finding["construct"] if finding["construct"]
-        payload["split_brain_construct_file"] = finding["construct_file"] if finding["construct_file"]
       end
       if backend_kind == "http" || doctor_prefix_supplied?(options)
         payload["doctor_prefix"] = doctor_read_prefix(options)
@@ -2674,10 +2600,6 @@ module AgentCoord
       # the report is emitted.
       @stdout.puts "split_brain_env_file: #{env_file}"
       @stdout.puts "split_brain_reason: #{payload.fetch('split_brain_reason')}"
-      @stdout.puts "split_brain_construct: #{payload['split_brain_construct']}" if payload["split_brain_construct"]
-      return unless payload["split_brain_construct_file"]
-
-      @stdout.puts "split_brain_construct_file: #{payload.fetch('split_brain_construct_file')}"
     end
 
     def render_doctor_http_details(payload)
