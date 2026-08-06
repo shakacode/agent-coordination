@@ -1182,6 +1182,8 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     assert_includes result.stdout, "cannot prove inert"
     assert_includes result.stdout, "split_brain_reason"
     assert_includes result.stdout, "split_brain_construct"
+    # Every payload field the report can emit is documented, not just two of three.
+    assert_includes result.stdout, "split_brain_construct_file"
     assert_includes result.stdout, "last assignment wins"
   end
 
