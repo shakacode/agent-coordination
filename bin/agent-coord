@@ -864,7 +864,10 @@ module AgentCoord
       # compute it once rather than re-reading the file at each site.
       return options[:split_brain_finding] if options.key?(:split_brain_finding)
 
-      options[:split_brain_finding] = consumer_env_files.filter_map { |path| consumer_env_file_finding(path) }.first
+      # lazy so the first deciding candidate short-circuits: each finding may read
+      # a sourced file as well as the candidate itself.
+      options[:split_brain_finding] =
+        consumer_env_files.lazy.filter_map { |path| consumer_env_file_finding(path) }.first
     end
 
     def consumer_split_brain_env_file(options)
