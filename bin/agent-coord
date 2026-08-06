@@ -39,6 +39,99 @@ module AgentCoord
   # split-brain advisory and the write hard stop.
   LOCAL_MODE_ENV = "AGENT_COORD_LOCAL"
   LOCAL_MODE_TRUE_VALUES = %w[1 true yes].freeze
+  # Consumer env-file probe. The scanner proves inertness only for the constructs
+  # it recognizes: a plain AGENT_COORD_API_URL assignment, an `unset` of it, a
+  # `source`/`.` include it can resolve inside the config directory, a comment or
+  # blank line, and a line that cannot reach the variable at all. Everything else
+  # is a fail-closed "cannot prove" (issue #99).
+  CONSUMER_API_URL_ASSIGNMENT = /^\s*(?:export\s+)?AGENT_COORD_API_URL=(.*)$/
+  CONSUMER_API_URL_UNSET = /^\s*unset\s+(?:-v\s+)?AGENT_COORD_API_URL\s*$/
+  # The variable named anywhere else: an assignment the anchored pattern cannot
+  # read (`[ -n "$F" ] && AGENT_COORD_API_URL=$F`), a bare `export` of it, and so on.
+  # Both boundaries matter: MY_AGENT_COORD_API_URL is a different variable.
+  CONSUMER_API_URL_MENTION = /(?<![A-Za-z0-9_])AGENT_COORD_API_URL(?![A-Za-z0-9_])/
+  # An assignment that survives removing quote characters and backslashes from
+  # anywhere in the name or around the "=". A shell performs that removal before
+  # it sees the assignment, so `export "AGENT_COORD_API_URL"=x`,
+  # `export AGENT_COORD_API"_URL"=x`, `export AGENT_COORD_API\_URL=x`,
+  # `export $'AGENT_COORD_API_URL'=x` and `declare -x` all take effect and are
+  # matched here. A quoted *value* that merely names the variable does not, since
+  # nothing follows the name with an "=" (`DOC_URL="see AGENT_COORD_API_URL.md"`).
+  # The name must sit where a command word can start — line start or after a
+  # statement separator, optionally behind a declaration builtin and its options —
+  # so another variable's value that merely contains the text
+  # (`HELP_TEXT="Set AGENT_COORD_API_URL=<url>"`) is not read as an assignment.
+  # The assigned name, tolerating brace expansion between the name and the "="
+  # (`export "AGENT_COORD_API_URL"{,}=x` assigns it just the same).
+  CONSUMER_API_URL_ASSIGNED_NAME = /(?<![A-Za-z0-9_])AGENT_COORD_API_URL(?:\{[^}]*\})*=/
+  # What may sit before the name for it to still be an assignment: a statement
+  # start, then any number of command prefixes — reserved words, `command`/
+  # `builtin`/`exec` style wrappers, and prefix assignments — then an optional
+  # declaration builtin with its options. Matched against the boundary view, where
+  # everything that came from inside quotes is neutralized, so a value that merely
+  # looks like this cannot satisfy it.
+  CONSUMER_COMMAND_WORD_PREFIX = /
+    (?:\A|[;&|(){}]|\b(?:then|do|else|elif|if|while|until|in)\b)\s*
+    (?:(?:!|time|command|builtin|exec|nohup|env|[A-Za-z_][A-Za-z0-9_]*=\S*)\s+)*
+    (?:(?:export|declare|typeset|readonly)\s+(?:-{1,2}[A-Za-z]*\s+)*)?\z
+  /x
+  # A declaration builtin whose assigned name contains brace expansion before the
+  # "=" (`export AGENT_COORD_API{_URL,}=x` sets AGENT_COORD_API_URL). Braces are
+  # never expanded here — the construct is refused instead.
+  CONSUMER_BRACE_OPEN = "{"
+  # A declaration builtin whose name position is an expansion (`export ${N}=x`):
+  # the name is not in the file text, so its effect cannot be proven.
+  CONSUMER_DECLARATION_BUILTIN = /\A\s*(?:export|declare|typeset|readonly)\s+(\S.*)\z/
+  CONSUMER_OPTION_WORD = /\A-{1,2}[A-Za-z]*\z/
+  CONSUMER_ENV_INERT_LINE = /\A\s*(?:#|\z)/
+  # An odd number of trailing backslashes: a backslash-newline the shell removes
+  # before tokenizing, so the next physical line continues this one.
+  CONSUMER_LINE_CONTINUATION = /(?<!\\)\\(?:\\\\)*\z/
+  CONSUMER_INCLUDE_DIRECTIVE = /^\s*(?:source|\.)\s+(\S.*)$/
+  # A second assignment — or an unset — after a statement separator on the same
+  # line. The value scanner stops at the separator, so last-assignment-wins cannot
+  # see past it either way. A mention in a trailing comment is not one of these.
+  CONSUMER_SECOND_ASSIGNMENT = /
+    [;&|]\s*
+    (?:(?:export\s+)?AGENT_COORD_API_URL=|unset\s+(?:-v\s+)?AGENT_COORD_API_URL)
+  /x
+  # An include that is not the first statement on its line — `[ -f x ] && . x`,
+  # `true; . x`, `if [ -f x ]; then . x; fi`. Whether it runs at all depends on the
+  # guard, so it is unprovable rather than followed.
+  # Matched against quote-stripped text, so the include's argument may be gone.
+  CONSUMER_COMPOUND_INCLUDE = /(?:[;&|(){}]|\bthen\b|\bdo\b|\belse\b)\s*(?:source|\.)(?:\s|\z)/
+  CONSUMER_INCLUDE_EXPANSION = /\$(?:\{(HOME|XDG_CONFIG_HOME)\}|(HOME|XDG_CONFIG_HOME)\b)/
+  CONSUMER_COMMAND_SUBSTITUTION = /\$\(|`/
+  CONSUMER_EVAL = %r{(?<![\w./-])eval(?![\w-])}
+  CONSUMER_OTHER_ASSIGNMENT = /\A\s*(?:export\s+)?[A-Za-z_][A-Za-z0-9_]*=/
+  CONSUMER_STATEMENT_SEPARATOR = /[;&|]/
+  REASON_CONFIGURED = "configured_api_url"
+  # Operator-facing sentence per finding: the message has to explain a refusal
+  # that may be blocking valid work, so each reason says what could not be proven.
+  CONSUMER_SPLIT_BRAIN_REASONS = {
+    REASON_CONFIGURED => "configures AGENT_COORD_API_URL",
+    "unresolved_expansion" => "assigns AGENT_COORD_API_URL from a variable or command this CLI cannot evaluate",
+    "opaque_api_url_reference" => "names AGENT_COORD_API_URL outside a plain assignment this CLI can read",
+    "command_substitution" => "runs a command substitution that could set AGENT_COORD_API_URL",
+    "eval" => "evaluates text that could set AGENT_COORD_API_URL",
+    "indirect_declaration" => "declares a variable whose name comes from an expansion this CLI cannot evaluate",
+    "brace_expanded_declaration" => "declares a variable whose name is split across brace expansion, which " \
+                                    "this CLI does not expand",
+    "undecodable_env_file" => "is not valid UTF-8, so this CLI cannot read what the rest of it does",
+    "unreadable_env_file" => "exists but cannot be read by this CLI",
+    "guarded_include" => "sources a file from a compound statement, so whether that include runs — " \
+                         "and what else the line does — is not something this CLI can evaluate",
+    "unreadable_include" => "sources a file this CLI cannot read",
+    "include_outside_config_dir" => "sources a file outside your config directory, which this CLI will not read",
+    "relative_include" => "sources a relative path, which depends on the sourcing shell's working directory",
+    "unexpanded_variable" => "sources a path with a variable this CLI does not expand " \
+                             "(only $HOME and $XDG_CONFIG_HOME)",
+    "unexpanded_tilde" => "sources a path starting with ~, which this CLI does not expand",
+    "nested_include" => "sources a file that itself sources another file, which this CLI does not follow",
+    "empty_include" => "sources an empty target",
+    "config_dir_unresolvable" => "sources a file that cannot be checked because your config directory " \
+                                 "could not be resolved"
+  }.freeze
   MACHINE_ID_ENV = "AGENT_COORD_MACHINE_ID"
   SESSION_ID_ENV = "AGENT_COORD_SESSION_ID"
   CODEX_THREAD_ID_ENV = "CODEX_THREAD_ID"
@@ -48,6 +141,12 @@ module AgentCoord
   MACHINE_MATCH_MATCH = "match"
   MACHINE_MATCH_MISMATCH = "mismatch"
   MACHINE_MATCH_UNVERIFIED = "unverified"
+  # The no-name/no-owner sentinel that lane_name/lane_owner emit and that status
+  # rendering and batch-audit attribution compare against. register-batch rejects
+  # it as a lane name or owner so a registered value can never be mistaken for
+  # "absent". The existing comparison sites keep the equivalent literal; naming
+  # the token here does not change any of them.
+  LANE_IDENTITY_UNKNOWN = "UNKNOWN"
   JSON_PREFIXES = %w[claims heartbeats batches].freeze
   STATE_PREFIXES = (JSON_PREFIXES + %w[events archive]).freeze
   STATE_PATH_PATTERN = %r{\A(?:
@@ -298,6 +397,25 @@ module AgentCoord
     end
   end
   DemoResult = Struct.new(:code, :stdout, :stderr, keyword_init: true)
+  # What a consumer env file means for AGENT_COORD_API_URL after folding it in
+  # order: :empty (provably unset or blanked), :configured (a proven fleet URL),
+  # or :unprovable (a construct whose effect could not be proven inert).
+  # Deliberately carries no text from the file. Reporting a construct meant
+  # reporting file bytes, and no predicate over those bytes could be trusted to
+  # find every credential in them, so the reason class plus the env file path are
+  # the whole report.
+  ConsumerEnvVerdict = Struct.new(:kind, :reason) do
+    def unprovable?
+      kind == :unprovable
+    end
+
+    # Both a proven URL and an unprovable construct decide the file against an
+    # implicit local write; only :empty permits it.
+    def decided?
+      kind != :empty
+    end
+  end
+  CONSUMER_ENV_INERT = ConsumerEnvVerdict.new(:empty).freeze
 
   class Runner # rubocop:disable Metrics/ClassLength
     def initialize(argv, stdout: $stdout, stderr: $stderr, clock: Time, backend_conflict_warnings: true)
@@ -746,7 +864,10 @@ module AgentCoord
       return unless options[:state_root] && !options[:api_url]
       return unless ENV.fetch("AGENT_COORD_API_URL", "").empty?
 
-      env_file = consumer_env_files.find { |path| consumer_api_url_configured?(path) }
+      # Advisory only, and only for a proven assignment: this path already has an
+      # explicit local root, so it warns rather than refusing and must not turn an
+      # unprovable construct into noise on every read.
+      env_file = consumer_env_files.find { |path| proven_split_brain?(consumer_env_file_finding(path) || {}) }
       return unless env_file
 
       @stderr.puts(
@@ -785,41 +906,71 @@ module AgentCoord
       options[:status_root_local] && ENV.fetch("AGENT_COORD_STATE_ROOT", "").empty?
     end
 
-    def consumer_split_brain_env_file(options)
+    # The finding that drives the hard stop: either a proven AGENT_COORD_API_URL
+    # assignment, or a construct whose effect on it could not be proven inert.
+    def consumer_split_brain_finding(options)
       return nil if options[:stack_json]
       return nil unless split_brain_eligible_local?(options)
       return nil unless ENV.fetch("AGENT_COORD_API_URL", "").empty?
       return nil if local_mode_opt_in?
       # Consulted from the notice, the refusal and the doctor payload in one run;
       # compute it once rather than re-reading the file at each site.
-      return options[:split_brain_env_file] if options.key?(:split_brain_env_file)
+      return options[:split_brain_finding] if options.key?(:split_brain_finding)
 
-      options[:split_brain_env_file] = consumer_env_files.find { |path| consumer_api_url_configured?(path) }
+      # lazy so the first deciding candidate short-circuits: each finding may read
+      # a sourced file as well as the candidate itself.
+      options[:split_brain_finding] =
+        consumer_env_files.lazy.filter_map { |path| consumer_env_file_finding(path) }.first
     end
 
-    def consumer_split_brain_message(env_file)
-      "split-brain configuration: #{env_file} configures AGENT_COORD_API_URL, but this CLI resolved to the " \
-        "implicit local backend; refusing writes that would land on the local state root while a fleet API URL " \
-        "is configured. Source #{env_file} for fleet writes, pass --state-root PATH to choose a local root " \
-        "explicitly, or set #{LOCAL_MODE_ENV}=1 to opt into local mode."
+    def consumer_split_brain_env_file(options)
+      consumer_split_brain_finding(options)&.fetch("env_file")
+    end
+
+    # Fail closed on an unprovable construct. The message names the file, the class
+    # of construct, and the three local-mode selections — never text from the file,
+    # since a line the probe could not parse may carry a credential.
+    def consumer_split_brain_message(finding)
+      env_file = finding.fetch("env_file")
+      "split-brain configuration: #{env_file} #{consumer_split_brain_cause(finding)}, but this CLI resolved to " \
+        "the implicit local backend; refusing writes that #{consumer_split_brain_risk(finding)} while a fleet " \
+        "API URL #{consumer_split_brain_certainty(finding)} configured. Source #{env_file} for fleet writes, " \
+        "pass --state-root PATH to choose a local root explicitly, or set #{LOCAL_MODE_ENV}=1 to opt into " \
+        "local mode."
+    end
+
+    def consumer_split_brain_cause(finding)
+      sentence = CONSUMER_SPLIT_BRAIN_REASONS.fetch(finding.fetch("reason"))
+      return sentence if proven_split_brain?(finding)
+
+      "may configure AGENT_COORD_API_URL: it #{sentence}"
+    end
+
+    def consumer_split_brain_risk(finding)
+      proven_split_brain?(finding) ? "would land on the local state root" : "could land on the local state root"
+    end
+
+    def consumer_split_brain_certainty(finding)
+      proven_split_brain?(finding) ? "is" : "may be"
+    end
+
+    # Safe on an absent finding ({}), which the read-command advisory relies on.
+    def proven_split_brain?(finding)
+      finding["reason"] == REASON_CONFIGURED
     end
 
     def refuse_split_brain_write!(command, options)
       return unless split_brain_write_command?(command)
 
-      env_file = consumer_split_brain_env_file(options)
-      return unless env_file
+      finding = consumer_split_brain_finding(options)
+      return unless finding
 
-      raise OperationalError, consumer_split_brain_message(env_file)
+      raise OperationalError, consumer_split_brain_message(finding)
     end
 
     def consumer_env_files
       configured = ENV.fetch("AGENT_COORD_ENV_FILE", "")
-      config_home = ENV.fetch("XDG_CONFIG_HOME", "")
-      if config_home.empty?
-        home = ENV.fetch("HOME", "")
-        config_home = File.join(home, ".config") unless home.empty?
-      end
+      config_home = consumer_config_home
       conventional = if config_home.empty?
                        []
                      else
@@ -828,18 +979,399 @@ module AgentCoord
       ([configured] + conventional).reject(&:empty?).uniq
     end
 
-    def consumer_api_url_configured?(path)
-      File.foreach(path).any? do |line|
-        # Capture from the "=" without consuming the space after it: in a shell,
-        # `=#x` assigns "#x" while `= #x` assigns nothing, and the value scanner
-        # needs that whitespace to tell them apart.
-        match = line.match(/^\s*(?:export\s+)?AGENT_COORD_API_URL=(.*)$/)
-        next false unless match
+    def consumer_config_home
+      config_home = ENV.fetch("XDG_CONFIG_HOME", "")
+      return config_home unless config_home.empty?
 
-        !consumer_env_assignment_value(match[1].to_s).empty?
+      home = ENV.fetch("HOME", "")
+      home.empty? ? "" : File.join(home, ".config")
+    end
+
+    # What one candidate env file means for AGENT_COORD_API_URL: nil when it is
+    # provably inert or absent, otherwise the finding that drives the hard stop.
+    #
+    # A file that exists but cannot be decoded or read is exactly "cannot prove
+    # inert" — one stray byte must not discard the verdict for the rest of the file
+    # — so it stops like any other unprovable construct. Only a genuinely absent
+    # candidate is not a candidate.
+    def consumer_env_file_finding(path)
+      verdict = consumer_env_verdict(path, CONSUMER_ENV_INERT, follow_includes: true)
+      return nil unless verdict.decided?
+
+      { "env_file" => path, "reason" => verdict.reason }
+    rescue Errno::ENOENT, Errno::ENOTDIR
+      nil
+    rescue ArgumentError
+      { "env_file" => path, "reason" => "undecodable_env_file" }
+    rescue SystemCallError
+      { "env_file" => path, "reason" => "unreadable_env_file" }
+    end
+
+    # Fold a consumer env file the way a shell would: assignments take effect in
+    # order and the last one wins, a followed `source`/`.` include contributes its
+    # assignments in place, and any construct whose effect on AGENT_COORD_API_URL
+    # cannot be proven inert decides the file immediately (issue #99).
+    #
+    # Fail closed on that "cannot prove" case, per the maintainer's recorded
+    # direction on #99: for a mutual-exclusion guard, a loud false positive that
+    # the documented local-mode selections clear is the right trade against a
+    # silent false negative that permits an invisible-lease write. Unprovable is
+    # therefore sticky — a later empty assignment does not clear it, because
+    # whether the earlier construct even ran is exactly what is unknown.
+    def consumer_env_verdict(path, verdict, follow_includes:)
+      consumer_env_logical_lines(path) do |line|
+        next if line.match?(CONSUMER_ENV_INERT_LINE)
+
+        updated = consumer_env_line_verdict(line, verdict, follow_includes)
+        next unless updated
+
+        verdict = updated
+        break if verdict.unprovable?
       end
+      verdict
+    end
+
+    # A shell removes backslash-newline before it tokenizes, so a name or value
+    # split across physical lines is one logical line — `AGENT_COORD_API\` followed
+    # by `_URL=https://fleet.example` really does set the variable. Classifying
+    # physical lines would see neither half. An even number of trailing backslashes
+    # is a literal backslash and ends the line.
+    def consumer_env_logical_lines(path)
+      pending = nil
+      File.foreach(path) do |physical|
+        chomped = physical.chomp
+        if chomped.match?(CONSUMER_LINE_CONTINUATION)
+          pending = "#{pending}#{chomped[0..-2]}"
+          next
+        end
+
+        yield "#{pending}#{physical}"
+        pending = nil
+      end
+      yield pending unless pending.nil?
+    end
+
+    def consumer_env_line_verdict(line, verdict, follow_includes)
+      # Every structural check below reads statement shape, so none of them may
+      # see a trailing comment: `MACHINE_ID=$(hostname) # one per host; audit` is
+      # inert, and a `;` inside that comment must not make it look otherwise.
+      code = consumer_executable_text(line)
+      return nil if code.strip.empty?
+
+      # Capture from the "=" without consuming the space after it: in a shell,
+      # `=#x` assigns "#x" while `= #x` assigns nothing, and the value scanner
+      # needs that whitespace to tell them apart.
+      return consumer_assignment_verdict(code, code.match(CONSUMER_API_URL_ASSIGNMENT)[1].to_s) if code.match?(
+        CONSUMER_API_URL_ASSIGNMENT
+      )
+
+      # An assignment the anchored pattern cannot read because quoting, a
+      # backslash, or brace expansion falls inside the name or around the "=".
+      # The shell resolves all of those before assigning, so the variable is set.
+      return unprovable_verdict("opaque_api_url_reference") if consumer_effective_assignment?(code)
+      return unprovable_verdict("indirect_declaration") if consumer_indirect_declaration?(code)
+      return unprovable_verdict("brace_expanded_declaration") if consumer_brace_expanded_declaration?(code)
+      return consumer_include_verdict(code, verdict, follow_includes) if code[CONSUMER_INCLUDE_DIRECTIVE, 1]
+      return CONSUMER_ENV_INERT if code.match?(CONSUMER_API_URL_UNSET)
+
+      consumer_opaque_line_verdict(code)
+    end
+
+    # The part of a line a shell would run: everything before an unquoted `#` that
+    # begins a word. A `#` inside quotes, or inside an unquoted word such as a URL
+    # fragment, is an ordinary character — the same rule the value scanner uses.
+    def consumer_executable_text(line)
+      quote = nil
+      index = 0
+      while index < line.length
+        char = line[index]
+        if consumer_escape?(quote, char)
+          index += 2
+          next
+        end
+
+        quote = consumer_next_quote_state(quote, char)
+        # An unterminated quote runs to end of line, so no comment starts inside it.
+        return line[0...index] if quote.nil? && char == "#" && (index.zero? || line[index - 1].match?(/\s/))
+
+        index += 1
+      end
+      line
+    end
+
+    # A backslash escapes the next character both outside quotes and inside double
+    # quotes, so neither `echo \"x\"` nor `"a\"b"` opens or closes a span there.
+    # Single quotes have no escapes: only another `'` ends them. Missing either case
+    # desynchronizes the scan and hides everything after it on the line.
+    def consumer_escape?(quote, char)
+      char == "\\" && quote != "'"
+    end
+
+    # Quote state after reading one character: nil outside quotes, otherwise the
+    # open quote character.
+    def consumer_next_quote_state(quote, char)
+      return nil if quote == char
+      return quote if quote
+
+      ['"', "'"].include?(char) ? char : nil
+    end
+
+    def consumer_assignment_verdict(code, raw)
+      # The value scanner stops at the first unquoted separator, so a second
+      # assignment after one (`URL=https://x; URL=`) would be invisible to it and
+      # the last-assignment-wins rule could not be applied to the line.
+      return unprovable_verdict("opaque_api_url_reference") if consumer_unquoted_text(code).match?(
+        CONSUMER_SECOND_ASSIGNMENT
+      )
+
+      value = consumer_env_assignment_value(raw)
+      # A value the shell would expand at source time (`"${FLEET_URL:-}"`, a
+      # command substitution) is not decidable from the file text.
+      return unprovable_verdict("unresolved_expansion") if consumer_expanding_value?(value)
+
+      return CONSUMER_ENV_INERT if value.empty?
+
+      ConsumerEnvVerdict.new(:configured, REASON_CONFIGURED)
+    end
+
+    def consumer_expanding_value?(value)
+      value.include?("$") || value.include?("`")
+    end
+
+    # Includes are followed exactly one level deep: the nested fold is called with
+    # follow_includes: false, so recursion is impossible by construction, and a
+    # nested include is itself a cannot-prove stop rather than a silent miss.
+    def consumer_include_verdict(code, verdict, follow_includes)
+      return unprovable_verdict("nested_include") unless follow_includes
+      # Only a line that is *just* an include may be followed. Anything after the
+      # include word — a second include (`. a || . b`), or an assignment
+      # (`. a; URL=https://x`) — is invisible to the include fold, so following it
+      # would silently drop whatever else the line does.
+      return unprovable_verdict("guarded_include") if consumer_unquoted_text(code).match?(
+        CONSUMER_STATEMENT_SEPARATOR
+      )
+
+      target, reason = consumer_include_path(code[CONSUMER_INCLUDE_DIRECTIVE, 1])
+      return unprovable_verdict(reason) unless target
+
+      consumer_env_verdict(target, verdict, follow_includes: false)
     rescue SystemCallError, ArgumentError
+      # Readability was checked before the fold; losing the file in between, or
+      # finding it undecodable, leaves its effect unproven.
+      unprovable_verdict("unreadable_include")
+    end
+
+    # A line that is neither our assignment, a leading include, nor an unset is
+    # inert unless it could set the variable by a route the probe does not parse.
+    # The routes that exist are: naming the variable outside a plain assignment,
+    # sourcing a file from a compound statement (only a *leading* include can be
+    # resolved and followed), eval, and a command substitution that is not
+    # confined to another variable's value (a subshell cannot change this
+    # shell's environment).
+    # Structural tokens are read from quote-stripped text: `GREETING="time to eval
+    # options"` and `DOC_URL="see AGENT_COORD_API_URL.md"` are ordinary values, not
+    # shell syntax. Command substitution is the exception — double quotes do not
+    # stop it running — so that one is matched against the quoted text.
+    def consumer_opaque_line_verdict(code)
+      structure = consumer_unquoted_text(code)
+      reason = if structure.match?(CONSUMER_API_URL_MENTION)
+                 "opaque_api_url_reference"
+               elsif structure.match?(CONSUMER_COMPOUND_INCLUDE)
+                 "guarded_include"
+               elsif structure.match?(CONSUMER_EVAL)
+                 "eval"
+               elsif code.match?(CONSUMER_COMMAND_SUBSTITUTION) && !consumer_contained_substitution?(code)
+                 "command_substitution"
+               end
+      reason && unprovable_verdict(reason)
+    end
+
+    # A substitution confined to another variable's value runs in a subshell and
+    # cannot change this shell's environment, so `MACHINE_ID=$(hostname)` stays
+    # inert. Any statement separator puts that guarantee out of reach, so the line
+    # is treated as unprovable instead.
+    def consumer_contained_substitution?(code)
+      code.match?(CONSUMER_OTHER_ASSIGNMENT) && !consumer_unquoted_text(code).match?(CONSUMER_STATEMENT_SEPARATOR)
+    end
+
+    # The line with quote characters and backslashes removed but their content
+    # kept, which is what a shell assigns from. Distinct from
+    # consumer_unquoted_text, which drops quoted content entirely because it reads
+    # statement structure; here the content is exactly what must stay visible.
+    def consumer_name_normalized_text(code)
+      consumer_name_normalized_pair(code).first
+    end
+
+    # Two views of the same normalization: the text a shell would assign from, and
+    # the same text with every character that came from *inside* quotes replaced by
+    # "_". A real assignment always has its statement boundary and any declaration
+    # builtin outside quotes — only the name may be quoted — so the second view is
+    # what the boundary is tested against. Without it, punctuation or a keyword
+    # inside an ordinary value (`NOTE="Do not touch; AGENT_COORD_API_URL=<url>"`)
+    # would look like the start of a new statement.
+    def consumer_name_normalized_pair(code)
+      text = +""
+      boundary = +""
+      quote = nil
+      index = 0
+      while index < code.length
+        char = code[index]
+        # An escaped character is a literal and must not reach the quote tracker —
+        # advancing by one let `\"` close a double-quoted span, which misattributed
+        # the rest of the line to inside-quotes. The sibling scanners advance by two;
+        # this one also has to emit the escaped character itself.
+        if consumer_escape?(quote, char)
+          consumer_append_normalized(text, boundary, code[index + 1], quote)
+          index += 2
+          next
+        end
+
+        state = consumer_next_quote_state(quote, char)
+        delimiter = ['"', "'"].include?(char) && (state.nil? || quote.nil?)
+        consumer_append_normalized(text, boundary, char, quote) unless delimiter
+        quote = state
+        index += 1
+      end
+      [text, boundary]
+    end
+
+    # The character goes into the text view as-is; the boundary view sees "_" when
+    # it came from inside quotes, so quoted content cannot pose as shell structure.
+    def consumer_append_normalized(text, boundary, char, quote)
+      return if char.nil?
+
+      text << char
+      boundary << (quote ? "_" : char)
+    end
+
+    # True when the line assigns this variable for real: the name (which may be
+    # quoted) sits where a command word can start, judged on the boundary view so a
+    # separator or keyword inside another value cannot fake that position.
+    def consumer_effective_assignment?(code)
+      text, boundary = consumer_name_normalized_pair(code)
+      offset = 0
+      while (match = CONSUMER_API_URL_ASSIGNED_NAME.match(text, offset))
+        start = match.begin(0)
+        return true if boundary[0...start].match?(CONSUMER_COMMAND_WORD_PREFIX)
+
+        offset = start + 1
+      end
       false
+    end
+
+    # `export ${N}=x` / `export "$N"=x`: the assigned name is an expansion, so the
+    # file text cannot say which variable it sets. Options are skipped, and a
+    # literal first word (`export PATH="$PATH:/x"`) is not indirect.
+    def consumer_indirect_declaration?(code)
+      # code still carries the line's newline, which the anchored pattern cannot.
+      args = code.strip[CONSUMER_DECLARATION_BUILTIN, 1]
+      return false unless args
+
+      words = consumer_name_normalized_text(args).split(/\s+/)
+      words.drop_while { |word| word.match?(CONSUMER_OPTION_WORD) }.first&.start_with?("$") || false
+    end
+
+    # A line's statement structure with quoted spans removed, so a separator
+    # inside a quoted word — an include path such as "backend;prod.env" — is not
+    # mistaken for a second statement on the line.
+    def consumer_unquoted_text(code)
+      unquoted = +""
+      quote = nil
+      index = 0
+      while index < code.length
+        char = code[index]
+        if consumer_escape?(quote, char)
+          index += 2
+          next
+        end
+
+        state = consumer_next_quote_state(quote, char)
+        unquoted << char if state.nil? && quote.nil?
+        quote = state
+        index += 1
+      end
+      unquoted
+    end
+
+    # No file text: a verdict carries a classification, nothing more.
+    def unprovable_verdict(reason)
+      ConsumerEnvVerdict.new(:unprovable, reason)
+    end
+
+    # `export AGENT_COORD_API{_URL,}=x` assigns AGENT_COORD_API_URL, and so does any
+    # other split of the name across brace expansion. Braces are never expanded
+    # here; a declaration builtin whose assigned name carries an unquoted brace
+    # before its "=" is refused instead. Judged on the boundary view, so a brace
+    # that came from inside quotes — where a shell does not expand it — does not
+    # count. Without a declaration builtin the shell recognizes the assignment word
+    # before brace expansion, so that case is genuinely inert and stays permitted.
+    def consumer_brace_expanded_declaration?(code)
+      _, boundary = consumer_name_normalized_pair(code)
+      args = boundary.strip[CONSUMER_DECLARATION_BUILTIN, 1]
+      return false unless args
+
+      word = args.split(/\s+/).drop_while { |candidate| candidate.match?(CONSUMER_OPTION_WORD) }.first
+      return false unless word
+
+      brace = word.index(CONSUMER_BRACE_OPEN)
+      assign = word.index("=")
+      !brace.nil? && (assign.nil? || brace < assign)
+    end
+
+    # The include target the guard is willing to read, or [nil, reason] when its
+    # effect cannot be proven from the file text plus $HOME/$XDG_CONFIG_HOME.
+    def consumer_include_path(raw_target)
+      word = consumer_env_assignment_value(raw_target)
+      return [nil, "empty_include"] if word.empty?
+      # A shell expands a bare leading "~" but leaves a quoted one alone, and the
+      # scanned word no longer says which it was.
+      return [nil, "unexpanded_tilde"] if word.start_with?("~")
+
+      expanded = consumer_expanded_include_path(word)
+      return [nil, "unexpanded_variable"] unless expanded
+      # A relative include resolves against the sourcing shell's working
+      # directory, which this process cannot know.
+      return [nil, "relative_include"] unless Pathname.new(expanded).absolute?
+
+      consumer_contained_include_path(expanded)
+    end
+
+    # Symlinks and ".." are resolved before the containment decision, so nothing
+    # outside the config directory is read even via a link inside it.
+    def consumer_contained_include_path(expanded)
+      root = consumer_config_root
+      return [nil, "config_dir_unresolvable"] unless root
+
+      resolved = File.realpath(expanded)
+      return [nil, "include_outside_config_dir"] unless resolved.start_with?("#{root}#{File::SEPARATOR}")
+      return [nil, "unreadable_include"] unless File.file?(resolved) && File.readable?(resolved)
+
+      [resolved, nil]
+    rescue SystemCallError
+      [nil, "unreadable_include"]
+    end
+
+    def consumer_config_root
+      config_home = consumer_config_home
+      return nil if config_home.empty?
+
+      File.realpath(config_home)
+    rescue SystemCallError
+      nil
+    end
+
+    # Only the two variables the documented env-file locations use expand; any
+    # other expansion leaves the path unproven.
+    def consumer_expanded_include_path(word)
+      expanded = word.gsub(CONSUMER_INCLUDE_EXPANSION) do
+        value = ENV.fetch(Regexp.last_match(1) || Regexp.last_match(2), "")
+        return nil if value.empty?
+
+        value
+      end
+      return nil if expanded.include?("$")
+
+      expanded
     end
 
     # What a shell would actually leave in the variable. Quoted and unquoted
@@ -928,13 +1460,7 @@ module AgentCoord
         opts.separator "Exit 2 means coordination state for that command is UNKNOWN."
         opts.separator ""
       when "doctor"
-        opts.separator ""
-        opts.separator "Doctor modes:"
-        opts.separator "    default  lightweight auth, ref, and layout checks without reading every JSON file"
-        opts.separator "    --deep   parse every claim, heartbeat, and batch JSON file"
-        opts.separator "    --stack-json  emit the versioned component report for stack aggregators"
-        opts.separator "Exit 2 means coordination state is UNKNOWN until backend access is fixed."
-        opts.separator ""
+        add_doctor_command_help(opts)
       when "gc"
         add_gc_command_help(opts)
       when "register-batch"
@@ -942,6 +1468,8 @@ module AgentCoord
         opts.separator "Batch registration:"
         opts.separator "    --file PATH           JSON manifest with batch_id and lanes"
         opts.separator "    --launch-prompt PATH|-  prompt file or stdin (overrides manifest)"
+        opts.separator "A lane name or owner of UNKNOWN (any case) is rejected: it is the reserved"
+        opts.separator "no-name/no-owner sentinel in status and batch-audit output."
         opts.separator ""
       when "record-event"
         add_record_event_command_help(opts)
@@ -956,6 +1484,62 @@ module AgentCoord
         opts.separator "    --pr-state STATE            final pull request state"
         opts.separator ""
       end
+      add_split_brain_command_help(opts) if split_brain_write_command?(command)
+    end
+
+    # claim/heartbeat have no command-specific help section, so the note is
+    # attached by write-command class rather than per branch: every command that
+    # can now fail with exit 2 for this reason documents it identically.
+    def add_split_brain_command_help(opts)
+      opts.separator ""
+      opts.separator "Backend safety:"
+      opts.separator "    Exit 2 (doctor status: split_brain) when a consumer env file configures"
+      opts.separator "    AGENT_COORD_API_URL — or carries a construct that could set it and cannot"
+      opts.separator "    be proven inert — while this CLI resolved to the implicit local root: the"
+      opts.separator "    write would be invisible to the fleet. The CLI never sources or evaluates"
+      opts.separator "    your env files, so it fails closed instead of guessing. The error names the"
+      opts.separator "    file and the construct. Source that env file for fleet writes, or select"
+      opts.separator "    local mode explicitly with --state-root PATH, AGENT_COORD_STATE_ROOT, or"
+      opts.separator "    AGENT_COORD_LOCAL=1."
+      opts.separator ""
+    end
+
+    def add_doctor_command_help(opts)
+      opts.separator ""
+      opts.separator "Doctor modes:"
+      opts.separator "    default  lightweight auth, ref, and layout checks without reading every JSON file"
+      opts.separator "    --deep   parse every claim, heartbeat, and batch JSON file"
+      opts.separator "    --stack-json  emit the versioned component report for stack aggregators"
+      opts.separator "Exit 2 means coordination state is UNKNOWN until backend access is fixed."
+      opts.separator "Exit 2 with status: split_brain means a consumer env file (AGENT_COORD_ENV_FILE,"
+      opts.separator "$XDG_CONFIG_HOME/agent-coord/env, $XDG_CONFIG_HOME/agent-coord/http-env.sh, or a"
+      opts.separator "source/. include one level inside the config dir) configures AGENT_COORD_API_URL"
+      opts.separator "while this CLI resolved to a local root that governs reads only; the JSON payload"
+      opts.separator "names it in split_brain_env_file. The same condition hard stops claim, release,"
+      opts.separator "heartbeat, record-event, and register-batch."
+      opts.separator "The probe reads your env files as text and never sources or evaluates them, so"
+      opts.separator "it also fails closed on a construct it cannot prove inert: an include it cannot"
+      opts.separator "read, resolve, or contain within your config dir, an include inside an include,"
+      opts.separator "an include that is not the first statement on its line (`[ -f x ] && . x`),"
+      opts.separator "an assignment from an unresolved expansion or command substitution, an"
+      opts.separator "assignment whose name carries quoting, a backslash, or brace expansion (a shell"
+      opts.separator "resolves those before assigning, so `export \"AGENT_COORD_API_URL\"=x` and"
+      opts.separator "`export AGENT_COORD_API{_URL,}=x` both configure it), a declared name that only"
+      opts.separator "exists after an expansion, an assignment split across lines by a"
+      opts.separator "backslash-newline, an env file that exists but is not valid UTF-8 or cannot be"
+      opts.separator "read, and any other line that could set AGENT_COORD_API_URL."
+      opts.separator "split_brain_reason names which class of construct decided it. Nothing from the"
+      opts.separator "file's contents is reported — not the line, not an include target — because a"
+      opts.separator "line the probe could not parse may carry a credential and no output should."
+      opts.separator "The reason plus split_brain_env_file are what locate it."
+      opts.separator "Detection is conservative, not exhaustive: it refuses everything it cannot prove"
+      opts.separator "inert, and a name produced only by expansion at source time is refused where it"
+      opts.separator "is visible rather than resolved."
+      opts.separator "Provably inert env files still pass: the last assignment wins, so a later"
+      opts.separator "blank assignment or unset leaves no fleet URL configured."
+      opts.separator "Select local mode explicitly to return to ok and exit 0: --state-root PATH,"
+      opts.separator "AGENT_COORD_STATE_ROOT, or AGENT_COORD_LOCAL=1."
+      opts.separator ""
     end
 
     def add_record_event_command_help(opts)
@@ -1703,7 +2287,7 @@ module AgentCoord
         render_doctor_text(payload, doctor_options, section_notes)
       end
       raise_machine_identity_mismatch!(environment_identity) if environment_identity
-      raise_consumer_split_brain!(payload)
+      raise_consumer_split_brain!(payload, doctor_options)
       0
     ensure
       close_store(store)
@@ -1737,11 +2321,10 @@ module AgentCoord
       environment_identity.fetch("machine_match") == MACHINE_MATCH_MISMATCH
     end
 
-    def raise_consumer_split_brain!(payload)
-      env_file = payload["split_brain_env_file"]
-      return unless env_file
+    def raise_consumer_split_brain!(payload, options)
+      return unless payload["split_brain_env_file"]
 
-      raise OperationalError, consumer_split_brain_message(env_file)
+      raise OperationalError, consumer_split_brain_message(consumer_split_brain_finding(options))
     end
 
     def raise_machine_identity_mismatch!(environment_identity)
@@ -1961,10 +2544,14 @@ module AgentCoord
         "deep" => !deep.nil?,
         "status" => "ok"
       }
-      split_brain_file = consumer_split_brain_env_file(options)
-      if split_brain_file
+      # Both a proven assignment and an unprovable construct are reported as
+      # split_brain and exit 2. The report is the reason class and the env file, and
+      # deliberately nothing from the file's contents.
+      finding = consumer_split_brain_finding(options)
+      if finding
         payload["status"] = "split_brain"
-        payload["split_brain_env_file"] = split_brain_file
+        payload["split_brain_env_file"] = finding.fetch("env_file")
+        payload["split_brain_reason"] = finding.fetch("reason")
       end
       if backend_kind == "http" || doctor_prefix_supplied?(options)
         payload["doctor_prefix"] = doctor_read_prefix(options)
@@ -2012,6 +2599,7 @@ module AgentCoord
       # The remediation text arrives once, on stderr, from the error raised after
       # the report is emitted.
       @stdout.puts "split_brain_env_file: #{env_file}"
+      @stdout.puts "split_brain_reason: #{payload.fetch('split_brain_reason')}"
     end
 
     def render_doctor_http_details(payload)
@@ -4122,16 +4710,22 @@ module AgentCoord
     end
 
     def lane_name(lane)
-      lane["name"] || lane["id"] || "UNKNOWN"
+      lane["name"] || lane["id"] || LANE_IDENTITY_UNKNOWN
     end
 
     def malformed_lane_name?(name)
       name.to_s.include?(":")
     end
 
+    # register-batch refuses to register this token (any case) as a lane name or
+    # owner, so a lane that renders as UNKNOWN really has no name/owner.
+    def reserved_lane_identity?(value)
+      value.to_s.casecmp?(LANE_IDENTITY_UNKNOWN)
+    end
+
     def lane_owner(lane)
       owner = lane["owner"] || lane["agent_id"]
-      owner.to_s.empty? ? "UNKNOWN" : owner
+      owner.to_s.empty? ? LANE_IDENTITY_UNKNOWN : owner
     end
 
     def lane_status(lane, heartbeat)
@@ -4367,6 +4961,7 @@ module AgentCoord
       raise Error, "batch lane #{position} missing name" if name.nil?
       raise Error, "batch lane #{position} name must be a string" unless name.is_a?(String)
       raise Error, "batch lane #{position} missing name" if name.empty?
+      raise Error, reserved_lane_identity_error("#{position} name", name) if reserved_lane_identity?(name)
 
       name
     end
@@ -4376,8 +4971,14 @@ module AgentCoord
       raise Error, "batch lane #{name} missing owner" if owner.nil?
       raise Error, "batch lane #{name} owner must be a string" unless owner.is_a?(String)
       raise Error, "batch lane #{name} missing owner" if owner.empty?
+      raise Error, reserved_lane_identity_error("#{name} owner", owner) if reserved_lane_identity?(owner)
 
       owner
+    end
+
+    def reserved_lane_identity_error(subject, value)
+      "batch lane #{subject} #{value} is reserved: #{LANE_IDENTITY_UNKNOWN} (any case) is the no-name/no-owner " \
+        "sentinel in status and batch-audit output; choose a different value"
     end
 
     def require_options(options, *names)

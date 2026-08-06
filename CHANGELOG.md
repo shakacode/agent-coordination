@@ -160,6 +160,15 @@ when releases begin.
 
 ### Changed
 
+- `register-batch` now rejects a lane whose `name`/`id` or `owner`/`agent_id` is
+  the literal `UNKNOWN`, in any case, with an error naming the offending value.
+  `UNKNOWN` is the no-name/no-owner sentinel that `status` rendering and
+  `batch-audit` lane attribution both compare against, so a lane legitimately
+  registered under that value could not be distinguished from a lane with no
+  name or owner and could be misreported by the fail-closed closeout gate
+  (issue #96). Values that merely contain the token, such as `unknown-docs`, are
+  still accepted, and already-registered batches are unaffected. No gem has been
+  published, so no migration is required.
 - Split-brain configuration is now enforced instead of merely advised. When a
   consumer env file configures `AGENT_COORD_API_URL` but was never sourced, and
   the CLI therefore fell back to the *implicit* local state root, the write
@@ -182,6 +191,74 @@ when releases begin.
 
 ### Fixed
 
+- The consumer env-file probe now follows a `source`/`.` include one level deep,
+  so a wrapper env file whose only content is
+  `. "$HOME/.config/agent-coord/backend.env"` no longer reads as configuring
+  nothing while sourcing it really does select a fleet backend — the
+  invisible-lease split-brain write the hard stop exists to prevent. Two more
+  changes land with it: the **last** assignment wins rather than the first, so a
+  file that sets a URL and later blanks or unsets it is correctly read as
+  unconfigured (previously a false positive that refused valid implicit-local
+  writes); and a construct whose effect on `AGENT_COORD_API_URL` cannot be proven
+  inert now hard stops exactly like a proven fleet URL, naming the file and the
+  exact construct. That covers an include the CLI cannot read, resolve, or
+  contain within the config directory, an include inside an include, an include
+  that is not the first statement on its line (`[ -f "$F" ] && . "$F"`, whose
+  execution depends on the guard), a value from an unresolved expansion or
+  command substitution (`"${FLEET_URL:-}"`), the variable named outside a plain
+  assignment, `eval`, and a command substitution that is not confined to another
+  variable's value. Because a shell removes quoting before it assigns, an
+  assignment whose *name* carries quoting or a backslash is effective and is
+  refused too — `export "AGENT_COORD_API_URL"=x`, `export AGENT_COORD_API"_URL"=x`,
+  `export $'AGENT_COORD_API_URL'=x`, `export AGENT_COORD_API\_URL=x`,
+  `declare -x`/`typeset -x`/`export --`, and a declared name that only exists
+  after an expansion (`export ${N}=x`), and a declaration builtin whose assigned
+  name is split across brace expansion (`export AGENT_COORD_API{_URL,}=x`, which a
+  shell resolves to this variable; without a declaration builtin the assignment word
+  is recognized first, so that shape is genuinely inert and stays permitted).
+  Physical lines joined by a
+  backslash-newline are folded into one logical line first, since a shell removes
+  that continuation before tokenizing and an identifier split across two lines
+  carries the whole name on neither. An env file that exists but is not valid
+  UTF-8, or cannot be read, is refused on the same grounds rather than ignored, so
+  one stray byte cannot discard the verdict for the rest of the file; a file that
+  is simply absent is still not a candidate. The CLI still never sources
+  or evaluates operator shell; include resolution expands only `$HOME` and
+  `$XDG_CONFIG_HOME`, requires an absolute target, and refuses any target that
+  resolves — after symlink and `..` resolution — outside the config directory.
+  For a mutual-exclusion guard, a loud false positive that `--state-root`,
+  `AGENT_COORD_STATE_ROOT`, or `AGENT_COORD_LOCAL=1` clears beats a silent false
+  negative that permits an invisible-lease write. `doctor` reports the deciding
+  construct in `split_brain_reason`/`split_brain_construct` (plus
+  `split_brain_construct_file` when it lives in a sourced fragment) and exits
+  `2`. No output reports anything read out of an env file: `split_brain_reason`
+  names the class of construct and `split_brain_env_file` names the file, and the
+  offending line itself — including an include target — is never quoted, on any
+  surface, because a fleet API URL can embed basic-auth credentials or a token
+  parameter and `doctor --json` lands in CI logs. Reducing the line before printing
+  it was tried and abandoned: deciding which bytes are a secret got base64 padding,
+  words ending in `=`, tokens sharing a word with the variable name, and
+  token-bearing include paths wrong. Detection is likewise conservative rather than
+  exhaustive — it refuses what it cannot prove inert and does not claim to
+  enumerate every construct a shell could use. Lines that cannot reach the
+  variable — comments, other variables
+  (including one this name is only a prefix of, such as `MY_AGENT_COORD_API_URL`),
+  a compound statement that sources nothing, and a substitution confined to
+  another variable's value such as `MACHINE_ID=$(hostname)` — stay inert, and the
+  read-command advisory warning stays limited to a proven assignment (issue #99).
+  No gem has been published, so no migration is required.
+- `doctor --help` now documents the `split_brain` status: that `doctor` exits `2`
+  with `status: split_brain` when a consumer env file configures — or cannot be
+  proven not to configure — `AGENT_COORD_API_URL` while the CLI resolved to a
+  local root governing reads only, that the JSON payload names the file in
+  `split_brain_env_file` and the deciding construct in `split_brain_reason` and
+  `split_brain_construct`, and that
+  `--state-root PATH`, `AGENT_COORD_STATE_ROOT`, and `AGENT_COORD_LOCAL=1` are
+  the explicit local-mode selections that return it to `ok`. The write commands
+  that hard stop for the same reason (`claim`, `release`, `heartbeat`,
+  `record-event`, `register-batch`) now carry a matching `Backend safety:` note in
+  their own `--help` output, and `register-batch --help` documents the reserved
+  `UNKNOWN` lane identity (issue #100).
 - The consumer env-file probe no longer reads a commented-out assignment such as
   `AGENT_COORD_API_URL= # remote disabled` as a configured fleet URL. Sourcing
   that file leaves the variable empty, so it selects no fleet backend; the value

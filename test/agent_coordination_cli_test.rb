@@ -112,6 +112,9 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
   # In-process runners read the real process ENV, so keep them off the developer's
   # consumer env file, which would otherwise trip the split-brain guard.
   CONSUMER_ENV_KEYS = %w[AGENT_COORD_ENV_FILE AGENT_COORD_LOCAL XDG_CONFIG_HOME].freeze
+  # Secrets planted in the credential-bearing env fixtures. A leak of either on any
+  # surface is the failure the output-safety scan exists to catch.
+  CREDENTIAL_FIXTURES = %w[SUPERSECRETsklive9f3a dXNlcjpwYXNzd29yZA].freeze
 
   def setup
     @state_root = Dir.mktmpdir("agent-coord-test")
@@ -1164,6 +1167,449 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     refute_includes result.stdout, "--deep"
     refute_includes result.stdout, "--doctor-prefix"
     refute_includes result.stdout, "--stack-json"
+  end
+
+  # issue #100: the hard-stop error is how operators discover this status, so
+  # doctor's own help has to name it and the way back to ok.
+  def test_doctor_help_documents_split_brain_status_and_local_mode_selections
+    result = run_agent_coord("doctor", "--help", state_root: nil)
+
+    assert_equal 0, result.status.exitstatus, result.stderr
+    assert_includes result.stdout, "status: split_brain"
+    assert_includes result.stdout, "split_brain_env_file"
+    assert_includes result.stdout, "--state-root PATH"
+    assert_includes result.stdout, "AGENT_COORD_STATE_ROOT"
+    assert_includes result.stdout, "AGENT_COORD_LOCAL=1"
+    # The fail-closed half: what it refuses on, and what it reports.
+    assert_includes result.stdout, "never sources or evaluates"
+    assert_includes result.stdout, "cannot prove inert"
+    assert_includes result.stdout, "split_brain_reason"
+    assert_includes result.stdout, "brace expansion"
+    # The output-safety guarantee and the honest detection bound are both stated,
+    # and no construct field is advertised because none is emitted.
+    assert_includes result.stdout, "Nothing from the"
+    assert_includes result.stdout, "conservative, not exhaustive"
+    refute_includes result.stdout, "split_brain_construct"
+    assert_includes result.stdout, "last assignment wins"
+  end
+
+  # Every command that can now exit 2 for the same reason documents it; read
+  # commands keep the advisory warning and must not claim a hard stop.
+  def test_write_command_help_documents_the_split_brain_hard_stop
+    %w[claim release heartbeat record-event register-batch].each do |command|
+      result = run_agent_coord(command, "--help", state_root: nil)
+
+      assert_equal 0, result.status.exitstatus, result.stderr
+      assert_includes result.stdout, "Backend safety:", command
+      assert_includes result.stdout, "split_brain", command
+      assert_includes result.stdout, "cannot", command
+      assert_includes result.stdout, "AGENT_COORD_LOCAL=1", command
+    end
+
+    %w[status batch-audit gc doctor].each do |command|
+      result = run_agent_coord(command, "--help", state_root: nil)
+
+      refute_includes result.stdout, "Backend safety:", command
+    end
+  end
+
+  def test_register_batch_help_documents_the_reserved_lane_identity
+    result = run_agent_coord("register-batch", "--help", state_root: nil)
+
+    assert_equal 0, result.status.exitstatus, result.stderr
+    assert_includes result.stdout, "UNKNOWN (any case) is rejected"
+  end
+
+  # issue #99: a wrapper env file that delegates the assignment to a sourced
+  # fragment does configure a fleet URL when sourced, so an unsourced implicit
+  # local write is the same invisible-lease split brain #97/#98 hard stop on.
+  def test_write_command_hard_stops_for_wrapper_env_file_that_sources_the_assignment
+    with_consumer_env_config do |_root, agent_dir, env|
+      env_file = File.join(agent_dir, "env")
+      File.write(File.join(agent_dir, "backend.env"), "AGENT_COORD_API_URL=https://fleet.example\n")
+      # Same content under a filename whose characters look like separators.
+      File.write(File.join(agent_dir, "backend;prod.env"), "AGENT_COORD_API_URL=https://fleet.example\n")
+      ['. "$HOME/.config/agent-coord/backend.env"',
+       'source "$XDG_CONFIG_HOME/agent-coord/backend.env"',
+       "source ${XDG_CONFIG_HOME}/agent-coord/backend.env",
+       # A trailing comment does not make the include a compound statement, so it
+       # is still resolved and followed rather than reported as unprovable.
+       '. "$XDG_CONFIG_HOME/agent-coord/backend.env" # fleet backend; see docs',
+       # Nor does a separator inside the quoted path: this is one statement.
+       '. "$XDG_CONFIG_HOME/agent-coord/backend;prod.env"',
+       ". #{File.join(agent_dir, 'backend.env')}"].each_with_index do |include_line, index|
+        File.write(env_file, "# wrapper: the assignment lives in backend.env\n#{include_line}\n")
+
+        result = run_consumer_env_cli(env, *split_brain_claim_args(index))
+
+        assert_equal 2, result.status.exitstatus, "#{include_line}: #{result.stderr}"
+        assert_includes result.stderr, "split-brain configuration", include_line
+        assert_includes result.stderr, env_file, include_line
+        refute_includes result.stderr, "local mode — single-machine only"
+
+        # The include was followed, not refused as unprovable.
+        assert_doctor_reports_split_brain(env, env_file, "configured_api_url", include_line)
+      end
+    end
+  end
+
+  # The cannot-prove policy, per the maintainer's recorded direction on #99: an
+  # include whose effect the probe cannot prove inert fails closed, naming the
+  # construct, rather than permitting a possibly invisible write. The escape
+  # hatches are what make that tolerable.
+  def test_write_command_hard_stops_for_include_it_cannot_prove_inert
+    with_consumer_env_config do |root, agent_dir, env|
+      env_file = File.join(agent_dir, "env")
+      outside = File.join(root, "outside", "backend.env")
+      FileUtils.mkdir_p(File.dirname(outside))
+      File.write(outside, "AGENT_COORD_API_URL=https://fleet.example\n")
+      FileUtils.ln_s(outside, File.join(agent_dir, "escape.env"))
+
+      cannot_prove_includes(outside).each_with_index do |(include_line, reason), index|
+        File.write(env_file, "#{include_line}\n")
+
+        claim = run_consumer_env_cli(env, *split_brain_claim_args(index))
+        assert_equal 2, claim.status.exitstatus, "#{include_line}: #{claim.stderr}"
+        assert_includes claim.stderr, "may configure AGENT_COORD_API_URL", include_line
+        # The include target is not echoed — a path read out of the file can carry a
+        # credential, so the reason class and the env file are the whole report.
+        refute_includes claim.stderr, include_line.strip, include_line
+        assert_includes claim.stderr, "--state-root PATH", include_line
+        assert_includes claim.stderr, "AGENT_COORD_LOCAL=1", include_line
+
+        assert_doctor_reports_split_brain(env, env_file, reason, include_line)
+      end
+    end
+  end
+
+  # Constructs that are not includes and are still not decidable from the file
+  # text: the value depends on the environment at source time, or the variable is
+  # reachable by a route the probe does not parse.
+  def test_write_command_hard_stops_for_constructs_it_cannot_prove_inert
+    with_consumer_env_config do |_root, agent_dir, env|
+      env_file = File.join(agent_dir, "env")
+
+      cannot_prove_lines.each_with_index do |(line, reason), index|
+        File.write(env_file, "#{line}\n")
+
+        claim = run_consumer_env_cli(env, *split_brain_claim_args(index))
+        assert_equal 2, claim.status.exitstatus, "#{line}: #{claim.stderr}"
+        assert_includes claim.stderr, "may configure AGENT_COORD_API_URL", line
+        # Construct text is pinned by the redaction tests, which assert what may and
+        # may not appear; asserting the raw line here would only restate the rule.
+        assert_doctor_reports_split_brain(env, env_file, reason, line)
+      end
+    end
+  end
+
+  # A leading include followed by another statement on the same line: the include
+  # fold never sees the trailing assignment, so following the line would silently
+  # drop it. Reported by review as a real permit hole — the inert include made the
+  # whole line look inert while the trailing assignment set a fleet URL.
+  def test_write_command_hard_stops_for_an_include_with_a_trailing_statement
+    with_consumer_env_config do |_root, agent_dir, env|
+      env_file = File.join(agent_dir, "env")
+      File.write(File.join(agent_dir, "inert.env"), "AGENT_COORD_API_TOKEN=secret\n")
+      include_word = %(. "$XDG_CONFIG_HOME/agent-coord/inert.env")
+
+      # When the trailing statement is itself an assignment, that is what decides
+      # the line — the assignment really does set the URL, so it is reported as the
+      # named-outside-a-plain-assignment case rather than as a guarded include.
+      { "#{include_word}; AGENT_COORD_API_URL=https://fleet.example" => "opaque_api_url_reference",
+        "#{include_word} && AGENT_COORD_API_URL=https://fleet.example" => "opaque_api_url_reference",
+        "#{include_word} | tee /dev/null" => "guarded_include" }
+        .each_with_index do |(line, reason), index|
+        File.write(env_file, "#{line}\n")
+
+        claim = run_consumer_env_cli(env, *split_brain_claim_args(index))
+        assert_equal 2, claim.status.exitstatus, "#{line}: #{claim.stderr}"
+        assert_includes claim.stderr, "may configure AGENT_COORD_API_URL", line
+
+        assert_doctor_reports_split_brain(env, env_file, reason, line)
+      end
+    end
+  end
+
+  # Bounded at one level: an include inside an include is not followed, and under
+  # fail-closed that unfollowed level is itself a stop rather than a silent miss.
+  def test_write_command_hard_stops_for_an_include_inside_an_include
+    with_consumer_env_config do |_root, agent_dir, env|
+      env_file = File.join(agent_dir, "env")
+      File.write(env_file, %(. "$XDG_CONFIG_HOME/agent-coord/level-one.env"\n))
+      File.write(File.join(agent_dir, "level-one.env"), %(. "$XDG_CONFIG_HOME/agent-coord/level-two.env"\n))
+      File.write(File.join(agent_dir, "level-two.env"), "AGENT_COORD_API_URL=https://fleet.example\n")
+
+      claim = run_consumer_env_cli(env, *split_brain_claim_args(0))
+      assert_equal 2, claim.status.exitstatus, claim.stderr
+      # The nested target is not named: the report carries the reason class and the
+      # candidate env file, never text read out of a file.
+      refute_includes claim.stderr, "level-two.env"
+
+      doctor = run_consumer_env_cli(env, "doctor", "--json")
+      assert_equal 2, doctor.status.exitstatus
+      payload = JSON.parse(doctor.stdout)
+      assert_equal "split_brain", payload.fetch("status")
+      assert_equal env_file, payload.fetch("split_brain_env_file")
+      assert_equal "nested_include", payload.fetch("split_brain_reason")
+    end
+  end
+
+  # A readable, contained include is provable, which is why following includes
+  # beats a blanket stop on every env file that has one: this wrapper resolves to
+  # an assignment a shell would leave empty, so the write proceeds.
+  def test_write_command_ignores_resolved_include_that_configures_nothing
+    with_consumer_env_config do |_root, agent_dir, env|
+      File.write(File.join(agent_dir, "env"), %(source "$XDG_CONFIG_HOME/agent-coord/backend.env"\n))
+      File.write(File.join(agent_dir, "backend.env"), "AGENT_COORD_API_URL= # remote disabled\n")
+
+      claim = run_consumer_env_cli(env, *split_brain_claim_args(0))
+      assert_equal 0, claim.status.exitstatus, claim.stderr
+      refute_includes claim.stderr, "split-brain"
+
+      doctor = run_consumer_env_cli(env, "doctor", "--json")
+      assert_equal 0, doctor.status.exitstatus, doctor.stderr
+      payload = JSON.parse(doctor.stdout)
+      assert_equal "ok", payload.fetch("status")
+      refute_includes payload.keys, "split_brain_env_file"
+    end
+  end
+
+  # A shell keeps the *last* assignment, so a file that sets a URL and then
+  # blanks or unsets it configures nothing. The probe used to take the first
+  # match and refuse a valid implicit-local write (issue #99).
+  def test_write_command_ignores_env_file_whose_last_assignment_leaves_no_url
+    with_consumer_env_config do |_root, agent_dir, env|
+      env_file = File.join(agent_dir, "env")
+      ["AGENT_COORD_API_URL=https://fleet.example\nAGENT_COORD_API_URL=\n",
+       %(AGENT_COORD_API_URL=https://fleet.example\nAGENT_COORD_API_URL=""\n),
+       "export AGENT_COORD_API_URL=https://fleet.example\nAGENT_COORD_API_URL= # disabled today\n",
+       "AGENT_COORD_API_URL=https://fleet.example\nunset AGENT_COORD_API_URL\n",
+       # The variable named in a trailing comment is not a second assignment.
+       "AGENT_COORD_API_URL= # AGENT_COORD_API_URL is disabled here\n"].each_with_index do |body, index|
+        File.write(env_file, body)
+
+        claim = run_consumer_env_cli(env, *split_brain_claim_args(index))
+        assert_equal 0, claim.status.exitstatus, "#{body.inspect}: #{claim.stderr}"
+        refute_includes claim.stderr, "split-brain", body.inspect
+      end
+    end
+  end
+
+  # Ordering holds across an include boundary, in both directions: a followed
+  # include contributes its assignments in place rather than resetting or winning.
+  def test_write_command_applies_last_assignment_wins_across_an_include
+    with_consumer_env_config do |_root, agent_dir, env|
+      env_file = File.join(agent_dir, "env")
+      File.write(File.join(agent_dir, "fleet.env"), "AGENT_COORD_API_URL=https://fleet.example\n")
+      File.write(File.join(agent_dir, "inert.env"), "AGENT_COORD_API_TOKEN=secret\n")
+
+      # The include sets the URL, then the outer file blanks it: unconfigured.
+      File.write(env_file, %(. "$XDG_CONFIG_HOME/agent-coord/fleet.env"\nAGENT_COORD_API_URL=\n))
+      blanked = run_consumer_env_cli(env, *split_brain_claim_args(0))
+      assert_equal 0, blanked.status.exitstatus, blanked.stderr
+      refute_includes blanked.stderr, "split-brain"
+
+      # The outer file sets the URL and the include touches nothing: still set.
+      File.write(env_file, %(AGENT_COORD_API_URL=https://fleet.example\n. "$XDG_CONFIG_HOME/agent-coord/inert.env"\n))
+      survives = run_consumer_env_cli(env, *split_brain_claim_args(1))
+      assert_equal 2, survives.status.exitstatus
+      assert_includes survives.stderr, "configures AGENT_COORD_API_URL"
+
+      # The outer file blanks it and the include sets it afterwards: configured. The
+      # sourced file is not named in the report — only the candidate env file is.
+      File.write(env_file, %(AGENT_COORD_API_URL=\n. "$XDG_CONFIG_HOME/agent-coord/fleet.env"\n))
+      reset = run_consumer_env_cli(env, *split_brain_claim_args(2))
+      assert_equal 2, reset.status.exitstatus
+      assert_includes reset.stderr, "configures AGENT_COORD_API_URL"
+      assert_includes reset.stderr, env_file
+      refute_includes reset.stderr, "fleet.env"
+    end
+  end
+
+  # The reverse order still stops: the last assignment is the fleet URL.
+  def test_write_command_hard_stops_when_the_last_assignment_sets_the_url
+    with_consumer_env_config do |_root, agent_dir, env|
+      File.write(
+        File.join(agent_dir, "env"),
+        "AGENT_COORD_API_URL=\nAGENT_COORD_API_URL=https://fleet.example\n"
+      )
+
+      claim = run_consumer_env_cli(env, *split_brain_claim_args(0))
+
+      assert_equal 2, claim.status.exitstatus
+      assert_includes claim.stderr, "configures AGENT_COORD_API_URL"
+    end
+  end
+
+  # Differential coverage. The guard's verdict is compared against what a real
+  # shell exports to a child process, because a fixture asserted only against the
+  # guard's own regexes cannot tell whether a construct is *effective* — which is
+  # how a quoted variable name (`export "AGENT_COORD_API_URL"=…`) and an
+  # undecodable env file were both read as inert while bash and zsh exported the
+  # fleet URL. This direction is the release-blocking one: whenever a shell really
+  # exports a URL, the guard must refuse.
+  def test_write_command_refuses_every_construct_a_real_shell_exports
+    shells = available_posix_shells
+    skip "no POSIX shell available to compare against" if shells.empty?
+
+    with_consumer_env_config do |_root, agent_dir, env|
+      env_file = File.join(agent_dir, "env")
+      exporting_env_bodies.each_with_index do |(label, body), index|
+        write_env_fixture(env_file, body)
+        # At least one real shell must export it — some constructs differ between
+        # shells (`command export "NAME=v"` reaches the parent in bash, not zsh), and
+        # one shell exporting is enough to make an unsourced local write invisible.
+        exported = shells.map { |shell| shell_exported_api_url(shell, env_file) }
+        assert_includes exported, "https://fleet.example",
+                        "#{label}: no available shell exported the URL (#{exported.inspect})"
+
+        claim = run_consumer_env_cli(env, *split_brain_claim_args(index))
+        assert_equal 2, claim.status.exitstatus, "#{label}: #{claim.stderr}"
+        assert_includes claim.stderr, "split-brain configuration", label
+      end
+    end
+  end
+
+  # The other direction: a construct no shell exports must not be refused, or
+  # fail-closed becomes a CLI that ordinary env files cannot use. (The guard is
+  # deliberately stricter than the shell for constructs it cannot prove, so this
+  # is asserted over known-inert bodies rather than as a biconditional.)
+  def test_write_command_permits_constructs_no_real_shell_exports
+    shells = available_posix_shells
+    skip "no POSIX shell available to compare against" if shells.empty?
+
+    with_consumer_env_config do |_root, agent_dir, env|
+      env_file = File.join(agent_dir, "env")
+      inert_env_bodies.each_with_index do |(label, body), index|
+        write_env_fixture(env_file, body)
+        shells.each do |shell|
+          assert_empty shell_exported_api_url(shell, env_file),
+                       "#{label}: fixture must export nothing via #{shell}"
+        end
+
+        claim = run_consumer_env_cli(env, *split_brain_claim_args(index))
+        assert_equal 0, claim.status.exitstatus, "#{label}: #{claim.stderr}"
+        refute_includes claim.stderr, "split-brain", label
+      end
+    end
+  end
+
+  # The output-safety guarantee, ported from the QA harness that found the leaks a
+  # per-word redactor could not close: for each construct, no surface an operator or
+  # a CI log sees may contain the credential. The report is the reason class plus the
+  # env file path and nothing from the file's contents, so this holds by
+  # construction rather than by a predicate over file bytes.
+  def test_split_brain_output_never_carries_file_contents
+    with_consumer_env_config do |_root, agent_dir, env|
+      credential_bearing_env_bodies.each do |label, body|
+        write_env_fixture(File.join(agent_dir, "env"), body)
+
+        payload = assert_no_surface_echoes(env, CREDENTIAL_FIXTURES, label)
+        refute_includes payload.keys, "split_brain_construct", label
+        refute_includes payload.keys, "split_brain_construct_file", label
+      end
+    end
+  end
+
+  # The payload names the class and the file, which is what locates the problem.
+  def test_split_brain_payload_reports_reason_and_env_file_only
+    with_consumer_env_config do |_root, agent_dir, env|
+      env_file = File.join(agent_dir, "env")
+      File.write(env_file, "AGENT_COORD_API_URL=https://user:tok@fleet.example\n")
+
+      doctor = run_consumer_env_cli(env, "doctor", "--json")
+
+      assert_equal 2, doctor.status.exitstatus
+      payload = JSON.parse(doctor.stdout)
+      assert_equal "split_brain", payload.fetch("status")
+      assert_equal env_file, payload.fetch("split_brain_env_file")
+      assert_equal "configured_api_url", payload.fetch("split_brain_reason")
+      assert_empty payload.keys.grep(/construct/)
+
+      text = run_consumer_env_cli(env, "doctor")
+      assert_includes text.stdout, "split_brain_reason: configured_api_url"
+      refute_includes text.stdout, "split_brain_construct"
+    end
+  end
+
+  # An env file that exists but cannot be decoded or read is "cannot prove inert",
+  # not "inert": one stray byte must not discard the verdict for the rest of it.
+  # A genuinely absent candidate stays a non-candidate.
+  def test_write_command_hard_stops_for_an_undecodable_env_file_and_ignores_an_absent_one
+    with_consumer_env_config do |_root, agent_dir, env|
+      env_file = File.join(agent_dir, "env")
+      write_env_fixture(env_file, "# op\xE9rateur\nexport AGENT_COORD_API_URL=https://fleet.example\n".bytes)
+
+      claim = run_consumer_env_cli(env, *split_brain_claim_args(0))
+      assert_equal 2, claim.status.exitstatus, claim.stderr
+      assert_doctor_reports_split_brain(env, env_file, "undecodable_env_file", "latin-1 comment")
+
+      FileUtils.rm_f(env_file)
+      absent = run_consumer_env_cli(env, *split_brain_claim_args(1))
+      assert_equal 0, absent.status.exitstatus, absent.stderr
+      refute_includes absent.stderr, "split-brain"
+    end
+  end
+
+  # Fail-closed must not fire on lines that cannot reach the variable at all,
+  # or every operator with an ordinary env file loses the CLI.
+  def test_write_command_ignores_env_lines_that_cannot_reach_the_api_url
+    with_consumer_env_config do |_root, agent_dir, env|
+      env_file = File.join(agent_dir, "env")
+      # A substitution confined to another variable's value runs in a subshell;
+      # a commented-out assignment, a different variable, and a name this one is
+      # only a prefix of are all inert too.
+      ["MACHINE_ID=$(hostname)\n",
+       "# AGENT_COORD_API_URL=https://fleet.example\n",
+       "AGENT_COORD_API_TOKEN=secret\n",
+       "export AGENT_COORD_STATUS_STATE_ROOT=/tmp/status-state\n",
+       "AGENT_COORD_API_URL_BACKUP=https://fleet.example\n",
+       "MY_AGENT_COORD_API_URL=https://fleet.example\n",
+       # A trailing comment is not shell structure: the separators and the
+       # variable name inside it must not decide the line.
+       "MACHINE_ID=$(hostname)  # one per host; used for audit logs\n",
+       "AGENT_COORD_API_TOKEN=secret # rotate; see AGENT_COORD_API_URL docs\n",
+       # Structural tokens inside a quoted value are text, not shell syntax.
+       %(GREETING="Time to eval options"\n),
+       %(DOC_URL="see docs/AGENT_COORD_API_URL.md for details"\n),
+       %(NOTES="deploy; . env then restart"\n),
+       "[ -d /tmp ] && export PATH=/usr/local/bin:$PATH\n",
+       "find . -name '*.env' > /dev/null\n",
+       "umask 077\n"].each_with_index do |body, index|
+        File.write(env_file, body)
+
+        claim = run_consumer_env_cli(env, *split_brain_claim_args(index))
+        assert_equal 0, claim.status.exitstatus, "#{body.inspect}: #{claim.stderr}"
+        refute_includes claim.stderr, "split-brain", body.inspect
+      end
+    end
+  end
+
+  # The escape hatches are what make fail-closed tolerable, so every stop class
+  # has to clear under an explicit local-mode selection.
+  def test_local_mode_opt_in_clears_every_split_brain_stop_class
+    with_consumer_env_config do |root, agent_dir, env|
+      env_file = File.join(agent_dir, "env")
+      outside = File.join(root, "outside", "backend.env")
+      FileUtils.mkdir_p(File.dirname(outside))
+      File.write(outside, "AGENT_COORD_API_URL=https://fleet.example\n")
+      opt_in = env.merge("AGENT_COORD_LOCAL" => "1")
+
+      ["AGENT_COORD_API_URL=https://fleet.example\n",
+       ". #{outside}\n",
+       %(AGENT_COORD_API_URL="${AGENT_COORD_FLEET_URL:-}"\n),
+       "eval \"$(fleet-env)\"\n"].each_with_index do |body, index|
+        File.write(env_file, body)
+
+        claim = run_consumer_env_cli(opt_in, *split_brain_claim_args(index))
+        assert_equal 0, claim.status.exitstatus, "#{body.inspect}: #{claim.stderr}"
+        refute_includes claim.stderr, "split-brain", body.inspect
+
+        doctor = run_consumer_env_cli(opt_in, "doctor", "--json")
+        assert_equal 0, doctor.status.exitstatus, doctor.stderr
+        assert_equal "ok", JSON.parse(doctor.stdout).fetch("status"), body.inspect
+      end
+    end
   end
 
   def test_http_integration_harness_uses_portable_hashing_and_cleans_up_wrangler
@@ -6087,6 +6533,56 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     refute_path_exists File.join(@state_root, "batches", "batch-b.json")
   end
 
+  # issue #96: "UNKNOWN" is the no-name sentinel that status rendering and
+  # batch-audit attribution compare against, so it cannot also be a real name.
+  def test_register_batch_rejects_reserved_unknown_lane_name
+    manifest_path = File.join(@state_root, "batch-manifest.json")
+    [{ "name" => "UNKNOWN" }, { "name" => "unknown" }, { "id" => "Unknown" }].each do |identity|
+      lane = identity.merge("owner" => "worker-docs", "targets" => ["3972"])
+      File.write(manifest_path, JSON.pretty_generate("batch_id" => "batch-b", "lanes" => [lane]))
+
+      result = run_agent_coord("register-batch", "--file", manifest_path)
+
+      assert_equal 1, result.status.exitstatus, result.stderr
+      assert_includes result.stderr, "batch lane 1 name #{identity.values.first} is reserved"
+      assert_includes result.stderr, "no-name/no-owner sentinel"
+      refute_path_exists File.join(@state_root, "batches", "batch-b.json")
+    end
+  end
+
+  # Same sentinel on the owner side: lane_owner falls back to "UNKNOWN", and
+  # batch-audit gates its owner attribution on that value.
+  def test_register_batch_rejects_reserved_unknown_lane_owner
+    manifest_path = File.join(@state_root, "batch-manifest.json")
+    [{ "owner" => "UNKNOWN" }, { "owner" => "unknown" }, { "agent_id" => "UNKNOWN" }].each do |identity|
+      lane = identity.merge("name" => "docs", "targets" => ["3972"])
+      File.write(manifest_path, JSON.pretty_generate("batch_id" => "batch-b", "lanes" => [lane]))
+
+      result = run_agent_coord("register-batch", "--file", manifest_path)
+
+      assert_equal 1, result.status.exitstatus, result.stderr
+      assert_includes result.stderr, "batch lane docs owner #{identity.values.first} is reserved"
+      assert_includes result.stderr, "no-name/no-owner sentinel"
+      refute_path_exists File.join(@state_root, "batches", "batch-b.json")
+    end
+  end
+
+  def test_register_batch_still_accepts_lane_identities_that_only_contain_unknown
+    manifest_path = File.join(@state_root, "batch-manifest.json")
+    File.write(
+      manifest_path,
+      JSON.pretty_generate(
+        "batch_id" => "batch-b",
+        "lanes" => [{ "name" => "unknown-docs", "owner" => "worker-unknown", "targets" => ["3972"] }]
+      )
+    )
+
+    result = run_agent_coord("register-batch", "--file", manifest_path)
+
+    assert_equal 0, result.status.exitstatus, result.stderr
+    assert_path_exists File.join(@state_root, "batches", "batch-b.json")
+  end
+
   def test_status_batch_scope_reports_missing_lane_owner_heartbeats
     write_batch(
       "batch-b",
@@ -8007,6 +8503,265 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     matches = events_of_type(batch_id, type)
     assert_equal 1, matches.length, "expected exactly one #{type} event in #{batch_id}"
     matches.first
+  end
+
+  # Isolated HOME/XDG so the consumer env-file probe sees only the files a test
+  # writes, and an implicit-local write lands in the temp tree.
+  def with_consumer_env_config
+    Dir.mktmpdir("agent-coord-consumer-include") do |root|
+      agent_dir = File.join(root, ".config", "agent-coord")
+      FileUtils.mkdir_p(agent_dir)
+      env = {
+        "HOME" => root,
+        "XDG_CONFIG_HOME" => File.join(root, ".config"),
+        "XDG_STATE_HOME" => File.join(root, "state")
+      }
+      yield root, agent_dir, env
+    end
+  end
+
+  # RbConfig.ruby, not "ruby": these runs override HOME, which breaks version
+  # managers that keep per-HOME state in a PATH shim.
+  def run_consumer_env_cli(env, *)
+    run_command(env, RbConfig.ruby, BIN, *)
+  end
+
+  # A distinct target per case, so a successful claim never collides with the
+  # claim the previous case left behind.
+  def split_brain_claim_args(index)
+    ["claim", "--agent-id", "worker-a", "--repo", "demo/example", "--target", (index + 1).to_s]
+  end
+
+  # Include forms whose effect the probe cannot prove, and the reason each stops
+  # with. Every one of them points at a file that really does set the URL, which
+  # is the case fail-closed exists for.
+  def cannot_prove_includes(outside)
+    {
+      ". #{outside}" => "include_outside_config_dir",
+      '. "$XDG_CONFIG_HOME/agent-coord/escape.env"' => "include_outside_config_dir",
+      '. "$XDG_CONFIG_HOME/agent-coord/../../outside/backend.env"' => "include_outside_config_dir",
+      ". backend.env" => "relative_include",
+      '. "$AGENT_COORD_FLEET_ENV/backend.env"' => "unexpanded_variable",
+      '. "~/.config/agent-coord/backend.env"' => "unexpanded_tilde",
+      '. "$XDG_CONFIG_HOME/agent-coord/missing.env"' => "unreadable_include",
+      '. ""' => "empty_include"
+    }
+  end
+
+  # Shells to compare the guard against. zsh is absent on most CI images, so it
+  # participates when present rather than being required.
+  def available_posix_shells
+    ["/bin/bash", "/bin/zsh"].select { |shell| File.executable?(shell) }
+  end
+
+  # Sourced with `set -a` — how these env files are actually consumed (systemd
+  # EnvironmentFile, `set -a; . env`) — then read from a child process, which is
+  # the only ground truth for "does this configure a fleet URL for what runs next".
+  def shell_exported_api_url(shell, fixture)
+    script = "set -a; . #{Shellwords.escape(fixture)} >/dev/null 2>&1; printenv AGENT_COORD_API_URL"
+    stdout, = Open3.capture3({ "AGENT_COORD_API_URL" => nil }, shell, "-c", script)
+    stdout.strip
+  end
+
+  # Constructs that carry credential-shaped text in places a per-word redactor
+  # cannot reason about: an include path, a trailing comment, a here-doc body, a
+  # word ending in "=", a word whose prefix is the secret, a secret beside the
+  # variable's own name, and base64 padding that looks like an assignment.
+  def credential_bearing_env_bodies
+    token, base64 = CREDENTIAL_FIXTURES
+    {
+      "source target carries a token" => ". /tmp/fleet-#{token}.env\n",
+      "quoted source target" => %(. "/tmp/fleet-#{token}.env"\n),
+      "mention word carries a secret" => %(echo "$AGENT_COORD_API_URL:#{token}"\n),
+      "base64 credential in a quoted word" =>
+        %(curl -H "Authorization: Basic #{base64}==" "$AGENT_COORD_API_URL/x"\n),
+      "base64 credential in a comment" => %(eval "$SETUP"  # rotate #{base64}== yearly\n),
+      "here-doc body line" =>
+        "cat <<EOF\nAuthorization: Basic #{base64}== $AGENT_COORD_API_URL\nEOF\n",
+      "bare word ending in =" => "eval #{token}=\n",
+      "secret before the first =" => "eval #{token}=1\n",
+      "secret beside the variable name" => %(eval "AGENT_COORD_API_URL #{token}"\n),
+      "value is a vault call" => "export AGENT_COORD_API_URL=$(vault read -field=url secret/#{token})\n",
+      "value has inline credentials" => %(AGENT_COORD_API_URL="https://user:#{token}@host"\n),
+      "here-doc delimiter is a secret" => "cat <<#{token}=x\neval y\n#{token}=x\n",
+      "base64 in a source path" => ". /tmp/#{base64}==.env\n",
+      "unparsed flag value" => "eval --token=#{token}\n"
+    }
+  end
+
+  # Every surface a refusal reaches — the write command's own output, doctor --json,
+  # and doctor's text report — must be free of every planted secret. Returns the
+  # doctor payload so a caller can also assert on its shape.
+  # The verdict is deliberately not asserted here: some of these fixtures only
+  # *reference* the variable and are correctly permitted. What must hold either way
+  # is that no surface carries the secret.
+  def assert_no_surface_echoes(env, secrets, label)
+    claim = run_consumer_env_cli(env, *split_brain_claim_args(0))
+    json = run_consumer_env_cli(env, "doctor", "--json")
+    text = run_consumer_env_cli(env, "doctor")
+    surfaces = { "claim.stdout" => claim.stdout, "claim.stderr" => claim.stderr,
+                 "json.stdout" => json.stdout, "json.stderr" => json.stderr,
+                 "text.stdout" => text.stdout, "text.stderr" => text.stderr }
+    Array(secrets).each do |secret|
+      surfaces.each do |name, content|
+        refute_includes content, secret, "#{label}: #{secret} leaked on #{name}"
+      end
+    end
+    JSON.parse(json.stdout)
+  end
+
+  # A byte array writes verbatim, so an invalid-UTF-8 fixture stays invalid.
+  def write_env_fixture(path, body)
+    body.is_a?(String) ? File.write(path, body) : File.binwrite(path, body.pack("C*"))
+  end
+
+  # Constructs a real shell exports. The quoted, split, ANSI-C and backslashed
+  # names all reach the variable because the shell removes quoting before
+  # assigning; the last two carry an invalid byte around a plain export.
+  def exporting_env_bodies
+    {
+      "quoted name" => %(export "AGENT_COORD_API_URL"=https://fleet.example\n),
+      "single-quoted name" => %(export 'AGENT_COORD_API_URL'=https://fleet.example\n),
+      "quoted equals" => %(export AGENT_COORD_API_URL"="https://fleet.example\n),
+      "name split across quotes" => %(export AGENT_COORD_API"_URL"=https://fleet.example\n),
+      "ansi-c quoted name" => %(export $'AGENT_COORD_API_URL'=https://fleet.example\n),
+      "backslash inside name" => %(export AGENT_COORD_API\\_URL=https://fleet.example\n),
+      "declare -x" => %(declare -x AGENT_COORD_API_URL=https://fleet.example\n),
+      "typeset -x" => %(typeset -x AGENT_COORD_API_URL=https://fleet.example\n),
+      "export --" => %(export -- AGENT_COORD_API_URL=https://fleet.example\n),
+      "indirect name set in file" => %(N=AGENT_COORD_API_URL\nexport ${N}=https://fleet.example\n),
+      "quoted name in a compound line" => %(true; export "AGENT_COORD_API_URL"=https://fleet.example\n),
+      # An escaped quote inside another value must not desynchronize the scan and
+      # hide what follows it on the line.
+      "escaped quote then assignment" => %(X="a\\"b" AGENT_COORD_API_URL=https://fleet.example\n),
+      # The same escape outside any quoting: a lone `\\"` must not be read as
+      # opening a span, or the rest of the line disappears with it.
+      "bareword escaped quotes" =>
+        %(AGENT_COORD_API_URL=;echo \\"disabled\\"; AGENT_COORD_API_URL=https://fleet.example\n),
+      "escaped quote then export" => %(X="a\\"b" export AGENT_COORD_API_URL=https://fleet.example\n),
+      "assignment prefix before the name" => %(X=1 AGENT_COORD_API_URL=https://fleet.example\n),
+      # A real statement boundary before the name, versus one that only exists
+      # inside another value (see the inert list).
+      "separator then the name" => %(true; AGENT_COORD_API_URL=https://fleet.example\n),
+      "keyword then the name" => %(if true; then AGENT_COORD_API_URL=https://fleet.example; fi\n),
+      # Statement prefixes in front of a quoted name: reserved words, command
+      # wrappers, a prefix assignment, and brace expansion in the name itself. The
+      # assignment still takes effect behind every one of them.
+      "time before a quoted name" => %(time export "AGENT_COORD_API_URL=https://fleet.example"\n),
+      "! before a quoted name" => %(! export "AGENT_COORD_API_URL=https://fleet.example"\n),
+      "command before a quoted name" => %(command export "AGENT_COORD_API_URL=https://fleet.example"\n),
+      "builtin before a quoted name" => %(builtin export "AGENT_COORD_API_URL=https://fleet.example"\n),
+      "prefix assignment before a quoted name" =>
+        %(FOO=1 export "AGENT_COORD_API_URL=https://fleet.example"\n),
+      "brace expansion after the name" => %(export "AGENT_COORD_API_URL"{,}=https://fleet.example\n),
+      "three prefix assignments" => %(X=1 Y=2 Z=3 export AGENT_COORD_API_URL=https://fleet.example\n),
+      "append with +=" => "export AGENT_COORD_API_URL+=https://fleet.example\n",
+      # Brace expansion *inside* the name, which a shell resolves before assigning.
+      # Only a declaration builtin reaches the variable this way; see the inert list
+      # for the same shape without one.
+      "brace expansion inside the name" => %(export AGENT_COORD_API{_URL,}=https://fleet.example\n),
+      "brace expansion at the tail" => %(export AGENT_COORD_API_UR{L,}=https://fleet.example\n),
+      "quoted stem then brace tail" => %(export "AGENT_COORD_API"{_URL,}=https://fleet.example\n),
+      "brace expansion at the stem" => %(export AGENT_COORD{_API_URL,}=https://fleet.example\n),
+      "declare -x with brace in the name" => %(declare -x AGENT_COORD_API{_URL,}=https://fleet.example\n),
+      # An escaped quote in a prefix assignment used to close the span and hide the
+      # quoted name behind it.
+      "escaped quote prefix then quoted name" =>
+        %(X="a\\"b" export "AGENT_COORD_API_URL"=https://fleet.example\n),
+      # A shell removes backslash-newline before tokenizing, so neither physical
+      # line carries the whole identifier yet the variable is still set.
+      "identifier split by a continuation" => "AGENT_COORD_API\\\n_URL=https://fleet.example\n",
+      "export split by a continuation" => "export AGENT_COORD_API\\\n_URL=https://fleet.example\n",
+      "value split by a continuation" => "AGENT_COORD_API_URL=https://\\\nfleet.example\n",
+      "invalid byte before the export" =>
+        "# op\xE9rateur\nexport AGENT_COORD_API_URL=https://fleet.example\n".bytes,
+      "invalid byte after the export" =>
+        "export AGENT_COORD_API_URL=https://fleet.example\n# op\xE9rateur\n".bytes
+    }
+  end
+
+  # Constructs no shell exports, which must keep working.
+  def inert_env_bodies
+    {
+      "quoted variable name in a value" => %(DOC_URL="see docs/AGENT_COORD_API_URL.md for details"\n),
+      # A documentation-style value containing the whole assignment text: the name
+      # is not in a command-word position, so it assigns only HELP_TEXT.
+      "assignment text inside another value" =>
+        %(HELP_TEXT="Set AGENT_COORD_API_URL=<url> to configure the fleet backend"\n),
+      # Punctuation and keywords inside a value are content, not shell structure,
+      # so they cannot fake the command-word position the name needs.
+      "separator inside a quoted value" =>
+        %(NOTE="Do not touch; AGENT_COORD_API_URL=<url> must stay unset"\n),
+      "keyword inside a quoted value" => %(NOTE="run then AGENT_COORD_API_URL=<url> later"\n),
+      "quoted eval word" => %(GREETING="Time to eval options"\n),
+      "substitution in another variable" => %(MACHINE_ID=$(hostname)  # one per host; audit\n),
+      "last assignment blanks it" => "AGENT_COORD_API_URL=https://fleet.example\nAGENT_COORD_API_URL=\n",
+      "unset after assignment" => "AGENT_COORD_API_URL=https://fleet.example\nunset AGENT_COORD_API_URL\n",
+      "valid utf-8 comment" => "# opérateur\nAGENT_COORD_API_URL=\n",
+      "export of another variable" => %(export PATH="$PATH:/usr/local/bin"\n),
+      "export -p prints only" => "export -p\n",
+      # An even number of trailing backslashes is a literal backslash, so the next
+      # line is not a continuation of this one.
+      "literal trailing backslash" => "NOTE=ends-with-two\\\\\nAGENT_COORD_API_TOKEN=secret\n",
+      "escaped quote in another value" => %(X="a\\"b" MACHINE_ID=host-1\n),
+      # Without a declaration builtin a shell recognizes the assignment word before
+      # brace expansion, so this sets a variable literally named with braces —
+      # nothing reaches AGENT_COORD_API_URL, and refusing would be over-blocking.
+      "brace in the name, no declaration" => %(AGENT_COORD_API{_URL,}=https://fleet.example\n),
+      "brace after the value" => "export FOO={a,b}\n",
+      "different variable, suffix" => "AGENT_COORD_API_URL_EXTRA=https://fleet.example\n",
+      "unset -v on its own" => "unset -v AGENT_COORD_API_URL\n",
+      "quoted empty value" => %(export AGENT_COORD_API_URL=""\n),
+      "single-quoted empty value" => "AGENT_COORD_API_URL=''\n",
+      "unrelated export" => "export FOO=bar\n",
+      "comment mention after an assignment" => "FOO=bar # see AGENT_COORD_API_URL docs\n",
+      "bareword escaped quotes only" => %(echo \\"disabled\\"\n),
+      # Single quotes have no escapes, so the backslash is literal content.
+      "backslash inside single quotes" => %(NOTE='keep \\ this'\nMACHINE_ID=host-1\n)
+    }
+  end
+
+  # Non-include constructs the probe cannot prove inert. The first two are the
+  # `${VAR:-}` and command-substitution values from the issue's own comments.
+  def cannot_prove_lines
+    {
+      %(AGENT_COORD_API_URL="${AGENT_COORD_FLEET_URL:-}") => "unresolved_expansion",
+      "AGENT_COORD_API_URL=$(fleet-url)" => "unresolved_expansion",
+      '[ -n "$FLEET" ] && AGENT_COORD_API_URL="$FLEET"' => "opaque_api_url_reference",
+      "export AGENT_COORD_API_URL" => "opaque_api_url_reference",
+      # Quoting the assignment does not stop it taking effect, so it is not text.
+      %(export "AGENT_COORD_API_URL=https://fleet.example") => "opaque_api_url_reference",
+      # A name that only exists after an expansion: the file text cannot say which
+      # variable is declared, so it is refused rather than guessed at.
+      "export ${AGENT_COORD_NAME_VAR}=https://fleet.example" => "indirect_declaration",
+      # Two assignments on one line, or an assignment then an unset: the value
+      # scanner stops at the `;`, so last-assignment-wins cannot be applied to it.
+      "AGENT_COORD_API_URL=https://fleet.example; AGENT_COORD_API_URL=" => "opaque_api_url_reference",
+      "AGENT_COORD_API_URL=https://fleet.example; unset AGENT_COORD_API_URL" => "opaque_api_url_reference",
+      'eval "$(fleet-env)"' => "eval",
+      "$(fleet-env)" => "command_substitution",
+      # A guarded or compound include is not the first statement on its line, so
+      # it cannot be resolved and followed the way a leading include can.
+      '[ -f "$XDG_CONFIG_HOME/agent-coord/backend.env" ] && . ' \
+      '"$XDG_CONFIG_HOME/agent-coord/backend.env"' => "guarded_include",
+      'true; . "$XDG_CONFIG_HOME/agent-coord/backend.env"' => "guarded_include",
+      'if [ -f "$XDG_CONFIG_HOME/agent-coord/backend.env" ]; then ' \
+      '. "$XDG_CONFIG_HOME/agent-coord/backend.env"; fi' => "guarded_include",
+      # A leading include with a second include after `||`: the fallback is not
+      # reachable from the first, so the line as a whole stays unproven.
+      'source "$XDG_CONFIG_HOME/agent-coord/a.env" || source ' \
+      '"$XDG_CONFIG_HOME/agent-coord/backend.env"' => "guarded_include"
+    }
+  end
+
+  def assert_doctor_reports_split_brain(env, env_file, reason, label)
+    doctor = run_consumer_env_cli(env, "doctor", "--json")
+
+    assert_equal 2, doctor.status.exitstatus, "#{label}: #{doctor.stderr}"
+    payload = JSON.parse(doctor.stdout)
+    assert_equal "split_brain", payload.fetch("status"), label
+    assert_equal env_file, payload.fetch("split_brain_env_file"), label
+    assert_equal reason, payload.fetch("split_brain_reason"), label
   end
 
   def run_agent_coord(*, state_root: @state_root, stdin_data: nil, env: {})

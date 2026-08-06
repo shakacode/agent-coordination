@@ -302,14 +302,78 @@ Selection 5 is *implicit* local. When a consumer env file
 but that file was never sourced, an implicit local run is a split-brain
 configuration: writes would land on a local state root the fleet never reads.
 `claim`, `release`, `heartbeat`, `record-event`, and `register-batch` therefore
-hard stop with exit `2` and name the offending env file. Read commands
-(`status`, `batch-audit`) keep the advisory warning and still succeed. Choose a
+hard stop with exit `2` and name the offending env file — and, per the detection
+rules below, do the same when that file merely *could* configure one in a way the
+CLI cannot prove inert. Read commands (`status`, `batch-audit`) keep the advisory
+warning, which stays limited to a proven assignment, and still succeed. Choose a
 backend explicitly to proceed: source the env file for fleet writes, pass
 `--state-root PATH` (or set `AGENT_COORD_STATE_ROOT`) for an explicit local
 root, or set `AGENT_COORD_LOCAL=1` to opt into implicit local mode.
 `AGENT_COORD_LOCAL` accepts `1`, `true`, or `yes` (case-insensitive); any other
 value, including empty and `0`, is not an opt-in. The opt-in also silences the
-advisory warning for read commands.
+advisory warning for read commands. The same hard stop is documented in
+`--help` for each write command (`Backend safety:`) and in `doctor --help`.
+
+The env-file probe reads your env files **as text**: it never sources or
+evaluates them, because running operator shell as a side effect of every
+`agent-coord` invocation is not a trade this CLI makes. It folds each file the
+way a shell would — assignments take effect in order and the **last one wins**,
+so a file that sets a URL and later blanks or unsets it configures nothing — and
+it follows a `source`/`.` include **one level deep**, so a wrapper file whose
+assignment lives in a sourced fragment still counts as configuring a fleet URL:
+
+```sh
+# ~/.config/agent-coord/env
+. "$HOME/.config/agent-coord/backend.env"   # AGENT_COORD_API_URL lives here
+```
+
+Include resolution is deliberately bounded: only `$HOME` and `$XDG_CONFIG_HOME`
+expand, the target must be absolute and must resolve — after symlink and `..`
+resolution — inside the user's config directory, and the included file's own
+includes are never followed.
+
+**The probe fails closed on anything it cannot prove inert.** Reading text
+cannot decide every file, and for a mutual-exclusion guard a loud false positive
+that an explicit local-mode selection clears beats a silent false negative that
+permits an invisible-lease write. So these all hard stop exactly like a proven
+fleet URL, naming the file and the exact construct:
+
+| Construct | Example |
+| --- | --- |
+| include the CLI cannot read | `. "$XDG_CONFIG_HOME/agent-coord/missing.env"` |
+| include outside the config directory | `. /etc/agent-coord/backend.env` |
+| include that is relative, `~`-rooted, or uses another variable | `. backend.env` |
+| include inside an include (past the one-level bound) | `. "$XDG_CONFIG_HOME/agent-coord/level-two.env"` |
+| include that is not the first statement on its line | `[ -f "$F" ] && . "$F"` |
+| value from an unresolved expansion or command substitution | `AGENT_COORD_API_URL="${FLEET_URL:-}"` |
+| the variable named outside a plain assignment | `[ -n "$F" ] && AGENT_COORD_API_URL="$F"` |
+| an assignment whose name carries quoting or a backslash | `export "AGENT_COORD_API_URL"=…`, `export AGENT_COORD_API"_URL"=…` |
+| a quoted name behind a statement prefix or brace expansion | `time export "AGENT_COORD_API_URL"=…`, `FOO=1 export "AGENT_COORD_API_URL"=…`, `export "AGENT_COORD_API_URL"{,}=…` |
+| a declared name split across brace expansion | `export AGENT_COORD_API{_URL,}=…` (without a declaration builtin the assignment word wins, so that shape is inert) |
+| an assignment split across lines by a backslash-newline | `AGENT_COORD_API\` then `_URL=…` |
+| a declaration builtin other than a plain `export NAME=` | `declare -x AGENT_COORD_API_URL=…`, `export -- …` |
+| a declared name that only exists after an expansion | `export ${N}=…` |
+| an env file that exists but is not valid UTF-8, or cannot be read | `# op<invalid byte>rateur` |
+| `eval`, or a command substitution that is not confined to another variable's value | `eval "$(fleet-env)"` |
+
+A shell removes quoting *before* it assigns, so `export "AGENT_COORD_API_URL"=x`
+and `export AGENT_COORD_API\_URL=x` really do export the fleet URL; the probe
+normalizes quote characters and backslashes out of the name before deciding, so
+those are refusals rather than misses. It also removes backslash-newline before
+tokenizing, so the probe folds continued physical lines into one logical line
+first — otherwise an identifier split across two lines would carry the whole name
+on neither of them. An undecodable file is refused for the
+same reason: one stray byte must not discard the verdict for the rest of it. A
+file that is simply absent is not a candidate and changes nothing.
+
+Lines that cannot reach the variable stay inert, so ordinary env files are
+unaffected: comments, a different variable (including one this name is only a
+prefix of, such as `MY_AGENT_COORD_API_URL`), a compound statement that sources
+nothing (`[ -d /tmp ] && export PATH=...`), a declaration of another variable
+(`export PATH="$PATH:/usr/local/bin"`, `export -p`), and a substitution confined
+to another variable's value (`MACHINE_ID=$(hostname)`, which runs in a subshell)
+never trip the guard. `doctor` reports which construct decided the verdict in
+`split_brain_reason` and `split_brain_construct`.
 
 React on Rails workflow docs assume `agent-coord` is available on `PATH`.
 `bin/agent-coord bootstrap` installs `agent-coord` into `$HOME/.local/bin` by
@@ -337,7 +401,31 @@ warning. When `doctor` itself resolved to the *implicit* local backend under
 that configuration, it emits its full report with `status: split_brain` plus a
 `split_brain_env_file` field naming the env file, then exits `2`; the same
 explicit opt-ins that unblock writes (`--state-root`, `AGENT_COORD_STATE_ROOT`,
-`AGENT_COORD_LOCAL=1`) return it to `ok` and exit `0`. If an explicitly
+`AGENT_COORD_LOCAL=1`) return it to `ok` and exit `0`. `doctor --help` states
+all of this, so the operator who hits the hard stop can find it from the CLI.
+The payload also carries `split_brain_reason` and `split_brain_construct` (plus
+`split_brain_construct_file` when the deciding line lives in a sourced fragment),
+which name the construct behind the verdict — `configured_api_url` for a proven
+assignment, or the specific cannot-prove class otherwise.
+
+**No output reports anything read out of an env file.** A fleet API URL can embed
+basic-auth credentials or a token query parameter, and `doctor --json` is exactly
+the kind of output that lands in CI logs and support bundles. Earlier revisions
+reduced the offending line before printing it, which failed: any predicate over
+file bytes has to decide which bytes are a secret, and several — base64 padding
+that looks like an assignment, a word ending in `=`, a token sharing a word with
+the variable name, an include path containing a token — were wrong. So the line
+is not reported at all. `split_brain_reason` names the *class* of construct and
+`split_brain_env_file` names the file; together they locate the problem without
+quoting it. The write commands' refusal message follows the same rule.
+
+**Detection is conservative, not exhaustive.** The probe refuses everything it
+cannot prove inert, and the classes above are what it recognizes; a name that
+only exists after expansion at source time is refused where it is visible
+(`export ${N}=…`, `export AGENT_COORD_API{_URL,}=…`) rather than resolved. It is
+not a shell, and does not claim to enumerate every construct a shell could use —
+which is why the failure direction is refusal and why the local-mode selections
+exist. If an explicitly
 configured backend fails, agents should report
 coordination state
 as `UNKNOWN` and use the public claim-comment fallback until the operator fixes
@@ -444,7 +532,12 @@ read the exact coordination prompt from a file, or `--launch-prompt -` to read i
 from stdin; the explicit option overrides any `launch_prompt` already present in
 the manifest. Registration stamps `schema_version`, `registered_at`, and
 `updated_at`, preserves optional operator/dashboard/thread metadata, and rejects
-malformed lane names or owner/target fields before workers claim lanes.
+malformed lane names or owner/target fields before workers claim lanes. A lane
+name or owner of `UNKNOWN` (in any case) is rejected: `UNKNOWN` is the reserved
+no-name/no-owner sentinel that `status` rendering and `batch-audit` attribution
+compare against, so registering it would make a real lane indistinguishable from
+a lane with no name or owner. Values that merely contain the token, such as
+`unknown-docs`, are fine.
 `--synthetic --synthetic-kind KIND` stamps batch-level simulation provenance;
 re-registration preserves those fields when a later manifest and command omit
 them, so completed synthetic batches retain the one-day GC window.
@@ -557,7 +650,9 @@ lanes **and the event's target belongs to that lane** (or the event carries no
 target). This is what links the auto-emitted `claim.acquired`/`claim.released`
 events (which carry `agent_id` and `target` but no `lane` field) to their lane —
 while a unique owner doing unrelated work on a different target under the same
-batch-id does not complete the lane. `register-batch` enforces unique lane *names*
+batch-id does not complete the lane. The lane-name and owner paths skip the
+reserved `UNKNOWN` sentinel, which `register-batch` refuses to register as a lane
+name or owner for exactly that reason. `register-batch` enforces unique lane *names*
 but not unique targets or owners, so when two lanes share a target or an owner that
 shared key is ambiguous and is not used on its own for attribution; a lane whose
 only keys are ambiguous and was never touched by a lane-name-tagged event correctly
