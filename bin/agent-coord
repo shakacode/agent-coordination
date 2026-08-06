@@ -61,10 +61,12 @@ module AgentCoord
   # statement separator, optionally behind a declaration builtin and its options —
   # so another variable's value that merely contains the text
   # (`HELP_TEXT="Set AGENT_COORD_API_URL=<url>"`) is not read as an assignment.
-  CONSUMER_EFFECTIVE_ASSIGNMENT = /
+  CONSUMER_API_URL_ASSIGNED_NAME = "AGENT_COORD_API_URL="
+  # What must sit immediately before the name for it to be an assignment: a
+  # statement start, then an optional declaration builtin and its options.
+  CONSUMER_COMMAND_WORD_PREFIX = /
     (?:\A|[;&|(){}]|\bthen\b|\bdo\b|\belse\b)\s*
-    (?:(?:export|declare|typeset|readonly)\s+(?:-{1,2}[A-Za-z]*\s+)*)?
-    AGENT_COORD_API_URL=
+    (?:(?:export|declare|typeset|readonly)\s+(?:-{1,2}[A-Za-z]*\s+)*)?\z
   /x
   # A declaration builtin whose name position is an expansion (`export ${N}=x`):
   # the name is not in the file text, so its effect cannot be proven.
@@ -1062,9 +1064,7 @@ module AgentCoord
       # An assignment the anchored pattern cannot read because quoting or a
       # backslash falls inside the name or around the "=". The shell removes those
       # before assigning, so the variable really is set.
-      if consumer_name_normalized_text(code).match?(CONSUMER_EFFECTIVE_ASSIGNMENT)
-        return unprovable_verdict(path, line, "opaque_api_url_reference")
-      end
+      return unprovable_verdict(path, line, "opaque_api_url_reference") if consumer_effective_assignment?(code)
       return unprovable_verdict(path, line, "indirect_declaration") if consumer_indirect_declaration?(code)
 
       return consumer_include_verdict(path, line, code, verdict, follow_includes) if code[
@@ -1197,7 +1197,51 @@ module AgentCoord
     # consumer_unquoted_text, which drops quoted content entirely because it reads
     # statement structure; here the content is exactly what must stay visible.
     def consumer_name_normalized_text(code)
-      code.gsub(/["'\\]/, "")
+      consumer_name_normalized_pair(code).first
+    end
+
+    # Two views of the same normalization: the text a shell would assign from, and
+    # the same text with every character that came from *inside* quotes replaced by
+    # "_". A real assignment always has its statement boundary and any declaration
+    # builtin outside quotes — only the name may be quoted — so the second view is
+    # what the boundary is tested against. Without it, punctuation or a keyword
+    # inside an ordinary value (`NOTE="Do not touch; AGENT_COORD_API_URL=<url>"`)
+    # would look like the start of a new statement.
+    def consumer_name_normalized_pair(code)
+      text = +""
+      boundary = +""
+      quote = nil
+      index = 0
+      while index < code.length
+        char = code[index]
+        if consumer_escape?(quote, char)
+          index += 1
+          next
+        end
+
+        state = consumer_next_quote_state(quote, char)
+        unless ['"', "'"].include?(char) && (state.nil? || quote.nil?)
+          text << char
+          boundary << (quote ? "_" : char)
+        end
+        quote = state
+        index += 1
+      end
+      [text, boundary]
+    end
+
+    # True when the line assigns this variable for real: the name (which may be
+    # quoted) sits where a command word can start, judged on the boundary view so a
+    # separator or keyword inside another value cannot fake that position.
+    def consumer_effective_assignment?(code)
+      text, boundary = consumer_name_normalized_pair(code)
+      offset = 0
+      while (index = text.index(CONSUMER_API_URL_ASSIGNED_NAME, offset))
+        return true if boundary[0...index].match?(CONSUMER_COMMAND_WORD_PREFIX)
+
+        offset = index + 1
+      end
+      false
     end
 
     # `export ${N}=x` / `export "$N"=x`: the assigned name is an expansion, so the

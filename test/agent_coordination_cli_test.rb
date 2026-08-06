@@ -8590,6 +8590,10 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
         %(AGENT_COORD_API_URL=;echo \\"disabled\\"; AGENT_COORD_API_URL=https://fleet.example\n),
       "escaped quote then export" => %(X="a\\"b" export AGENT_COORD_API_URL=https://fleet.example\n),
       "assignment prefix before the name" => %(X=1 AGENT_COORD_API_URL=https://fleet.example\n),
+      # A real statement boundary before the name, versus one that only exists
+      # inside another value (see the inert list).
+      "separator then the name" => %(true; AGENT_COORD_API_URL=https://fleet.example\n),
+      "keyword then the name" => %(if true; then AGENT_COORD_API_URL=https://fleet.example; fi\n),
       # A shell removes backslash-newline before tokenizing, so neither physical
       # line carries the whole identifier yet the variable is still set.
       "identifier split by a continuation" => "AGENT_COORD_API\\\n_URL=https://fleet.example\n",
@@ -8610,6 +8614,11 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
       # is not in a command-word position, so it assigns only HELP_TEXT.
       "assignment text inside another value" =>
         %(HELP_TEXT="Set AGENT_COORD_API_URL=<url> to configure the fleet backend"\n),
+      # Punctuation and keywords inside a value are content, not shell structure,
+      # so they cannot fake the command-word position the name needs.
+      "separator inside a quoted value" =>
+        %(NOTE="Do not touch; AGENT_COORD_API_URL=<url> must stay unset"\n),
+      "keyword inside a quoted value" => %(NOTE="run then AGENT_COORD_API_URL=<url> later"\n),
       "quoted eval word" => %(GREETING="Time to eval options"\n),
       "substitution in another variable" => %(MACHINE_ID=$(hostname)  # one per host; audit\n),
       "last assignment blanks it" => "AGENT_COORD_API_URL=https://fleet.example\nAGENT_COORD_API_URL=\n",
