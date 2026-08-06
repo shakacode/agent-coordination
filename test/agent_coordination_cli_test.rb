@@ -1523,6 +1523,27 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     end
   end
 
+  # A quoted value carries through its own spaces, so redaction has to run to the
+  # end of the shell word rather than to the first space — otherwise the tail of a
+  # credential survives in the message and the payload.
+  def test_split_brain_output_redacts_quoted_values_containing_spaces
+    with_consumer_env_config do |_root, agent_dir, env|
+      secret = "s3cret-token"
+      { %(AGENT_COORD_API_URL="https://user:pa #{secret}@fleet.example"\n) =>
+          "AGENT_COORD_API_URL=<redacted>",
+        %(export "AGENT_COORD_API_URL=https://user:#{secret}@fleet.example"\n) =>
+          %("AGENT_COORD_API_URL=<redacted>) }.each do |body, construct|
+        File.write(File.join(agent_dir, "env"), body)
+
+        doctor = run_consumer_env_cli(env, "doctor", "--json")
+
+        assert_equal 2, doctor.status.exitstatus, body
+        refute_includes doctor.stdout, secret, body
+        assert_includes JSON.parse(doctor.stdout).fetch("split_brain_construct"), construct, body
+      end
+    end
+  end
+
   # An env file that exists but cannot be decoded or read is "cannot prove inert",
   # not "inert": one stray byte must not discard the verdict for the rest of it.
   # A genuinely absent candidate stays a non-candidate.
@@ -8554,10 +8575,12 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     stdout.strip
   end
 
-  # How a construct is surfaced: every assigned value is replaced, and everything
-  # else — including the variable names — survives.
+  # Constructs surface with assigned values redacted, so the matrix asserts the
+  # part that must survive — everything before the first "=" — rather than
+  # restating the redaction rule. Exact redaction is pinned by
+  # test_split_brain_output_never_echoes_an_assigned_value.
   def expected_construct(line)
-    line.strip.gsub(/=(?!\s|\z)\S*/) { "=<redacted>" }
+    line.strip.split("=").first
   end
 
   # A byte array writes verbatim, so an invalid-UTF-8 fixture stays invalid.
@@ -8649,9 +8672,10 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
       # A name that only exists after an expansion: the file text cannot say which
       # variable is declared, so it is refused rather than guessed at.
       "export ${AGENT_COORD_NAME_VAR}=https://fleet.example" => "indirect_declaration",
-      # Two assignments on one line: the value scanner stops at the `;`, so
-      # last-assignment-wins cannot be applied to it.
+      # Two assignments on one line, or an assignment then an unset: the value
+      # scanner stops at the `;`, so last-assignment-wins cannot be applied to it.
       "AGENT_COORD_API_URL=https://fleet.example; AGENT_COORD_API_URL=" => "opaque_api_url_reference",
+      "AGENT_COORD_API_URL=https://fleet.example; unset AGENT_COORD_API_URL" => "opaque_api_url_reference",
       'eval "$(fleet-env)"' => "eval",
       "$(fleet-env)" => "command_substitution",
       # A guarded or compound include is not the first statement on its line, so

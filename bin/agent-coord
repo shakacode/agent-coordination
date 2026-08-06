@@ -77,10 +77,13 @@ module AgentCoord
   # before tokenizing, so the next physical line continues this one.
   CONSUMER_LINE_CONTINUATION = /(?<!\\)\\(?:\\\\)*\z/
   CONSUMER_INCLUDE_DIRECTIVE = /^\s*(?:source|\.)\s+(\S.*)$/
-  # A second assignment after a statement separator on the same line. The value
-  # scanner stops at the separator, so last-assignment-wins cannot see past it.
-  # A mention in a trailing comment is not an assignment and does not match.
-  CONSUMER_SECOND_ASSIGNMENT = /[;&|]\s*(?:export\s+)?AGENT_COORD_API_URL=/
+  # A second assignment — or an unset — after a statement separator on the same
+  # line. The value scanner stops at the separator, so last-assignment-wins cannot
+  # see past it either way. A mention in a trailing comment is not one of these.
+  CONSUMER_SECOND_ASSIGNMENT = /
+    [;&|]\s*
+    (?:(?:export\s+)?AGENT_COORD_API_URL=|unset\s+(?:-v\s+)?AGENT_COORD_API_URL)
+  /x
   # An include that is not the first statement on its line — `[ -f x ] && . x`,
   # `true; . x`, `if [ -f x ]; then . x; fi`. Whether it runs at all depends on the
   # guard, so it is unprovable rather than followed.
@@ -91,9 +94,6 @@ module AgentCoord
   CONSUMER_EVAL = %r{(?<![\w./-])eval(?![\w-])}
   CONSUMER_OTHER_ASSIGNMENT = /\A\s*(?:export\s+)?[A-Za-z_][A-Za-z0-9_]*=/
   CONSUMER_STATEMENT_SEPARATOR = /[;&|]/
-  # An assigned value: everything from an "=" to the end of that word. Used to
-  # redact values out of operator-facing constructs, which reach doctor --json.
-  CONSUMER_ASSIGNED_VALUE = /=(?!\s|\z)\S*/
   REASON_CONFIGURED = "configured_api_url"
   # Operator-facing sentence per finding: the message has to explain a refusal
   # that may be blocking valid work, so each reason says what could not be proven.
@@ -1287,12 +1287,53 @@ module AgentCoord
     # can carry basic-auth credentials or a token query parameter. Everything up to
     # the first "=" is kept, which is what identifies the construct; a line with no
     # assignment (an include, `eval`, a command substitution) is unchanged.
+    # Redaction is per shell word, so a quoted value carries through its own spaces
+    # (`URL="https://user:pa ss@host"` surrenders all of it, not just up to the
+    # space) and every assignment on the line is covered, which keeps a prefix
+    # assignment naming the variable the refusal is about.
     def consumer_redacted_construct(line)
-      # Every assigned value on the line, not just the first: a prefix assignment
-      # (`X=1 AGENT_COORD_API_URL=…`) must keep naming the variable the refusal is
-      # about while still surrendering no value. An empty assignment has nothing to
-      # redact, and a line with no assignment is unchanged.
-      line.strip.gsub(CONSUMER_ASSIGNED_VALUE) { "=<redacted>" }
+      text = line.strip
+      out = +""
+      index = 0
+      while index < text.length
+        if text[index].match?(/\s/)
+          out << text[index]
+          index += 1
+          next
+        end
+
+        word_end = consumer_word_end(text, index)
+        out << consumer_redacted_word(text[index...word_end])
+        index = word_end
+      end
+      out
+    end
+
+    # A word keeps everything up to its first "=" and surrenders the rest. An empty
+    # assignment has nothing to surrender, and a word with no "=" is unchanged.
+    def consumer_redacted_word(word)
+      assign = word.index("=")
+      return word if assign.nil? || assign == word.length - 1
+
+      "#{word[0..assign]}<redacted>"
+    end
+
+    # Index just past the shell word starting at index: unquoted whitespace ends it,
+    # while a quoted span carries through spaces.
+    def consumer_word_end(text, index)
+      quote = nil
+      while index < text.length
+        char = text[index]
+        if consumer_escape?(quote, char)
+          index += 2
+          next
+        end
+        break if quote.nil? && char.match?(/\s/)
+
+        quote = consumer_next_quote_state(quote, char)
+        index += 1
+      end
+      index
     end
 
     # The include target the guard is willing to read, or [nil, reason] when its
