@@ -1304,16 +1304,20 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
       File.write(File.join(agent_dir, "inert.env"), "AGENT_COORD_API_TOKEN=secret\n")
       include_word = %(. "$XDG_CONFIG_HOME/agent-coord/inert.env")
 
-      ["#{include_word}; AGENT_COORD_API_URL=https://fleet.example",
-       "#{include_word} && AGENT_COORD_API_URL=https://fleet.example",
-       "#{include_word} | tee /dev/null"].each_with_index do |line, index|
+      # When the trailing statement is itself an assignment, that is what decides
+      # the line — the assignment really does set the URL, so it is reported as the
+      # named-outside-a-plain-assignment case rather than as a guarded include.
+      { "#{include_word}; AGENT_COORD_API_URL=https://fleet.example" => "opaque_api_url_reference",
+        "#{include_word} && AGENT_COORD_API_URL=https://fleet.example" => "opaque_api_url_reference",
+        "#{include_word} | tee /dev/null" => "guarded_include" }
+        .each_with_index do |(line, reason), index|
         File.write(env_file, "#{line}\n")
 
         claim = run_consumer_env_cli(env, *split_brain_claim_args(index))
         assert_equal 2, claim.status.exitstatus, "#{line}: #{claim.stderr}"
         assert_includes claim.stderr, "may configure AGENT_COORD_API_URL", line
 
-        assert_doctor_reports_split_brain(env, env_file, "guarded_include", line)
+        assert_doctor_reports_split_brain(env, env_file, reason, line)
       end
     end
   end
@@ -1424,6 +1428,76 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
 
       assert_equal 2, claim.status.exitstatus
       assert_includes claim.stderr, "configures AGENT_COORD_API_URL"
+    end
+  end
+
+  # Differential coverage. The guard's verdict is compared against what a real
+  # shell exports to a child process, because a fixture asserted only against the
+  # guard's own regexes cannot tell whether a construct is *effective* — which is
+  # how a quoted variable name (`export "AGENT_COORD_API_URL"=…`) and an
+  # undecodable env file were both read as inert while bash and zsh exported the
+  # fleet URL. This direction is the release-blocking one: whenever a shell really
+  # exports a URL, the guard must refuse.
+  def test_write_command_refuses_every_construct_a_real_shell_exports
+    shells = available_posix_shells
+    skip "no POSIX shell available to compare against" if shells.empty?
+
+    with_consumer_env_config do |_root, agent_dir, env|
+      env_file = File.join(agent_dir, "env")
+      exporting_env_bodies.each_with_index do |(label, body), index|
+        write_env_fixture(env_file, body)
+        shells.each do |shell|
+          assert_equal "https://fleet.example", shell_exported_api_url(shell, env_file),
+                       "#{label}: fixture must really export the URL via #{shell}"
+        end
+
+        claim = run_consumer_env_cli(env, *split_brain_claim_args(index))
+        assert_equal 2, claim.status.exitstatus, "#{label}: #{claim.stderr}"
+        assert_includes claim.stderr, "split-brain configuration", label
+      end
+    end
+  end
+
+  # The other direction: a construct no shell exports must not be refused, or
+  # fail-closed becomes a CLI that ordinary env files cannot use. (The guard is
+  # deliberately stricter than the shell for constructs it cannot prove, so this
+  # is asserted over known-inert bodies rather than as a biconditional.)
+  def test_write_command_permits_constructs_no_real_shell_exports
+    shells = available_posix_shells
+    skip "no POSIX shell available to compare against" if shells.empty?
+
+    with_consumer_env_config do |_root, agent_dir, env|
+      env_file = File.join(agent_dir, "env")
+      inert_env_bodies.each_with_index do |(label, body), index|
+        write_env_fixture(env_file, body)
+        shells.each do |shell|
+          assert_empty shell_exported_api_url(shell, env_file),
+                       "#{label}: fixture must export nothing via #{shell}"
+        end
+
+        claim = run_consumer_env_cli(env, *split_brain_claim_args(index))
+        assert_equal 0, claim.status.exitstatus, "#{label}: #{claim.stderr}"
+        refute_includes claim.stderr, "split-brain", label
+      end
+    end
+  end
+
+  # An env file that exists but cannot be decoded or read is "cannot prove inert",
+  # not "inert": one stray byte must not discard the verdict for the rest of it.
+  # A genuinely absent candidate stays a non-candidate.
+  def test_write_command_hard_stops_for_an_undecodable_env_file_and_ignores_an_absent_one
+    with_consumer_env_config do |_root, agent_dir, env|
+      env_file = File.join(agent_dir, "env")
+      write_env_fixture(env_file, "# op\xE9rateur\nexport AGENT_COORD_API_URL=https://fleet.example\n".bytes)
+
+      claim = run_consumer_env_cli(env, *split_brain_claim_args(0))
+      assert_equal 2, claim.status.exitstatus, claim.stderr
+      assert_doctor_reports_split_brain(env, env_file, "undecodable_env_file", "latin-1 comment")
+
+      FileUtils.rm_f(env_file)
+      absent = run_consumer_env_cli(env, *split_brain_claim_args(1))
+      assert_equal 0, absent.status.exitstatus, absent.stderr
+      refute_includes absent.stderr, "split-brain"
     end
   end
 
@@ -8424,6 +8498,63 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     }
   end
 
+  # Shells to compare the guard against. zsh is absent on most CI images, so it
+  # participates when present rather than being required.
+  def available_posix_shells
+    ["/bin/bash", "/bin/zsh"].select { |shell| File.executable?(shell) }
+  end
+
+  # Sourced with `set -a` — how these env files are actually consumed (systemd
+  # EnvironmentFile, `set -a; . env`) — then read from a child process, which is
+  # the only ground truth for "does this configure a fleet URL for what runs next".
+  def shell_exported_api_url(shell, fixture)
+    script = "set -a; . #{Shellwords.escape(fixture)} >/dev/null 2>&1; printenv AGENT_COORD_API_URL"
+    stdout, = Open3.capture3({ "AGENT_COORD_API_URL" => nil }, shell, "-c", script)
+    stdout.strip
+  end
+
+  # A byte array writes verbatim, so an invalid-UTF-8 fixture stays invalid.
+  def write_env_fixture(path, body)
+    body.is_a?(String) ? File.write(path, body) : File.binwrite(path, body.pack("C*"))
+  end
+
+  # Constructs a real shell exports. The quoted, split, ANSI-C and backslashed
+  # names all reach the variable because the shell removes quoting before
+  # assigning; the last two carry an invalid byte around a plain export.
+  def exporting_env_bodies
+    {
+      "quoted name" => %(export "AGENT_COORD_API_URL"=https://fleet.example\n),
+      "single-quoted name" => %(export 'AGENT_COORD_API_URL'=https://fleet.example\n),
+      "quoted equals" => %(export AGENT_COORD_API_URL"="https://fleet.example\n),
+      "name split across quotes" => %(export AGENT_COORD_API"_URL"=https://fleet.example\n),
+      "ansi-c quoted name" => %(export $'AGENT_COORD_API_URL'=https://fleet.example\n),
+      "backslash inside name" => %(export AGENT_COORD_API\\_URL=https://fleet.example\n),
+      "declare -x" => %(declare -x AGENT_COORD_API_URL=https://fleet.example\n),
+      "typeset -x" => %(typeset -x AGENT_COORD_API_URL=https://fleet.example\n),
+      "export --" => %(export -- AGENT_COORD_API_URL=https://fleet.example\n),
+      "indirect name set in file" => %(N=AGENT_COORD_API_URL\nexport ${N}=https://fleet.example\n),
+      "quoted name in a compound line" => %(true; export "AGENT_COORD_API_URL"=https://fleet.example\n),
+      "invalid byte before the export" =>
+        "# op\xE9rateur\nexport AGENT_COORD_API_URL=https://fleet.example\n".bytes,
+      "invalid byte after the export" =>
+        "export AGENT_COORD_API_URL=https://fleet.example\n# op\xE9rateur\n".bytes
+    }
+  end
+
+  # Constructs no shell exports, which must keep working.
+  def inert_env_bodies
+    {
+      "quoted variable name in a value" => %(DOC_URL="see docs/AGENT_COORD_API_URL.md for details"\n),
+      "quoted eval word" => %(GREETING="Time to eval options"\n),
+      "substitution in another variable" => %(MACHINE_ID=$(hostname)  # one per host; audit\n),
+      "last assignment blanks it" => "AGENT_COORD_API_URL=https://fleet.example\nAGENT_COORD_API_URL=\n",
+      "unset after assignment" => "AGENT_COORD_API_URL=https://fleet.example\nunset AGENT_COORD_API_URL\n",
+      "valid utf-8 comment" => "# opérateur\nAGENT_COORD_API_URL=\n",
+      "export of another variable" => %(export PATH="$PATH:/usr/local/bin"\n),
+      "export -p prints only" => "export -p\n"
+    }
+  end
+
   # Non-include constructs the probe cannot prove inert. The first two are the
   # `${VAR:-}` and command-substitution values from the issue's own comments.
   def cannot_prove_lines
@@ -8434,6 +8565,9 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
       "export AGENT_COORD_API_URL" => "opaque_api_url_reference",
       # Quoting the assignment does not stop it taking effect, so it is not text.
       %(export "AGENT_COORD_API_URL=https://fleet.example") => "opaque_api_url_reference",
+      # A name that only exists after an expansion: the file text cannot say which
+      # variable is declared, so it is refused rather than guessed at.
+      "export ${AGENT_COORD_NAME_VAR}=https://fleet.example" => "indirect_declaration",
       # Two assignments on one line: the value scanner stops at the `;`, so
       # last-assignment-wins cannot be applied to it.
       "AGENT_COORD_API_URL=https://fleet.example; AGENT_COORD_API_URL=" => "opaque_api_url_reference",

@@ -347,13 +347,25 @@ fleet URL, naming the file and the exact construct:
 | include that is not the first statement on its line | `[ -f "$F" ] && . "$F"` |
 | value from an unresolved expansion or command substitution | `AGENT_COORD_API_URL="${FLEET_URL:-}"` |
 | the variable named outside a plain assignment | `[ -n "$F" ] && AGENT_COORD_API_URL="$F"` |
+| an assignment whose name carries quoting or a backslash | `export "AGENT_COORD_API_URL"=…`, `export AGENT_COORD_API"_URL"=…` |
+| a declaration builtin other than a plain `export NAME=` | `declare -x AGENT_COORD_API_URL=…`, `export -- …` |
+| a declared name that only exists after an expansion | `export ${N}=…` |
+| an env file that exists but is not valid UTF-8, or cannot be read | `# op<invalid byte>rateur` |
 | `eval`, or a command substitution that is not confined to another variable's value | `eval "$(fleet-env)"` |
+
+A shell removes quoting *before* it assigns, so `export "AGENT_COORD_API_URL"=x`
+and `export AGENT_COORD_API\_URL=x` really do export the fleet URL; the probe
+normalizes quote characters and backslashes out of the name before deciding, so
+those are refusals rather than misses. An undecodable file is refused for the
+same reason: one stray byte must not discard the verdict for the rest of it. A
+file that is simply absent is not a candidate and changes nothing.
 
 Lines that cannot reach the variable stay inert, so ordinary env files are
 unaffected: comments, a different variable (including one this name is only a
 prefix of, such as `MY_AGENT_COORD_API_URL`), a compound statement that sources
-nothing (`[ -d /tmp ] && export PATH=...`), and a substitution confined to
-another variable's value (`MACHINE_ID=$(hostname)`, which runs in a subshell)
+nothing (`[ -d /tmp ] && export PATH=...`), a declaration of another variable
+(`export PATH="$PATH:/usr/local/bin"`, `export -p`), and a substitution confined
+to another variable's value (`MACHINE_ID=$(hostname)`, which runs in a subshell)
 never trip the guard. `doctor` reports which construct decided the verdict in
 `split_brain_reason` and `split_brain_construct`.
 

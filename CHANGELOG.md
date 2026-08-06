@@ -207,7 +207,15 @@ when releases begin.
   execution depends on the guard), a value from an unresolved expansion or
   command substitution (`"${FLEET_URL:-}"`), the variable named outside a plain
   assignment, `eval`, and a command substitution that is not confined to another
-  variable's value. The CLI still never sources
+  variable's value. Because a shell removes quoting before it assigns, an
+  assignment whose *name* carries quoting or a backslash is effective and is
+  refused too — `export "AGENT_COORD_API_URL"=x`, `export AGENT_COORD_API"_URL"=x`,
+  `export $'AGENT_COORD_API_URL'=x`, `export AGENT_COORD_API\_URL=x`,
+  `declare -x`/`typeset -x`/`export --`, and a declared name that only exists
+  after an expansion (`export ${N}=x`). An env file that exists but is not valid
+  UTF-8, or cannot be read, is refused on the same grounds rather than ignored, so
+  one stray byte cannot discard the verdict for the rest of the file; a file that
+  is simply absent is still not a candidate. The CLI still never sources
   or evaluates operator shell; include resolution expands only `$HOME` and
   `$XDG_CONFIG_HOME`, requires an absolute target, and refuses any target that
   resolves — after symlink and `..` resolution — outside the config directory.

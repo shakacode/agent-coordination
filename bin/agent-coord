@@ -50,10 +50,18 @@ module AgentCoord
   # read (`[ -n "$F" ] && AGENT_COORD_API_URL=$F`), a bare `export` of it, and so on.
   # Both boundaries matter: MY_AGENT_COORD_API_URL is a different variable.
   CONSUMER_API_URL_MENTION = /(?<![A-Za-z0-9_])AGENT_COORD_API_URL(?![A-Za-z0-9_])/
-  # Quoting the assignment does not stop it taking effect (`export "URL=x"`), so
-  # the mention check looks inside quotes for an assignment even though it ignores
-  # a merely quoted name (`DOC_URL="see AGENT_COORD_API_URL.md"`).
-  CONSUMER_QUOTED_API_URL_ASSIGNMENT = /["'][^"']*(?<![A-Za-z0-9_])AGENT_COORD_API_URL=/
+  # An assignment that survives removing quote characters and backslashes from
+  # anywhere in the name or around the "=". A shell performs that removal before
+  # it sees the assignment, so `export "AGENT_COORD_API_URL"=x`,
+  # `export AGENT_COORD_API"_URL"=x`, `export AGENT_COORD_API\_URL=x`,
+  # `export $'AGENT_COORD_API_URL'=x` and `declare -x` all take effect and are
+  # matched here. A quoted *value* that merely names the variable does not, since
+  # nothing follows the name with an "=" (`DOC_URL="see AGENT_COORD_API_URL.md"`).
+  CONSUMER_EFFECTIVE_ASSIGNMENT = /(?<![A-Za-z0-9_])AGENT_COORD_API_URL=/
+  # A declaration builtin whose name position is an expansion (`export ${N}=x`):
+  # the name is not in the file text, so its effect cannot be proven.
+  CONSUMER_DECLARATION_BUILTIN = /\A\s*(?:export|declare|typeset|readonly)\s+(\S.*)\z/
+  CONSUMER_OPTION_WORD = /\A-{1,2}[A-Za-z]*\z/
   CONSUMER_ENV_INERT_LINE = /\A\s*(?:#|\z)/
   CONSUMER_INCLUDE_DIRECTIVE = /^\s*(?:source|\.)\s+(\S.*)$/
   # A second assignment after a statement separator on the same line. The value
@@ -79,6 +87,9 @@ module AgentCoord
     "opaque_api_url_reference" => "names AGENT_COORD_API_URL outside a plain assignment this CLI can read",
     "command_substitution" => "runs a command substitution that could set AGENT_COORD_API_URL",
     "eval" => "evaluates text that could set AGENT_COORD_API_URL",
+    "indirect_declaration" => "declares a variable whose name comes from an expansion this CLI cannot evaluate",
+    "undecodable_env_file" => "is not valid UTF-8, so this CLI cannot read what the rest of it does",
+    "unreadable_env_file" => "exists but cannot be read by this CLI",
     "guarded_include" => "sources a file from a compound statement, so whether that include runs — " \
                          "and what else the line does — is not something this CLI can evaluate",
     "unreadable_include" => "sources a file this CLI cannot read",
@@ -903,6 +914,8 @@ module AgentCoord
       end
 
       detail = [finding["construct"], construct_file && "in #{construct_file}"].compact.join(" ")
+      return "may configure AGENT_COORD_API_URL: it #{sentence}" if detail.empty?
+
       "may configure AGENT_COORD_API_URL: it #{sentence} (#{detail})"
     end
 
@@ -948,10 +961,12 @@ module AgentCoord
     end
 
     # What one candidate env file means for AGENT_COORD_API_URL: nil when it is
-    # provably inert, otherwise the finding that drives the hard stop.
+    # provably inert or absent, otherwise the finding that drives the hard stop.
     #
-    # An unreadable or undecodable candidate is not a candidate at all, which
-    # keeps the documented "ignore an env file with invalid encoding" behavior.
+    # A file that exists but cannot be decoded or read is exactly "cannot prove
+    # inert" — one stray byte must not discard the verdict for the rest of the file
+    # — so it stops like any other unprovable construct. Only a genuinely absent
+    # candidate is not a candidate.
     def consumer_env_file_finding(path)
       verdict = consumer_env_verdict(path, CONSUMER_ENV_INERT, follow_includes: true)
       return nil unless verdict.decided?
@@ -964,8 +979,12 @@ module AgentCoord
       construct_file = verdict.construct_file
       finding["construct_file"] = construct_file if construct_file && construct_file != path
       finding.compact
-    rescue SystemCallError, ArgumentError
+    rescue Errno::ENOENT, Errno::ENOTDIR
       nil
+    rescue ArgumentError
+      { "env_file" => path, "reason" => "undecodable_env_file" }
+    rescue SystemCallError
+      { "env_file" => path, "reason" => "unreadable_env_file" }
     end
 
     # Fold a consumer env file the way a shell would: assignments take effect in
@@ -1005,6 +1024,14 @@ module AgentCoord
       if (match = code.match(CONSUMER_API_URL_ASSIGNMENT))
         return consumer_assignment_verdict(path, line, code, match[1].to_s)
       end
+
+      # An assignment the anchored pattern cannot read because quoting or a
+      # backslash falls inside the name or around the "=". The shell removes those
+      # before assigning, so the variable really is set.
+      if consumer_name_normalized_text(code).match?(CONSUMER_EFFECTIVE_ASSIGNMENT)
+        return unprovable_verdict(path, line, "opaque_api_url_reference")
+      end
+      return unprovable_verdict(path, line, "indirect_declaration") if consumer_indirect_declaration?(code)
 
       return consumer_include_verdict(path, line, code, verdict, follow_includes) if code[
         CONSUMER_INCLUDE_DIRECTIVE, 1
@@ -1096,7 +1123,7 @@ module AgentCoord
     # stop it running — so that one is matched against the quoted text.
     def consumer_opaque_line_verdict(path, line, code)
       structure = consumer_unquoted_text(code)
-      reason = if structure.match?(CONSUMER_API_URL_MENTION) || code.match?(CONSUMER_QUOTED_API_URL_ASSIGNMENT)
+      reason = if structure.match?(CONSUMER_API_URL_MENTION)
                  "opaque_api_url_reference"
                elsif structure.match?(CONSUMER_COMPOUND_INCLUDE)
                  "guarded_include"
@@ -1114,6 +1141,26 @@ module AgentCoord
     # is treated as unprovable instead.
     def consumer_contained_substitution?(code)
       code.match?(CONSUMER_OTHER_ASSIGNMENT) && !consumer_unquoted_text(code).match?(CONSUMER_STATEMENT_SEPARATOR)
+    end
+
+    # The line with quote characters and backslashes removed but their content
+    # kept, which is what a shell assigns from. Distinct from
+    # consumer_unquoted_text, which drops quoted content entirely because it reads
+    # statement structure; here the content is exactly what must stay visible.
+    def consumer_name_normalized_text(code)
+      code.gsub(/["'\\]/, "")
+    end
+
+    # `export ${N}=x` / `export "$N"=x`: the assigned name is an expansion, so the
+    # file text cannot say which variable it sets. Options are skipped, and a
+    # literal first word (`export PATH="$PATH:/x"`) is not indirect.
+    def consumer_indirect_declaration?(code)
+      # code still carries the line's newline, which the anchored pattern cannot.
+      args = code.strip[CONSUMER_DECLARATION_BUILTIN, 1]
+      return false unless args
+
+      words = consumer_name_normalized_text(args).split(/\s+/)
+      words.drop_while { |word| word.match?(CONSUMER_OPTION_WORD) }.first&.start_with?("$") || false
     end
 
     # A line's statement structure with quoted spans removed, so a separator
@@ -1345,8 +1392,12 @@ module AgentCoord
       opts.separator "it also fails closed on a construct it cannot prove inert: an include it cannot"
       opts.separator "read, resolve, or contain within your config dir, an include inside an include,"
       opts.separator "an include that is not the first statement on its line (`[ -f x ] && . x`),"
-      opts.separator "an assignment from an unresolved expansion or command substitution, and any"
-      opts.separator "other line that could set AGENT_COORD_API_URL. split_brain_reason and"
+      opts.separator "an assignment from an unresolved expansion or command substitution, an"
+      opts.separator "assignment whose name carries quoting or a backslash (a shell removes those"
+      opts.separator "before assigning, so `export \"AGENT_COORD_API_URL\"=x` does configure it), a"
+      opts.separator "declared name that only exists after an expansion, an env file that exists but"
+      opts.separator "is not valid UTF-8 or cannot be read, and any other line that could set"
+      opts.separator "AGENT_COORD_API_URL. split_brain_reason and"
       opts.separator "split_brain_construct name which construct decided it, and"
       opts.separator "split_brain_construct_file names the sourced file when it is not the env file."
       opts.separator "Provably inert env files still pass: the last assignment wins, so a later"
