@@ -57,7 +57,15 @@ module AgentCoord
   # `export $'AGENT_COORD_API_URL'=x` and `declare -x` all take effect and are
   # matched here. A quoted *value* that merely names the variable does not, since
   # nothing follows the name with an "=" (`DOC_URL="see AGENT_COORD_API_URL.md"`).
-  CONSUMER_EFFECTIVE_ASSIGNMENT = /(?<![A-Za-z0-9_])AGENT_COORD_API_URL=/
+  # The name must sit where a command word can start — line start or after a
+  # statement separator, optionally behind a declaration builtin and its options —
+  # so another variable's value that merely contains the text
+  # (`HELP_TEXT="Set AGENT_COORD_API_URL=<url>"`) is not read as an assignment.
+  CONSUMER_EFFECTIVE_ASSIGNMENT = /
+    (?:\A|[;&|(){}]|\bthen\b|\bdo\b|\belse\b)\s*
+    (?:(?:export|declare|typeset|readonly)\s+(?:-{1,2}[A-Za-z]*\s+)*)?
+    AGENT_COORD_API_URL=
+  /x
   # A declaration builtin whose name position is an expansion (`export ${N}=x`):
   # the name is not in the file text, so its effect cannot be proven.
   CONSUMER_DECLARATION_BUILTIN = /\A\s*(?:export|declare|typeset|readonly)\s+(\S.*)\z/

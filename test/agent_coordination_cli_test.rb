@@ -8550,6 +8550,10 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
   def inert_env_bodies
     {
       "quoted variable name in a value" => %(DOC_URL="see docs/AGENT_COORD_API_URL.md for details"\n),
+      # A documentation-style value containing the whole assignment text: the name
+      # is not in a command-word position, so it assigns only HELP_TEXT.
+      "assignment text inside another value" =>
+        %(HELP_TEXT="Set AGENT_COORD_API_URL=<url> to configure the fleet backend"\n),
       "quoted eval word" => %(GREETING="Time to eval options"\n),
       "substitution in another variable" => %(MACHINE_ID=$(hostname)  # one per host; audit\n),
       "last assignment blanks it" => "AGENT_COORD_API_URL=https://fleet.example\nAGENT_COORD_API_URL=\n",
