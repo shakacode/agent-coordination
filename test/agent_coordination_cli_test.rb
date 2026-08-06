@@ -8360,6 +8360,9 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
       "AGENT_COORD_API_URL=$(fleet-url)" => "unresolved_expansion",
       '[ -n "$FLEET" ] && AGENT_COORD_API_URL="$FLEET"' => "opaque_api_url_reference",
       "export AGENT_COORD_API_URL" => "opaque_api_url_reference",
+      # Two assignments on one line: the value scanner stops at the `;`, so
+      # last-assignment-wins cannot be applied to it.
+      "AGENT_COORD_API_URL=https://fleet.example; AGENT_COORD_API_URL=" => "opaque_api_url_reference",
       'eval "$(fleet-env)"' => "eval",
       "$(fleet-env)" => "command_substitution",
       # A guarded or compound include is not the first statement on its line, so

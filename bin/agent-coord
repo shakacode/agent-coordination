@@ -996,6 +996,12 @@ module AgentCoord
     end
 
     def consumer_assignment_verdict(path, line, raw)
+      # The value scanner stops at the first unquoted separator, so a second
+      # assignment on the same line (`URL=https://x; URL=`) would be invisible to
+      # it and the last-assignment-wins rule could not be applied. More than one
+      # mention on the line means it cannot be read as a single assignment.
+      return unprovable_verdict(path, line, "opaque_api_url_reference") if consumer_repeated_mention?(line)
+
       value = consumer_env_assignment_value(raw)
       # A value the shell would expand at source time (`"${FLEET_URL:-}"`, a
       # command substitution) is not decidable from the file text.
@@ -1008,6 +1014,10 @@ module AgentCoord
 
     def consumer_expanding_value?(value)
       value.include?("$") || value.include?("`")
+    end
+
+    def consumer_repeated_mention?(line)
+      line.scan(CONSUMER_API_URL_MENTION).length > 1
     end
 
     # Includes are followed exactly one level deep: the nested fold is called with
