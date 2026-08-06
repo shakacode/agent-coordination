@@ -8345,7 +8345,8 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
       ". backend.env" => "relative_include",
       '. "$AGENT_COORD_FLEET_ENV/backend.env"' => "unexpanded_variable",
       '. "~/.config/agent-coord/backend.env"' => "unexpanded_tilde",
-      '. "$XDG_CONFIG_HOME/agent-coord/missing.env"' => "unreadable_include"
+      '. "$XDG_CONFIG_HOME/agent-coord/missing.env"' => "unreadable_include",
+      '. ""' => "empty_include"
     }
   end
 
