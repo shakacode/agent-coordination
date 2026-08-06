@@ -1287,10 +1287,8 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
         claim = run_consumer_env_cli(env, *split_brain_claim_args(index))
         assert_equal 2, claim.status.exitstatus, "#{line}: #{claim.stderr}"
         assert_includes claim.stderr, "may configure AGENT_COORD_API_URL", line
-        # Constructs surface with the assigned value redacted; see
-        # test_split_brain_output_never_echoes_an_assigned_value.
-        assert_includes claim.stderr, expected_construct(line), line
-
+        # Construct text is pinned by the redaction tests, which assert what may and
+        # may not appear; asserting the raw line here would only restate the rule.
         assert_doctor_reports_split_brain(env, env_file, reason, line)
       end
     end
@@ -1448,10 +1446,12 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
       env_file = File.join(agent_dir, "env")
       exporting_env_bodies.each_with_index do |(label, body), index|
         write_env_fixture(env_file, body)
-        shells.each do |shell|
-          assert_equal "https://fleet.example", shell_exported_api_url(shell, env_file),
-                       "#{label}: fixture must really export the URL via #{shell}"
-        end
+        # At least one real shell must export it — some constructs differ between
+        # shells (`command export "NAME=v"` reaches the parent in bash, not zsh), and
+        # one shell exporting is enough to make an unsourced local write invisible.
+        exported = shells.map { |shell| shell_exported_api_url(shell, env_file) }
+        assert_includes exported, "https://fleet.example",
+                        "#{label}: no available shell exported the URL (#{exported.inspect})"
 
         claim = run_consumer_env_cli(env, *split_brain_claim_args(index))
         assert_equal 2, claim.status.exitstatus, "#{label}: #{claim.stderr}"
@@ -1540,6 +1540,41 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
         assert_equal 2, doctor.status.exitstatus, body
         refute_includes doctor.stdout, secret, body
         assert_includes JSON.parse(doctor.stdout).fetch("split_brain_construct"), construct, body
+      end
+    end
+  end
+
+  # A value can span several shell words — a command substitution with arguments is
+  # one word to a shell but several to a naive splitter — so redaction runs to the
+  # end of the value region. Asserted across every surface an operator or a CI log
+  # would see, on the credential itself rather than on the redaction text.
+  def test_split_brain_output_redacts_values_that_span_words
+    with_consumer_env_config do |_root, agent_dir, env|
+      secret = "SEKRET"
+      ["AGENT_COORD_API_URL=$(vault read -field=url secret/fleet/#{secret})\n",
+       "AGENT_COORD_API_URL=`vault read -field=url secret/fleet/#{secret}`\n",
+       "AGENT_COORD_API_URL=${FLEET_URL:-https://u:#{secret}@h}\n",
+       %(AGENT_COORD_API_URL="https://u:#{secret}@h/a?k=#{secret}"\n)].each do |body|
+        File.write(File.join(agent_dir, "env"), body)
+
+        assert_no_surface_echoes(env, secret, body)
+      end
+    end
+  end
+
+  # A line with no assignment used to be echoed whole, so a credential sitting in an
+  # unparsed construct reached the same surfaces. The construct now carries only the
+  # classification: shell syntax, the variable's own name, and nothing else.
+  def test_split_brain_output_omits_unrecognized_words
+    with_consumer_env_config do |_root, agent_dir, env|
+      secret = "SEKRET"
+      { "echo AGENT_COORD_API_URL https://u:#{secret}@h\n" =>
+          "<omitted> AGENT_COORD_API_URL <omitted>",
+        %(eval "$(fleet-env --token #{secret})"\n) => "eval <omitted>" }.each do |body, construct|
+        File.write(File.join(agent_dir, "env"), body)
+
+        payload = assert_no_surface_echoes(env, secret, body)
+        assert_equal construct, payload.fetch("split_brain_construct"), body
       end
     end
   end
@@ -8575,12 +8610,22 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     stdout.strip
   end
 
-  # Constructs surface with assigned values redacted, so the matrix asserts the
-  # part that must survive — everything before the first "=" — rather than
-  # restating the redaction rule. Exact redaction is pinned by
-  # test_split_brain_output_never_echoes_an_assigned_value.
-  def expected_construct(line)
-    line.strip.split("=").first
+  # Every surface a refusal reaches — the write command's own output, doctor --json,
+  # and doctor's text report — must be free of the assigned value. Returns the
+  # doctor payload so a caller can also pin the construct.
+  def assert_no_surface_echoes(env, secret, label)
+    claim = run_consumer_env_cli(env, *split_brain_claim_args(0))
+    assert_equal 2, claim.status.exitstatus, "#{label}: #{claim.stderr}"
+    refute_includes claim.stderr, secret, "claim stderr: #{label}"
+    refute_includes claim.stdout, secret, "claim stdout: #{label}"
+
+    json = run_consumer_env_cli(env, "doctor", "--json")
+    text = run_consumer_env_cli(env, "doctor")
+    [json, text].each_with_index do |result, index|
+      refute_includes result.stdout, secret, "doctor[#{index}] stdout: #{label}"
+      refute_includes result.stderr, secret, "doctor[#{index}] stderr: #{label}"
+    end
+    JSON.parse(json.stdout)
   end
 
   # A byte array writes verbatim, so an invalid-UTF-8 fixture stays invalid.
@@ -8617,6 +8662,16 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
       # inside another value (see the inert list).
       "separator then the name" => %(true; AGENT_COORD_API_URL=https://fleet.example\n),
       "keyword then the name" => %(if true; then AGENT_COORD_API_URL=https://fleet.example; fi\n),
+      # Statement prefixes in front of a quoted name: reserved words, command
+      # wrappers, a prefix assignment, and brace expansion in the name itself. The
+      # assignment still takes effect behind every one of them.
+      "time before a quoted name" => %(time export "AGENT_COORD_API_URL=https://fleet.example"\n),
+      "! before a quoted name" => %(! export "AGENT_COORD_API_URL=https://fleet.example"\n),
+      "command before a quoted name" => %(command export "AGENT_COORD_API_URL=https://fleet.example"\n),
+      "builtin before a quoted name" => %(builtin export "AGENT_COORD_API_URL=https://fleet.example"\n),
+      "prefix assignment before a quoted name" =>
+        %(FOO=1 export "AGENT_COORD_API_URL=https://fleet.example"\n),
+      "brace expansion in the name" => %(export "AGENT_COORD_API_URL"{,}=https://fleet.example\n),
       # A shell removes backslash-newline before tokenizing, so neither physical
       # line carries the whole identifier yet the variable is still set.
       "identifier split by a continuation" => "AGENT_COORD_API\\\n_URL=https://fleet.example\n",

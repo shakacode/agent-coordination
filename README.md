@@ -348,6 +348,7 @@ fleet URL, naming the file and the exact construct:
 | value from an unresolved expansion or command substitution | `AGENT_COORD_API_URL="${FLEET_URL:-}"` |
 | the variable named outside a plain assignment | `[ -n "$F" ] && AGENT_COORD_API_URL="$F"` |
 | an assignment whose name carries quoting or a backslash | `export "AGENT_COORD_API_URL"=…`, `export AGENT_COORD_API"_URL"=…` |
+| a quoted name behind a statement prefix or brace expansion | `time export "AGENT_COORD_API_URL"=…`, `FOO=1 export "AGENT_COORD_API_URL"=…`, `export "AGENT_COORD_API_URL"{,}=…` |
 | an assignment split across lines by a backslash-newline | `AGENT_COORD_API\` then `_URL=…` |
 | a declaration builtin other than a plain `export NAME=` | `declare -x AGENT_COORD_API_URL=…`, `export -- …` |
 | a declared name that only exists after an expansion | `export ${N}=…` |
@@ -404,7 +405,22 @@ all of this, so the operator who hits the hard stop can find it from the CLI.
 The payload also carries `split_brain_reason` and `split_brain_construct` (plus
 `split_brain_construct_file` when the deciding line lives in a sourced fragment),
 which name the construct behind the verdict — `configured_api_url` for a proven
-assignment, or the specific cannot-prove class otherwise. If an explicitly
+assignment, or the specific cannot-prove class otherwise.
+
+**`split_brain_construct` never carries file content that could be a
+credential.** A fleet API URL can embed basic-auth credentials or a token query
+parameter, and `doctor --json` is exactly the kind of output that lands in CI
+logs and support bundles, so the construct is reduced before it is reported: an
+assignment keeps its name and surrenders its value (to the end of the value,
+including a `$(…)`, `${…}`, or backtick expansion that spans spaces), a
+`source`/`.` target is kept as a path, shell syntax and the variable's own name
+are kept, and every other word is replaced with `<omitted>`. So
+`AGENT_COORD_API_URL=$(vault read -field=url secret/fleet/x)` reports as
+`AGENT_COORD_API_URL=<redacted>`, and `echo AGENT_COORD_API_URL https://u:tok@h`
+reports as `<omitted> AGENT_COORD_API_URL <omitted>`. The reason names the class
+of construct and `split_brain_env_file` names the file, which is what an operator
+needs to find it. The same reduction applies to the refusal message on the write
+commands. If an explicitly
 configured backend fails, agents should report
 coordination state
 as `UNKNOWN` and use the public claim-comment fallback until the operator fixes

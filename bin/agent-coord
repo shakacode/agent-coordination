@@ -61,13 +61,32 @@ module AgentCoord
   # statement separator, optionally behind a declaration builtin and its options —
   # so another variable's value that merely contains the text
   # (`HELP_TEXT="Set AGENT_COORD_API_URL=<url>"`) is not read as an assignment.
-  CONSUMER_API_URL_ASSIGNED_NAME = "AGENT_COORD_API_URL="
-  # What must sit immediately before the name for it to be an assignment: a
-  # statement start, then an optional declaration builtin and its options.
+  # The assigned name, tolerating brace expansion between the name and the "="
+  # (`export "AGENT_COORD_API_URL"{,}=x` assigns it just the same).
+  CONSUMER_API_URL_ASSIGNED_NAME = /(?<![A-Za-z0-9_])AGENT_COORD_API_URL(?:\{[^}]*\})*=/
+  # What may sit before the name for it to still be an assignment: a statement
+  # start, then any number of command prefixes — reserved words, `command`/
+  # `builtin`/`exec` style wrappers, and prefix assignments — then an optional
+  # declaration builtin with its options. Matched against the boundary view, where
+  # everything that came from inside quotes is neutralized, so a value that merely
+  # looks like this cannot satisfy it.
   CONSUMER_COMMAND_WORD_PREFIX = /
-    (?:\A|[;&|(){}]|\bthen\b|\bdo\b|\belse\b)\s*
+    (?:\A|[;&|(){}]|\b(?:then|do|else|elif|if|while|until|in)\b)\s*
+    (?:(?:!|time|command|builtin|exec|nohup|env|[A-Za-z_][A-Za-z0-9_]*=\S*)\s+)*
     (?:(?:export|declare|typeset|readonly)\s+(?:-{1,2}[A-Za-z]*\s+)*)?\z
   /x
+  # Words that may appear verbatim in an operator-facing construct: shell syntax,
+  # option flags, and the variable's own name. Anything else is omitted, because a
+  # construct must never carry file content that could be a credential.
+  CONSUMER_CONSTRUCT_OMITTED = "<omitted>"
+  CONSUMER_SAFE_CONSTRUCT_WORD = /
+    \A(?:
+      [;&|(){}\[\]!]+ | -{1,2}[A-Za-z]* |
+      source|\.|export|declare|typeset|readonly|unset|eval|time|command|builtin|exec|env|nohup|
+      if|then|else|elif|fi|while|until|do|done|case|esac|in
+    )\z
+  /x
+  CONSUMER_INCLUDE_WORD = /\A(?:source|\.)\z/
   # A declaration builtin whose name position is an expansion (`export ${N}=x`):
   # the name is not in the file text, so its effect cannot be proven.
   CONSUMER_DECLARATION_BUILTIN = /\A\s*(?:export|declare|typeset|readonly)\s+(\S.*)\z/
@@ -1236,10 +1255,11 @@ module AgentCoord
     def consumer_effective_assignment?(code)
       text, boundary = consumer_name_normalized_pair(code)
       offset = 0
-      while (index = text.index(CONSUMER_API_URL_ASSIGNED_NAME, offset))
-        return true if boundary[0...index].match?(CONSUMER_COMMAND_WORD_PREFIX)
+      while (match = CONSUMER_API_URL_ASSIGNED_NAME.match(text, offset))
+        start = match.begin(0)
+        return true if boundary[0...start].match?(CONSUMER_COMMAND_WORD_PREFIX)
 
-        offset = index + 1
+        offset = start + 1
       end
       false
     end
@@ -1295,6 +1315,7 @@ module AgentCoord
       text = line.strip
       out = +""
       index = 0
+      previous = nil
       while index < text.length
         if text[index].match?(/\s/)
           out << text[index]
@@ -1303,37 +1324,75 @@ module AgentCoord
         end
 
         word_end = consumer_word_end(text, index)
-        out << consumer_redacted_word(text[index...word_end])
+        word = text[index...word_end]
+        out << consumer_construct_word(word, after_include: previous&.match?(CONSUMER_INCLUDE_WORD))
+        previous = word
         index = word_end
       end
       out
     end
 
-    # A word keeps everything up to its first "=" and surrenders the rest. An empty
-    # assignment has nothing to surrender, and a word with no "=" is unchanged.
-    def consumer_redacted_word(word)
+    # What a word contributes to the construct. An assignment keeps its name and
+    # surrenders its value; a source directive's target is kept, being a path of the
+    # same kind the report already names; shell syntax and the variable's own name
+    # are kept. Everything else is omitted rather than echoed, because file content
+    # this probe did not parse may be a credential — the reason says which kind of
+    # construct stopped the write, and the env file says where it is.
+    def consumer_construct_word(word, after_include:)
       assign = word.index("=")
-      return word if assign.nil? || assign == word.length - 1
+      return "#{word[0..assign]}<redacted>" if assign && assign < word.length - 1
+      return word if assign || after_include
+      return word if word.match?(CONSUMER_SAFE_CONSTRUCT_WORD) || word.match?(CONSUMER_API_URL_MENTION)
 
-      "#{word[0..assign]}<redacted>"
+      CONSUMER_CONSTRUCT_OMITTED
     end
 
-    # Index just past the shell word starting at index: unquoted whitespace ends it,
-    # while a quoted span carries through spaces.
+    # Index just past the shell word starting at index. Unquoted whitespace ends
+    # it, while a quoted span, a `$(…)`/`${…}` expansion, or a backtick span all
+    # carry through spaces — a value like `$(vault read -field=url secret/x)` is one
+    # word, so redacting per word covers all of it rather than the first fragment.
     def consumer_word_end(text, index)
       quote = nil
+      depth = 0
       while index < text.length
         char = text[index]
         if consumer_escape?(quote, char)
           index += 2
           next
         end
-        break if quote.nil? && char.match?(/\s/)
 
+        if quote.nil?
+          skipped = consumer_expansion_skip(text, index, depth) { |change| depth += change }
+          if skipped
+            index = skipped
+            next
+          end
+
+          break if depth.zero? && char.match?(/\s/)
+        end
         quote = consumer_next_quote_state(quote, char)
         index += 1
       end
       index
+    end
+
+    # Advances past expansion syntax, returning the new index, or nil when the
+    # character is not expansion syntax. `depth` tracks open `$(`/`${` nesting so a
+    # closing bracket only counts inside one.
+    def consumer_expansion_skip(text, index, depth)
+      char = text[index]
+      if char == "$" && ["(", "{"].include?(text[index + 1].to_s)
+        yield 1
+        return index + 2
+      end
+      if char == "`"
+        close = text.index("`", index + 1)
+        return close ? close + 1 : text.length
+      end
+      return nil unless depth.positive? && [")", "}"].include?(char)
+
+      yield(-1)
+      index + 1
     end
 
     # The include target the guard is willing to read, or [nil, reason] when its
@@ -1546,7 +1605,8 @@ module AgentCoord
       opts.separator "lines by a backslash-newline, an env file that exists but"
       opts.separator "is not valid UTF-8 or cannot be read, and any other line that could set"
       opts.separator "AGENT_COORD_API_URL. split_brain_reason and"
-      opts.separator "split_brain_construct name which construct decided it, and"
+      opts.separator "split_brain_construct name which construct decided it (with assigned values"
+      opts.separator "redacted and unrecognized words omitted, so no output carries a credential), and"
       opts.separator "split_brain_construct_file names the sourced file when it is not the env file."
       opts.separator "Provably inert env files still pass: the last assignment wins, so a later"
       opts.separator "blank assignment or unset leaves no fleet URL configured."

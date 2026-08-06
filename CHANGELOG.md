@@ -227,7 +227,14 @@ when releases begin.
   negative that permits an invisible-lease write. `doctor` reports the deciding
   construct in `split_brain_reason`/`split_brain_construct` (plus
   `split_brain_construct_file` when it lives in a sourced fragment) and exits
-  `2`. Lines that cannot reach the variable — comments, other variables
+  `2`, and `split_brain_construct` never carries file content that could be a
+  credential: an assignment keeps its name and surrenders its value to the end of
+  the value region (including a `$(…)`, `${…}`, or backtick expansion that spans
+  spaces), a `source`/`.` target is kept as a path, shell syntax and the variable's
+  own name are kept, and every other word is reported as `<omitted>`. A fleet API
+  URL can embed basic-auth credentials or a token parameter, and `doctor --json`
+  lands in CI logs, so the same reduction applies to the write commands' refusal
+  message. Lines that cannot reach the variable — comments, other variables
   (including one this name is only a prefix of, such as `MY_AGENT_COORD_API_URL`),
   a compound statement that sources nothing, and a substitution confined to
   another variable's value such as `MACHINE_ID=$(hostname)` — stay inert, and the
