@@ -1083,10 +1083,7 @@ module AgentCoord
       index = 0
       while index < line.length
         char = line[index]
-        # Inside double quotes a backslash escapes the next character, so an
-        # escaped quote does not close the span. Tracking that matters: a
-        # desynchronized scan hides everything after it on the line.
-        if quote == '"' && char == "\\"
+        if consumer_escape?(quote, char)
           index += 2
           next
         end
@@ -1098,6 +1095,14 @@ module AgentCoord
         index += 1
       end
       line
+    end
+
+    # A backslash escapes the next character both outside quotes and inside double
+    # quotes, so neither `echo \"x\"` nor `"a\"b"` opens or closes a span there.
+    # Single quotes have no escapes: only another `'` ends them. Missing either case
+    # desynchronizes the scan and hides everything after it on the line.
+    def consumer_escape?(quote, char)
+      char == "\\" && quote != "'"
     end
 
     # Quote state after reading one character: nil outside quotes, otherwise the
@@ -1216,10 +1221,7 @@ module AgentCoord
       index = 0
       while index < code.length
         char = code[index]
-        # An escaped quote inside double quotes does not close the span; treating
-        # it as a boundary would desynchronize the rest of the line and hide a real
-        # assignment after it.
-        if quote == '"' && char == "\\"
+        if consumer_escape?(quote, char)
           index += 2
           next
         end

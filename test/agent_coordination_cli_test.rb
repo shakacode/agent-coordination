@@ -8584,6 +8584,10 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
       # An escaped quote inside another value must not desynchronize the scan and
       # hide what follows it on the line.
       "escaped quote then assignment" => %(X="a\\"b" AGENT_COORD_API_URL=https://fleet.example\n),
+      # The same escape outside any quoting: a lone `\\"` must not be read as
+      # opening a span, or the rest of the line disappears with it.
+      "bareword escaped quotes" =>
+        %(AGENT_COORD_API_URL=;echo \\"disabled\\"; AGENT_COORD_API_URL=https://fleet.example\n),
       "escaped quote then export" => %(X="a\\"b" export AGENT_COORD_API_URL=https://fleet.example\n),
       "assignment prefix before the name" => %(X=1 AGENT_COORD_API_URL=https://fleet.example\n),
       # A shell removes backslash-newline before tokenizing, so neither physical
@@ -8616,7 +8620,10 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
       # An even number of trailing backslashes is a literal backslash, so the next
       # line is not a continuation of this one.
       "literal trailing backslash" => "NOTE=ends-with-two\\\\\nAGENT_COORD_API_TOKEN=secret\n",
-      "escaped quote in another value" => %(X="a\\"b" MACHINE_ID=host-1\n)
+      "escaped quote in another value" => %(X="a\\"b" MACHINE_ID=host-1\n),
+      "bareword escaped quotes only" => %(echo \\"disabled\\"\n),
+      # Single quotes have no escapes, so the backslash is literal content.
+      "backslash inside single quotes" => %(NOTE='keep \\ this'\nMACHINE_ID=host-1\n)
     }
   end
 
