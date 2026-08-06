@@ -1507,6 +1507,16 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
       assert_equal "configured_api_url", payload.fetch("split_brain_reason")
       assert_equal "AGENT_COORD_API_URL=<redacted>", payload.fetch("split_brain_construct")
 
+      # A decoy assignment first: the construct must still name the variable the
+      # refusal is about, and still surrender neither value.
+      File.write(File.join(agent_dir, "env"),
+                 "X=decoy-#{secret} AGENT_COORD_API_URL=https://user:#{secret}@fleet.example\n")
+      prefixed = run_consumer_env_cli(env, "doctor", "--json")
+      assert_equal 2, prefixed.status.exitstatus
+      refute_includes prefixed.stdout, secret
+      assert_equal "X=<redacted> AGENT_COORD_API_URL=<redacted>",
+                   JSON.parse(prefixed.stdout).fetch("split_brain_construct")
+
       text = run_consumer_env_cli(env, "doctor")
       refute_includes text.stdout, secret, "doctor text output must not echo the assigned value"
       refute_includes text.stderr, secret
@@ -8544,10 +8554,10 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     stdout.strip
   end
 
-  # How a construct is surfaced: everything up to the first "=" survives, the
-  # assigned value does not.
+  # How a construct is surfaced: every assigned value is replaced, and everything
+  # else — including the variable names — survives.
   def expected_construct(line)
-    line.strip.sub(/=(?!\z).*/m, "=<redacted>")
+    line.strip.gsub(/=(?!\s|\z)\S*/) { "=<redacted>" }
   end
 
   # A byte array writes verbatim, so an invalid-UTF-8 fixture stays invalid.

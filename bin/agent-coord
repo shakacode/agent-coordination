@@ -89,6 +89,9 @@ module AgentCoord
   CONSUMER_EVAL = %r{(?<![\w./-])eval(?![\w-])}
   CONSUMER_OTHER_ASSIGNMENT = /\A\s*(?:export\s+)?[A-Za-z_][A-Za-z0-9_]*=/
   CONSUMER_STATEMENT_SEPARATOR = /[;&|]/
+  # An assigned value: everything from an "=" to the end of that word. Used to
+  # redact values out of operator-facing constructs, which reach doctor --json.
+  CONSUMER_ASSIGNED_VALUE = /=(?!\s|\z)\S*/
   REASON_CONFIGURED = "configured_api_url"
   # Operator-facing sentence per finding: the message has to explain a refusal
   # that may be blocking valid work, so each reason says what could not be proven.
@@ -1239,7 +1242,11 @@ module AgentCoord
     # the first "=" is kept, which is what identifies the construct; a line with no
     # assignment (an include, `eval`, a command substitution) is unchanged.
     def consumer_redacted_construct(line)
-      line.strip.sub(/=(?!\z).*/m, "=<redacted>")
+      # Every assigned value on the line, not just the first: a prefix assignment
+      # (`X=1 AGENT_COORD_API_URL=…`) must keep naming the variable the refusal is
+      # about while still surrendering no value. An empty assignment has nothing to
+      # redact, and a line with no assignment is unchanged.
+      line.strip.gsub(CONSUMER_ASSIGNED_VALUE) { "=<redacted>" }
     end
 
     # The include target the guard is willing to read, or [nil, reason] when its
