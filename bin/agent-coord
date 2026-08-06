@@ -988,25 +988,56 @@ module AgentCoord
     end
 
     def consumer_env_line_verdict(path, line, verdict, follow_includes)
+      # Every structural check below reads statement shape, so none of them may
+      # see a trailing comment: `MACHINE_ID=$(hostname) # one per host; audit` is
+      # inert, and a `;` inside that comment must not make it look otherwise.
+      code = consumer_executable_text(line)
+      return nil if code.strip.empty?
+
       # Capture from the "=" without consuming the space after it: in a shell,
       # `=#x` assigns "#x" while `= #x` assigns nothing, and the value scanner
       # needs that whitespace to tell them apart.
-      if (match = line.match(CONSUMER_API_URL_ASSIGNMENT))
-        return consumer_assignment_verdict(path, line, match[1].to_s)
+      if (match = code.match(CONSUMER_API_URL_ASSIGNMENT))
+        return consumer_assignment_verdict(path, line, code, match[1].to_s)
       end
 
-      include_word = line[CONSUMER_INCLUDE_DIRECTIVE, 1]
-      return consumer_include_verdict(path, line, include_word, verdict, follow_includes) if include_word
-      return CONSUMER_ENV_INERT if line.match?(CONSUMER_API_URL_UNSET)
+      return consumer_include_verdict(path, line, code, verdict, follow_includes) if code[
+        CONSUMER_INCLUDE_DIRECTIVE, 1
+      ]
+      return CONSUMER_ENV_INERT if code.match?(CONSUMER_API_URL_UNSET)
 
-      consumer_opaque_line_verdict(path, line)
+      consumer_opaque_line_verdict(path, line, code)
     end
 
-    def consumer_assignment_verdict(path, line, raw)
+    # The part of a line a shell would run: everything before an unquoted `#` that
+    # begins a word. A `#` inside quotes, or inside an unquoted word such as a URL
+    # fragment, is an ordinary character — the same rule the value scanner uses.
+    def consumer_executable_text(line)
+      index = 0
+      while index < line.length
+        case line[index]
+        when '"', "'"
+          close = line.index(line[index], index + 1)
+          # An unterminated quote runs to end of line, so no comment starts here.
+          return line unless close
+
+          index = close + 1
+        when "#"
+          return line[0...index] if index.zero? || line[index - 1].match?(/\s/)
+
+          index += 1
+        else
+          index += 1
+        end
+      end
+      line
+    end
+
+    def consumer_assignment_verdict(path, line, code, raw)
       # The value scanner stops at the first unquoted separator, so a second
       # assignment after one (`URL=https://x; URL=`) would be invisible to it and
       # the last-assignment-wins rule could not be applied to the line.
-      return unprovable_verdict(path, line, "opaque_api_url_reference") if line.match?(CONSUMER_SECOND_ASSIGNMENT)
+      return unprovable_verdict(path, line, "opaque_api_url_reference") if code.match?(CONSUMER_SECOND_ASSIGNMENT)
 
       value = consumer_env_assignment_value(raw)
       # A value the shell would expand at source time (`"${FLEET_URL:-}"`, a
@@ -1025,15 +1056,15 @@ module AgentCoord
     # Includes are followed exactly one level deep: the nested fold is called with
     # follow_includes: false, so recursion is impossible by construction, and a
     # nested include is itself a cannot-prove stop rather than a silent miss.
-    def consumer_include_verdict(path, line, raw_target, verdict, follow_includes)
+    def consumer_include_verdict(path, line, code, verdict, follow_includes)
       return unprovable_verdict(path, line, "nested_include") unless follow_includes
       # Only a line that is *just* an include may be followed. Anything after the
       # include word — a second include (`. a || . b`), or an assignment
       # (`. a; URL=https://x`) — is invisible to the include fold, so following it
       # would silently drop whatever else the line does.
-      return unprovable_verdict(path, line, "guarded_include") if line.match?(CONSUMER_STATEMENT_SEPARATOR)
+      return unprovable_verdict(path, line, "guarded_include") if code.match?(CONSUMER_STATEMENT_SEPARATOR)
 
-      target, reason = consumer_include_path(raw_target)
+      target, reason = consumer_include_path(code[CONSUMER_INCLUDE_DIRECTIVE, 1])
       return unprovable_verdict(path, line, reason) unless target
 
       consumer_env_verdict(target, verdict, follow_includes: false)
@@ -1050,14 +1081,14 @@ module AgentCoord
     # resolved and followed), eval, and a command substitution that is not
     # confined to another variable's value (a subshell cannot change this
     # shell's environment).
-    def consumer_opaque_line_verdict(path, line)
-      reason = if line.match?(CONSUMER_API_URL_MENTION)
+    def consumer_opaque_line_verdict(path, line, code)
+      reason = if code.match?(CONSUMER_API_URL_MENTION)
                  "opaque_api_url_reference"
-               elsif line.match?(CONSUMER_COMPOUND_INCLUDE)
+               elsif code.match?(CONSUMER_COMPOUND_INCLUDE)
                  "guarded_include"
-               elsif line.match?(CONSUMER_EVAL)
+               elsif code.match?(CONSUMER_EVAL)
                  "eval"
-               elsif line.match?(CONSUMER_COMMAND_SUBSTITUTION) && !consumer_contained_substitution?(line)
+               elsif code.match?(CONSUMER_COMMAND_SUBSTITUTION) && !consumer_contained_substitution?(code)
                  "command_substitution"
                end
       reason && unprovable_verdict(path, line, reason)
@@ -1065,10 +1096,10 @@ module AgentCoord
 
     # A substitution confined to another variable's value runs in a subshell and
     # cannot change this shell's environment, so `MACHINE_ID=$(hostname)` stays
-    # inert. Any statement separator on the line puts that guarantee out of reach,
-    # so the line is treated as unprovable instead.
-    def consumer_contained_substitution?(line)
-      line.match?(CONSUMER_OTHER_ASSIGNMENT) && !line.match?(CONSUMER_STATEMENT_SEPARATOR)
+    # inert. Any statement separator puts that guarantee out of reach, so the line
+    # is treated as unprovable instead.
+    def consumer_contained_substitution?(code)
+      code.match?(CONSUMER_OTHER_ASSIGNMENT) && !code.match?(CONSUMER_STATEMENT_SEPARATOR)
     end
 
     def unprovable_verdict(path, line, reason)

@@ -1224,6 +1224,9 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
       ['. "$HOME/.config/agent-coord/backend.env"',
        'source "$XDG_CONFIG_HOME/agent-coord/backend.env"',
        "source ${XDG_CONFIG_HOME}/agent-coord/backend.env",
+       # A trailing comment does not make the include a compound statement, so it
+       # is still resolved and followed rather than reported as unprovable.
+       '. "$XDG_CONFIG_HOME/agent-coord/backend.env" # fleet backend; see docs',
        ". #{File.join(agent_dir, 'backend.env')}"].each_with_index do |include_line, index|
         File.write(env_file, "# wrapper: the assignment lives in backend.env\n#{include_line}\n")
 
@@ -1233,6 +1236,9 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
         assert_includes result.stderr, "split-brain configuration", include_line
         assert_includes result.stderr, env_file, include_line
         refute_includes result.stderr, "local mode — single-machine only"
+
+        # The include was followed, not refused as unprovable.
+        assert_doctor_reports_split_brain(env, env_file, "configured_api_url", include_line)
       end
     end
   end
@@ -1431,6 +1437,10 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
        "export AGENT_COORD_STATUS_STATE_ROOT=/tmp/status-state\n",
        "AGENT_COORD_API_URL_BACKUP=https://fleet.example\n",
        "MY_AGENT_COORD_API_URL=https://fleet.example\n",
+       # A trailing comment is not shell structure: the separators and the
+       # variable name inside it must not decide the line.
+       "MACHINE_ID=$(hostname)  # one per host; used for audit logs\n",
+       "AGENT_COORD_API_TOKEN=secret # rotate; see AGENT_COORD_API_URL docs\n",
        "[ -d /tmp ] && export PATH=/usr/local/bin:$PATH\n",
        "find . -name '*.env' > /dev/null\n",
        "umask 077\n"].each_with_index do |body, index|
