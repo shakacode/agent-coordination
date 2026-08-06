@@ -220,8 +220,8 @@ when releases begin.
   (including one this name is only a prefix of, such as `MY_AGENT_COORD_API_URL`),
   a compound statement that sources nothing, and a substitution confined to
   another variable's value such as `MACHINE_ID=$(hostname)` — stay inert, and the
-  read-command advisory warning stays limited to a proven assignment (issue #99). No gem has been published, so
-  no migration is required.
+  read-command advisory warning stays limited to a proven assignment (issue #99).
+  No gem has been published, so no migration is required.
 - `doctor --help` now documents the `split_brain` status: that `doctor` exits `2`
   with `status: split_brain` when a consumer env file configures — or cannot be
   proven not to configure — `AGENT_COORD_API_URL` while the CLI resolved to a
