@@ -1445,6 +1445,10 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
        # variable name inside it must not decide the line.
        "MACHINE_ID=$(hostname)  # one per host; used for audit logs\n",
        "AGENT_COORD_API_TOKEN=secret # rotate; see AGENT_COORD_API_URL docs\n",
+       # Structural tokens inside a quoted value are text, not shell syntax.
+       %(GREETING="Time to eval options"\n),
+       %(DOC_URL="see docs/AGENT_COORD_API_URL.md for details"\n),
+       %(NOTES="deploy; . env then restart"\n),
        "[ -d /tmp ] && export PATH=/usr/local/bin:$PATH\n",
        "find . -name '*.env' > /dev/null\n",
        "umask 077\n"].each_with_index do |body, index|
@@ -8428,6 +8432,8 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
       "AGENT_COORD_API_URL=$(fleet-url)" => "unresolved_expansion",
       '[ -n "$FLEET" ] && AGENT_COORD_API_URL="$FLEET"' => "opaque_api_url_reference",
       "export AGENT_COORD_API_URL" => "opaque_api_url_reference",
+      # Quoting the assignment does not stop it taking effect, so it is not text.
+      %(export "AGENT_COORD_API_URL=https://fleet.example") => "opaque_api_url_reference",
       # Two assignments on one line: the value scanner stops at the `;`, so
       # last-assignment-wins cannot be applied to it.
       "AGENT_COORD_API_URL=https://fleet.example; AGENT_COORD_API_URL=" => "opaque_api_url_reference",
