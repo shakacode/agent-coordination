@@ -1338,13 +1338,43 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
       ["AGENT_COORD_API_URL=https://fleet.example\nAGENT_COORD_API_URL=\n",
        %(AGENT_COORD_API_URL=https://fleet.example\nAGENT_COORD_API_URL=""\n),
        "export AGENT_COORD_API_URL=https://fleet.example\nAGENT_COORD_API_URL= # disabled today\n",
-       "AGENT_COORD_API_URL=https://fleet.example\nunset AGENT_COORD_API_URL\n"].each_with_index do |body, index|
+       "AGENT_COORD_API_URL=https://fleet.example\nunset AGENT_COORD_API_URL\n",
+       # The variable named in a trailing comment is not a second assignment.
+       "AGENT_COORD_API_URL= # AGENT_COORD_API_URL is disabled here\n"].each_with_index do |body, index|
         File.write(env_file, body)
 
         claim = run_consumer_env_cli(env, *split_brain_claim_args(index))
         assert_equal 0, claim.status.exitstatus, "#{body.inspect}: #{claim.stderr}"
         refute_includes claim.stderr, "split-brain", body.inspect
       end
+    end
+  end
+
+  # Ordering holds across an include boundary, in both directions: a followed
+  # include contributes its assignments in place rather than resetting or winning.
+  def test_write_command_applies_last_assignment_wins_across_an_include
+    with_consumer_env_config do |_root, agent_dir, env|
+      env_file = File.join(agent_dir, "env")
+      File.write(File.join(agent_dir, "fleet.env"), "AGENT_COORD_API_URL=https://fleet.example\n")
+      File.write(File.join(agent_dir, "inert.env"), "AGENT_COORD_API_TOKEN=secret\n")
+
+      # The include sets the URL, then the outer file blanks it: unconfigured.
+      File.write(env_file, %(. "$XDG_CONFIG_HOME/agent-coord/fleet.env"\nAGENT_COORD_API_URL=\n))
+      blanked = run_consumer_env_cli(env, *split_brain_claim_args(0))
+      assert_equal 0, blanked.status.exitstatus, blanked.stderr
+      refute_includes blanked.stderr, "split-brain"
+
+      # The outer file sets the URL and the include touches nothing: still set.
+      File.write(env_file, %(AGENT_COORD_API_URL=https://fleet.example\n. "$XDG_CONFIG_HOME/agent-coord/inert.env"\n))
+      survives = run_consumer_env_cli(env, *split_brain_claim_args(1))
+      assert_equal 2, survives.status.exitstatus
+      assert_includes survives.stderr, "configures AGENT_COORD_API_URL"
+
+      # The outer file blanks it and the include sets it afterwards: configured.
+      File.write(env_file, %(AGENT_COORD_API_URL=\n. "$XDG_CONFIG_HOME/agent-coord/fleet.env"\n))
+      reset = run_consumer_env_cli(env, *split_brain_claim_args(2))
+      assert_equal 2, reset.status.exitstatus
+      assert_includes reset.stderr, File.realpath(File.join(agent_dir, "fleet.env"))
     end
   end
 

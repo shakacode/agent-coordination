@@ -52,6 +52,10 @@ module AgentCoord
   CONSUMER_API_URL_MENTION = /(?<![A-Za-z0-9_])AGENT_COORD_API_URL(?![A-Za-z0-9_])/
   CONSUMER_ENV_INERT_LINE = /\A\s*(?:#|\z)/
   CONSUMER_INCLUDE_DIRECTIVE = /^\s*(?:source|\.)\s+(\S.*)$/
+  # A second assignment after a statement separator on the same line. The value
+  # scanner stops at the separator, so last-assignment-wins cannot see past it.
+  # A mention in a trailing comment is not an assignment and does not match.
+  CONSUMER_SECOND_ASSIGNMENT = /[;&|]\s*(?:export\s+)?AGENT_COORD_API_URL=/
   # An include that is not the first statement on its line — `[ -f x ] && . x`,
   # `true; . x`, `if [ -f x ]; then . x; fi`. Whether it runs at all depends on the
   # guard, so it is unprovable rather than followed.
@@ -1000,10 +1004,9 @@ module AgentCoord
 
     def consumer_assignment_verdict(path, line, raw)
       # The value scanner stops at the first unquoted separator, so a second
-      # assignment on the same line (`URL=https://x; URL=`) would be invisible to
-      # it and the last-assignment-wins rule could not be applied. More than one
-      # mention on the line means it cannot be read as a single assignment.
-      return unprovable_verdict(path, line, "opaque_api_url_reference") if consumer_repeated_mention?(line)
+      # assignment after one (`URL=https://x; URL=`) would be invisible to it and
+      # the last-assignment-wins rule could not be applied to the line.
+      return unprovable_verdict(path, line, "opaque_api_url_reference") if line.match?(CONSUMER_SECOND_ASSIGNMENT)
 
       value = consumer_env_assignment_value(raw)
       # A value the shell would expand at source time (`"${FLEET_URL:-}"`, a
@@ -1017,10 +1020,6 @@ module AgentCoord
 
     def consumer_expanding_value?(value)
       value.include?("$") || value.include?("`")
-    end
-
-    def consumer_repeated_mention?(line)
-      line.scan(CONSUMER_API_URL_MENTION).length > 1
     end
 
     # Includes are followed exactly one level deep: the nested fold is called with
