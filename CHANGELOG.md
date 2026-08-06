@@ -212,7 +212,10 @@ when releases begin.
   refused too — `export "AGENT_COORD_API_URL"=x`, `export AGENT_COORD_API"_URL"=x`,
   `export $'AGENT_COORD_API_URL'=x`, `export AGENT_COORD_API\_URL=x`,
   `declare -x`/`typeset -x`/`export --`, and a declared name that only exists
-  after an expansion (`export ${N}=x`). An env file that exists but is not valid
+  after an expansion (`export ${N}=x`). Physical lines joined by a
+  backslash-newline are folded into one logical line first, since a shell removes
+  that continuation before tokenizing and an identifier split across two lines
+  carries the whole name on neither. An env file that exists but is not valid
   UTF-8, or cannot be read, is refused on the same grounds rather than ignored, so
   one stray byte cannot discard the verdict for the rest of the file; a file that
   is simply absent is still not a candidate. The CLI still never sources

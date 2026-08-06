@@ -63,6 +63,9 @@ module AgentCoord
   CONSUMER_DECLARATION_BUILTIN = /\A\s*(?:export|declare|typeset|readonly)\s+(\S.*)\z/
   CONSUMER_OPTION_WORD = /\A-{1,2}[A-Za-z]*\z/
   CONSUMER_ENV_INERT_LINE = /\A\s*(?:#|\z)/
+  # An odd number of trailing backslashes: a backslash-newline the shell removes
+  # before tokenizing, so the next physical line continues this one.
+  CONSUMER_LINE_CONTINUATION = /(?<!\\)\\(?:\\\\)*\z/
   CONSUMER_INCLUDE_DIRECTIVE = /^\s*(?:source|\.)\s+(\S.*)$/
   # A second assignment after a statement separator on the same line. The value
   # scanner stops at the separator, so last-assignment-wins cannot see past it.
@@ -999,7 +1002,7 @@ module AgentCoord
     # therefore sticky — a later empty assignment does not clear it, because
     # whether the earlier construct even ran is exactly what is unknown.
     def consumer_env_verdict(path, verdict, follow_includes:)
-      File.foreach(path) do |line|
+      consumer_env_logical_lines(path) do |line|
         next if line.match?(CONSUMER_ENV_INERT_LINE)
 
         updated = consumer_env_line_verdict(path, line, verdict, follow_includes)
@@ -1009,6 +1012,26 @@ module AgentCoord
         break if verdict.unprovable?
       end
       verdict
+    end
+
+    # A shell removes backslash-newline before it tokenizes, so a name or value
+    # split across physical lines is one logical line — `AGENT_COORD_API\` followed
+    # by `_URL=https://fleet.example` really does set the variable. Classifying
+    # physical lines would see neither half. An even number of trailing backslashes
+    # is a literal backslash and ends the line.
+    def consumer_env_logical_lines(path)
+      pending = nil
+      File.foreach(path) do |physical|
+        chomped = physical.chomp
+        if chomped.match?(CONSUMER_LINE_CONTINUATION)
+          pending = "#{pending}#{chomped[0..-2]}"
+          next
+        end
+
+        yield "#{pending}#{physical}"
+        pending = nil
+      end
+      yield pending unless pending.nil?
     end
 
     def consumer_env_line_verdict(path, line, verdict, follow_includes)
@@ -1395,7 +1418,8 @@ module AgentCoord
       opts.separator "an assignment from an unresolved expansion or command substitution, an"
       opts.separator "assignment whose name carries quoting or a backslash (a shell removes those"
       opts.separator "before assigning, so `export \"AGENT_COORD_API_URL\"=x` does configure it), a"
-      opts.separator "declared name that only exists after an expansion, an env file that exists but"
+      opts.separator "declared name that only exists after an expansion, an assignment split across"
+      opts.separator "lines by a backslash-newline, an env file that exists but"
       opts.separator "is not valid UTF-8 or cannot be read, and any other line that could set"
       opts.separator "AGENT_COORD_API_URL. split_brain_reason and"
       opts.separator "split_brain_construct name which construct decided it, and"

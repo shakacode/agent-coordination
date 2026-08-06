@@ -348,6 +348,7 @@ fleet URL, naming the file and the exact construct:
 | value from an unresolved expansion or command substitution | `AGENT_COORD_API_URL="${FLEET_URL:-}"` |
 | the variable named outside a plain assignment | `[ -n "$F" ] && AGENT_COORD_API_URL="$F"` |
 | an assignment whose name carries quoting or a backslash | `export "AGENT_COORD_API_URL"=…`, `export AGENT_COORD_API"_URL"=…` |
+| an assignment split across lines by a backslash-newline | `AGENT_COORD_API\` then `_URL=…` |
 | a declaration builtin other than a plain `export NAME=` | `declare -x AGENT_COORD_API_URL=…`, `export -- …` |
 | a declared name that only exists after an expansion | `export ${N}=…` |
 | an env file that exists but is not valid UTF-8, or cannot be read | `# op<invalid byte>rateur` |
@@ -356,7 +357,10 @@ fleet URL, naming the file and the exact construct:
 A shell removes quoting *before* it assigns, so `export "AGENT_COORD_API_URL"=x`
 and `export AGENT_COORD_API\_URL=x` really do export the fleet URL; the probe
 normalizes quote characters and backslashes out of the name before deciding, so
-those are refusals rather than misses. An undecodable file is refused for the
+those are refusals rather than misses. It also removes backslash-newline before
+tokenizing, so the probe folds continued physical lines into one logical line
+first — otherwise an identifier split across two lines would carry the whole name
+on neither of them. An undecodable file is refused for the
 same reason: one stray byte must not discard the verdict for the rest of it. A
 file that is simply absent is not a candidate and changes nothing.
 

@@ -8534,6 +8534,11 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
       "export --" => %(export -- AGENT_COORD_API_URL=https://fleet.example\n),
       "indirect name set in file" => %(N=AGENT_COORD_API_URL\nexport ${N}=https://fleet.example\n),
       "quoted name in a compound line" => %(true; export "AGENT_COORD_API_URL"=https://fleet.example\n),
+      # A shell removes backslash-newline before tokenizing, so neither physical
+      # line carries the whole identifier yet the variable is still set.
+      "identifier split by a continuation" => "AGENT_COORD_API\\\n_URL=https://fleet.example\n",
+      "export split by a continuation" => "export AGENT_COORD_API\\\n_URL=https://fleet.example\n",
+      "value split by a continuation" => "AGENT_COORD_API_URL=https://\\\nfleet.example\n",
       "invalid byte before the export" =>
         "# op\xE9rateur\nexport AGENT_COORD_API_URL=https://fleet.example\n".bytes,
       "invalid byte after the export" =>
@@ -8551,7 +8556,10 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
       "unset after assignment" => "AGENT_COORD_API_URL=https://fleet.example\nunset AGENT_COORD_API_URL\n",
       "valid utf-8 comment" => "# opérateur\nAGENT_COORD_API_URL=\n",
       "export of another variable" => %(export PATH="$PATH:/usr/local/bin"\n),
-      "export -p prints only" => "export -p\n"
+      "export -p prints only" => "export -p\n",
+      # An even number of trailing backslashes is a literal backslash, so the next
+      # line is not a continuation of this one.
+      "literal trailing backslash" => "NOTE=ends-with-two\\\\\nAGENT_COORD_API_TOKEN=secret\n"
     }
   end
 
