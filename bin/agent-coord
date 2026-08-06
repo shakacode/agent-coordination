@@ -74,8 +74,8 @@ module AgentCoord
     "opaque_api_url_reference" => "names AGENT_COORD_API_URL outside a plain assignment this CLI can read",
     "command_substitution" => "runs a command substitution that could set AGENT_COORD_API_URL",
     "eval" => "evaluates text that could set AGENT_COORD_API_URL",
-    "guarded_include" => "sources a file from a compound statement, so whether it runs at all " \
-                         "depends on shell state this CLI cannot evaluate",
+    "guarded_include" => "sources a file from a compound statement, so whether that include runs — " \
+                         "and what else the line does — is not something this CLI can evaluate",
     "unreadable_include" => "sources a file this CLI cannot read",
     "include_outside_config_dir" => "sources a file outside your config directory, which this CLI will not read",
     "relative_include" => "sources a relative path, which depends on the sourcing shell's working directory",
@@ -1027,9 +1027,11 @@ module AgentCoord
     # nested include is itself a cannot-prove stop rather than a silent miss.
     def consumer_include_verdict(path, line, raw_target, verdict, follow_includes)
       return unprovable_verdict(path, line, "nested_include") unless follow_includes
-      # A second include later on the same line (`. a || . b`) is not reachable
-      # from the leading one, so the line as a whole cannot be proven.
-      return unprovable_verdict(path, line, "guarded_include") if line.match?(CONSUMER_COMPOUND_INCLUDE)
+      # Only a line that is *just* an include may be followed. Anything after the
+      # include word — a second include (`. a || . b`), or an assignment
+      # (`. a; URL=https://x`) — is invisible to the include fold, so following it
+      # would silently drop whatever else the line does.
+      return unprovable_verdict(path, line, "guarded_include") if line.match?(CONSUMER_STATEMENT_SEPARATOR)
 
       target, reason = consumer_include_path(raw_target)
       return unprovable_verdict(path, line, reason) unless target

@@ -1284,6 +1284,30 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     end
   end
 
+  # A leading include followed by another statement on the same line: the include
+  # fold never sees the trailing assignment, so following the line would silently
+  # drop it. Reported by review as a real permit hole — the inert include made the
+  # whole line look inert while the trailing assignment set a fleet URL.
+  def test_write_command_hard_stops_for_an_include_with_a_trailing_statement
+    with_consumer_env_config do |_root, agent_dir, env|
+      env_file = File.join(agent_dir, "env")
+      File.write(File.join(agent_dir, "inert.env"), "AGENT_COORD_API_TOKEN=secret\n")
+      include_word = %(. "$XDG_CONFIG_HOME/agent-coord/inert.env")
+
+      ["#{include_word}; AGENT_COORD_API_URL=https://fleet.example",
+       "#{include_word} && AGENT_COORD_API_URL=https://fleet.example",
+       "#{include_word} | tee /dev/null"].each_with_index do |line, index|
+        File.write(env_file, "#{line}\n")
+
+        claim = run_consumer_env_cli(env, *split_brain_claim_args(index))
+        assert_equal 2, claim.status.exitstatus, "#{line}: #{claim.stderr}"
+        assert_includes claim.stderr, "may configure AGENT_COORD_API_URL", line
+
+        assert_doctor_reports_split_brain(env, env_file, "guarded_include", line)
+      end
+    end
+  end
+
   # Bounded at one level: an include inside an include is not followed, and under
   # fail-closed that unfollowed level is itself a stop rather than a silent miss.
   def test_write_command_hard_stops_for_an_include_inside_an_include
