@@ -1287,7 +1287,9 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
         claim = run_consumer_env_cli(env, *split_brain_claim_args(index))
         assert_equal 2, claim.status.exitstatus, "#{line}: #{claim.stderr}"
         assert_includes claim.stderr, "may configure AGENT_COORD_API_URL", line
-        assert_includes claim.stderr, line.strip, line
+        # Constructs surface with the assigned value redacted; see
+        # test_split_brain_output_never_echoes_an_assigned_value.
+        assert_includes claim.stderr, expected_construct(line), line
 
         assert_doctor_reports_split_brain(env, env_file, reason, line)
       end
@@ -1479,6 +1481,35 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
         assert_equal 0, claim.status.exitstatus, "#{label}: #{claim.stderr}"
         refute_includes claim.stderr, "split-brain", label
       end
+    end
+  end
+
+  # A fleet API URL can carry credentials, and `doctor --json` lands in CI logs and
+  # support bundles, so no output may echo an assigned value — only the construct
+  # up to the "=". Asserted on the credential itself rather than on the redaction
+  # text, so the property holds however the construct is rendered.
+  def test_split_brain_output_never_echoes_an_assigned_value
+    with_consumer_env_config do |_root, agent_dir, env|
+      secret = "s3cret-token"
+      File.write(File.join(agent_dir, "env"),
+                 "AGENT_COORD_API_URL=https://user:#{secret}@fleet.example/api?key=#{secret}\n")
+
+      claim = run_consumer_env_cli(env, *split_brain_claim_args(0))
+      assert_equal 2, claim.status.exitstatus, claim.stderr
+      refute_includes claim.stderr, secret, "the refusal must not echo the assigned value"
+      refute_includes claim.stdout, secret
+
+      doctor = run_consumer_env_cli(env, "doctor", "--json")
+      assert_equal 2, doctor.status.exitstatus
+      refute_includes doctor.stdout, secret, "doctor --json must not echo the assigned value"
+      refute_includes doctor.stderr, secret
+      payload = JSON.parse(doctor.stdout)
+      assert_equal "configured_api_url", payload.fetch("split_brain_reason")
+      assert_equal "AGENT_COORD_API_URL=<redacted>", payload.fetch("split_brain_construct")
+
+      text = run_consumer_env_cli(env, "doctor")
+      refute_includes text.stdout, secret, "doctor text output must not echo the assigned value"
+      refute_includes text.stderr, secret
     end
   end
 
@@ -8511,6 +8542,12 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     script = "set -a; . #{Shellwords.escape(fixture)} >/dev/null 2>&1; printenv AGENT_COORD_API_URL"
     stdout, = Open3.capture3({ "AGENT_COORD_API_URL" => nil }, shell, "-c", script)
     stdout.strip
+  end
+
+  # How a construct is surfaced: everything up to the first "=" survives, the
+  # assigned value does not.
+  def expected_construct(line)
+    line.strip.sub(/=(?!\z).*/m, "=<redacted>")
   end
 
   # A byte array writes verbatim, so an invalid-UTF-8 fixture stays invalid.

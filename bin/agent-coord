@@ -1111,7 +1111,7 @@ module AgentCoord
 
       return CONSUMER_ENV_INERT if value.empty?
 
-      ConsumerEnvVerdict.new(:configured, REASON_CONFIGURED, line.strip, path)
+      ConsumerEnvVerdict.new(:configured, REASON_CONFIGURED, consumer_redacted_construct(line), path)
     end
 
     def consumer_expanding_value?(value)
@@ -1217,7 +1217,16 @@ module AgentCoord
     end
 
     def unprovable_verdict(path, line, reason)
-      ConsumerEnvVerdict.new(:unprovable, reason, line.strip, path)
+      ConsumerEnvVerdict.new(:unprovable, reason, consumer_redacted_construct(line), path)
+    end
+
+    # The construct is operator-facing and `doctor --json` lands in CI logs and
+    # support bundles, so an assigned value never appears in it: a fleet API URL
+    # can carry basic-auth credentials or a token query parameter. Everything up to
+    # the first "=" is kept, which is what identifies the construct; a line with no
+    # assignment (an include, `eval`, a command substitution) is unchanged.
+    def consumer_redacted_construct(line)
+      line.strip.sub(/=(?!\z).*/m, "=<redacted>")
     end
 
     # The include target the guard is willing to read, or [nil, reason] when its
