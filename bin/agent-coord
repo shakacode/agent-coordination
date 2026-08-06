@@ -1076,24 +1076,34 @@ module AgentCoord
     # begins a word. A `#` inside quotes, or inside an unquoted word such as a URL
     # fragment, is an ordinary character — the same rule the value scanner uses.
     def consumer_executable_text(line)
+      quote = nil
       index = 0
       while index < line.length
-        case line[index]
-        when '"', "'"
-          close = line.index(line[index], index + 1)
-          # An unterminated quote runs to end of line, so no comment starts here.
-          return line unless close
-
-          index = close + 1
-        when "#"
-          return line[0...index] if index.zero? || line[index - 1].match?(/\s/)
-
-          index += 1
-        else
-          index += 1
+        char = line[index]
+        # Inside double quotes a backslash escapes the next character, so an
+        # escaped quote does not close the span. Tracking that matters: a
+        # desynchronized scan hides everything after it on the line.
+        if quote == '"' && char == "\\"
+          index += 2
+          next
         end
+
+        quote = consumer_next_quote_state(quote, char)
+        # An unterminated quote runs to end of line, so no comment starts inside it.
+        return line[0...index] if quote.nil? && char == "#" && (index.zero? || line[index - 1].match?(/\s/))
+
+        index += 1
       end
       line
+    end
+
+    # Quote state after reading one character: nil outside quotes, otherwise the
+    # open quote character.
+    def consumer_next_quote_state(quote, char)
+      return nil if quote == char
+      return quote if quote
+
+      ['"', "'"].include?(char) ? char : nil
     end
 
     def consumer_assignment_verdict(path, line, code, raw)
@@ -1199,19 +1209,22 @@ module AgentCoord
     # mistaken for a second statement on the line.
     def consumer_unquoted_text(code)
       unquoted = +""
+      quote = nil
       index = 0
       while index < code.length
         char = code[index]
-        if ['"', "'"].include?(char)
-          close = code.index(char, index + 1)
-          # An unterminated quote swallows the rest of the line.
-          break unless close
-
-          index = close + 1
-        else
-          unquoted << char
-          index += 1
+        # An escaped quote inside double quotes does not close the span; treating
+        # it as a boundary would desynchronize the rest of the line and hide a real
+        # assignment after it.
+        if quote == '"' && char == "\\"
+          index += 2
+          next
         end
+
+        state = consumer_next_quote_state(quote, char)
+        unquoted << char if state.nil? && quote.nil?
+        quote = state
+        index += 1
       end
       unquoted
     end

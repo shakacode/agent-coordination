@@ -8571,6 +8571,11 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
       "export --" => %(export -- AGENT_COORD_API_URL=https://fleet.example\n),
       "indirect name set in file" => %(N=AGENT_COORD_API_URL\nexport ${N}=https://fleet.example\n),
       "quoted name in a compound line" => %(true; export "AGENT_COORD_API_URL"=https://fleet.example\n),
+      # An escaped quote inside another value must not desynchronize the scan and
+      # hide what follows it on the line.
+      "escaped quote then assignment" => %(X="a\\"b" AGENT_COORD_API_URL=https://fleet.example\n),
+      "escaped quote then export" => %(X="a\\"b" export AGENT_COORD_API_URL=https://fleet.example\n),
+      "assignment prefix before the name" => %(X=1 AGENT_COORD_API_URL=https://fleet.example\n),
       # A shell removes backslash-newline before tokenizing, so neither physical
       # line carries the whole identifier yet the variable is still set.
       "identifier split by a continuation" => "AGENT_COORD_API\\\n_URL=https://fleet.example\n",
@@ -8600,7 +8605,8 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
       "export -p prints only" => "export -p\n",
       # An even number of trailing backslashes is a literal backslash, so the next
       # line is not a continuation of this one.
-      "literal trailing backslash" => "NOTE=ends-with-two\\\\\nAGENT_COORD_API_TOKEN=secret\n"
+      "literal trailing backslash" => "NOTE=ends-with-two\\\\\nAGENT_COORD_API_TOKEN=secret\n",
+      "escaped quote in another value" => %(X="a\\"b" MACHINE_ID=host-1\n)
     }
   end
 
