@@ -1374,6 +1374,9 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
        "AGENT_COORD_API_TOKEN=secret\n",
        "export AGENT_COORD_STATUS_STATE_ROOT=/tmp/status-state\n",
        "AGENT_COORD_API_URL_BACKUP=https://fleet.example\n",
+       "MY_AGENT_COORD_API_URL=https://fleet.example\n",
+       "[ -d /tmp ] && export PATH=/usr/local/bin:$PATH\n",
+       "find . -name '*.env' > /dev/null\n",
        "umask 077\n"].each_with_index do |body, index|
         File.write(env_file, body)
 
@@ -8355,7 +8358,18 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
       '[ -n "$FLEET" ] && AGENT_COORD_API_URL="$FLEET"' => "opaque_api_url_reference",
       "export AGENT_COORD_API_URL" => "opaque_api_url_reference",
       'eval "$(fleet-env)"' => "eval",
-      "$(fleet-env)" => "command_substitution"
+      "$(fleet-env)" => "command_substitution",
+      # A guarded or compound include is not the first statement on its line, so
+      # it cannot be resolved and followed the way a leading include can.
+      '[ -f "$XDG_CONFIG_HOME/agent-coord/backend.env" ] && . ' \
+      '"$XDG_CONFIG_HOME/agent-coord/backend.env"' => "guarded_include",
+      'true; . "$XDG_CONFIG_HOME/agent-coord/backend.env"' => "guarded_include",
+      'if [ -f "$XDG_CONFIG_HOME/agent-coord/backend.env" ]; then ' \
+      '. "$XDG_CONFIG_HOME/agent-coord/backend.env"; fi' => "guarded_include",
+      # A leading include with a second include after `||`: the fallback is not
+      # reachable from the first, so the line as a whole stays unproven.
+      'source "$XDG_CONFIG_HOME/agent-coord/a.env" || source ' \
+      '"$XDG_CONFIG_HOME/agent-coord/backend.env"' => "guarded_include"
     }
   end
 

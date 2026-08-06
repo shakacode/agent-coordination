@@ -48,9 +48,14 @@ module AgentCoord
   CONSUMER_API_URL_UNSET = /^\s*unset\s+(?:-v\s+)?AGENT_COORD_API_URL\s*$/
   # The variable named anywhere else: an assignment the anchored pattern cannot
   # read (`[ -n "$F" ] && AGENT_COORD_API_URL=$F`), a bare `export` of it, and so on.
-  CONSUMER_API_URL_MENTION = /AGENT_COORD_API_URL(?![A-Za-z0-9_])/
+  # Both boundaries matter: MY_AGENT_COORD_API_URL is a different variable.
+  CONSUMER_API_URL_MENTION = /(?<![A-Za-z0-9_])AGENT_COORD_API_URL(?![A-Za-z0-9_])/
   CONSUMER_ENV_INERT_LINE = /\A\s*(?:#|\z)/
   CONSUMER_INCLUDE_DIRECTIVE = /^\s*(?:source|\.)\s+(\S.*)$/
+  # An include that is not the first statement on its line — `[ -f x ] && . x`,
+  # `true; . x`, `if [ -f x ]; then . x; fi`. Whether it runs at all depends on the
+  # guard, so it is unprovable rather than followed.
+  CONSUMER_COMPOUND_INCLUDE = /(?:[;&|(){}]|\bthen\b|\bdo\b|\belse\b)\s*(?:source|\.)\s+\S/
   CONSUMER_INCLUDE_EXPANSION = /\$(?:\{(HOME|XDG_CONFIG_HOME)\}|(HOME|XDG_CONFIG_HOME)\b)/
   CONSUMER_COMMAND_SUBSTITUTION = /\$\(|`/
   CONSUMER_EVAL = %r{(?<![\w./-])eval(?![\w-])}
@@ -65,6 +70,8 @@ module AgentCoord
     "opaque_api_url_reference" => "names AGENT_COORD_API_URL outside a plain assignment this CLI can read",
     "command_substitution" => "runs a command substitution that could set AGENT_COORD_API_URL",
     "eval" => "evaluates text that could set AGENT_COORD_API_URL",
+    "guarded_include" => "sources a file from a compound statement, so whether it runs at all " \
+                         "depends on shell state this CLI cannot evaluate",
     "unreadable_include" => "sources a file this CLI cannot read",
     "include_outside_config_dir" => "sources a file outside your config directory, which this CLI will not read",
     "relative_include" => "sources a relative path, which depends on the sourcing shell's working directory",
@@ -1008,6 +1015,9 @@ module AgentCoord
     # nested include is itself a cannot-prove stop rather than a silent miss.
     def consumer_include_verdict(path, line, raw_target, verdict, follow_includes)
       return unprovable_verdict(path, line, "nested_include") unless follow_includes
+      # A second include later on the same line (`. a || . b`) is not reachable
+      # from the leading one, so the line as a whole cannot be proven.
+      return unprovable_verdict(path, line, "guarded_include") if line.match?(CONSUMER_COMPOUND_INCLUDE)
 
       target, reason = consumer_include_path(raw_target)
       return unprovable_verdict(path, line, reason) unless target
@@ -1019,14 +1029,18 @@ module AgentCoord
       unprovable_verdict(path, line, "unreadable_include")
     end
 
-    # A line that is neither our assignment, an include, nor an unset is inert
-    # unless it could set the variable by a route the probe does not parse. The
-    # routes that exist are: naming the variable outside a plain assignment,
-    # eval, and a command substitution that is not confined to another
-    # variable's value (a subshell cannot change this shell's environment).
+    # A line that is neither our assignment, a leading include, nor an unset is
+    # inert unless it could set the variable by a route the probe does not parse.
+    # The routes that exist are: naming the variable outside a plain assignment,
+    # sourcing a file from a compound statement (only a *leading* include can be
+    # resolved and followed), eval, and a command substitution that is not
+    # confined to another variable's value (a subshell cannot change this
+    # shell's environment).
     def consumer_opaque_line_verdict(path, line)
       reason = if line.match?(CONSUMER_API_URL_MENTION)
                  "opaque_api_url_reference"
+               elsif line.match?(CONSUMER_COMPOUND_INCLUDE)
+                 "guarded_include"
                elsif line.match?(CONSUMER_EVAL)
                  "eval"
                elsif line.match?(CONSUMER_COMMAND_SUBSTITUTION) && !consumer_contained_substitution?(line)
@@ -1249,6 +1263,7 @@ module AgentCoord
       opts.separator "The probe reads your env files as text and never sources or evaluates them, so"
       opts.separator "it also fails closed on a construct it cannot prove inert: an include it cannot"
       opts.separator "read, resolve, or contain within your config dir, an include inside an include,"
+      opts.separator "an include that is not the first statement on its line (`[ -f x ] && . x`),"
       opts.separator "an assignment from an unresolved expansion or command substitution, and any"
       opts.separator "other line that could set AGENT_COORD_API_URL. split_brain_reason and"
       opts.separator "split_brain_construct name which construct decided it, and in which file."

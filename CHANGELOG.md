@@ -202,10 +202,12 @@ when releases begin.
   writes); and a construct whose effect on `AGENT_COORD_API_URL` cannot be proven
   inert now hard stops exactly like a proven fleet URL, naming the file and the
   exact construct. That covers an include the CLI cannot read, resolve, or
-  contain within the config directory, an include inside an include, a value from
-  an unresolved expansion or command substitution (`"${FLEET_URL:-}"`), the
-  variable named outside a plain assignment, `eval`, and a command substitution
-  that is not confined to another variable's value. The CLI still never sources
+  contain within the config directory, an include inside an include, an include
+  that is not the first statement on its line (`[ -f "$F" ] && . "$F"`, whose
+  execution depends on the guard), a value from an unresolved expansion or
+  command substitution (`"${FLEET_URL:-}"`), the variable named outside a plain
+  assignment, `eval`, and a command substitution that is not confined to another
+  variable's value. The CLI still never sources
   or evaluates operator shell; include resolution expands only `$HOME` and
   `$XDG_CONFIG_HOME`, requires an absolute target, and refuses any target that
   resolves — after symlink and `..` resolution — outside the config directory.
@@ -214,10 +216,11 @@ when releases begin.
   negative that permits an invisible-lease write. `doctor` reports the deciding
   construct in `split_brain_reason`/`split_brain_construct` (plus
   `split_brain_construct_file` when it lives in a sourced fragment) and exits
-  `2`. Lines that cannot reach the variable — comments, other variables, a
-  substitution confined to another variable's value such as
-  `MACHINE_ID=$(hostname)` — stay inert, and the read-command advisory warning
-  stays limited to a proven assignment (issue #99). No gem has been published, so
+  `2`. Lines that cannot reach the variable — comments, other variables
+  (including one this name is only a prefix of, such as `MY_AGENT_COORD_API_URL`),
+  a compound statement that sources nothing, and a substitution confined to
+  another variable's value such as `MACHINE_ID=$(hostname)` — stay inert, and the
+  read-command advisory warning stays limited to a proven assignment (issue #99). No gem has been published, so
   no migration is required.
 - `doctor --help` now documents the `split_brain` status: that `doctor` exits `2`
   with `status: split_brain` when a consumer env file configures — or cannot be

@@ -344,12 +344,15 @@ fleet URL, naming the file and the exact construct:
 | include outside the config directory | `. /etc/agent-coord/backend.env` |
 | include that is relative, `~`-rooted, or uses another variable | `. backend.env` |
 | include inside an include (past the one-level bound) | `. "$XDG_CONFIG_HOME/agent-coord/level-two.env"` |
+| include that is not the first statement on its line | `[ -f "$F" ] && . "$F"` |
 | value from an unresolved expansion or command substitution | `AGENT_COORD_API_URL="${FLEET_URL:-}"` |
 | the variable named outside a plain assignment | `[ -n "$F" ] && AGENT_COORD_API_URL="$F"` |
 | `eval`, or a command substitution that is not confined to another variable's value | `eval "$(fleet-env)"` |
 
 Lines that cannot reach the variable stay inert, so ordinary env files are
-unaffected: comments, a different variable, and a substitution confined to
+unaffected: comments, a different variable (including one this name is only a
+prefix of, such as `MY_AGENT_COORD_API_URL`), a compound statement that sources
+nothing (`[ -d /tmp ] && export PATH=...`), and a substitution confined to
 another variable's value (`MACHINE_ID=$(hostname)`, which runs in a subshell)
 never trip the guard. `doctor` reports which construct decided the verdict in
 `split_brain_reason` and `split_brain_construct`.
