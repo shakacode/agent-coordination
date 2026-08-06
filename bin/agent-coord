@@ -1062,7 +1062,9 @@ module AgentCoord
       # include word — a second include (`. a || . b`), or an assignment
       # (`. a; URL=https://x`) — is invisible to the include fold, so following it
       # would silently drop whatever else the line does.
-      return unprovable_verdict(path, line, "guarded_include") if code.match?(CONSUMER_STATEMENT_SEPARATOR)
+      if consumer_unquoted_text(code).match?(CONSUMER_STATEMENT_SEPARATOR)
+        return unprovable_verdict(path, line, "guarded_include")
+      end
 
       target, reason = consumer_include_path(code[CONSUMER_INCLUDE_DIRECTIVE, 1])
       return unprovable_verdict(path, line, reason) unless target
@@ -1099,7 +1101,29 @@ module AgentCoord
     # inert. Any statement separator puts that guarantee out of reach, so the line
     # is treated as unprovable instead.
     def consumer_contained_substitution?(code)
-      code.match?(CONSUMER_OTHER_ASSIGNMENT) && !code.match?(CONSUMER_STATEMENT_SEPARATOR)
+      code.match?(CONSUMER_OTHER_ASSIGNMENT) && !consumer_unquoted_text(code).match?(CONSUMER_STATEMENT_SEPARATOR)
+    end
+
+    # A line's statement structure with quoted spans removed, so a separator
+    # inside a quoted word — an include path such as "backend;prod.env" — is not
+    # mistaken for a second statement on the line.
+    def consumer_unquoted_text(code)
+      unquoted = +""
+      index = 0
+      while index < code.length
+        char = code[index]
+        if ['"', "'"].include?(char)
+          close = code.index(char, index + 1)
+          # An unterminated quote swallows the rest of the line.
+          break unless close
+
+          index = close + 1
+        else
+          unquoted << char
+          index += 1
+        end
+      end
+      unquoted
     end
 
     def unprovable_verdict(path, line, reason)

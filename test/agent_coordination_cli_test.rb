@@ -1221,12 +1221,16 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     with_consumer_env_config do |_root, agent_dir, env|
       env_file = File.join(agent_dir, "env")
       File.write(File.join(agent_dir, "backend.env"), "AGENT_COORD_API_URL=https://fleet.example\n")
+      # Same content under a filename whose characters look like separators.
+      File.write(File.join(agent_dir, "backend;prod.env"), "AGENT_COORD_API_URL=https://fleet.example\n")
       ['. "$HOME/.config/agent-coord/backend.env"',
        'source "$XDG_CONFIG_HOME/agent-coord/backend.env"',
        "source ${XDG_CONFIG_HOME}/agent-coord/backend.env",
        # A trailing comment does not make the include a compound statement, so it
        # is still resolved and followed rather than reported as unprovable.
        '. "$XDG_CONFIG_HOME/agent-coord/backend.env" # fleet backend; see docs',
+       # Nor does a separator inside the quoted path: this is one statement.
+       '. "$XDG_CONFIG_HOME/agent-coord/backend;prod.env"',
        ". #{File.join(agent_dir, 'backend.env')}"].each_with_index do |include_line, index|
         File.write(env_file, "# wrapper: the assignment lives in backend.env\n#{include_line}\n")
 
