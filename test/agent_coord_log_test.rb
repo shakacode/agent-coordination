@@ -794,6 +794,57 @@ class AgentCoordLogTest < AgentCoordLogTestCase
     assert_equal 0, result.status.exitstatus, result.stderr
     assert_includes result.stdout, "log"
   end
+
+  # The fleet carries claims left active with an expiry long past, so promoting
+  # one on recency alone would report expired custody as current.
+  def test_log_marks_an_expired_claim_rather_than_presenting_it_as_current
+    write_claim("shakacode/example", "10112",
+                "status" => "active", "agent_id" => "queue-worker", "machine_id" => "m5",
+                "host" => "codex", "updated_at" => "2026-07-18T12:00:00Z",
+                "expires_at" => "2026-07-18T12:42:44Z")
+
+    stdout = run_log("shakacode/example#10112").stdout
+
+    assert_includes stdout, "claim active"
+    assert_includes stdout, "expired"
+    assert_includes stdout, "2026-07-18T12:42:44Z"
+  end
+
+  def test_log_does_not_mark_a_live_claim_as_expired
+    write_claim("shakacode/example", "10112",
+                "status" => "active", "agent_id" => "queue-worker", "machine_id" => "m5",
+                "host" => "codex", "updated_at" => "2099-01-01T00:00:00Z",
+                "expires_at" => "2099-01-01T04:00:00Z")
+
+    refute_includes run_log("shakacode/example#10112").stdout, "expired"
+  end
+
+  def test_log_json_reports_claim_expiry
+    write_claim("shakacode/example", "10112",
+                "status" => "active", "agent_id" => "queue-worker", "machine_id" => "m5",
+                "host" => "codex", "updated_at" => "2026-07-18T12:00:00Z",
+                "expires_at" => "2026-07-18T12:42:44Z")
+
+    claim = JSON.parse(run_log("shakacode/example#10112", "--json").stdout).fetch("claim")
+
+    assert_equal true, claim.fetch("expired")
+    assert_equal "2026-07-18T12:42:44Z", claim.fetch("expires_at")
+  end
+
+  def test_log_marks_a_synthetic_claim
+    write_claim("sim/race", "task_two",
+                "status" => "active", "agent_id" => "racer0", "machine_id" => "m5",
+                "host" => "scripted-sim", "updated_at" => "2099-01-01T00:00:00Z",
+                "expires_at" => "2099-01-01T04:00:00Z",
+                "synthetic" => true, "synthetic_kind" => "simulation")
+
+    stdout = run_log("sim/race#task_two", "--include-synthetic").stdout
+    claim = JSON.parse(run_log("sim/race#task_two", "--include-synthetic", "--json").stdout).fetch("claim")
+
+    assert_includes stdout, "[synthetic]"
+    assert_equal true, claim.fetch("synthetic")
+    assert_equal "simulation", claim.fetch("synthetic_kind")
+  end
 end
 
 # The durable `--sync` mirror: scope, ordering, locking, and replacement.

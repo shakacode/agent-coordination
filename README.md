@@ -575,6 +575,14 @@ no events for ShakaCode/hichee#issue:10112
 claim active m5 codex codex-whimstay-queue-20260801 phase implementing updated 2026-08-01T01:13:03Z
 ```
 
+A claim whose lease has run out is labelled rather than presented as current
+custody — recency alone does not make a claim live, and the fleet holds many left
+active with an expiry long past:
+
+```text
+claim released m5 codex codex-whimstay-queue-20260801 phase implementation updated 2026-08-01T06:05:27Z expired 2026-08-01T06:05:27Z
+```
+
 Two reporting rules worth knowing. Hosts are recorded with many spellings
 (`codex`, `codex-subagent`, `codex-desktop`, `codex-collaboration@its`,
 `claude-code`); `log` normalizes them onto the `codex` and `claude` families used

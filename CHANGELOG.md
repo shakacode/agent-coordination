@@ -113,6 +113,11 @@ when releases begin.
   all: `claim` permits omitting `--batch-id` and no lifecycle event is emitted
   without a batch, so a work item can carry stale events and a live claim at the
   same time, and answering with the last event would have named the wrong place.
+  A claim whose `expires_at` has passed is labelled `expired` in text and carries
+  `expired`/`expires_at` in JSON rather than being presented as current custody;
+  the fleet holds many claims left active with an expiry long past, and recency
+  alone does not make one live. A synthetic claim is marked the way synthetic
+  events are.
 - An `AGENT_COORD_LOCAL` environment opt-in that explicitly selects the implicit
   local backend. It accepts `1`, `true`, or `yes` (case-insensitive); any other
   value, including empty and `0`, is not an opt-in. Setting it both satisfies the

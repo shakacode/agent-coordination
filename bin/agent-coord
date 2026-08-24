@@ -3531,7 +3531,7 @@ module AgentCoord
       # Casing variants produce two claim paths for one work item; the newest is
       # the one that describes where the work actually is.
       newest = matches.max_by { |candidate| log_at_key(candidate.data["updated_at"]) }
-      newest && log_claim_record(newest.data)
+      newest && log_claim_record(newest.data, now_utc)
     rescue OperationalError => e
       degradation = listing_degradation(e, "claims")
       raise unless degradation
@@ -3557,20 +3557,40 @@ module AgentCoord
 
     # Structured so a --json consumer reads the claim's fields instead of
     # re-parsing the sentence the text renderer builds from them.
-    def log_claim_record(data)
+    def log_claim_record(data, now)
       {
         "status" => log_present(data["status"]),
         "machine" => log_present(data["machine_id"]),
         "host" => log_host_family(data["host"]),
         "agent_id" => log_present(data["agent_id"]),
         "phase" => log_phase_or_dash(data["phase"]),
-        "updated_at" => log_present(data["updated_at"])
+        "updated_at" => log_present(data["updated_at"]),
+        "expires_at" => log_present(data["expires_at"])
       }.transform_values { |value| log_scrub(value) }
+       .merge(
+         "expired" => log_claim_expired?(data, now),
+         "synthetic" => data["synthetic"] ? true : false,
+         "synthetic_kind" => log_scrub(log_present(data["synthetic_kind"]))
+       )
+    end
+
+    # The fleet carries claims left active with an expiry long past, so a claim
+    # cannot be reported as current custody on recency alone. It is still shown
+    # -- a stale record is worth knowing about -- but labelled for what it is.
+    def log_claim_expired?(data, now)
+      expires = data["expires_at"].to_s
+      return false if expires.empty?
+
+      log_at_key(expires) < now.to_r
     end
 
     def log_claim_note_line(claim)
-      "claim #{claim.fetch('status')} #{claim.fetch('machine')} #{claim.fetch('host')} " \
-        "#{claim.fetch('agent_id')} phase #{claim.fetch('phase')} updated #{claim.fetch('updated_at')}"
+      parts = ["claim", claim.fetch("status")]
+      parts << "[synthetic]" if claim.fetch("synthetic")
+      parts.push(claim.fetch("machine"), claim.fetch("host"), claim.fetch("agent_id"),
+                 "phase", claim.fetch("phase"), "updated", claim.fetch("updated_at"))
+      parts.push("expired", claim.fetch("expires_at")) if claim.fetch("expired")
+      parts.join(" ")
     end
 
     def log_phase_or_dash(value)
