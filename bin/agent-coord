@@ -3273,10 +3273,8 @@ module AgentCoord
 
       emit_log(rows, options, log_claim_for(store, options, rows))
       0
-    rescue JSON::ParserError => e
+    rescue JSON::ParserError, SystemCallError => e
       raise OperationalError, "state unreadable: #{e.message}"
-    rescue SystemCallError => e
-      raise OperationalError, "log mirror unwritable: #{e.message}"
     ensure
       close_store(store)
     end
@@ -3639,6 +3637,12 @@ module AgentCoord
     # prunes hot events from the backend.
     def log_sync(options, rows)
       path = log_sync_path(options)
+      log_sync_write(path, rows, options)
+    rescue SystemCallError => e
+      raise OperationalError, "log mirror unwritable: #{e.message}"
+    end
+
+    def log_sync_write(path, rows, options)
       FileUtils.mkdir_p(File.dirname(path))
       fresh = log_sync_append(path, rows.map { |row| log_tsv_line(row) })
       if options[:json]

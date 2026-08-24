@@ -863,6 +863,22 @@ class AgentCoordLogTest < AgentCoordLogTestCase
     assert_includes stdout, "claim active"
     assert_includes stdout, "legacy-worker"
   end
+
+  # A read failure on a plain query has nothing to do with the mirror; pointing
+  # the operator at log.tsv would send them to the wrong file.
+  def test_log_reports_an_unreadable_state_root_as_unreadable_state
+    write_trace
+    FileUtils.chmod(0o000, File.join(@state_root, "events"))
+
+    result = run_log("shakacode/example#104")
+
+    assert_equal 2, result.status.exitstatus
+    assert_includes result.stderr, "not readable", result.stderr
+    refute_includes result.stderr, "mirror", "a read failure must not point at log.tsv"
+    refute_match(%r{\bfrom .*bin/agent-coord:\d+}, result.stderr)
+  ensure
+    FileUtils.chmod(0o700, File.join(@state_root, "events"))
+  end
 end
 
 # The durable `--sync` mirror: scope, ordering, locking, and replacement.
