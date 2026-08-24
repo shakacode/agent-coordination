@@ -3286,7 +3286,10 @@ module AgentCoord
     def validate_log_sync_scope!(options)
       return unless options[:sync]
 
-      narrowed = LOG_TRAIL_FILTERS.select { |field| options[field] }
+      # An empty flag value is unset on the read path, so it is unset here too.
+      # --limit is the exception in the other direction: any limit narrows the
+      # mirror, including zero, whereas only zero narrows an already-empty trail.
+      narrowed = LOG_TRAIL_FILTERS.reject { |field| options[field].to_s.empty? }
                                   .map { |field| "--#{field.to_s.tr('_', '-')}" }
       narrowed << "a work item" if options[:work_item]
       return if narrowed.empty?

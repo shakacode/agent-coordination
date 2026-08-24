@@ -988,6 +988,30 @@ class AgentCoordLogSyncTest < AgentCoordLogTestCase
     assert_includes File.read(File.join(@state_root, "log.tsv")), "shakacode/example#104"
   end
 
+  # The read path treats an empty flag value as unset; --sync must agree, or a
+  # script expanding an unset variable gets a refusal instead of a full mirror.
+  def test_log_sync_accepts_empty_filter_values
+    write_trace
+
+    %w[--machine --host --type].each do |flag|
+      result = run_log("--sync", flag, "")
+
+      assert_equal 0, result.status.exitstatus, "expected --sync #{flag} '' to be accepted: #{result.stderr}"
+    end
+    assert_equal 6, File.readlines(File.join(@state_root, "log.tsv"), encoding: "UTF-8").length
+  end
+
+  # --limit is different: any limit narrows the mirror, including zero, so both
+  # stay rejected even though only zero narrows an already-empty trail.
+  def test_log_sync_rejects_every_limit
+    write_trace
+
+    %w[0 5].each do |limit|
+      assert_equal 1, run_log("--sync", "--limit", limit).status.exitstatus,
+                   "expected --sync --limit #{limit} to be rejected"
+    end
+  end
+
   def test_log_sync_rejects_trail_filters
     write_trace
 
