@@ -59,7 +59,12 @@ when releases begin.
   positional work item, so `log --json OWNER/REPO#1` parses. `--sync` mirrors the
   complete trail and rejects any narrowing option, because appending a narrow sync
   and then a broader one would place older events after newer ones and the file's
-  last line would stop being the current state.
+  last line would stop being the current state. The mirror is deduplicated and
+  appended under one exclusive lock, so two writers cannot both decide the same
+  rows are new. Text columns are scrubbed of tabs and newlines like the tsv ones,
+  so agent-supplied text cannot split one printed event across two lines. A
+  filtered claims listing warns as well, so a hidden claim does not read as an
+  absent one.
 - An `AGENT_COORD_LOCAL` environment opt-in that explicitly selects the implicit
   local backend. It accepts `1`, `true`, or `yes` (case-insensitive); any other
   value, including empty and `0`, is not an opt-in. Setting it both satisfies the

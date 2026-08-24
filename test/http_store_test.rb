@@ -1692,6 +1692,21 @@ class LogHttpBackendTest < HttpEnvTestCase
     stub.shutdown
   end
 
+  # A filtered claims listing can hide the very claim being asked about, so a
+  # silent "no claim" would be indistinguishable from a real absence.
+  def test_log_warns_when_the_claim_listing_is_filtered_by_a_scoped_token
+    stub = HttpStoreStub.new([[200, { "entries" => [] }], [200, { "entries" => [], "filtered" => true }]])
+    with_env("AGENT_COORD_API_URL" => stub.base_url, "AGENT_COORD_API_TOKEN" => "tok") do
+      code, out, err = run_cli(["log", "shakacode/example#1"], {})
+
+      assert_equal 0, code
+      assert_includes out, "no events"
+      assert_includes err, "claims filtered by scoped token"
+    end
+  ensure
+    stub.shutdown
+  end
+
   # Swallowing every claims failure made "this token cannot read claims" print
   # identically to "this work item has no claim".
   def test_log_warns_when_the_claim_lookup_is_forbidden_to_a_scoped_token
@@ -1701,7 +1716,7 @@ class LogHttpBackendTest < HttpEnvTestCase
 
       assert_equal 0, code
       assert_includes out, "no events"
-      assert_includes err, "claims not readable here"
+      assert_includes err, "claims not readable by scoped token"
     end
   ensure
     stub.shutdown

@@ -511,6 +511,41 @@ class AgentCoordLogTest < Minitest::Test
     assert_includes result.stderr, "--sync"
   end
 
+  # The tsv renderer was hardened but the default text renderer was not, so an
+  # embedded newline still split one event across two printed lines.
+  def test_log_text_output_scrubs_control_characters_from_every_column
+    write_event("b1", "e1", "type" => "claim.acquired", "repo" => "shakacode/example", "target" => "5",
+                            "machine_id" => "m5", "host" => "codex",
+                            "agent_id" => "worker\ninjected", "batch_id" => "batch\tsplit",
+                            "at" => "2026-08-01T00:00:00Z")
+
+    stdout = run_log("shakacode/example#5").stdout
+
+    assert_equal 1, stdout.lines.length, "an embedded newline must not split the printed event"
+    assert_includes stdout, "worker injected"
+  end
+
+  # Two writers (a cron and an operator, say) would each read the file before
+  # either appended, and both would then write the same rows. Asserting on a race
+  # would only pass by luck, so this holds the lock and checks that sync waits.
+  def test_log_sync_waits_for_an_exclusive_lock_on_the_mirror
+    write_trace
+    path = File.join(@state_root, "log.tsv")
+    FileUtils.touch(path)
+    File.open(path, File::RDWR) do |holder|
+      holder.flock(File::LOCK_EX)
+      pid = spawn(COMMAND_ENV.merge("AGENT_COORD_STATE_ROOT" => @state_root),
+                  "ruby", BIN, "log", "--sync", out: File::NULL, err: File::NULL)
+
+      assert_nil wait_briefly(pid), "expected --sync to wait for the exclusive lock, not write through it"
+
+      holder.flock(File::LOCK_UN)
+      Process.waitpid(pid)
+    end
+
+    assert_equal 6, File.readlines(path, encoding: "UTF-8").length
+  end
+
   # --- read-only contract ----------------------------------------------------
 
   def test_log_does_not_mutate_coordination_state
@@ -554,6 +589,17 @@ class AgentCoordLogTest < Minitest::Test
     write_event("b1", "e6", "type" => "claim.acquired", "repo" => "shakacode/other", "target" => "7",
                             "machine_id" => "m5", "host" => "codex", "agent_id" => "other-worker",
                             "at" => "2026-08-03T02:41:00Z")
+  end
+
+  # Poll briefly for the child to exit; nil means it is still blocked.
+  def wait_briefly(pid, attempts: 20)
+    attempts.times do
+      finished = Process.waitpid(pid, Process::WNOHANG)
+      return finished if finished
+
+      sleep 0.05
+    end
+    nil
   end
 
   def write_claim(repo, target, payload)

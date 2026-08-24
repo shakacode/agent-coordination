@@ -3456,12 +3456,12 @@ module AgentCoord
     # trace stays tight while a mixed feed still lines up. `detail` is free text
     # and carries no width, which is why it is always last.
     def log_text_widths(rows)
-      LOG_TEXT_COLUMNS.to_h { |field| [field, rows.map { |row| row.fetch(field).length }.max] }
+      LOG_TEXT_COLUMNS.to_h { |field| [field, rows.map { |row| log_scrub(row.fetch(field)).length }.max] }
     end
 
     def log_text_line(row, widths)
-      columns = LOG_TEXT_COLUMNS.map { |field| row.fetch(field).ljust(widths.fetch(field)) }
-      columns.push(row.fetch("detail")).join("  ").rstrip
+      columns = LOG_TEXT_COLUMNS.map { |field| log_scrub(row.fetch(field)).ljust(widths.fetch(field)) }
+      columns.push(log_scrub(row.fetch("detail"))).join("  ").rstrip
     end
 
     # A work item can hold a claim while having no event trail, because claims
@@ -3476,7 +3476,9 @@ module AgentCoord
       # would answer a question the operator did not ask.
       return nil if LOG_TRAIL_FILTERS.any? { |field| options[field] }
 
-      entry = store.list_json("claims").find do |candidate|
+      claims = store.list_json("claims")
+      log_warn_claims("filtered by scoped token") if filtered_status_list?(store, "claims")
+      entry = claims.find do |candidate|
         next false if candidate.data["synthetic"] && !options[:include_synthetic]
 
         log_work_item(candidate.data).casecmp?(wanted)
@@ -3485,8 +3487,14 @@ module AgentCoord
     rescue OperationalError => e
       raise unless unsupported_resource_listing?(e) || scoped_http_forbidden_listing?(e, "claims")
 
-      @stderr.puts "warning: claims not readable here; a claim for this work item would not be reported"
+      log_warn_claims(
+        scoped_http_forbidden_listing?(e, "claims") ? "not readable by scoped token" : "not supported by backend"
+      )
       nil
+    end
+
+    def log_warn_claims(reason)
+      @stderr.puts "warning: claims #{reason}; a claim for this work item would not be reported"
     end
 
     def log_claim_note_line(data)
@@ -3513,11 +3521,23 @@ module AgentCoord
     def log_sync(options, rows)
       path = log_sync_path(options)
       FileUtils.mkdir_p(File.dirname(path))
-      seen = log_sync_seen(path)
-      fresh = rows.map { |row| log_tsv_line(row) }.reject { |line| seen.key?(line) }
-      File.open(path, "a", encoding: "UTF-8") { |file| fresh.each { |line| file.puts(line) } }
+      fresh = log_sync_append(path, rows.map { |row| log_tsv_line(row) })
       @stdout.puts "synced #{fresh.length} new #{fresh.length == 1 ? 'event' : 'events'} to #{path}"
       0
+    end
+
+    # Dedup and append under one exclusive lock. Two writers that each read before
+    # either appended would both decide the same rows were new and write them
+    # twice, and an append-only mirror has no later pass to clean that up.
+    def log_sync_append(path, lines)
+      File.open(path, File::RDWR | File::CREAT, 0o644, encoding: "UTF-8") do |file|
+        file.flock(File::LOCK_EX)
+        seen = file.each_line.to_h { |line| [line.chomp, true] }
+        fresh = lines.reject { |line| seen.key?(line) }
+        file.seek(0, IO::SEEK_END)
+        fresh.each { |line| file.puts(line) }
+        fresh
+      end
     end
 
     # Read the mirror as UTF-8 rather than trusting the locale. Under a non-UTF-8
