@@ -10,7 +10,7 @@ require "tmpdir"
 # the event store (issue #129). These tests pin the operator contract: which
 # machine and host touched a work item, whether it moved, and when it was last
 # worked on -- with no state inference beyond ordering events by timestamp.
-class AgentCoordLogTest < Minitest::Test
+class AgentCoordLogTestCase < Minitest::Test
   ROOT = File.expand_path("..", __dir__)
   BIN = File.join(ROOT, "bin", "agent-coord")
   CommandResult = Struct.new(:stdout, :stderr, :status, keyword_init: true)
@@ -41,8 +41,80 @@ class AgentCoordLogTest < Minitest::Test
     FileUtils.remove_entry(@state_root)
   end
 
-  # --- work-item trace -------------------------------------------------------
+  private
 
+  # A realistic custody trail: opened on m5 under codex, handed to a maintainer,
+  # then picked back up on m1 under claude and closed. Exercises the move.
+  def write_trace
+    write_event("b1", "e1", "type" => "claim.acquired", "repo" => "shakacode/example", "target" => "104",
+                            "machine_id" => "m5", "host" => "codex", "agent_id" => "acd-worker",
+                            "phase" => "addressing_review", "at" => "2026-08-03T02:40:16Z")
+    write_event("b1", "e2", "type" => "phase.changed", "repo" => "shakacode/example", "target" => "104",
+                            "machine_id" => "m5", "host" => "codex", "agent_id" => "acd-worker",
+                            "old_phase" => "addressing_review", "phase" => "waiting_on_checks_or_review",
+                            "at" => "2026-08-03T02:45:53Z")
+    write_event("b1", "e3", "type" => "claim.released", "repo" => "shakacode/example", "target" => "104",
+                            "machine_id" => "m5", "host" => "codex", "agent_id" => "acd-worker",
+                            "handoff_to" => "maintainer", "at" => "2026-08-03T02:56:53Z")
+    write_event("b1", "e4", "type" => "claim.acquired", "repo" => "shakacode/example", "target" => "104",
+                            "machine_id" => "m1", "host" => "claude-code", "agent_id" => "acd-finisher",
+                            "phase" => "final_merge", "at" => "2026-08-03T03:35:49Z")
+    write_event("b1", "e5", "type" => "lane_closed", "repo" => "shakacode/example", "target" => "104",
+                            "machine_id" => "m1", "host" => "claude-code", "agent_id" => "acd-finisher",
+                            "terminal" => "done", "at" => "2026-08-03T04:00:08Z")
+    write_event("b1", "e6", "type" => "claim.acquired", "repo" => "shakacode/other", "target" => "7",
+                            "machine_id" => "m5", "host" => "codex", "agent_id" => "other-worker",
+                            "at" => "2026-08-03T02:41:00Z")
+  end
+
+  # Poll briefly for the child to exit; nil means it is still blocked.
+  def wait_briefly(pid, attempts: 20)
+    attempts.times do
+      finished = Process.waitpid(pid, Process::WNOHANG)
+      return finished if finished
+
+      sleep 0.05
+    end
+    nil
+  end
+
+  def write_claim(repo, target, payload)
+    path = File.join(@state_root, "claims", repo, "#{target}.json")
+    FileUtils.mkdir_p(File.dirname(path))
+    record = { "schema_version" => 1, "repo" => repo, "target" => target }.merge(payload)
+    File.write(path, "#{JSON.generate(record, ascii_only: true)}\n")
+  end
+
+  # Fixtures are written with \u escapes so the bytes on disk stay pure ASCII and
+  # remain readable under a non-UTF-8 locale, while still decoding to a non-ASCII
+  # string in memory -- which is exactly the case the sync dedup has to survive.
+  def write_event(batch_id, event_id, payload)
+    path = File.join(@state_root, "events", batch_id, "#{event_id}.json")
+    FileUtils.mkdir_p(File.dirname(path))
+    record = { "schema_version" => 2, "event_id" => event_id, "batch_id" => batch_id }.merge(payload)
+    File.write(path, "#{JSON.generate(record, ascii_only: true)}\n")
+  end
+
+  def state_fingerprint
+    Dir.glob(File.join(@state_root, "events", "**", "*.json")).map do |path|
+      [path, File.read(path)]
+    end
+  end
+
+  def run_log(*, env: {})
+    run_command(COMMAND_ENV.merge("AGENT_COORD_STATE_ROOT" => @state_root).merge(env), "ruby", BIN, "log", *)
+  end
+
+  def run_command(*args, stdin_data: nil)
+    env = args.first.is_a?(Hash) ? args.shift : {}
+    stdout, stderr, status = Open3.capture3(env, *args, stdin_data: stdin_data)
+    CommandResult.new(stdout: stdout, stderr: stderr, status: status)
+  end
+end
+
+# The trail itself: what `log` reports for a work item and how it filters.
+class AgentCoordLogTest < AgentCoordLogTestCase
+  # --- work-item trace -------------------------------------------------------
   def test_log_traces_one_work_item_in_chronological_order
     write_trace
 
@@ -146,7 +218,6 @@ class AgentCoordLogTest < Minitest::Test
   end
 
   # --- honesty about missing data --------------------------------------------
-
   def test_log_renders_unknown_machine_as_a_placeholder_rather_than_guessing
     write_event("b1", "e1", "type" => "claim.acquired", "repo" => "shakacode/example", "target" => "5",
                             "host" => "codex", "at" => "2026-08-01T00:00:00Z")
@@ -166,7 +237,6 @@ class AgentCoordLogTest < Minitest::Test
   end
 
   # --- host normalization ----------------------------------------------------
-
   def test_log_normalizes_the_sprawled_host_vocabulary_into_two_families
     {
       "codex" => "codex", "codex-subagent" => "codex", "codex-desktop" => "codex",
@@ -194,7 +264,6 @@ class AgentCoordLogTest < Minitest::Test
   end
 
   # --- filters ---------------------------------------------------------------
-
   def test_log_filters_synthetic_records_by_default_and_includes_them_on_request
     write_trace
     write_event("sim", "s1", "type" => "claim.acquired", "repo" => "sim/race", "target" => "task_two",
@@ -261,7 +330,6 @@ class AgentCoordLogTest < Minitest::Test
   end
 
   # --- output shapes ---------------------------------------------------------
-
   def test_log_emits_structured_json_on_request
     write_trace
 
@@ -275,69 +343,11 @@ class AgentCoordLogTest < Minitest::Test
     assert_equal "claim.acquired", first.fetch("type")
   end
 
-  def test_log_sync_writes_a_greppable_tsv_under_the_state_root
-    write_trace
-
-    result = run_log("--sync")
-    log_path = File.join(@state_root, "log.tsv")
-
-    assert_equal 0, result.status.exitstatus, result.stderr
-    assert_path_exists log_path
-    lines = File.readlines(log_path)
-
-    assert_equal 6, lines.length
-    assert(lines.any? { |line| line.include?("shakacode/example#104") && line.include?("lane_closed") })
-  end
-
-  def test_log_sync_is_idempotent_and_appends_only_unseen_events
-    write_trace
-    run_log("--sync")
-    first_pass = File.readlines(File.join(@state_root, "log.tsv"))
-
-    run_log("--sync")
-    second_pass = File.readlines(File.join(@state_root, "log.tsv"))
-
-    assert_equal first_pass, second_pass
-
-    write_event("b2", "e9", "type" => "merged", "repo" => "shakacode/example", "target" => "104",
-                            "machine_id" => "m1", "host" => "claude-code", "at" => "2026-08-04T00:00:00Z")
-    run_log("--sync")
-    third_pass = File.readlines(File.join(@state_root, "log.tsv"))
-
-    assert_equal first_pass.length + 1, third_pass.length
-    assert_includes third_pass.last, "merged"
-  end
-
   # Under a non-UTF-8 locale the appended line reads back tagged with the locale
   # encoding, so a row carrying any non-ASCII character (an em dash in a merge
   # note, say) failed the dedup lookup and re-appended on every sync, growing the
   # file without bound. The log always reads and writes UTF-8 regardless of locale.
-  def test_log_sync_dedupes_non_ascii_rows_under_an_ascii_locale
-    write_event("b1", "e1", "type" => "lane", "repo" => "shakacode/example", "target" => "4711",
-                            "machine_id" => "m5", "host" => "codex",
-                            "message" => "PR 4711 merged \u2014 verified via GitHub",
-                            "at" => "2026-07-17T22:52:29Z")
-    ascii_locale = { "LC_ALL" => "C", "LANG" => "C" }
-
-    3.times { run_log("--sync", env: ascii_locale) }
-    lines = File.readlines(File.join(@state_root, "log.tsv"), encoding: "UTF-8")
-
-    assert_equal 1, lines.length, "expected the non-ASCII row to be written exactly once"
-    assert_includes lines.first, "\u2014"
-  end
-
-  def test_log_sync_retains_history_after_events_are_pruned
-    write_trace
-    run_log("--sync")
-    FileUtils.rm_rf(File.join(@state_root, "events"))
-
-    run_log("--sync")
-
-    assert_includes File.read(File.join(@state_root, "log.tsv")), "shakacode/example#104"
-  end
-
   # --- review findings (PR #131) ---------------------------------------------
-
   # `log` was registered as a backend command but not a status-read command, so
   # it silently read the default local root instead of the configured status root
   # and skipped the split-brain advisory it is supposed to keep.
@@ -490,27 +500,6 @@ class AgentCoordLogTest < Minitest::Test
   # The mirror is a complete durable copy, not a filtered view. A narrow sync
   # followed by a broader one would append the older events after the newer ones,
   # so the file's last line would no longer be the current state.
-  def test_log_sync_rejects_trail_filters
-    write_trace
-
-    [["--since", "1d"], ["--machine", "m5"], ["--host", "codex"],
-     ["--type", "claim.acquired"], ["--limit", "2"]].each do |filter|
-      result = run_log("--sync", *filter)
-
-      assert_equal 1, result.status.exitstatus, "expected --sync #{filter.first} to be rejected"
-      assert_includes result.stderr, "--sync"
-    end
-  end
-
-  def test_log_sync_rejects_a_work_item_scope
-    write_trace
-
-    result = run_log("shakacode/example#104", "--sync")
-
-    assert_equal 1, result.status.exitstatus
-    assert_includes result.stderr, "--sync"
-  end
-
   # The tsv renderer was hardened but the default text renderer was not, so an
   # embedded newline still split one event across two printed lines.
   def test_log_text_output_scrubs_control_characters_from_every_column
@@ -529,25 +518,7 @@ class AgentCoordLogTest < Minitest::Test
   # either wrote, and both would then publish the same rows. Asserting on a race
   # would only pass by luck, so this holds the lock and checks that sync waits.
   # The lock lives on a sidecar because the mirror itself is replaced by rename.
-  def test_log_sync_waits_for_an_exclusive_lock_on_the_mirror
-    write_trace
-    path = File.join(@state_root, "log.tsv")
-    File.open("#{path}.lock", File::RDWR | File::CREAT, 0o644) do |holder|
-      holder.flock(File::LOCK_EX)
-      pid = spawn(COMMAND_ENV.merge("AGENT_COORD_STATE_ROOT" => @state_root),
-                  "ruby", BIN, "log", "--sync", out: File::NULL, err: File::NULL)
-
-      assert_nil wait_briefly(pid), "expected --sync to wait for the exclusive lock, not write through it"
-
-      holder.flock(File::LOCK_UN)
-      Process.waitpid(pid)
-    end
-
-    assert_equal 6, File.readlines(path, encoding: "UTF-8").length
-  end
-
   # --- review findings (PR #131, round 4) ------------------------------------
-
   # log_row derives "phase" for events, falling back to status; reusing it for a
   # claim printed a claim whose status is active as "phase active".
   def test_log_claim_note_does_not_relabel_claim_status_as_phase
@@ -570,34 +541,9 @@ class AgentCoordLogTest < Minitest::Test
     assert_includes run_log("shakacode/example#10112").stdout, "phase implementing"
   end
 
-  def test_log_sync_reports_json_when_json_is_requested
-    write_trace
-
-    payload = JSON.parse(run_log("--sync", "--json").stdout)
-
-    assert_equal 6, payload.fetch("synced")
-    assert payload.fetch("path").end_with?("log.tsv")
-  end
-
   # A later sync can still discover an older event -- a concurrent writer, or a
   # backfill -- and appending it blindly would put it after newer rows, so the
   # mirror's last line would stop being the current state.
-  def test_log_sync_keeps_the_mirror_in_timestamp_order
-    write_event("b1", "e2", "type" => "lane_closed", "repo" => "shakacode/example", "target" => "5",
-                            "machine_id" => "m5", "host" => "codex", "terminal" => "done",
-                            "at" => "2026-08-02T00:00:00Z")
-    run_log("--sync")
-    write_event("b1", "e1", "type" => "claim.acquired", "repo" => "shakacode/example", "target" => "5",
-                            "machine_id" => "m5", "host" => "codex", "at" => "2026-08-01T00:00:00Z")
-    run_log("--sync")
-
-    lines = File.readlines(File.join(@state_root, "log.tsv"), encoding: "UTF-8")
-
-    assert_equal 2, lines.length
-    assert_includes lines.first, "2026-08-01T00:00:00Z"
-    assert_includes lines.last, "2026-08-02T00:00:00Z"
-  end
-
   # add_target_options already registers --host for every command; registering it
   # again for log collided with that definition. The log help block still
   # describes what --host means here, which is a separate line from the registry.
@@ -608,7 +554,6 @@ class AgentCoordLogTest < Minitest::Test
   end
 
   # --- review findings (PR #131, round 5) ------------------------------------
-
   def test_log_claim_note_scrubs_control_characters
     write_claim("shakacode/example", "10112",
                 "status" => "active", "agent_id" => "worker\ninjected", "machine_id" => "m5",
@@ -622,38 +567,10 @@ class AgentCoordLogTest < Minitest::Test
 
   # --include-synthetic widens the mirror rather than narrowing it, so rejecting
   # it left simulation history with no way to be preserved before gc pruned it.
-  def test_log_sync_accepts_include_synthetic
-    write_trace
-    write_event("sim", "s1", "type" => "claim.acquired", "repo" => "sim/race", "target" => "task_two",
-                             "machine_id" => "m5", "host" => "scripted-sim", "synthetic" => true,
-                             "at" => "2026-08-03T05:00:00Z")
-
-    result = run_log("--sync", "--include-synthetic")
-
-    assert_equal 0, result.status.exitstatus, result.stderr
-    assert_includes File.read(File.join(@state_root, "log.tsv")), "sim/race#task_two"
-  end
-
   # After gc prunes the backend the mirror can be the only copy, so a crash mid
   # rewrite must not be able to destroy it. The replace is atomic, which means no
   # partial file is ever visible at the mirror's path.
-  def test_log_sync_replaces_the_mirror_atomically
-    write_trace
-    run_log("--sync")
-    path = File.join(@state_root, "log.tsv")
-    before = File.read(path)
-
-    write_event("b2", "e9", "type" => "merged", "repo" => "shakacode/example", "target" => "104",
-                            "machine_id" => "m1", "host" => "claude-code", "at" => "2026-08-04T00:00:00Z")
-    run_log("--sync")
-
-    assert_equal 7, File.readlines(path, encoding: "UTF-8").length
-    before.each_line { |line| assert_includes File.read(path), line.chomp }
-    assert_empty Dir.glob(File.join(@state_root, "log.tsv.*tmp*")), "no temporary file may be left behind"
-  end
-
   # --- review findings (PR #131, round 6) ------------------------------------
-
   # add_target_options advertises --repo/--target for every command, so they are
   # accepted here; ignoring them silently dumped the entire feed instead.
   def test_log_scopes_by_repo_and_target_options
@@ -685,34 +602,7 @@ class AgentCoordLogTest < Minitest::Test
 
   # The mirror must order a same-timestamp tie the way the command does, or a
   # grep of the file and a `log` invocation disagree about what happened last.
-  def test_log_sync_breaks_timestamp_ties_by_event_id_like_the_command
-    write_event("b1", "zzz", "type" => "phase.changed", "repo" => "shakacode/example", "target" => "5",
-                             "machine_id" => "m5", "host" => "codex", "at" => "2026-08-01T00:00:00Z")
-    run_log("--sync")
-    write_event("b1", "aaa", "type" => "claim.acquired", "repo" => "shakacode/example", "target" => "5",
-                             "machine_id" => "m5", "host" => "codex", "at" => "2026-08-01T00:00:00Z")
-    run_log("--sync")
-
-    mirror = File.readlines(File.join(@state_root, "log.tsv"), encoding: "UTF-8").map { |l| l.split("\t")[4] }
-
-    assert_equal run_log("shakacode/example#5").stdout.lines.map { |l| l.split(/\s+/)[4] }, mirror
-  end
-
-  def test_log_sync_preserves_restrictive_mirror_permissions
-    write_trace
-    run_log("--sync")
-    path = File.join(@state_root, "log.tsv")
-    File.chmod(0o600, path)
-
-    write_event("b2", "e9", "type" => "merged", "repo" => "shakacode/example", "target" => "104",
-                            "machine_id" => "m1", "host" => "codex", "at" => "2026-08-04T00:00:00Z")
-    run_log("--sync")
-
-    assert_equal 0o600, File.stat(path).mode & 0o777
-  end
-
   # --- review findings (PR #131, round 7) ------------------------------------
-
   # The row's host column is family-normalized, so comparing the raw flag value
   # against it meant every real recorded spelling silently matched nothing.
   def test_log_host_filter_accepts_recorded_host_spellings
@@ -794,7 +684,6 @@ class AgentCoordLogTest < Minitest::Test
   end
 
   # --- review findings (PR #131, round 9) ------------------------------------
-
   # A positive limit removes nothing from an already-empty trail, so treating
   # every non-nil limit as "a filter emptied this" hid live custody.
   def test_log_keeps_the_claim_fallback_under_a_positive_limit
@@ -811,15 +700,6 @@ class AgentCoordLogTest < Minitest::Test
                 "host" => "codex", "updated_at" => "2026-08-01T03:13:03Z")
 
     refute_includes run_log("shakacode/example#10112", "--limit", "0").stdout, "claim active"
-  end
-
-  def test_log_sync_narrowing_error_names_only_real_flags
-    write_trace
-
-    stderr = run_log("shakacode/example#104", "--sync").stderr
-
-    refute_includes stderr, "--work-item", "there is no --work-item flag in this CLI"
-    assert_includes stderr, "work item"
   end
 
   # Terminals that recognize C1 act on U+009B/U+009D just as they do on ESC[.
@@ -851,21 +731,53 @@ class AgentCoordLogTest < Minitest::Test
     assert_equal "2026-08-01T03:13:03Z", claim.fetch("updated_at")
   end
 
-  def test_log_sync_reports_an_unwritable_mirror_as_an_operational_error
-    write_trace
-    FileUtils.chmod(0o500, @state_root)
+  # `claim` permits omitting --batch-id, and no lifecycle event is emitted when
+  # there is no batch, so a work item can carry stale events and a live claim at
+  # once. Reporting the claim only on an empty trail answered "where is it now"
+  # with the last thing that happened to leave a trace.
+  def test_log_reports_a_claim_newer_than_the_last_event
+    write_event("b1", "e1", "type" => "lane_closed", "repo" => "shakacode/example", "target" => "5",
+                            "machine_id" => "m1", "host" => "codex", "terminal" => "done",
+                            "at" => "2026-08-01T00:00:00Z")
+    write_claim("shakacode/example", "5", "status" => "active", "agent_id" => "current-worker",
+                                          "machine_id" => "m5", "host" => "codex",
+                                          "updated_at" => "2026-08-02T00:00:00Z")
 
-    result = run_log("--sync")
+    lines = run_log("shakacode/example#5").stdout.lines
 
-    assert_equal 2, result.status.exitstatus
-    refute_includes result.stderr, "SystemCallError"
-    refute_match(%r{\bfrom .*bin/agent-coord:\d+}, result.stderr, "must not leak a Ruby backtrace")
-  ensure
-    FileUtils.chmod(0o700, @state_root)
+    assert_includes lines.first, "lane_closed"
+    assert_includes lines.last, "claim active"
+    assert_includes lines.last, "current-worker"
+  end
+
+  def test_log_omits_a_claim_older_than_the_last_event
+    write_event("b1", "e1", "type" => "lane_closed", "repo" => "shakacode/example", "target" => "5",
+                            "machine_id" => "m1", "host" => "codex", "terminal" => "done",
+                            "at" => "2026-08-03T00:00:00Z")
+    write_claim("shakacode/example", "5", "status" => "released", "agent_id" => "old-worker",
+                                          "machine_id" => "m5", "host" => "codex",
+                                          "updated_at" => "2026-08-02T00:00:00Z")
+
+    stdout = run_log("shakacode/example#5").stdout
+
+    assert_equal 1, stdout.lines.length
+    refute_includes stdout, "claim "
+  end
+
+  def test_log_json_includes_a_claim_newer_than_the_last_event
+    write_event("b1", "e1", "type" => "lane_closed", "repo" => "shakacode/example", "target" => "5",
+                            "machine_id" => "m1", "host" => "codex", "at" => "2026-08-01T00:00:00Z")
+    write_claim("shakacode/example", "5", "status" => "active", "agent_id" => "current-worker",
+                                          "machine_id" => "m5", "host" => "codex",
+                                          "updated_at" => "2026-08-02T00:00:00Z")
+
+    payload = JSON.parse(run_log("shakacode/example#5", "--json").stdout)
+
+    assert_equal 1, payload.fetch("events").length
+    assert_equal "current-worker", payload.fetch("claim").fetch("agent_id")
   end
 
   # --- read-only contract ----------------------------------------------------
-
   def test_log_does_not_mutate_coordination_state
     write_trace
     before = state_fingerprint
@@ -882,74 +794,202 @@ class AgentCoordLogTest < Minitest::Test
     assert_equal 0, result.status.exitstatus, result.stderr
     assert_includes result.stdout, "log"
   end
+end
 
-  private
+# The durable `--sync` mirror: scope, ordering, locking, and replacement.
+class AgentCoordLogSyncTest < AgentCoordLogTestCase
+  def test_log_sync_writes_a_greppable_tsv_under_the_state_root
+    write_trace
 
-  # A realistic custody trail: opened on m5 under codex, handed to a maintainer,
-  # then picked back up on m1 under claude and closed. Exercises the move.
-  def write_trace
-    write_event("b1", "e1", "type" => "claim.acquired", "repo" => "shakacode/example", "target" => "104",
-                            "machine_id" => "m5", "host" => "codex", "agent_id" => "acd-worker",
-                            "phase" => "addressing_review", "at" => "2026-08-03T02:40:16Z")
-    write_event("b1", "e2", "type" => "phase.changed", "repo" => "shakacode/example", "target" => "104",
-                            "machine_id" => "m5", "host" => "codex", "agent_id" => "acd-worker",
-                            "old_phase" => "addressing_review", "phase" => "waiting_on_checks_or_review",
-                            "at" => "2026-08-03T02:45:53Z")
-    write_event("b1", "e3", "type" => "claim.released", "repo" => "shakacode/example", "target" => "104",
-                            "machine_id" => "m5", "host" => "codex", "agent_id" => "acd-worker",
-                            "handoff_to" => "maintainer", "at" => "2026-08-03T02:56:53Z")
-    write_event("b1", "e4", "type" => "claim.acquired", "repo" => "shakacode/example", "target" => "104",
-                            "machine_id" => "m1", "host" => "claude-code", "agent_id" => "acd-finisher",
-                            "phase" => "final_merge", "at" => "2026-08-03T03:35:49Z")
-    write_event("b1", "e5", "type" => "lane_closed", "repo" => "shakacode/example", "target" => "104",
-                            "machine_id" => "m1", "host" => "claude-code", "agent_id" => "acd-finisher",
-                            "terminal" => "done", "at" => "2026-08-03T04:00:08Z")
-    write_event("b1", "e6", "type" => "claim.acquired", "repo" => "shakacode/other", "target" => "7",
-                            "machine_id" => "m5", "host" => "codex", "agent_id" => "other-worker",
-                            "at" => "2026-08-03T02:41:00Z")
+    result = run_log("--sync")
+    log_path = File.join(@state_root, "log.tsv")
+
+    assert_equal 0, result.status.exitstatus, result.stderr
+    assert_path_exists log_path
+    lines = File.readlines(log_path)
+
+    assert_equal 6, lines.length
+    assert(lines.any? { |line| line.include?("shakacode/example#104") && line.include?("lane_closed") })
   end
 
-  # Poll briefly for the child to exit; nil means it is still blocked.
-  def wait_briefly(pid, attempts: 20)
-    attempts.times do
-      finished = Process.waitpid(pid, Process::WNOHANG)
-      return finished if finished
+  def test_log_sync_is_idempotent_and_appends_only_unseen_events
+    write_trace
+    run_log("--sync")
+    first_pass = File.readlines(File.join(@state_root, "log.tsv"))
 
-      sleep 0.05
+    run_log("--sync")
+    second_pass = File.readlines(File.join(@state_root, "log.tsv"))
+
+    assert_equal first_pass, second_pass
+
+    write_event("b2", "e9", "type" => "merged", "repo" => "shakacode/example", "target" => "104",
+                            "machine_id" => "m1", "host" => "claude-code", "at" => "2026-08-04T00:00:00Z")
+    run_log("--sync")
+    third_pass = File.readlines(File.join(@state_root, "log.tsv"))
+
+    assert_equal first_pass.length + 1, third_pass.length
+    assert_includes third_pass.last, "merged"
+  end
+
+  def test_log_sync_dedupes_non_ascii_rows_under_an_ascii_locale
+    write_event("b1", "e1", "type" => "lane", "repo" => "shakacode/example", "target" => "4711",
+                            "machine_id" => "m5", "host" => "codex",
+                            "message" => "PR 4711 merged \u2014 verified via GitHub",
+                            "at" => "2026-07-17T22:52:29Z")
+    ascii_locale = { "LC_ALL" => "C", "LANG" => "C" }
+
+    3.times { run_log("--sync", env: ascii_locale) }
+    lines = File.readlines(File.join(@state_root, "log.tsv"), encoding: "UTF-8")
+
+    assert_equal 1, lines.length, "expected the non-ASCII row to be written exactly once"
+    assert_includes lines.first, "\u2014"
+  end
+
+  def test_log_sync_retains_history_after_events_are_pruned
+    write_trace
+    run_log("--sync")
+    FileUtils.rm_rf(File.join(@state_root, "events"))
+
+    run_log("--sync")
+
+    assert_includes File.read(File.join(@state_root, "log.tsv")), "shakacode/example#104"
+  end
+
+  def test_log_sync_rejects_trail_filters
+    write_trace
+
+    [["--since", "1d"], ["--machine", "m5"], ["--host", "codex"],
+     ["--type", "claim.acquired"], ["--limit", "2"]].each do |filter|
+      result = run_log("--sync", *filter)
+
+      assert_equal 1, result.status.exitstatus, "expected --sync #{filter.first} to be rejected"
+      assert_includes result.stderr, "--sync"
     end
-    nil
   end
 
-  def write_claim(repo, target, payload)
-    path = File.join(@state_root, "claims", repo, "#{target}.json")
-    FileUtils.mkdir_p(File.dirname(path))
-    record = { "schema_version" => 1, "repo" => repo, "target" => target }.merge(payload)
-    File.write(path, "#{JSON.generate(record, ascii_only: true)}\n")
+  def test_log_sync_rejects_a_work_item_scope
+    write_trace
+
+    result = run_log("shakacode/example#104", "--sync")
+
+    assert_equal 1, result.status.exitstatus
+    assert_includes result.stderr, "--sync"
   end
 
-  # Fixtures are written with \u escapes so the bytes on disk stay pure ASCII and
-  # remain readable under a non-UTF-8 locale, while still decoding to a non-ASCII
-  # string in memory -- which is exactly the case the sync dedup has to survive.
-  def write_event(batch_id, event_id, payload)
-    path = File.join(@state_root, "events", batch_id, "#{event_id}.json")
-    FileUtils.mkdir_p(File.dirname(path))
-    record = { "schema_version" => 2, "event_id" => event_id, "batch_id" => batch_id }.merge(payload)
-    File.write(path, "#{JSON.generate(record, ascii_only: true)}\n")
-  end
+  def test_log_sync_waits_for_an_exclusive_lock_on_the_mirror
+    write_trace
+    path = File.join(@state_root, "log.tsv")
+    File.open("#{path}.lock", File::RDWR | File::CREAT, 0o644) do |holder|
+      holder.flock(File::LOCK_EX)
+      pid = spawn(COMMAND_ENV.merge("AGENT_COORD_STATE_ROOT" => @state_root),
+                  "ruby", BIN, "log", "--sync", out: File::NULL, err: File::NULL)
 
-  def state_fingerprint
-    Dir.glob(File.join(@state_root, "events", "**", "*.json")).map do |path|
-      [path, File.read(path)]
+      assert_nil wait_briefly(pid), "expected --sync to wait for the exclusive lock, not write through it"
+
+      holder.flock(File::LOCK_UN)
+      Process.waitpid(pid)
     end
+
+    assert_equal 6, File.readlines(path, encoding: "UTF-8").length
   end
 
-  def run_log(*, env: {})
-    run_command(COMMAND_ENV.merge("AGENT_COORD_STATE_ROOT" => @state_root).merge(env), "ruby", BIN, "log", *)
+  def test_log_sync_reports_json_when_json_is_requested
+    write_trace
+
+    payload = JSON.parse(run_log("--sync", "--json").stdout)
+
+    assert_equal 6, payload.fetch("synced")
+    assert payload.fetch("path").end_with?("log.tsv")
   end
 
-  def run_command(*args, stdin_data: nil)
-    env = args.first.is_a?(Hash) ? args.shift : {}
-    stdout, stderr, status = Open3.capture3(env, *args, stdin_data: stdin_data)
-    CommandResult.new(stdout: stdout, stderr: stderr, status: status)
+  def test_log_sync_keeps_the_mirror_in_timestamp_order
+    write_event("b1", "e2", "type" => "lane_closed", "repo" => "shakacode/example", "target" => "5",
+                            "machine_id" => "m5", "host" => "codex", "terminal" => "done",
+                            "at" => "2026-08-02T00:00:00Z")
+    run_log("--sync")
+    write_event("b1", "e1", "type" => "claim.acquired", "repo" => "shakacode/example", "target" => "5",
+                            "machine_id" => "m5", "host" => "codex", "at" => "2026-08-01T00:00:00Z")
+    run_log("--sync")
+
+    lines = File.readlines(File.join(@state_root, "log.tsv"), encoding: "UTF-8")
+
+    assert_equal 2, lines.length
+    assert_includes lines.first, "2026-08-01T00:00:00Z"
+    assert_includes lines.last, "2026-08-02T00:00:00Z"
+  end
+
+  def test_log_sync_accepts_include_synthetic
+    write_trace
+    write_event("sim", "s1", "type" => "claim.acquired", "repo" => "sim/race", "target" => "task_two",
+                             "machine_id" => "m5", "host" => "scripted-sim", "synthetic" => true,
+                             "at" => "2026-08-03T05:00:00Z")
+
+    result = run_log("--sync", "--include-synthetic")
+
+    assert_equal 0, result.status.exitstatus, result.stderr
+    assert_includes File.read(File.join(@state_root, "log.tsv")), "sim/race#task_two"
+  end
+
+  def test_log_sync_replaces_the_mirror_atomically
+    write_trace
+    run_log("--sync")
+    path = File.join(@state_root, "log.tsv")
+    before = File.read(path)
+
+    write_event("b2", "e9", "type" => "merged", "repo" => "shakacode/example", "target" => "104",
+                            "machine_id" => "m1", "host" => "claude-code", "at" => "2026-08-04T00:00:00Z")
+    run_log("--sync")
+
+    assert_equal 7, File.readlines(path, encoding: "UTF-8").length
+    before.each_line { |line| assert_includes File.read(path), line.chomp }
+    assert_empty Dir.glob(File.join(@state_root, "log.tsv.*tmp*")), "no temporary file may be left behind"
+  end
+
+  def test_log_sync_breaks_timestamp_ties_by_event_id_like_the_command
+    write_event("b1", "zzz", "type" => "phase.changed", "repo" => "shakacode/example", "target" => "5",
+                             "machine_id" => "m5", "host" => "codex", "at" => "2026-08-01T00:00:00Z")
+    run_log("--sync")
+    write_event("b1", "aaa", "type" => "claim.acquired", "repo" => "shakacode/example", "target" => "5",
+                             "machine_id" => "m5", "host" => "codex", "at" => "2026-08-01T00:00:00Z")
+    run_log("--sync")
+
+    mirror = File.readlines(File.join(@state_root, "log.tsv"), encoding: "UTF-8").map { |l| l.split("\t")[4] }
+
+    assert_equal run_log("shakacode/example#5").stdout.lines.map { |l| l.split(/\s+/)[4] }, mirror
+  end
+
+  def test_log_sync_preserves_restrictive_mirror_permissions
+    write_trace
+    run_log("--sync")
+    path = File.join(@state_root, "log.tsv")
+    File.chmod(0o600, path)
+
+    write_event("b2", "e9", "type" => "merged", "repo" => "shakacode/example", "target" => "104",
+                            "machine_id" => "m1", "host" => "codex", "at" => "2026-08-04T00:00:00Z")
+    run_log("--sync")
+
+    assert_equal 0o600, File.stat(path).mode & 0o777
+  end
+
+  def test_log_sync_narrowing_error_names_only_real_flags
+    write_trace
+
+    stderr = run_log("shakacode/example#104", "--sync").stderr
+
+    refute_includes stderr, "--work-item", "there is no --work-item flag in this CLI"
+    assert_includes stderr, "work item"
+  end
+
+  def test_log_sync_reports_an_unwritable_mirror_as_an_operational_error
+    write_trace
+    FileUtils.chmod(0o500, @state_root)
+
+    result = run_log("--sync")
+
+    assert_equal 2, result.status.exitstatus
+    refute_includes result.stderr, "SystemCallError"
+    refute_match(%r{\bfrom .*bin/agent-coord:\d+}, result.stderr, "must not leak a Ruby backtrace")
+  ensure
+    FileUtils.chmod(0o700, @state_root)
   end
 end

@@ -563,9 +563,12 @@ half of a work item's history.
 A work item can also hold a claim while having no event trail, since claims
 written before lifecycle auto-emit were overwritten in place rather than
 appended. Rather than reporting a bare "no events" and hiding live custody, `log`
-falls back to the claim record and labels it as one — but only when the trail is
-genuinely empty, never when a filter emptied it, since the claim is not evaluated
-against `--since`, `--machine`, `--host`, or `--type`:
+reports the claim record, labelled as one, whenever it is the latest thing known
+about the work item. That covers an empty trail and also a trail whose events are
+all older than the claim — `claim` permits omitting `--batch-id`, and no
+lifecycle event is emitted without a batch, so stale events and a live claim can
+coexist. The claim is never reported when a filter emptied the trail, since it is
+not evaluated against `--since`, `--machine`, `--host`, or `--type`:
 
 ```text
 no events for ShakaCode/hichee#issue:10112

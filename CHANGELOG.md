@@ -108,7 +108,11 @@ when releases begin.
   longer suppresses the claim fallback, because it removes nothing from a trail
   that was already empty. Under `--json` the claim is a structured object rather
   than a preformatted sentence. The `--sync` narrowing error names real flags
-  instead of a `--work-item` option that does not exist.
+  instead of a `--work-item` option that does not exist. A claim is reported
+  whenever it is newer than the last event, not only when there are no events at
+  all: `claim` permits omitting `--batch-id` and no lifecycle event is emitted
+  without a batch, so a work item can carry stale events and a live claim at the
+  same time, and answering with the last event would have named the wrong place.
 - An `AGENT_COORD_LOCAL` environment opt-in that explicitly selects the implicit
   local backend. It accepts `1`, `true`, or `yes` (case-insensitive); any other
   value, including empty and `0`, is not an opt-in. Setting it both satisfies the

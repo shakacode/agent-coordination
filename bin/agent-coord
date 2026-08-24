@@ -3265,7 +3265,7 @@ module AgentCoord
       rows = log_rows(store, options)
       return log_sync(log_options, rows) if options[:sync]
 
-      emit_log(rows, options, log_claim_note(store, options, rows))
+      emit_log(rows, options, log_claim_for(store, options, rows))
       0
     rescue JSON::ParserError => e
       raise OperationalError, "state unreadable: #{e.message}"
@@ -3456,21 +3456,28 @@ module AgentCoord
         events = rows.map { |row| row.slice(*LOG_TSV_FIELDS) }
         @stdout.puts JSON.pretty_generate({ "events" => events, "claim" => claim }.compact)
       elsif format == "tsv"
-        # tsv is a data stream, so the note goes to stderr rather than inventing a
-        # row a consumer would have to parse around.
+        # tsv is a data stream, so notes go to stderr rather than inventing a row
+        # a consumer would have to parse around.
         rows.each { |row| @stdout.puts log_tsv_line(row) }
-        log_report_empty(options, claim, @stderr) if rows.empty?
-      elsif rows.empty?
-        log_report_empty(options, claim, @stdout)
+        log_report_trailer(options, claim, rows, @stderr)
       else
-        scrubbed = rows.map { |row| log_text_scrubbed(log_text_row(row)) }
-        widths = log_text_widths(scrubbed)
-        scrubbed.each { |row| @stdout.puts log_text_line(row, widths) }
+        log_report_rows(rows)
+        log_report_trailer(options, claim, rows, @stdout)
       end
     end
 
-    def log_report_empty(options, claim, stream)
-      stream.puts "no events for #{options[:work_item] || 'the current filters'}"
+    def log_report_rows(rows)
+      return if rows.empty?
+
+      scrubbed = rows.map { |row| log_text_scrubbed(log_text_row(row)) }
+      widths = log_text_widths(scrubbed)
+      scrubbed.each { |row| @stdout.puts log_text_line(row, widths) }
+    end
+
+    # A claim reaches here only when it is the latest thing known about the work
+    # item, so it always belongs last: it is the answer to "where is it now".
+    def log_report_trailer(options, claim, rows, stream)
+      stream.puts "no events for #{options[:work_item] || 'the current filters'}" if rows.empty?
       stream.puts log_claim_note_line(claim) if claim
     end
 
@@ -3494,9 +3501,21 @@ module AgentCoord
     # predating auto-emit were overwritten in place rather than appended. A bare
     # "no events" would hide live custody, so the claim record is reported with
     # its own provenance rather than being folded into the trail as an event.
-    def log_claim_note(store, options, rows)
+    # A claim can be newer than the last event, because `claim` permits omitting
+    # --batch-id and no lifecycle event is emitted without a batch. Reporting it
+    # only on an empty trail would answer "where is it now" with the last thing
+    # that happened to leave a trace, while a live claim sat unmentioned.
+    def log_claim_for(store, options, rows)
+      claim = log_claim_lookup(store, options)
+      return nil unless claim
+      return claim if rows.empty?
+
+      claim if log_at_key(claim.fetch("updated_at")) > rows.last.fetch("at_key")
+    end
+
+    def log_claim_lookup(store, options)
       wanted = options[:work_item].to_s
-      return nil unless rows.empty? && !wanted.empty?
+      return nil if wanted.empty?
       # A filter emptying the trail is a different answer from having no trail;
       # the claim is not evaluated against those filters, so reporting it here
       # would answer a question the operator did not ask.
