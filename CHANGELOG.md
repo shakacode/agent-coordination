@@ -64,7 +64,13 @@ when releases begin.
   rows are new. Text columns are scrubbed of tabs and newlines like the tsv ones,
   so agent-supplied text cannot split one printed event across two lines. A
   filtered claims listing warns as well, so a hidden claim does not read as an
-  absent one.
+  absent one, and when a repository is recorded under two casings the newest of
+  the matching claims is the one reported. The mirror is kept in timestamp order
+  rather than appended blindly, since a later sync can still discover an older
+  event and the file's last line has to stay the current state. `--sync` honors
+  `--json`. The claim note is built from claim fields directly rather than through
+  the event projection, which had printed a claim whose status is `active` as
+  `phase active`. Instants are compared exactly rather than through a float.
 - An `AGENT_COORD_LOCAL` environment opt-in that explicitly selects the implicit
   local backend. It accepts `1`, `true`, or `yes` (case-insensitive); any other
   value, including empty and `0`, is not an opt-in. Setting it both satisfies the

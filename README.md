@@ -522,9 +522,10 @@ timestamp), `--machine`, `--host`, `--type`, and `--limit`. Simulation and smoke
 records are excluded unless `--include-synthetic` is passed.
 
 `--sync` mirrors the complete trail and rejects every narrowing option, including
-a work item. A narrow sync followed by a broader one would append the older
-events after the newer ones, and the file's last line would stop being the
-current state.
+a work item, and keeps the file in timestamp order so its last line is the
+current state the same way the command's own last line is. It never drops a row
+it has already recorded, and it deduplicates and writes under an exclusive lock,
+so a cron sync and an operator sync cannot both write the same rows.
 
 Ordering is by parsed instant, not by the rendered string, so timestamps carrying
 an offset sort correctly. An event recorded without a timestamp sorts first, not

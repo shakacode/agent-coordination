@@ -1692,6 +1692,35 @@ class LogHttpBackendTest < HttpEnvTestCase
     stub.shutdown
   end
 
+  # The event store records one repo under two casings, and the HTTP backend is
+  # case-sensitive, so both claim paths match the query. Taking whichever the
+  # listing yields first is a coin flip; both orders are exercised here because
+  # listing order alone would otherwise decide the outcome.
+  def test_log_claim_note_selects_the_most_recently_updated_case_variant
+    newer = { "schema_version" => 1, "repo" => "ShakaCode/example", "target" => "1", "status" => "active",
+              "agent_id" => "current-worker", "machine_id" => "m5", "host" => "codex",
+              "updated_at" => "2026-08-01T03:13:03Z" }
+    older = { "schema_version" => 1, "repo" => "shakacode/example", "target" => "1", "status" => "released",
+              "agent_id" => "old-worker", "machine_id" => "m1", "host" => "codex",
+              "updated_at" => "2026-07-01T00:00:00Z" }
+    [[newer, older], [older, newer]].each do |first, second|
+      stub = HttpStoreStub.new([
+                                 [200, { "entries" => [] }],
+                                 [200, { "entries" => [
+                                   { "path" => "claims/a/1.json", "data" => first, "version" => 1 },
+                                   { "path" => "claims/b/1.json", "data" => second, "version" => 1 }
+                                 ] }]
+                               ])
+      with_env("AGENT_COORD_API_URL" => stub.base_url, "AGENT_COORD_API_TOKEN" => "tok") do
+        _code, out, = run_cli(["log", "shakacode/example#1"], {})
+
+        assert_includes out, "current-worker"
+        refute_includes out, "old-worker"
+      end
+      stub.shutdown
+    end
+  end
+
   # A filtered claims listing can hide the very claim being asked about, so a
   # silent "no claim" would be indistinguishable from a real absence.
   def test_log_warns_when_the_claim_listing_is_filtered_by_a_scoped_token

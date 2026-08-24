@@ -546,6 +546,67 @@ class AgentCoordLogTest < Minitest::Test
     assert_equal 6, File.readlines(path, encoding: "UTF-8").length
   end
 
+  # --- review findings (PR #131, round 4) ------------------------------------
+
+  # log_row derives "phase" for events, falling back to status; reusing it for a
+  # claim printed a claim whose status is active as "phase active".
+  def test_log_claim_note_does_not_relabel_claim_status_as_phase
+    write_claim("shakacode/example", "10112",
+                "status" => "active", "agent_id" => "queue-worker", "machine_id" => "m5",
+                "host" => "codex", "updated_at" => "2026-08-01T03:13:03Z")
+
+    stdout = run_log("shakacode/example#10112").stdout
+
+    assert_includes stdout, "claim active"
+    refute_includes stdout, "phase active"
+    assert_includes stdout, "phase -"
+  end
+
+  def test_log_claim_note_reports_a_real_phase_when_the_claim_has_one
+    write_claim("shakacode/example", "10112",
+                "status" => "active", "agent_id" => "queue-worker", "machine_id" => "m5",
+                "host" => "codex", "phase" => "implementing", "updated_at" => "2026-08-01T03:13:03Z")
+
+    assert_includes run_log("shakacode/example#10112").stdout, "phase implementing"
+  end
+
+  def test_log_sync_reports_json_when_json_is_requested
+    write_trace
+
+    payload = JSON.parse(run_log("--sync", "--json").stdout)
+
+    assert_equal 6, payload.fetch("synced")
+    assert payload.fetch("path").end_with?("log.tsv")
+  end
+
+  # A later sync can still discover an older event -- a concurrent writer, or a
+  # backfill -- and appending it blindly would put it after newer rows, so the
+  # mirror's last line would stop being the current state.
+  def test_log_sync_keeps_the_mirror_in_timestamp_order
+    write_event("b1", "e2", "type" => "lane_closed", "repo" => "shakacode/example", "target" => "5",
+                            "machine_id" => "m5", "host" => "codex", "terminal" => "done",
+                            "at" => "2026-08-02T00:00:00Z")
+    run_log("--sync")
+    write_event("b1", "e1", "type" => "claim.acquired", "repo" => "shakacode/example", "target" => "5",
+                            "machine_id" => "m5", "host" => "codex", "at" => "2026-08-01T00:00:00Z")
+    run_log("--sync")
+
+    lines = File.readlines(File.join(@state_root, "log.tsv"), encoding: "UTF-8")
+
+    assert_equal 2, lines.length
+    assert_includes lines.first, "2026-08-01T00:00:00Z"
+    assert_includes lines.last, "2026-08-02T00:00:00Z"
+  end
+
+  # add_target_options already registers --host for every command; registering it
+  # again for log collided with that definition. The log help block still
+  # describes what --host means here, which is a separate line from the registry.
+  def test_log_registers_host_exactly_once
+    result = run_command(COMMAND_ENV, "ruby", BIN, "log", "--help")
+
+    assert_equal 1, result.stdout.scan('--host HOST').length, "--host must not be registered twice"
+  end
+
   # --- read-only contract ----------------------------------------------------
 
   def test_log_does_not_mutate_coordination_state
