@@ -93,7 +93,13 @@ when releases begin.
   error for `08`/`09` and reading `010d` as eight days. Synthetic rows carry
   `synthetic` and `synthetic_kind` columns in tsv and JSON and a `[synthetic]`
   marker in text, so simulation history merged into the mirror by
-  `--sync --include-synthetic` cannot later be mistaken for real work.
+  `--sync --include-synthetic` cannot later be mistaken for real work. Rendered
+  text and tsv strip C0 control characters and DEL as well as tabs and line
+  endings, so an ANSI escape recorded in an event message cannot clear or rewrite
+  the trail on the reader's terminal; JSON is left alone because its encoder
+  escapes these already. Publishing the mirror fsyncs the parent directory after
+  the rename, the way `LocalStore` already does, since a rename is not durable
+  until the directory entry reaches stable storage.
 - An `AGENT_COORD_LOCAL` environment opt-in that explicitly selects the implicit
   local backend. It accepts `1`, `true`, or `yes` (case-insensitive); any other
   value, including empty and `0`, is not an opt-in. Setting it both satisfies the

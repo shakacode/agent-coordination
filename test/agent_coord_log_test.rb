@@ -773,6 +773,26 @@ class AgentCoordLogTest < Minitest::Test
     assert_equal "simulation", payload.fetch("events").first.fetch("synthetic_kind")
   end
 
+  # An event message is operator- and agent-supplied, so a record carrying an ANSI
+  # escape could clear or rewrite the very trail being read. Text and tsv are
+  # written straight to a terminal; JSON is left alone because its own encoder
+  # escapes control characters.
+  def test_log_strips_terminal_control_sequences_from_rendered_output
+    hostile = "before\e[2Jafter\u0000\u0007"
+    write_event("b1", "e1", "type" => "progress", "repo" => "shakacode/example", "target" => "5",
+                            "machine_id" => "m5", "host" => "codex", "message" => hostile,
+                            "at" => "2026-08-01T00:00:00Z")
+
+    text = run_log("shakacode/example#5").stdout
+    tsv = run_log("shakacode/example#5", "--format", "tsv").stdout
+
+    refute_includes text, "\e", "an escape sequence must never reach the terminal"
+    refute_includes tsv, "\e"
+    refute_includes text, "\u0000"
+    assert_includes text, "before"
+    assert_includes text, "after"
+  end
+
   # --- read-only contract ----------------------------------------------------
 
   def test_log_does_not_mutate_coordination_state

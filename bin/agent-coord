@@ -210,6 +210,11 @@ module AgentCoord
   LOG_TRAIL_FILTERS = %i[since machine host type limit].freeze
   LOG_SYNC_FILENAME = "log.tsv"
   LOG_SYNC_LOCK_SUFFIX = ".lock"
+  # C0 controls and DEL, minus the tab/CR/LF handled separately above. Text and
+  # tsv go straight to a terminal, where an escape sequence from a recorded
+  # message could clear or rewrite the trail being read. JSON is left alone: its
+  # encoder escapes these already.
+  LOG_CONTROL_CHARACTERS = /[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/
   LOG_UNKNOWN = "?"
   LOG_SINCE_UNITS = { "m" => 60, "h" => 3600, "d" => 86_400, "w" => 604_800 }.freeze
   BATCH_AUDIT_TERMINAL_REQUIRED_FACT_FIELDS = %w[event_id repo target terminal workspace at].freeze
@@ -3552,7 +3557,7 @@ module AgentCoord
     end
 
     def log_scrub(value)
-      value.to_s.gsub(/[\t\r\n]+/, " ")
+      value.to_s.gsub(/[\t\r\n]+/, " ").gsub(LOG_CONTROL_CHARACTERS, "")
     end
 
     # `--sync` mirrors the event store into a plain tab-separated file so grep
@@ -3610,6 +3615,7 @@ module AgentCoord
       # preserved by setting it explicitly before the file is published.
       File.chmod(mode, temp)
       File.rename(temp, path)
+      AgentCoord.fsync_parent_directory(path)
     ensure
       FileUtils.rm_f(temp) if temp && File.exist?(temp)
     end
@@ -5216,8 +5222,11 @@ module AgentCoord
       nil
     end
 
+    # Delegates so the durability rule lives in one place, while staying an
+    # instance method: the suite subclasses LocalStore and overrides this to
+    # observe the fsync and to inject failures.
     def fsync_directory(directory)
-      File.open(directory, File::RDONLY, &:fsync)
+      AgentCoord.fsync_directory(directory)
     end
 
     def expanded_path(path)
@@ -5724,6 +5733,21 @@ module AgentCoord
     return if segment.to_s.match?(/\A[A-Za-z0-9_:-]+(?:\.[A-Za-z0-9_:-]+)*\z/)
 
     raise PathValidationError, "invalid #{field}: #{segment}"
+  end
+
+  # Renaming a file into place is not durable until the directory entry itself
+  # reaches stable storage, so every atomic replacement in this file follows its
+  # rename with this.
+  def self.fsync_parent_directory(file)
+    return if Gem.win_platform?
+
+    fsync_directory(File.dirname(file))
+  rescue Errno::EINVAL, Errno::ENOTSUP
+    nil
+  end
+
+  def self.fsync_directory(directory)
+    File.open(directory, File::RDONLY, &:fsync)
   end
 
   def self.claim_path(repo, target)
