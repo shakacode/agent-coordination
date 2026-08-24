@@ -524,8 +524,11 @@ records are excluded unless `--include-synthetic` is passed.
 `--sync` mirrors the complete trail and rejects every narrowing option, including
 a work item, and keeps the file in timestamp order so its last line is the
 current state the same way the command's own last line is. It never drops a row
-it has already recorded, and it deduplicates and writes under an exclusive lock,
-so a cron sync and an operator sync cannot both write the same rows.
+it has already recorded, and it deduplicates under an exclusive lock (held on a
+`log.tsv.lock` sidecar) so a cron sync and an operator sync cannot both publish
+the same rows. The file is replaced atomically rather than rewritten in place:
+once `gc` prunes the backend the mirror can be the only remaining copy, so a
+crash must never be able to leave it partial.
 
 Ordering is by parsed instant, not by the rendered string, so timestamps carrying
 an offset sort correctly. An event recorded without a timestamp sorts first, not

@@ -205,8 +205,9 @@ module AgentCoord
   ].freeze
   LOG_TEXT_COLUMNS = %w[at machine host work_item type phase agent_id].freeze
   LOG_TRAIL_FILTERS = %i[since machine host type limit].freeze
-  LOG_SYNC_REJECTED_OPTIONS = %i[since machine host type limit include_synthetic].freeze
+  LOG_SYNC_REJECTED_OPTIONS = %i[since machine host type limit].freeze
   LOG_SYNC_FILENAME = "log.tsv"
+  LOG_SYNC_LOCK_SUFFIX = ".lock"
   LOG_UNKNOWN = "?"
   LOG_SINCE_UNITS = { "m" => 60, "h" => 3600, "d" => 86_400, "w" => 604_800 }.freeze
   BATCH_AUDIT_TERMINAL_REQUIRED_FACT_FIELDS = %w[event_id repo target terminal workspace at].freeze
@@ -3501,9 +3502,11 @@ module AgentCoord
     # falls back to "status" for events -- which printed a claim whose status is
     # active as "phase active".
     def log_claim_note_line(data)
-      "claim #{log_present(data['status'])} #{log_present(data['machine_id'])} " \
+      log_scrub(
+        "claim #{log_present(data['status'])} #{log_present(data['machine_id'])} " \
         "#{log_host_family(data['host'])} #{log_present(data['agent_id'])} " \
         "phase #{log_phase_or_dash(data['phase'])} updated #{log_present(data['updated_at'])}"
+      )
     end
 
     def log_phase_or_dash(value)
@@ -3545,18 +3548,35 @@ module AgentCoord
     # appended blindly. Nothing already recorded is ever dropped, and the rewrite
     # happens under the same exclusive lock as the read.
     def log_sync_append(path, lines)
-      File.open(path, File::RDWR | File::CREAT, 0o644, encoding: "UTF-8") do |file|
-        file.flock(File::LOCK_EX)
-        existing = file.each_line.map(&:chomp).reject(&:empty?)
+      File.open("#{path}#{LOG_SYNC_LOCK_SUFFIX}", File::RDWR | File::CREAT, 0o644) do |lock|
+        lock.flock(File::LOCK_EX)
+        existing = log_sync_existing(path)
         seen = existing.to_h { |line| [line, true] }
         fresh = lines.reject { |line| seen.key?(line) }
-        unless fresh.empty?
-          file.truncate(0)
-          file.rewind
-          log_sync_ordered(existing + fresh).each { |line| file.puts(line) }
-        end
+        log_sync_replace(path, log_sync_ordered(existing + fresh)) unless fresh.empty?
         fresh
       end
+    end
+
+    def log_sync_existing(path)
+      return [] unless File.exist?(path)
+
+      File.readlines(path, chomp: true, encoding: "UTF-8").reject(&:empty?)
+    end
+
+    # Written beside the mirror so the rename stays on one filesystem, flushed to
+    # disk before it is published, and moved into place in a single step. No
+    # partial file is ever visible at the mirror's path.
+    def log_sync_replace(path, lines)
+      temp = "#{path}.#{Process.pid}.tmp"
+      File.open(temp, File::WRONLY | File::CREAT | File::TRUNC, 0o644, encoding: "UTF-8") do |file|
+        lines.each { |line| file.puts(line) }
+        file.flush
+        file.fsync
+      end
+      File.rename(temp, path)
+    ensure
+      FileUtils.rm_f(temp) if temp && File.exist?(temp)
     end
 
     def log_sync_ordered(lines)

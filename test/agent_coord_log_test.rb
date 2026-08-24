@@ -494,7 +494,7 @@ class AgentCoordLogTest < Minitest::Test
     write_trace
 
     [["--since", "1d"], ["--machine", "m5"], ["--host", "codex"],
-     ["--type", "claim.acquired"], ["--include-synthetic"]].each do |filter|
+     ["--type", "claim.acquired"], ["--limit", "2"]].each do |filter|
       result = run_log("--sync", *filter)
 
       assert_equal 1, result.status.exitstatus, "expected --sync #{filter.first} to be rejected"
@@ -526,13 +526,13 @@ class AgentCoordLogTest < Minitest::Test
   end
 
   # Two writers (a cron and an operator, say) would each read the file before
-  # either appended, and both would then write the same rows. Asserting on a race
+  # either wrote, and both would then publish the same rows. Asserting on a race
   # would only pass by luck, so this holds the lock and checks that sync waits.
+  # The lock lives on a sidecar because the mirror itself is replaced by rename.
   def test_log_sync_waits_for_an_exclusive_lock_on_the_mirror
     write_trace
     path = File.join(@state_root, "log.tsv")
-    FileUtils.touch(path)
-    File.open(path, File::RDWR) do |holder|
+    File.open("#{path}.lock", File::RDWR | File::CREAT, 0o644) do |holder|
       holder.flock(File::LOCK_EX)
       pid = spawn(COMMAND_ENV.merge("AGENT_COORD_STATE_ROOT" => @state_root),
                   "ruby", BIN, "log", "--sync", out: File::NULL, err: File::NULL)
@@ -605,6 +605,51 @@ class AgentCoordLogTest < Minitest::Test
     result = run_command(COMMAND_ENV, "ruby", BIN, "log", "--help")
 
     assert_equal 1, result.stdout.scan('--host HOST').length, "--host must not be registered twice"
+  end
+
+  # --- review findings (PR #131, round 5) ------------------------------------
+
+  def test_log_claim_note_scrubs_control_characters
+    write_claim("shakacode/example", "10112",
+                "status" => "active", "agent_id" => "worker\ninjected", "machine_id" => "m5",
+                "host" => "codex", "updated_at" => "2026-08-01T03:13:03Z")
+
+    stdout = run_log("shakacode/example#10112").stdout
+
+    assert_equal 2, stdout.lines.length, "the claim note must stay on one line"
+    assert_includes stdout, "worker injected"
+  end
+
+  # --include-synthetic widens the mirror rather than narrowing it, so rejecting
+  # it left simulation history with no way to be preserved before gc pruned it.
+  def test_log_sync_accepts_include_synthetic
+    write_trace
+    write_event("sim", "s1", "type" => "claim.acquired", "repo" => "sim/race", "target" => "task_two",
+                             "machine_id" => "m5", "host" => "scripted-sim", "synthetic" => true,
+                             "at" => "2026-08-03T05:00:00Z")
+
+    result = run_log("--sync", "--include-synthetic")
+
+    assert_equal 0, result.status.exitstatus, result.stderr
+    assert_includes File.read(File.join(@state_root, "log.tsv")), "sim/race#task_two"
+  end
+
+  # After gc prunes the backend the mirror can be the only copy, so a crash mid
+  # rewrite must not be able to destroy it. The replace is atomic, which means no
+  # partial file is ever visible at the mirror's path.
+  def test_log_sync_replaces_the_mirror_atomically
+    write_trace
+    run_log("--sync")
+    path = File.join(@state_root, "log.tsv")
+    before = File.read(path)
+
+    write_event("b2", "e9", "type" => "merged", "repo" => "shakacode/example", "target" => "104",
+                            "machine_id" => "m1", "host" => "claude-code", "at" => "2026-08-04T00:00:00Z")
+    run_log("--sync")
+
+    assert_equal 7, File.readlines(path, encoding: "UTF-8").length
+    before.each_line { |line| assert_includes File.read(path), line.chomp }
+    assert_empty Dir.glob(File.join(@state_root, "log.tsv.*tmp*")), "no temporary file may be left behind"
   end
 
   # --- read-only contract ----------------------------------------------------

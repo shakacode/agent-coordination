@@ -70,7 +70,15 @@ when releases begin.
   event and the file's last line has to stay the current state. `--sync` honors
   `--json`. The claim note is built from claim fields directly rather than through
   the event projection, which had printed a claim whose status is `active` as
-  `phase active`. Instants are compared exactly rather than through a float.
+  `phase active`, and it is scrubbed like every other output path. Instants are
+  compared exactly rather than through a float. The mirror is replaced
+  atomically -- written to a temporary file, flushed, then renamed -- because
+  after `gc` prunes the backend it can be the only remaining copy of a row, and
+  a crash partway through an in-place rewrite would destroy it; the exclusive
+  lock moved to a `log.tsv.lock` sidecar so it survives that replacement.
+  `--include-synthetic` is allowed with `--sync`, since it widens the mirror
+  rather than narrowing it, and rejecting it left simulation history with no way
+  to be preserved before `gc` pruned it.
 - An `AGENT_COORD_LOCAL` environment opt-in that explicitly selects the implicit
   local backend. It accepts `1`, `true`, or `yes` (case-insensitive); any other
   value, including empty and `0`, is not an opt-in. Setting it both satisfies the
