@@ -954,6 +954,28 @@ class AgentCoordLogTest < AgentCoordLogTestCase
     assert_equal "m1", fields[1]
     assert_equal "top-level", fields[6]
   end
+
+  def test_log_treats_an_empty_since_value_as_unset
+    write_trace
+
+    result = run_log("--since", "")
+
+    assert_equal 0, result.status.exitstatus, result.stderr
+    assert_equal 6, result.stdout.lines.length
+  end
+
+  # Timestamps record whole seconds, so a claim acquired in the same second as
+  # the last event ties with it. A strict comparison dropped exactly that case.
+  def test_log_reports_a_claim_tied_with_the_latest_event
+    write_event("b1", "e1", "type" => "claim.released", "repo" => "shakacode/example", "target" => "5",
+                            "machine_id" => "m1", "host" => "codex", "at" => "2026-08-01T00:00:00Z")
+    write_claim("shakacode/example", "5", "status" => "active", "agent_id" => "same-second-worker",
+                                          "machine_id" => "m5", "host" => "codex",
+                                          "updated_at" => "2026-08-01T00:00:00Z",
+                                          "expires_at" => "2099-01-01T00:00:00Z")
+
+    assert_includes run_log("shakacode/example#5").stdout, "same-second-worker"
+  end
 end
 
 # The durable `--sync` mirror: scope, ordering, locking, and replacement.

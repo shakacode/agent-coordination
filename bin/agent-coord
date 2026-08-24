@@ -3534,7 +3534,7 @@ module AgentCoord
       return nil unless claim
       return claim if rows.empty?
 
-      claim if log_at_key(claim.fetch("updated_at")) > rows.last.fetch("at_key")
+      claim if log_at_key(claim.fetch("updated_at")) >= rows.last.fetch("at_key")
     end
 
     def log_claim_lookup(store, options)
@@ -3735,7 +3735,7 @@ module AgentCoord
 
     def log_since_timestamp(options)
       value = options[:since]
-      return nil if value.nil?
+      return nil if value.to_s.strip.empty?
 
       match = /\A(\d+)([mhdw])\z/.match(value.to_s.strip)
       return (now_utc - (Integer(match[1], 10) * LOG_SINCE_UNITS.fetch(match[2]))).to_r if match
