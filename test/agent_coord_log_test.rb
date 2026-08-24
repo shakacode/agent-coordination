@@ -927,6 +927,33 @@ class AgentCoordLogTest < AgentCoordLogTestCase
                       "expected #{flag} '' to leave the claim fallback intact"
     end
   end
+
+  # A contract-compliant v2 lane_closed carries identity only in closed_by --
+  # contracts/fixtures/v2/lane_closed.json has no top-level agent_id or
+  # machine_id -- so reading the top level alone rendered the closer as unknown.
+  def test_log_reads_lane_closure_identity_from_closed_by
+    write_event("b1", "e1", "type" => "lane_closed", "repo" => "shakacode/example", "target" => "51",
+                            "terminal" => "done", "workspace" => "default",
+                            "closed_by" => { "agent_id" => "ac-a-0712-0107-i51", "machine" => "m5" },
+                            "at" => "2026-07-12T01:07:00Z")
+
+    fields = run_log("shakacode/example#51").stdout.split(/\s+/)
+
+    assert_equal "m5", fields[1]
+    assert_equal "ac-a-0712-0107-i51", fields[6]
+  end
+
+  def test_log_prefers_top_level_identity_over_closed_by
+    write_event("b1", "e1", "type" => "lane_closed", "repo" => "shakacode/example", "target" => "51",
+                            "terminal" => "done", "agent_id" => "top-level", "machine_id" => "m1",
+                            "closed_by" => { "agent_id" => "nested", "machine" => "m5" },
+                            "at" => "2026-07-12T01:07:00Z")
+
+    fields = run_log("shakacode/example#51").stdout.split(/\s+/)
+
+    assert_equal "m1", fields[1]
+    assert_equal "top-level", fields[6]
+  end
 end
 
 # The durable `--sync` mirror: scope, ordering, locking, and replacement.

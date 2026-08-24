@@ -3344,12 +3344,12 @@ module AgentCoord
       {
         "at" => log_present(data["at"]),
         "at_key" => log_at_key(data["at"]),
-        "machine" => log_present(data["machine_id"]),
+        "machine" => log_present(data["machine_id"] || log_closed_by(data, "machine")),
         "host" => log_host_family(data["host"]),
         "work_item" => log_work_item(data),
         "type" => log_present(data["type"]),
         "phase" => log_present(data["phase"] || data["new_phase"] || data["terminal"] || data["status"]),
-        "agent_id" => log_present(data["agent_id"]),
+        "agent_id" => log_present(data["agent_id"] || log_closed_by(data, "agent_id")),
         "batch_id" => log_present(data["batch_id"]),
         "detail" => log_detail(data),
         "host_raw" => log_present(data["host"]),
@@ -3417,6 +3417,14 @@ module AgentCoord
       return "claude" if text.start_with?("claude")
 
       text
+    end
+
+    # A contract-compliant v2 lane_closed supplies its identity only under
+    # closed_by (see contracts/fixtures/v2/lane_closed.json), so the closer would
+    # otherwise render unknown on exactly the event that ends a lane.
+    def log_closed_by(data, field)
+      closed_by = data["closed_by"]
+      closed_by.is_a?(Hash) ? closed_by[field] : nil
     end
 
     def log_work_item(data)
