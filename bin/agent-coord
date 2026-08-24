@@ -3556,7 +3556,9 @@ module AgentCoord
     def log_narrowing_option?(options, field)
       return options[field]&.zero? if field == :limit
 
-      !options[field].nil?
+      # Matches log_matches?: an empty value is the absence of a filter, so the
+      # two halves of one query cannot disagree about whether it was narrowed.
+      !options[field].to_s.empty?
     end
 
     # Structured so a --json consumer reads the claim's fields instead of

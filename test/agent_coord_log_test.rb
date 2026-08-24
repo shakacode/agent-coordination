@@ -914,6 +914,19 @@ class AgentCoordLogTest < AgentCoordLogTestCase
       assert_equal 6, stdout.lines.length, "expected #{flag} '' to behave as no filter"
     end
   end
+
+  # Event matching treats an empty filter as unset, so the claim fallback must
+  # too, or the two halves of one query disagree about whether it was narrowed.
+  def test_log_keeps_the_claim_fallback_under_an_empty_filter_value
+    write_claim("shakacode/example", "10112",
+                "status" => "active", "agent_id" => "queue-worker", "machine_id" => "m5",
+                "host" => "codex", "updated_at" => "2026-08-01T03:13:03Z")
+
+    %w[--machine --host --type].each do |flag|
+      assert_includes run_log("shakacode/example#10112", flag, "").stdout, "claim active",
+                      "expected #{flag} '' to leave the claim fallback intact"
+    end
+  end
 end
 
 # The durable `--sync` mirror: scope, ordering, locking, and replacement.
