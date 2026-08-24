@@ -793,6 +793,77 @@ class AgentCoordLogTest < Minitest::Test
     assert_includes text, "after"
   end
 
+  # --- review findings (PR #131, round 9) ------------------------------------
+
+  # A positive limit removes nothing from an already-empty trail, so treating
+  # every non-nil limit as "a filter emptied this" hid live custody.
+  def test_log_keeps_the_claim_fallback_under_a_positive_limit
+    write_claim("shakacode/example", "10112",
+                "status" => "active", "agent_id" => "queue-worker", "machine_id" => "m5",
+                "host" => "codex", "updated_at" => "2026-08-01T03:13:03Z")
+
+    assert_includes run_log("shakacode/example#10112", "--limit", "5").stdout, "claim active"
+  end
+
+  def test_log_suppresses_the_claim_fallback_under_a_zero_limit
+    write_claim("shakacode/example", "10112",
+                "status" => "active", "agent_id" => "queue-worker", "machine_id" => "m5",
+                "host" => "codex", "updated_at" => "2026-08-01T03:13:03Z")
+
+    refute_includes run_log("shakacode/example#10112", "--limit", "0").stdout, "claim active"
+  end
+
+  def test_log_sync_narrowing_error_names_only_real_flags
+    write_trace
+
+    stderr = run_log("shakacode/example#104", "--sync").stderr
+
+    refute_includes stderr, "--work-item", "there is no --work-item flag in this CLI"
+    assert_includes stderr, "work item"
+  end
+
+  # Terminals that recognize C1 act on U+009B/U+009D just as they do on ESC[.
+  def test_log_strips_c1_terminal_controls
+    write_event("b1", "e1", "type" => "progress", "repo" => "shakacode/example", "target" => "5",
+                            "machine_id" => "m5", "host" => "codex",
+                            "message" => "before\u009B2Jafter", "at" => "2026-08-01T00:00:00Z")
+
+    stdout = run_log("shakacode/example#5").stdout
+
+    refute_includes stdout, "\u009B"
+    assert_includes stdout, "before"
+    assert_includes stdout, "after"
+  end
+
+  # A --json consumer should read the claim's fields, not re-parse a sentence.
+  def test_log_json_reports_the_claim_as_an_object
+    write_claim("shakacode/example", "10112",
+                "status" => "active", "agent_id" => "queue-worker", "machine_id" => "m5",
+                "host" => "claude-code", "phase" => "implementing", "updated_at" => "2026-08-01T03:13:03Z")
+
+    claim = JSON.parse(run_log("shakacode/example#10112", "--json").stdout).fetch("claim")
+
+    assert_equal "active", claim.fetch("status")
+    assert_equal "m5", claim.fetch("machine")
+    assert_equal "claude", claim.fetch("host")
+    assert_equal "queue-worker", claim.fetch("agent_id")
+    assert_equal "implementing", claim.fetch("phase")
+    assert_equal "2026-08-01T03:13:03Z", claim.fetch("updated_at")
+  end
+
+  def test_log_sync_reports_an_unwritable_mirror_as_an_operational_error
+    write_trace
+    FileUtils.chmod(0o500, @state_root)
+
+    result = run_log("--sync")
+
+    assert_equal 2, result.status.exitstatus
+    refute_includes result.stderr, "SystemCallError"
+    refute_match(%r{\bfrom .*bin/agent-coord:\d+}, result.stderr, "must not leak a Ruby backtrace")
+  ensure
+    FileUtils.chmod(0o700, @state_root)
+  end
+
   # --- read-only contract ----------------------------------------------------
 
   def test_log_does_not_mutate_coordination_state

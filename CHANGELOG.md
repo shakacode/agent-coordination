@@ -99,7 +99,16 @@ when releases begin.
   the trail on the reader's terminal; JSON is left alone because its encoder
   escapes these already. Publishing the mirror fsyncs the parent directory after
   the rename, the way `LocalStore` already does, since a rename is not durable
-  until the directory entry reaches stable storage.
+  until the directory entry reaches stable storage, and the temporary file it
+  renames from is created exclusively under an unpredictable name so a symlink
+  planted at that path cannot be followed. Filesystem faults while writing the
+  mirror are reported as operational errors rather than a Ruby backtrace. The
+  control scrub covers C1 controls as well as C0 and DEL, since terminals that
+  decode C1 act on `U+009B` the way they act on `ESC[`. A positive `--limit` no
+  longer suppresses the claim fallback, because it removes nothing from a trail
+  that was already empty. Under `--json` the claim is a structured object rather
+  than a preformatted sentence. The `--sync` narrowing error names real flags
+  instead of a `--work-item` option that does not exist.
 - An `AGENT_COORD_LOCAL` environment opt-in that explicitly selects the implicit
   local backend. It accepts `1`, `true`, or `yes` (case-insensitive); any other
   value, including empty and `0`, is not an opt-in. Setting it both satisfies the

@@ -214,7 +214,7 @@ module AgentCoord
   # tsv go straight to a terminal, where an escape sequence from a recorded
   # message could clear or rewrite the trail being read. JSON is left alone: its
   # encoder escapes these already.
-  LOG_CONTROL_CHARACTERS = /[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/
+  LOG_CONTROL_CHARACTERS = /[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F\u0080-\u009F]/
   LOG_UNKNOWN = "?"
   LOG_SINCE_UNITS = { "m" => 60, "h" => 3600, "d" => 86_400, "w" => 604_800 }.freeze
   BATCH_AUDIT_TERMINAL_REQUIRED_FACT_FIELDS = %w[event_id repo target terminal workspace at].freeze
@@ -3257,9 +3257,6 @@ module AgentCoord
     # defaulting to the local status state root like `status`.
     def render_log(options)
       options = options.merge(work_item: log_work_item_scope(options))
-      # --limit truncates before the mirror is written, so a repeated
-      # `log --limit N --sync` would permanently drop everything outside each
-      # observation's slice once gc pruned the events behind it.
       validate_log_format!(options)
       validate_log_sync_scope!(options)
 
@@ -3272,6 +3269,8 @@ module AgentCoord
       0
     rescue JSON::ParserError => e
       raise OperationalError, "state unreadable: #{e.message}"
+    rescue SystemCallError => e
+      raise OperationalError, "log mirror unwritable: #{e.message}"
     ensure
       close_store(store)
     end
@@ -3284,12 +3283,11 @@ module AgentCoord
       return unless options[:sync]
 
       narrowed = LOG_TRAIL_FILTERS.select { |field| options[field] }
-      narrowed << :work_item if options[:work_item]
+                                  .map { |field| "--#{field.to_s.tr('_', '-')}" }
+      narrowed << "a work item" if options[:work_item]
       return if narrowed.empty?
 
-      raise Error,
-            "--sync mirrors the complete trail and cannot be narrowed by " \
-            "#{narrowed.map { |field| "--#{field.to_s.tr('_', '-')}" }.join(', ')}"
+      raise Error, "--sync mirrors the complete trail and cannot be narrowed by #{narrowed.join(', ')}"
     end
 
     # --repo/--target are registered for every command, so they are accepted here
@@ -3452,18 +3450,18 @@ module AgentCoord
       raise Error, "--format must be text or tsv"
     end
 
-    def emit_log(rows, options, claim_note = nil)
+    def emit_log(rows, options, claim = nil)
       format = options[:format].to_s
       if options[:json]
         events = rows.map { |row| row.slice(*LOG_TSV_FIELDS) }
-        @stdout.puts JSON.pretty_generate({ "events" => events, "claim" => claim_note }.compact)
+        @stdout.puts JSON.pretty_generate({ "events" => events, "claim" => claim }.compact)
       elsif format == "tsv"
         # tsv is a data stream, so the note goes to stderr rather than inventing a
         # row a consumer would have to parse around.
         rows.each { |row| @stdout.puts log_tsv_line(row) }
-        log_report_empty(options, claim_note, @stderr) if rows.empty?
+        log_report_empty(options, claim, @stderr) if rows.empty?
       elsif rows.empty?
-        log_report_empty(options, claim_note, @stdout)
+        log_report_empty(options, claim, @stdout)
       else
         scrubbed = rows.map { |row| log_text_scrubbed(log_text_row(row)) }
         widths = log_text_widths(scrubbed)
@@ -3471,9 +3469,9 @@ module AgentCoord
       end
     end
 
-    def log_report_empty(options, claim_note, stream)
+    def log_report_empty(options, claim, stream)
       stream.puts "no events for #{options[:work_item] || 'the current filters'}"
-      stream.puts claim_note if claim_note
+      stream.puts log_claim_note_line(claim) if claim
     end
 
     # Columns are sized to the rows actually being rendered so a single-work-item
@@ -3502,7 +3500,7 @@ module AgentCoord
       # A filter emptying the trail is a different answer from having no trail;
       # the claim is not evaluated against those filters, so reporting it here
       # would answer a question the operator did not ask.
-      return nil if LOG_TRAIL_FILTERS.any? { |field| options[field] }
+      return nil if LOG_TRAIL_FILTERS.any? { |field| log_narrowing_option?(options, field) }
 
       claims = store.list_json("claims")
       log_warn_claims("filtered by scoped token") if filtered_status_list?(store, "claims")
@@ -3514,7 +3512,7 @@ module AgentCoord
       # Casing variants produce two claim paths for one work item; the newest is
       # the one that describes where the work actually is.
       newest = matches.max_by { |candidate| log_at_key(candidate.data["updated_at"]) }
-      newest && log_claim_note_line(newest.data)
+      newest && log_claim_record(newest.data)
     rescue OperationalError => e
       degradation = listing_degradation(e, "claims")
       raise unless degradation
@@ -3530,12 +3528,30 @@ module AgentCoord
     # Built from claim fields directly rather than through log_row, whose "phase"
     # falls back to "status" for events -- which printed a claim whose status is
     # active as "phase active".
-    def log_claim_note_line(data)
-      log_scrub(
-        "claim #{log_present(data['status'])} #{log_present(data['machine_id'])} " \
-        "#{log_host_family(data['host'])} #{log_present(data['agent_id'])} " \
-        "phase #{log_phase_or_dash(data['phase'])} updated #{log_present(data['updated_at'])}"
-      )
+    # --limit only narrows a trail that had rows to drop; on an already-empty
+    # trail a positive limit removed nothing, so it must not suppress the claim.
+    def log_narrowing_option?(options, field)
+      return options[field]&.zero? if field == :limit
+
+      !options[field].nil?
+    end
+
+    # Structured so a --json consumer reads the claim's fields instead of
+    # re-parsing the sentence the text renderer builds from them.
+    def log_claim_record(data)
+      {
+        "status" => log_present(data["status"]),
+        "machine" => log_present(data["machine_id"]),
+        "host" => log_host_family(data["host"]),
+        "agent_id" => log_present(data["agent_id"]),
+        "phase" => log_phase_or_dash(data["phase"]),
+        "updated_at" => log_present(data["updated_at"])
+      }.transform_values { |value| log_scrub(value) }
+    end
+
+    def log_claim_note_line(claim)
+      "claim #{claim.fetch('status')} #{claim.fetch('machine')} #{claim.fetch('host')} " \
+        "#{claim.fetch('agent_id')} phase #{claim.fetch('phase')} updated #{claim.fetch('updated_at')}"
     end
 
     def log_phase_or_dash(value)
@@ -3604,9 +3620,11 @@ module AgentCoord
     # disk before it is published, and moved into place in a single step. No
     # partial file is ever visible at the mirror's path.
     def log_sync_replace(path, lines)
-      temp = "#{path}.#{Process.pid}.tmp"
+      temp = "#{path}.tmp-#{Process.pid}-#{SecureRandom.hex(8)}"
       mode = File.exist?(path) ? File.stat(path).mode & 0o777 : 0o644
-      File.open(temp, File::WRONLY | File::CREAT | File::TRUNC, mode, encoding: "UTF-8") do |file|
+      # EXCL with an unpredictable name, so a symlink planted at the temporary
+      # path cannot be followed and its target overwritten before the rename.
+      File.open(temp, File::WRONLY | File::CREAT | File::EXCL, mode, encoding: "UTF-8") do |file|
         lines.each { |line| file.puts(line) }
         file.flush
         file.fsync
