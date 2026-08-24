@@ -879,6 +879,16 @@ class AgentCoordLogTest < AgentCoordLogTestCase
   ensure
     FileUtils.chmod(0o700, File.join(@state_root, "events"))
   end
+
+  def test_log_rejects_json_combined_with_format
+    write_trace
+
+    result = run_log("--json", "--format", "tsv")
+
+    assert_equal 1, result.status.exitstatus
+    assert_includes result.stderr, "--json"
+    assert_includes result.stderr, "--format"
+  end
 end
 
 # The durable `--sync` mirror: scope, ordering, locking, and replacement.

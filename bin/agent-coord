@@ -3457,9 +3457,10 @@ module AgentCoord
     end
 
     def validate_log_format!(options)
-      return if ["", "text", "tsv"].include?(options[:format].to_s)
+      raise Error, "--format must be text or tsv" unless ["", "text", "tsv"].include?(options[:format].to_s)
+      return unless options[:json] && !options[:format].to_s.empty?
 
-      raise Error, "--format must be text or tsv"
+      raise Error, "--json and --format are mutually exclusive"
     end
 
     def emit_log(rows, options, claim = nil)
@@ -5294,17 +5295,13 @@ module AgentCoord
       FileUtils.rm_f(temporary) if temporary
     end
 
+    # Passes its own fsync_directory so the shared rule applies while the actual
+    # syscall stays overridable: the suite subclasses LocalStore and replaces
+    # that method to observe the fsync and to inject failures.
     def fsync_parent_directory(file)
-      return if Gem.win_platform?
-
-      fsync_directory(File.dirname(file))
-    rescue Errno::EINVAL, Errno::ENOTSUP
-      nil
+      AgentCoord.fsync_parent_directory(file) { |directory| fsync_directory(directory) }
     end
 
-    # Delegates so the durability rule lives in one place, while staying an
-    # instance method: the suite subclasses LocalStore and overrides this to
-    # observe the fsync and to inject failures.
     def fsync_directory(directory)
       AgentCoord.fsync_directory(directory)
     end
@@ -5818,10 +5815,10 @@ module AgentCoord
   # Renaming a file into place is not durable until the directory entry itself
   # reaches stable storage, so every atomic replacement in this file follows its
   # rename with this.
-  def self.fsync_parent_directory(file)
+  def self.fsync_parent_directory(file, &fsync)
     return if Gem.win_platform?
 
-    fsync_directory(File.dirname(file))
+    (fsync || method(:fsync_directory)).call(File.dirname(file))
   rescue Errno::EINVAL, Errno::ENOTSUP
     nil
   end
