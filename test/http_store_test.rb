@@ -1721,6 +1721,20 @@ class LogHttpBackendTest < HttpEnvTestCase
     end
   end
 
+  # A partial listing would write a partial mirror that later reads as complete --
+  # the same hazard the narrowing options are rejected for.
+  def test_log_sync_refuses_to_write_a_mirror_from_a_filtered_listing
+    stub = HttpStoreStub.new([[200, { "entries" => [], "filtered" => true }]])
+    with_env("AGENT_COORD_API_URL" => stub.base_url, "AGENT_COORD_API_TOKEN" => "tok") do
+      code, _out, err = run_cli(["log", "--sync"], {})
+
+      assert_equal 2, code
+      assert_includes err, "incomplete"
+    end
+  ensure
+    stub.shutdown
+  end
+
   # A filtered claims listing can hide the very claim being asked about, so a
   # silent "no claim" would be indistinguishable from a real absence.
   def test_log_warns_when_the_claim_listing_is_filtered_by_a_scoped_token

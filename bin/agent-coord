@@ -3263,7 +3263,13 @@ module AgentCoord
       log_options = options.dup
       store = build_store(log_options)
       rows = log_rows(store, options)
-      return log_sync(log_options, rows) if options[:sync]
+      if options[:sync]
+        # A partial listing would write a partial mirror that later reads as
+        # complete -- the same hazard the narrowing options are rejected for.
+        raise OperationalError, "refusing to sync an incomplete trail: #{@log_incomplete}" if @log_incomplete
+
+        return log_sync(log_options, rows)
+      end
 
       emit_log(rows, options, log_claim_for(store, options, rows))
       0
@@ -3357,19 +3363,27 @@ module AgentCoord
     # path says so on stderr, because a silently short trail reads exactly like a
     # complete one.
     def log_event_entries(store)
-      entries = store.list_json("events")
-      log_warn_incomplete("filtered by scoped token") if filtered_status_list?(store, "events")
+      log_listing(store, "events") { |reason| "warning: events #{reason}; this trail may be incomplete" }
+    end
+
+    # One listing path for both families: warn on a partial or degraded read,
+    # remember that it happened, and hand back whatever was legible.
+    def log_listing(store, prefix)
+      entries = store.list_json(prefix)
+      log_note_incomplete(prefix, yield("filtered by scoped token")) if filtered_status_list?(store, prefix)
       entries
     rescue OperationalError => e
-      degradation = listing_degradation(e, "events")
+      degradation = listing_degradation(e, prefix)
       raise unless degradation
 
-      log_warn_incomplete(degradation == :forbidden ? "not readable by scoped token" : "not supported by backend")
+      reason = degradation == :forbidden ? "not readable by scoped token" : "not supported by backend"
+      log_note_incomplete(prefix, yield(reason))
       []
     end
 
-    def log_warn_incomplete(reason)
-      @stderr.puts "warning: events #{reason}; this trail may be incomplete"
+    def log_note_incomplete(prefix, message)
+      @log_incomplete = prefix
+      @stderr.puts message
     end
 
     # Order on a parsed instant, never on the rendered string. Lexical comparison
@@ -3521,8 +3535,9 @@ module AgentCoord
       # would answer a question the operator did not ask.
       return nil if LOG_TRAIL_FILTERS.any? { |field| log_narrowing_option?(options, field) }
 
-      claims = store.list_json("claims")
-      log_warn_claims("filtered by scoped token") if filtered_status_list?(store, "claims")
+      claims = log_listing(store, "claims") do |reason|
+        "warning: claims #{reason}; a claim for this work item would not be reported"
+      end
       matches = claims.select do |candidate|
         next false if candidate.data["synthetic"] && !options[:include_synthetic]
 
@@ -3532,16 +3547,6 @@ module AgentCoord
       # the one that describes where the work actually is.
       newest = matches.max_by { |candidate| log_at_key(candidate.data["updated_at"]) }
       newest && log_claim_record(newest.data, now_utc)
-    rescue OperationalError => e
-      degradation = listing_degradation(e, "claims")
-      raise unless degradation
-
-      log_warn_claims(degradation == :forbidden ? "not readable by scoped token" : "not supported by backend")
-      nil
-    end
-
-    def log_warn_claims(reason)
-      @stderr.puts "warning: claims #{reason}; a claim for this work item would not be reported"
     end
 
     # Built from claim fields directly rather than through log_row, whose "phase"

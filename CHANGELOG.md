@@ -52,7 +52,9 @@ when releases begin.
   to stderr rather than into the data stream. When a scoped token returns a
   partial event listing, `log` warns that the trail may be incomplete instead of
   presenting it as whole, and a scoped or unsupported listing degrades to an empty
-  trail with a warning rather than crashing a read-only query. A claims lookup
+  trail with a warning rather than crashing a read-only query. `--sync` refuses to
+  write a mirror from an incomplete listing, since a partial mirror would later
+  read as complete. A claims lookup
   that cannot be read warns too, so "this token cannot read claims" no longer
   prints identically to "this work item has no claim". An explicitly selected
   backend is never replaced by the local status root. Options may precede the
