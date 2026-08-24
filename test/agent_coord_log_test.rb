@@ -14,6 +14,7 @@ class AgentCoordLogTest < Minitest::Test
   ROOT = File.expand_path("..", __dir__)
   BIN = File.join(ROOT, "bin", "agent-coord")
   CommandResult = Struct.new(:stdout, :stderr, :status, keyword_init: true)
+  LOG_TSV_FIELD_COUNT = 11
   # Keeps the suite off the developer's real ~/.config/agent-coord/env, which
   # would otherwise trip the split-brain advisory and pollute stderr assertions.
   ISOLATED_CONFIG_HOME = Dir.mktmpdir("agent-coord-log-config")
@@ -333,6 +334,132 @@ class AgentCoordLogTest < Minitest::Test
     run_log("--sync")
 
     assert_includes File.read(File.join(@state_root, "log.tsv")), "shakacode/example#104"
+  end
+
+  # --- review findings (PR #131) ---------------------------------------------
+
+  # `log` was registered as a backend command but not a status-read command, so
+  # it silently read the default local root instead of the configured status root
+  # and skipped the split-brain advisory it is supposed to keep.
+  def test_log_reads_the_configured_status_state_root
+    write_trace
+    # An empty XDG state home makes the implicit local root definitively empty, so
+    # finding the trail proves the configured status root was the one consulted.
+    empty_state_home = Dir.mktmpdir("agent-coord-log-state-home")
+
+    result = run_command(
+      COMMAND_ENV.merge("AGENT_COORD_STATUS_STATE_ROOT" => @state_root, "XDG_STATE_HOME" => empty_state_home),
+      "ruby", BIN, "log", "shakacode/example#104"
+    )
+
+    assert_equal 0, result.status.exitstatus, result.stderr
+    assert_equal 5, result.stdout.lines.length
+  ensure
+    FileUtils.remove_entry(empty_state_home)
+  end
+
+  # "?" (0x3F) sorts after every digit, so an undated legacy event landed last and
+  # became the "where is it now" line, which is the one thing the trail must not
+  # get wrong. Undated events are older than anything stamped, so they sort first.
+  def test_log_orders_undated_events_before_dated_ones
+    write_event("b1", "e1", "type" => "claim.acquired", "repo" => "shakacode/example", "target" => "5",
+                            "machine_id" => "m5", "host" => "codex", "at" => "2026-08-01T00:00:00Z")
+    write_event("b1", "e2", "type" => "lane_closed", "repo" => "shakacode/example", "target" => "5",
+                            "machine_id" => "m5", "host" => "codex", "terminal" => "done",
+                            "at" => "2026-08-02T00:00:00Z")
+    write_event("b1", "e0", "type" => "phase", "repo" => "shakacode/example", "target" => "5",
+                            "machine_id" => "m5", "host" => "codex")
+
+    lines = run_log("shakacode/example#5").stdout.lines
+
+    assert_match(/\A\?/, lines.first, "undated event should sort first, not last")
+    assert_includes lines.last, "lane_closed"
+  end
+
+  def test_log_since_excludes_undated_events
+    write_event("b1", "e0", "type" => "phase", "repo" => "shakacode/example", "target" => "5",
+                            "machine_id" => "m5", "host" => "codex")
+
+    stdout = run_log("--since", "2026-01-01T00:00:00Z").stdout
+
+    assert_includes stdout, "no events"
+  end
+
+  # Lexical comparison does not reflect chronological order once a timestamp
+  # carries an offset: 2026-08-03T05:30:00+05:00 precedes 2026-08-03T01:00:00Z.
+  def test_log_orders_offset_timestamps_chronologically
+    write_event("b1", "later", "type" => "lane_closed", "repo" => "shakacode/example", "target" => "5",
+                               "machine_id" => "m5", "host" => "codex", "at" => "2026-08-03T01:00:00Z")
+    write_event("b1", "earlier", "type" => "claim.acquired", "repo" => "shakacode/example", "target" => "5",
+                                 "machine_id" => "m5", "host" => "codex", "at" => "2026-08-03T05:30:00+05:00")
+
+    types = run_log("shakacode/example#5").stdout.lines.map { |line| line.split(/\s+/)[4] }
+
+    assert_equal %w[claim.acquired lane_closed], types
+  end
+
+  def test_log_rejects_a_negative_limit
+    write_trace
+
+    result = run_log("--limit", "-1")
+
+    assert_equal 1, result.status.exitstatus
+    assert_includes result.stderr, "--limit"
+    refute_includes result.stderr, "negative array size"
+  end
+
+  # --limit truncates before the mirror is written, so a repeated
+  # `log --limit 5 --sync` would permanently lose everything outside each
+  # observation's most-recent slice once gc pruned the events behind it.
+  def test_log_rejects_limit_combined_with_sync
+    write_trace
+
+    result = run_log("--sync", "--limit", "2")
+
+    assert_equal 1, result.status.exitstatus
+    assert_includes result.stderr, "--limit"
+    assert_includes result.stderr, "--sync"
+  end
+
+  def test_log_tsv_scrubs_control_characters_from_every_field
+    write_event("b1", "e1", "type" => "claim.acquired", "repo" => "shakacode/example", "target" => "5",
+                            "machine_id" => "m5", "host" => "codex",
+                            "agent_id" => "worker\tinjected", "batch_id" => "batch\nsplit",
+                            "at" => "2026-08-01T00:00:00Z")
+
+    lines = run_log("shakacode/example#5", "--format", "tsv").stdout.lines
+
+    assert_equal 1, lines.length, "an embedded newline must not split the row"
+    assert_equal LOG_TSV_FIELD_COUNT, lines.first.chomp.split("\t").length
+  end
+
+  # tsv is a data stream, so a human note must not be written into it -- but the
+  # claim fallback must still reach the operator rather than vanishing.
+  def test_log_tsv_reports_an_empty_result_on_stderr
+    write_claim("shakacode/example", "10112",
+                "status" => "active", "agent_id" => "queue-worker", "machine_id" => "m5",
+                "host" => "codex", "updated_at" => "2026-08-01T03:13:03Z")
+
+    result = run_log("shakacode/example#10112", "--format", "tsv")
+
+    assert_empty result.stdout
+    assert_includes result.stderr, "no events"
+    assert_includes result.stderr, "claim active"
+  end
+
+  # The claim is not checked against --since/--machine/--host/--type, so surfacing
+  # it after a filter emptied the trail would answer a question nobody asked.
+  def test_log_does_not_fall_back_to_the_claim_when_a_filter_emptied_the_trail
+    write_event("b1", "e1", "type" => "claim.acquired", "repo" => "shakacode/example", "target" => "10112",
+                            "machine_id" => "m5", "host" => "codex", "at" => "2026-08-01T00:00:00Z")
+    write_claim("shakacode/example", "10112",
+                "status" => "active", "agent_id" => "queue-worker", "machine_id" => "m5",
+                "host" => "codex", "updated_at" => "2026-08-01T03:13:03Z")
+
+    stdout = run_log("shakacode/example#10112", "--type", "error").stdout
+
+    assert_includes stdout, "no events"
+    refute_includes stdout, "claim active"
   end
 
   # --- read-only contract ----------------------------------------------------

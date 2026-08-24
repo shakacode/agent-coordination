@@ -592,6 +592,22 @@ class HttpBackendSelectionTest < HttpEnvTestCase
     stub.shutdown
   end
 
+  # A scoped token can return a partial event listing. Rendering those entries as
+  # a whole custody trail would let `log` report the wrong current state with no
+  # sign anything was withheld (PR #131 review).
+  def test_log_warns_when_the_event_trail_is_filtered_by_a_scoped_token
+    stub = HttpStoreStub.new([[200, { "entries" => [], "filtered" => true }]])
+    with_env("AGENT_COORD_API_URL" => stub.base_url, "AGENT_COORD_API_TOKEN" => "tok") do
+      code, _out, err = run_cli(["log"], {})
+
+      assert_equal 0, code
+      assert_includes err, "filtered by scoped token"
+      assert_includes err, "may be incomplete"
+    end
+  ensure
+    stub.shutdown
+  end
+
   def test_batch_audit_unknown_when_event_trail_is_filtered_by_scoped_token
     responses = [
       [200, { "data" => { "schema_version" => 1, "batch_id" => "batch",

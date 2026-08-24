@@ -519,7 +519,14 @@ One line per event, oldest first. Nothing is inferred beyond ordering by time:
 
 Filter a broader feed with `--since` (a `3d`/`12h`/`30m` duration or an ISO8601
 timestamp), `--machine`, `--host`, `--type`, and `--limit`. Simulation and smoke
-records are excluded unless `--include-synthetic` is passed.
+records are excluded unless `--include-synthetic` is passed. `--limit` cannot be
+combined with `--sync`, which would mirror only the most recent slice and lose
+the rest once `gc` pruned the events behind it.
+
+Ordering is by parsed instant, not by the rendered string, so timestamps carrying
+an offset sort correctly. An event recorded without a timestamp sorts first, not
+last, and no `--since` window includes it — sorting it last would have made an
+undated legacy event read as the current state.
 
 `--format tsv` emits a tab-separated record that also carries the unnormalized
 host and the event id, and `--json` emits the same fields as structured output.
@@ -542,7 +549,9 @@ half of a work item's history.
 A work item can also hold a claim while having no event trail, since claims
 written before lifecycle auto-emit were overwritten in place rather than
 appended. Rather than reporting a bare "no events" and hiding live custody, `log`
-falls back to the claim record and labels it as one:
+falls back to the claim record and labels it as one — but only when the trail is
+genuinely empty, never when a filter emptied it, since the claim is not evaluated
+against `--since`, `--machine`, `--host`, or `--type`:
 
 ```text
 no events for ShakaCode/hichee#issue:10112

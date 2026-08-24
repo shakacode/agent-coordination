@@ -40,7 +40,18 @@ when releases begin.
   read as absent custody. `--sync` reads and writes the mirror as UTF-8 rather
   than trusting the locale; under a non-UTF-8 locale a row carrying a non-ASCII
   character would otherwise never match the line regenerated from state and would
-  re-append on every sync.
+  re-append on every sync. Events are ordered on a parsed instant rather than on
+  the rendered string, so timestamps carrying an offset or fractional seconds
+  order correctly and an undated legacy event sorts first rather than last
+  (sorting it last would have made it read as the current state); `--since` never
+  includes undated events. `--limit` rejects a negative value and cannot be
+  combined with `--sync`, which would otherwise mirror only the most recent slice
+  and lose the rest once `gc` pruned the events behind it. Every tsv field is
+  scrubbed of tabs and newlines, not just `detail`, so agent-supplied text cannot
+  invent a column or split a row. Under `--format tsv` the empty-result note goes
+  to stderr rather than into the data stream. When a scoped token returns a
+  partial event listing, `log` warns that the trail may be incomplete instead of
+  presenting it as whole.
 - An `AGENT_COORD_LOCAL` environment opt-in that explicitly selects the implicit
   local backend. It accepts `1`, `true`, or `yes` (case-insensitive); any other
   value, including empty and `0`, is not an opt-in. Setting it both satisfies the

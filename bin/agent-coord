@@ -204,6 +204,7 @@ module AgentCoord
     at machine host work_item type phase agent_id batch_id detail host_raw event_id
   ].freeze
   LOG_TEXT_COLUMNS = %w[at machine host work_item type phase agent_id].freeze
+  LOG_TRAIL_FILTERS = %i[since machine host type limit].freeze
   LOG_SYNC_FILENAME = "log.tsv"
   LOG_UNKNOWN = "?"
   LOG_SINCE_UNITS = { "m" => 60, "h" => 3600, "d" => 86_400, "w" => 604_800 }.freeze
@@ -627,7 +628,11 @@ module AgentCoord
       end
       opts.on("--machine ID", "only events recorded by one machine") { |value| options[:machine] = value }
       opts.on("--host FAMILY", "only events recorded by one host family") { |value| options[:host] = value }
-      opts.on("--limit N", Integer, "keep only the N most recent events") { |value| options[:limit] = value }
+      opts.on("--limit N", Integer, "keep only the N most recent events") do |value|
+        raise Error, "--limit must not be negative, got #{value}" if value.negative?
+
+        options[:limit] = value
+      end
       opts.on("--format FORMAT", "log output format: text or tsv") { |value| options[:format] = value }
       opts.on("--sync", "append unseen events to the local greppable log") { options[:sync] = true }
       opts.on("--include-synthetic", "include simulation and smoke records") { options[:include_synthetic] = true }
@@ -765,7 +770,7 @@ module AgentCoord
     # write-mode local default. batch-audit reads coordination state exactly like
     # status, so it resolves and warns identically.
     def status_read_command?(command)
-      %w[status doctor batch-audit].include?(command)
+      %w[status log doctor batch-audit].include?(command)
     end
 
     def warn_consumer_split_brain(command, options)
@@ -3241,13 +3246,18 @@ module AgentCoord
     # move is a change in the machine, host, or agent column. Read-only, and
     # defaulting to the local status state root like `status`.
     def render_log(options)
+      # --limit truncates before the mirror is written, so a repeated
+      # `log --limit N --sync` would permanently drop everything outside each
+      # observation's slice once gc pruned the events behind it.
+      raise Error, "--limit cannot be combined with --sync" if options[:sync] && options[:limit]
+
       log_options = options.dup
       log_options[:state_root] ||= default_status_state_root unless log_options[:api_url]
       store = build_store(log_options)
       rows = log_rows(store, options)
       return log_sync(log_options, rows) if options[:sync]
 
-      emit_log(rows, options, rows.empty? ? log_claim_note(store, options) : nil)
+      emit_log(rows, options, log_claim_note(store, options, rows))
       0
     rescue JSON::ParserError => e
       raise OperationalError, "state unreadable: #{e.message}"
@@ -3257,9 +3267,13 @@ module AgentCoord
 
     def log_rows(store, options)
       since = log_since_timestamp(options)
-      rows = store.list_json("events").map { |entry| log_row(entry.data) }
+      entries = store.list_json("events")
+      if filtered_status_list?(store, "events")
+        @stderr.puts "warning: events filtered by scoped token; this trail may be incomplete"
+      end
+      rows = entries.map { |entry| log_row(entry.data) }
       rows = rows.reject { |row| row.fetch("synthetic") } unless options[:include_synthetic]
-      rows = log_filtered(rows, options, since).sort_by { |row| [row.fetch("at"), row.fetch("event_id")] }
+      rows = log_filtered(rows, options, since).sort_by { |row| [row.fetch("at_key"), row.fetch("event_id")] }
       options[:limit] ? rows.last(options[:limit]) : rows
     end
 
@@ -3269,7 +3283,7 @@ module AgentCoord
           log_matches?(row, "machine", options[:machine]) &&
           log_matches?(row, "host", options[:host]) &&
           log_matches?(row, "type", options[:type]) &&
-          (since.nil? || row.fetch("at") >= since)
+          (since.nil? || row.fetch("at_key") >= since)
       end
     end
 
@@ -3283,6 +3297,7 @@ module AgentCoord
     def log_row(data)
       {
         "at" => log_present(data["at"]),
+        "at_key" => log_at_key(data["at"]),
         "machine" => log_present(data["machine_id"]),
         "host" => log_host_family(data["host"]),
         "work_item" => log_work_item(data),
@@ -3295,6 +3310,17 @@ module AgentCoord
         "event_id" => log_present(data["event_id"]),
         "synthetic" => data["synthetic"] ? true : false
       }
+    end
+
+    # Order on a parsed instant, never on the rendered string. Lexical comparison
+    # breaks once a timestamp carries an offset or fractional seconds, and the
+    # unknown marker "?" sorts after every digit, which would float an undated
+    # legacy event to the end and make it read as the current state. Undated
+    # events precede everything stamped, and no window includes them.
+    def log_at_key(value)
+      Time.iso8601(value.to_s).to_f
+    rescue ArgumentError, TypeError
+      -Float::INFINITY
     end
 
     # Missing identity is reported as unknown rather than inferred. Roughly a
@@ -3363,16 +3389,24 @@ module AgentCoord
       raise Error, "--format must be text or tsv" unless ["", "text", "tsv"].include?(format)
 
       if options[:json]
-        @stdout.puts JSON.pretty_generate({ "events" => rows, "claim" => claim_note }.compact)
+        events = rows.map { |row| row.slice(*LOG_TSV_FIELDS) }
+        @stdout.puts JSON.pretty_generate({ "events" => events, "claim" => claim_note }.compact)
       elsif format == "tsv"
+        # tsv is a data stream, so the note goes to stderr rather than inventing a
+        # row a consumer would have to parse around.
         rows.each { |row| @stdout.puts log_tsv_line(row) }
+        log_report_empty(options, claim_note, @stderr) if rows.empty?
       elsif rows.empty?
-        @stdout.puts "no events for #{options[:work_item] || 'the current filters'}"
-        @stdout.puts claim_note if claim_note
+        log_report_empty(options, claim_note, @stdout)
       else
         widths = log_text_widths(rows)
         rows.each { |row| @stdout.puts log_text_line(row, widths) }
       end
+    end
+
+    def log_report_empty(options, claim_note, stream)
+      stream.puts "no events for #{options[:work_item] || 'the current filters'}"
+      stream.puts claim_note if claim_note
     end
 
     # Columns are sized to the rows actually being rendered so a single-work-item
@@ -3391,9 +3425,13 @@ module AgentCoord
     # predating auto-emit were overwritten in place rather than appended. A bare
     # "no events" would hide live custody, so the claim record is reported with
     # its own provenance rather than being folded into the trail as an event.
-    def log_claim_note(store, options)
+    def log_claim_note(store, options, rows)
       wanted = options[:work_item].to_s
-      return nil if wanted.empty?
+      return nil unless rows.empty? && !wanted.empty?
+      # A filter emptying the trail is a different answer from having no trail;
+      # the claim is not evaluated against those filters, so reporting it here
+      # would answer a question the operator did not ask.
+      return nil if LOG_TRAIL_FILTERS.any? { |field| options[field] }
 
       entry = store.list_json("claims").find do |candidate|
         next false if candidate.data["synthetic"] && !options[:include_synthetic]
@@ -3411,8 +3449,15 @@ module AgentCoord
         "#{row.fetch('agent_id')} phase #{row.fetch('phase')} updated #{log_present(data['updated_at'])}"
     end
 
+    # Any field can carry operator- or agent-supplied text, so all of them are
+    # scrubbed. An embedded tab would invent a column and an embedded newline
+    # would split one event across two rows, silently corrupting the mirror.
     def log_tsv_line(row)
-      LOG_TSV_FIELDS.map { |field| row.fetch(field) }.join("\t")
+      LOG_TSV_FIELDS.map { |field| log_scrub(row.fetch(field)) }.join("\t")
+    end
+
+    def log_scrub(value)
+      value.to_s.gsub(/[\t\r\n]+/, " ")
     end
 
     # `--sync` mirrors the event store into a plain tab-separated file so grep
@@ -3448,17 +3493,13 @@ module AgentCoord
       return nil if value.nil?
 
       match = /\A(\d+)([mhdw])\z/.match(value.to_s.strip)
-      return log_iso8601(now_utc - (Integer(match[1]) * LOG_SINCE_UNITS.fetch(match[2]))) if match
+      return (now_utc - (Integer(match[1]) * LOG_SINCE_UNITS.fetch(match[2]))).to_f if match
 
       begin
-        log_iso8601(Time.iso8601(value.to_s.strip))
+        Time.iso8601(value.to_s.strip).to_f
       rescue ArgumentError
         raise Error, "--since expects a duration like 3d or an ISO8601 timestamp, got #{value.inspect}"
       end
-    end
-
-    def log_iso8601(time)
-      time.utc.strftime("%Y-%m-%dT%H:%M:%SZ")
     end
 
     def render_status(options)
