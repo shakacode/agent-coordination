@@ -3541,7 +3541,7 @@ module AgentCoord
       matches = claims.select do |candidate|
         next false if candidate.data["synthetic"] && !options[:include_synthetic]
 
-        log_work_item(candidate.data).casecmp?(wanted)
+        log_claim_work_item(candidate).casecmp?(wanted)
       end
       # Casing variants produce two claim paths for one work item; the newest is
       # the one that describes where the work actually is.
@@ -3562,6 +3562,16 @@ module AgentCoord
 
     # Structured so a --json consumer reads the claim's fields instead of
     # re-parsing the sentence the text renderer builds from them.
+    # Claims written before repo/target became explicit payload fields carry them
+    # only in the path, which is why claim_status_hash falls back to it. Reading
+    # the payload alone would leave such a claim unmatchable.
+    def log_claim_work_item(entry)
+      data = entry.data
+      repo = data["repo"] || AgentCoord.repo_from_claim_path(entry.path)
+      target = data["target"] || AgentCoord.target_from_path(entry.path)
+      log_work_item("repo" => repo, "target" => target)
+    end
+
     def log_claim_record(data, now)
       {
         "status" => log_present(data["status"]),
@@ -3647,7 +3657,7 @@ module AgentCoord
     # appended blindly. Nothing already recorded is ever dropped, and the rewrite
     # happens under the same exclusive lock as the read.
     def log_sync_append(path, lines)
-      File.open("#{path}#{LOG_SYNC_LOCK_SUFFIX}", File::RDWR | File::CREAT, 0o644) do |lock|
+      File.open("#{path}#{LOG_SYNC_LOCK_SUFFIX}", File::RDWR | File::CREAT, 0o600) do |lock|
         lock.flock(File::LOCK_EX)
         existing = log_sync_existing(path)
         seen = existing.to_h { |line| [line, true] }

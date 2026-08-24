@@ -846,6 +846,23 @@ class AgentCoordLogTest < AgentCoordLogTestCase
     assert_equal true, claim.fetch("synthetic")
     assert_equal "simulation", claim.fetch("synthetic_kind")
   end
+
+  # Claims predating explicit repo/target fields carry them only in the path,
+  # which is why claim_status_hash falls back to it. Reading the payload alone
+  # meant such a claim could never be matched to the work item it belongs to.
+  def test_log_matches_a_legacy_claim_that_carries_its_identity_only_in_the_path
+    path = File.join(@state_root, "claims", "shakacode", "example", "77.json")
+    FileUtils.mkdir_p(File.dirname(path))
+    File.write(path, "#{JSON.generate({ 'schema_version' => 1, 'status' => 'active',
+                                        'agent_id' => 'legacy-worker', 'machine_id' => 'm5',
+                                        'host' => 'codex', 'updated_at' => '2099-01-01T00:00:00Z' },
+                                      ascii_only: true)}\n")
+
+    stdout = run_log("shakacode/example#77").stdout
+
+    assert_includes stdout, "claim active"
+    assert_includes stdout, "legacy-worker"
+  end
 end
 
 # The durable `--sync` mirror: scope, ordering, locking, and replacement.
