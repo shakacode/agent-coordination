@@ -205,6 +205,7 @@ module AgentCoord
   ].freeze
   LOG_TEXT_COLUMNS = %w[at machine host work_item type phase agent_id].freeze
   LOG_TRAIL_FILTERS = %i[since machine host type limit].freeze
+  LOG_SYNC_REJECTED_OPTIONS = %i[since machine host type limit include_synthetic].freeze
   LOG_SYNC_FILENAME = "log.tsv"
   LOG_UNKNOWN = "?"
   LOG_SINCE_UNITS = { "m" => 60, "h" => 3600, "d" => 86_400, "w" => 604_800 }.freeze
@@ -337,8 +338,7 @@ module AgentCoord
       when "status"
         render_status(parse_options(command, @argv))
       when "log"
-        work_item = @argv.shift unless @argv.first.to_s.start_with?("-")
-        render_log(parse_options(command, @argv).merge(work_item: work_item))
+        render_log(parse_options(command, @argv, positional: :work_item))
       when "batch-audit"
         batch_audit(parse_options(command, @argv))
       when "gc"
@@ -415,7 +415,7 @@ module AgentCoord
       ["-h", "--help", "help"].include?(value)
     end
 
-    def parse_options(command, argv, parse_state: nil)
+    def parse_options(command, argv, parse_state: nil, positional: nil)
       options = default_options
       parse_state ||= { stack_json: false, backend_selector_count: 0, empty_backend_selector: false }
       parser, = build_option_parser(command, options, parse_state)
@@ -425,6 +425,9 @@ module AgentCoord
       raise Error, "doctor --json and --stack-json are mutually exclusive" if options[:json] && options[:stack_json]
 
       validate_stack_json_backend_selector_count!(options, parse_state)
+      # OptionParser permutes, so the positional can appear before or after the
+      # options; take it only after parsing rather than shifting it up front.
+      options[positional] = argv.shift if positional
       raise Error, "unexpected arguments: #{argv.join(' ')}" unless argv.empty?
 
       finalize_options(command, options)
@@ -3249,10 +3252,10 @@ module AgentCoord
       # --limit truncates before the mirror is written, so a repeated
       # `log --limit N --sync` would permanently drop everything outside each
       # observation's slice once gc pruned the events behind it.
-      raise Error, "--limit cannot be combined with --sync" if options[:sync] && options[:limit]
+      validate_log_sync_scope!(options)
 
       log_options = options.dup
-      log_options[:state_root] ||= default_status_state_root unless log_options[:api_url]
+      log_options[:state_root] ||= default_status_state_root if log_backend_unselected?(log_options)
       store = build_store(log_options)
       rows = log_rows(store, options)
       return log_sync(log_options, rows) if options[:sync]
@@ -3265,13 +3268,32 @@ module AgentCoord
       close_store(store)
     end
 
+    # The mirror is a complete durable copy, not a view. Appending a narrow sync
+    # and then a broader one would place older events after newer ones, so the
+    # file's last line would stop being the current state -- and --limit would
+    # drop the rest for good once gc pruned the events behind it.
+    def validate_log_sync_scope!(options)
+      return unless options[:sync]
+
+      narrowed = LOG_SYNC_REJECTED_OPTIONS.select { |field| options[field] }
+      narrowed << :work_item if options[:work_item]
+      return if narrowed.empty?
+
+      raise Error,
+            "--sync mirrors the complete trail and cannot be narrowed by " \
+            "#{narrowed.map { |field| "--#{field.to_s.tr('_', '-')}" }.join(', ')}"
+    end
+
+    # Mirrors the precondition resolve_default_local_backend already applies. An
+    # explicitly requested backend must win, or the trail silently answers for a
+    # different backend than the one asked for.
+    def log_backend_unselected?(options)
+      !options[:api_url] && options[:backend].to_s.empty?
+    end
+
     def log_rows(store, options)
       since = log_since_timestamp(options)
-      entries = store.list_json("events")
-      if filtered_status_list?(store, "events")
-        @stderr.puts "warning: events filtered by scoped token; this trail may be incomplete"
-      end
-      rows = entries.map { |entry| log_row(entry.data) }
+      rows = log_event_entries(store).map { |entry| log_row(entry.data) }
       rows = rows.reject { |row| row.fetch("synthetic") } unless options[:include_synthetic]
       rows = log_filtered(rows, options, since).sort_by { |row| [row.fetch("at_key"), row.fetch("event_id")] }
       options[:limit] ? rows.last(options[:limit]) : rows
@@ -3310,6 +3332,27 @@ module AgentCoord
         "event_id" => log_present(data["event_id"]),
         "synthetic" => data["synthetic"] ? true : false
       }
+    end
+
+    # Degrade the way status does rather than hard-failing: a scoped token or an
+    # older backend must not turn a read-only query into a crash. Every degraded
+    # path says so on stderr, because a silently short trail reads exactly like a
+    # complete one.
+    def log_event_entries(store)
+      entries = store.list_json("events")
+      log_warn_incomplete("filtered by scoped token") if filtered_status_list?(store, "events")
+      entries
+    rescue OperationalError => e
+      raise unless unsupported_resource_listing?(e) || scoped_http_forbidden_listing?(e, "events")
+
+      log_warn_incomplete(
+        scoped_http_forbidden_listing?(e, "events") ? "not readable by scoped token" : "not supported by backend"
+      )
+      []
+    end
+
+    def log_warn_incomplete(reason)
+      @stderr.puts "warning: events #{reason}; this trail may be incomplete"
     end
 
     # Order on a parsed instant, never on the rendered string. Lexical comparison
@@ -3439,7 +3482,10 @@ module AgentCoord
         log_work_item(candidate.data).casecmp?(wanted)
       end
       entry && log_claim_note_line(entry.data)
-    rescue OperationalError
+    rescue OperationalError => e
+      raise unless unsupported_resource_listing?(e) || scoped_http_forbidden_listing?(e, "claims")
+
+      @stderr.puts "warning: claims not readable here; a claim for this work item would not be reported"
       nil
     end
 

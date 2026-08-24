@@ -519,9 +519,12 @@ One line per event, oldest first. Nothing is inferred beyond ordering by time:
 
 Filter a broader feed with `--since` (a `3d`/`12h`/`30m` duration or an ISO8601
 timestamp), `--machine`, `--host`, `--type`, and `--limit`. Simulation and smoke
-records are excluded unless `--include-synthetic` is passed. `--limit` cannot be
-combined with `--sync`, which would mirror only the most recent slice and lose
-the rest once `gc` pruned the events behind it.
+records are excluded unless `--include-synthetic` is passed.
+
+`--sync` mirrors the complete trail and rejects every narrowing option, including
+a work item. A narrow sync followed by a broader one would append the older
+events after the newer ones, and the file's last line would stop being the
+current state.
 
 Ordering is by parsed instant, not by the rendered string, so timestamps carrying
 an offset sort correctly. An event recorded without a timestamp sorts first, not

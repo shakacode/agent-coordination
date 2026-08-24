@@ -462,6 +462,55 @@ class AgentCoordLogTest < Minitest::Test
     refute_includes stdout, "claim active"
   end
 
+  # An explicitly requested backend must not be silently replaced by the local
+  # status root, or the trail answers for a different backend than the one asked
+  # for, with nothing in the output saying so (PR #131 review round 2).
+  def test_log_preserves_an_explicit_backend_selection
+    write_trace
+
+    result = run_command(
+      COMMAND_ENV.merge("AGENT_COORD_STATUS_STATE_ROOT" => @state_root),
+      "ruby", BIN, "log", "--backend", "shakacode/does-not-exist"
+    )
+
+    refute_includes result.stdout, "shakacode/example#104",
+                    "an explicit --backend must not fall back to the local status root"
+  end
+
+  # OptionParser permits options before positionals, so `log --json REPO#1` is a
+  # conventional invocation; shifting the positional before parsing rejected it.
+  def test_log_accepts_options_before_the_work_item
+    write_trace
+
+    payload = JSON.parse(run_log("--json", "shakacode/example#104").stdout)
+
+    assert_equal 5, payload.fetch("events").length
+  end
+
+  # The mirror is a complete durable copy, not a filtered view. A narrow sync
+  # followed by a broader one would append the older events after the newer ones,
+  # so the file's last line would no longer be the current state.
+  def test_log_sync_rejects_trail_filters
+    write_trace
+
+    [["--since", "1d"], ["--machine", "m5"], ["--host", "codex"],
+     ["--type", "claim.acquired"], ["--include-synthetic"]].each do |filter|
+      result = run_log("--sync", *filter)
+
+      assert_equal 1, result.status.exitstatus, "expected --sync #{filter.first} to be rejected"
+      assert_includes result.stderr, "--sync"
+    end
+  end
+
+  def test_log_sync_rejects_a_work_item_scope
+    write_trace
+
+    result = run_log("shakacode/example#104", "--sync")
+
+    assert_equal 1, result.status.exitstatus
+    assert_includes result.stderr, "--sync"
+  end
+
   # --- read-only contract ----------------------------------------------------
 
   def test_log_does_not_mutate_coordination_state

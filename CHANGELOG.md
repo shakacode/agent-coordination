@@ -51,7 +51,15 @@ when releases begin.
   invent a column or split a row. Under `--format tsv` the empty-result note goes
   to stderr rather than into the data stream. When a scoped token returns a
   partial event listing, `log` warns that the trail may be incomplete instead of
-  presenting it as whole.
+  presenting it as whole, and a scoped or unsupported listing degrades to an empty
+  trail with a warning rather than crashing a read-only query. A claims lookup
+  that cannot be read warns too, so "this token cannot read claims" no longer
+  prints identically to "this work item has no claim". An explicitly selected
+  backend is never replaced by the local status root. Options may precede the
+  positional work item, so `log --json OWNER/REPO#1` parses. `--sync` mirrors the
+  complete trail and rejects any narrowing option, because appending a narrow sync
+  and then a broader one would place older events after newer ones and the file's
+  last line would stop being the current state.
 - An `AGENT_COORD_LOCAL` environment opt-in that explicitly selects the implicit
   local backend. It accepts `1`, `true`, or `yes` (case-insensitive); any other
   value, including empty and `0`, is not an opt-in. Setting it both satisfies the
