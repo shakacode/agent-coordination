@@ -519,8 +519,14 @@ One line per event, oldest first. Nothing is inferred beyond ordering by time:
 | When was it last worked on? | The timestamp on the last line |
 
 Filter a broader feed with `--since` (a `3d`/`12h`/`30m` duration or an ISO8601
-timestamp), `--machine`, `--host`, `--type`, and `--limit`. Simulation and smoke
-records are excluded unless `--include-synthetic` is passed.
+timestamp), `--machine`, `--host`, `--type`, and `--limit`. `--host` takes either
+a family (`codex`, `claude`) or any recorded spelling (`claude-code`,
+`codex-subagent`), since both normalize to the same family.
+
+Simulation and smoke records are excluded unless `--include-synthetic` is passed.
+When included they are marked `[synthetic]` in text output and carry `synthetic`
+and `synthetic_kind` columns in tsv and JSON, so a simulation row that has been
+merged into the mirror cannot later be read as real work.
 
 `--sync` mirrors the complete trail and rejects every narrowing option, including
 a work item, and keeps the file in timestamp order so its last line is the

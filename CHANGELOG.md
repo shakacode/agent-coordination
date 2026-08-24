@@ -85,7 +85,15 @@ when releases begin.
   `--format` is validated on the `--sync` path too. The mirror breaks
   same-timestamp ties on event id exactly as the command does, so a grep of the
   file and a `log` invocation cannot disagree about what happened last, and a
-  mirror an operator restricted keeps its mode across replacement.
+  mirror an operator restricted keeps its mode across replacement. `--host`
+  accepts any recorded spelling rather than only the normalized family name, so
+  `--host claude-code` matches the claude family instead of silently matching
+  nothing. Zero-padded durations such as `--since 08h` are read as decimal;
+  `Kernel#Integer` had treated the leading zero as octal, raising an uncaught
+  error for `08`/`09` and reading `010d` as eight days. Synthetic rows carry
+  `synthetic` and `synthetic_kind` columns in tsv and JSON and a `[synthetic]`
+  marker in text, so simulation history merged into the mirror by
+  `--sync --include-synthetic` cannot later be mistaken for real work.
 - An `AGENT_COORD_LOCAL` environment opt-in that explicitly selects the implicit
   local backend. It accepts `1`, `true`, or `yes` (case-insensitive); any other
   value, including empty and `0`, is not an opt-in. Setting it both satisfies the

@@ -14,7 +14,7 @@ class AgentCoordLogTest < Minitest::Test
   ROOT = File.expand_path("..", __dir__)
   BIN = File.join(ROOT, "bin", "agent-coord")
   CommandResult = Struct.new(:stdout, :stderr, :status, keyword_init: true)
-  LOG_TSV_FIELD_COUNT = 11
+  LOG_TSV_FIELD_COUNT = 13
   # Keeps the suite off the developer's real ~/.config/agent-coord/env, which
   # would otherwise trip the split-brain advisory and pollute stderr assertions.
   ISOLATED_CONFIG_HOME = Dir.mktmpdir("agent-coord-log-config")
@@ -709,6 +709,68 @@ class AgentCoordLogTest < Minitest::Test
     run_log("--sync")
 
     assert_equal 0o600, File.stat(path).mode & 0o777
+  end
+
+  # --- review findings (PR #131, round 7) ------------------------------------
+
+  # The row's host column is family-normalized, so comparing the raw flag value
+  # against it meant every real recorded spelling silently matched nothing.
+  def test_log_host_filter_accepts_recorded_host_spellings
+    write_trace
+
+    %w[claude claude-code CLAUDE-CODE].each do |spelling|
+      stdout = run_log("--host", spelling).stdout
+
+      assert_equal 2, stdout.lines.length, "expected --host #{spelling} to match the claude family"
+    end
+  end
+
+  def test_log_host_filter_still_rejects_an_unrelated_host
+    write_trace
+
+    assert_includes run_log("--host", "scripted-sim").stdout, "no events"
+  end
+
+  # Kernel#Integer reads a leading zero as octal, so 08h and 09h raised an
+  # uncaught ArgumentError and 010d silently meant 8 days.
+  def test_log_since_accepts_zero_padded_durations
+    write_event("b1", "e1", "type" => "claim.acquired", "repo" => "shakacode/example", "target" => "5",
+                            "machine_id" => "m5", "host" => "codex", "at" => "2020-01-01T00:00:00Z")
+
+    %w[08h 09m 018d].each do |duration|
+      result = run_log("--since", duration)
+
+      assert_equal 0, result.status.exitstatus, "expected --since #{duration} to parse: #{result.stderr}"
+      refute_includes result.stderr, "ArgumentError"
+    end
+  end
+
+  def test_log_since_reads_zero_padded_durations_as_decimal
+    write_event("b1", "e1", "type" => "claim.acquired", "repo" => "shakacode/example", "target" => "5",
+                            "machine_id" => "m5", "host" => "codex", "at" => "2020-01-01T00:00:00Z")
+
+    # 010d is ten days, not eight; both windows exclude a 2020 event either way,
+    # so compare the boundary the option computes instead.
+    ten = run_log("--since", "010d", "--json").stdout
+    also_ten = run_log("--since", "10d", "--json").stdout
+
+    assert_equal JSON.parse(ten), JSON.parse(also_ten)
+  end
+
+  # After --sync --include-synthetic the mirror holds simulation rows that a
+  # later default sync keeps; without provenance they read as real work.
+  def test_log_marks_synthetic_rows_in_machine_readable_output
+    write_event("sim", "s1", "type" => "claim.acquired", "repo" => "sim/race", "target" => "task_two",
+                             "machine_id" => "m5", "host" => "scripted-sim", "synthetic" => true,
+                             "synthetic_kind" => "simulation", "at" => "2026-08-03T05:00:00Z")
+
+    fields = run_log("sim/race#task_two", "--include-synthetic", "--format", "tsv").stdout.chomp.split("\t")
+    payload = JSON.parse(run_log("sim/race#task_two", "--include-synthetic", "--json").stdout)
+
+    assert_includes fields, "true"
+    assert_includes fields, "simulation"
+    assert_equal true, payload.fetch("events").first.fetch("synthetic")
+    assert_equal "simulation", payload.fetch("events").first.fetch("synthetic_kind")
   end
 
   # --- read-only contract ----------------------------------------------------

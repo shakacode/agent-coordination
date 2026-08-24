@@ -201,7 +201,7 @@ module AgentCoord
   # text so it stays last, and `host_raw` preserves the unnormalized host beside
   # the family the trail groups on.
   LOG_TSV_FIELDS = %w[
-    at machine host work_item type phase agent_id batch_id detail host_raw event_id
+    at machine host work_item type phase agent_id batch_id detail host_raw event_id synthetic synthetic_kind
   ].freeze
   LOG_TEXT_COLUMNS = %w[at machine host work_item type phase agent_id].freeze
   # Options that narrow the trail. Suppressing the claim fallback and rejecting a
@@ -3299,13 +3299,6 @@ module AgentCoord
       "#{options[:repo]}##{options[:target]}"
     end
 
-    # Mirrors the precondition resolve_default_local_backend already applies. An
-    # explicitly requested backend must win, or the trail silently answers for a
-    # different backend than the one asked for.
-    def log_backend_unselected?(options)
-      !options[:api_url] && options[:backend].to_s.empty?
-    end
-
     def log_rows(store, options)
       since = log_since_timestamp(options)
       rows = log_event_entries(store).map { |entry| log_row(entry.data) }
@@ -3328,7 +3321,13 @@ module AgentCoord
     # the same repo under more than one casing. Matching case-sensitively would
     # split one work item's history into two partial answers.
     def log_matches?(row, field, wanted)
-      wanted.nil? || row.fetch(field).casecmp?(wanted.to_s)
+      return true if wanted.nil?
+
+      # The host column holds a family, so the flag value is normalized the same
+      # way -- otherwise --host claude-code matches nothing, even though that is
+      # the spelling the records actually carry and the flag's help advertises.
+      wanted = log_host_family(wanted) if field == "host"
+      row.fetch(field).casecmp?(wanted.to_s)
     end
 
     def log_row(data)
@@ -3345,7 +3344,8 @@ module AgentCoord
         "detail" => log_detail(data),
         "host_raw" => log_present(data["host"]),
         "event_id" => log_present(data["event_id"]),
-        "synthetic" => data["synthetic"] ? true : false
+        "synthetic" => data["synthetic"] ? true : false,
+        "synthetic_kind" => log_present(data["synthetic_kind"])
       }
     end
 
@@ -3460,8 +3460,9 @@ module AgentCoord
       elsif rows.empty?
         log_report_empty(options, claim_note, @stdout)
       else
-        widths = log_text_widths(rows)
-        rows.each { |row| @stdout.puts log_text_line(row, widths) }
+        scrubbed = rows.map { |row| log_text_scrubbed(log_text_row(row)) }
+        widths = log_text_widths(scrubbed)
+        scrubbed.each { |row| @stdout.puts log_text_line(row, widths) }
       end
     end
 
@@ -3473,13 +3474,17 @@ module AgentCoord
     # Columns are sized to the rows actually being rendered so a single-work-item
     # trace stays tight while a mixed feed still lines up. `detail` is free text
     # and carries no width, which is why it is always last.
+    def log_text_scrubbed(row)
+      (LOG_TEXT_COLUMNS + ["detail"]).to_h { |field| [field, log_scrub(row.fetch(field))] }
+    end
+
     def log_text_widths(rows)
-      LOG_TEXT_COLUMNS.to_h { |field| [field, rows.map { |row| log_scrub(row.fetch(field)).length }.max] }
+      LOG_TEXT_COLUMNS.to_h { |field| [field, rows.map { |row| row.fetch(field).length }.max] }
     end
 
     def log_text_line(row, widths)
-      columns = LOG_TEXT_COLUMNS.map { |field| log_scrub(row.fetch(field)).ljust(widths.fetch(field)) }
-      columns.push(log_scrub(row.fetch("detail"))).join("  ").rstrip
+      columns = LOG_TEXT_COLUMNS.map { |field| row.fetch(field).ljust(widths.fetch(field)) }
+      columns.push(row.fetch("detail")).join("  ").rstrip
     end
 
     # A work item can hold a claim while having no event trail, because claims
@@ -3537,6 +3542,13 @@ module AgentCoord
     # would split one event across two rows, silently corrupting the mirror.
     def log_tsv_line(row)
       LOG_TSV_FIELDS.map { |field| log_scrub(row.fetch(field)) }.join("\t")
+    end
+
+    # Text output stays compact, so provenance rides in the detail column there.
+    def log_text_row(row)
+      return row unless row.fetch("synthetic")
+
+      row.merge("detail" => log_joined("[synthetic]", row.fetch("detail")))
     end
 
     def log_scrub(value)
@@ -3620,7 +3632,7 @@ module AgentCoord
       return nil if value.nil?
 
       match = /\A(\d+)([mhdw])\z/.match(value.to_s.strip)
-      return (now_utc - (Integer(match[1]) * LOG_SINCE_UNITS.fetch(match[2]))).to_r if match
+      return (now_utc - (Integer(match[1], 10) * LOG_SINCE_UNITS.fetch(match[2]))).to_r if match
 
       begin
         Time.iso8601(value.to_s.strip).to_r
@@ -4432,7 +4444,9 @@ module AgentCoord
       section_notes[prefix] = "#{prefix} filtered by scoped token" if filtered_status_list?(store, prefix)
       entries
     rescue OperationalError => e
-      raise unless scoped_http_forbidden_listing?(e, prefix)
+      # Deliberately narrower than status_event_entries: these sections have no
+      # "unsupported by backend" note, so an old backend must still surface.
+      raise unless listing_degradation(e, prefix) == :forbidden
 
       section_notes[prefix] = "#{prefix} not readable by scoped token"
       []
