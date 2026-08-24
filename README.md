@@ -501,6 +501,7 @@ recorded to answer, without reading the full coordination dump:
 
 ```bash
 agent-coord log ShakaCode/hichee#9765
+agent-coord log --repo ShakaCode/hichee --target 9765   # the same query
 ```
 
 ```text

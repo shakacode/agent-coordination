@@ -652,6 +652,65 @@ class AgentCoordLogTest < Minitest::Test
     assert_empty Dir.glob(File.join(@state_root, "log.tsv.*tmp*")), "no temporary file may be left behind"
   end
 
+  # --- review findings (PR #131, round 6) ------------------------------------
+
+  # add_target_options advertises --repo/--target for every command, so they are
+  # accepted here; ignoring them silently dumped the entire feed instead.
+  def test_log_scopes_by_repo_and_target_options
+    write_trace
+
+    stdout = run_log("--repo", "shakacode/example", "--target", "104").stdout
+
+    assert_equal 5, stdout.lines.length
+    refute_includes stdout, "shakacode/other#7"
+  end
+
+  def test_log_rejects_a_work_item_given_both_ways
+    write_trace
+
+    result = run_log("shakacode/example#104", "--repo", "shakacode/example", "--target", "104")
+
+    assert_equal 1, result.status.exitstatus
+    assert_includes result.stderr, "--repo"
+  end
+
+  def test_log_validates_format_on_the_sync_path
+    write_trace
+
+    result = run_log("--sync", "--format", "bogus")
+
+    assert_equal 1, result.status.exitstatus
+    assert_includes result.stderr, "--format"
+  end
+
+  # The mirror must order a same-timestamp tie the way the command does, or a
+  # grep of the file and a `log` invocation disagree about what happened last.
+  def test_log_sync_breaks_timestamp_ties_by_event_id_like_the_command
+    write_event("b1", "zzz", "type" => "phase.changed", "repo" => "shakacode/example", "target" => "5",
+                             "machine_id" => "m5", "host" => "codex", "at" => "2026-08-01T00:00:00Z")
+    run_log("--sync")
+    write_event("b1", "aaa", "type" => "claim.acquired", "repo" => "shakacode/example", "target" => "5",
+                             "machine_id" => "m5", "host" => "codex", "at" => "2026-08-01T00:00:00Z")
+    run_log("--sync")
+
+    mirror = File.readlines(File.join(@state_root, "log.tsv"), encoding: "UTF-8").map { |l| l.split("\t")[4] }
+
+    assert_equal run_log("shakacode/example#5").stdout.lines.map { |l| l.split(/\s+/)[4] }, mirror
+  end
+
+  def test_log_sync_preserves_restrictive_mirror_permissions
+    write_trace
+    run_log("--sync")
+    path = File.join(@state_root, "log.tsv")
+    File.chmod(0o600, path)
+
+    write_event("b2", "e9", "type" => "merged", "repo" => "shakacode/example", "target" => "104",
+                            "machine_id" => "m1", "host" => "codex", "at" => "2026-08-04T00:00:00Z")
+    run_log("--sync")
+
+    assert_equal 0o600, File.stat(path).mode & 0o777
+  end
+
   # --- read-only contract ----------------------------------------------------
 
   def test_log_does_not_mutate_coordination_state

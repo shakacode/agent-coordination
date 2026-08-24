@@ -78,7 +78,14 @@ when releases begin.
   lock moved to a `log.tsv.lock` sidecar so it survives that replacement.
   `--include-synthetic` is allowed with `--sync`, since it widens the mirror
   rather than narrowing it, and rejecting it left simulation history with no way
-  to be preserved before `gc` pruned it.
+  to be preserved before `gc` pruned it. The `--repo OWNER/REPO --target
+  ISSUE_OR_PR` options that every command advertises now scope the trail as an
+  alternate spelling of the positional, rather than being accepted and ignored
+  while the whole feed was printed; giving the work item both ways is an error.
+  `--format` is validated on the `--sync` path too. The mirror breaks
+  same-timestamp ties on event id exactly as the command does, so a grep of the
+  file and a `log` invocation cannot disagree about what happened last, and a
+  mirror an operator restricted keeps its mode across replacement.
 - An `AGENT_COORD_LOCAL` environment opt-in that explicitly selects the implicit
   local backend. It accepts `1`, `true`, or `yes` (case-insensitive); any other
   value, including empty and `0`, is not an opt-in. Setting it both satisfies the

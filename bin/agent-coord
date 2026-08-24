@@ -204,8 +204,10 @@ module AgentCoord
     at machine host work_item type phase agent_id batch_id detail host_raw event_id
   ].freeze
   LOG_TEXT_COLUMNS = %w[at machine host work_item type phase agent_id].freeze
+  # Options that narrow the trail. Suppressing the claim fallback and rejecting a
+  # narrowed --sync are the same question -- "was this answer filtered?" -- so
+  # they read one list and a new filter cannot be added to only one of them.
   LOG_TRAIL_FILTERS = %i[since machine host type limit].freeze
-  LOG_SYNC_REJECTED_OPTIONS = %i[since machine host type limit].freeze
   LOG_SYNC_FILENAME = "log.tsv"
   LOG_SYNC_LOCK_SUFFIX = ".lock"
   LOG_UNKNOWN = "?"
@@ -3249,13 +3251,14 @@ module AgentCoord
     # move is a change in the machine, host, or agent column. Read-only, and
     # defaulting to the local status state root like `status`.
     def render_log(options)
+      options = options.merge(work_item: log_work_item_scope(options))
       # --limit truncates before the mirror is written, so a repeated
       # `log --limit N --sync` would permanently drop everything outside each
       # observation's slice once gc pruned the events behind it.
+      validate_log_format!(options)
       validate_log_sync_scope!(options)
 
       log_options = options.dup
-      log_options[:state_root] ||= default_status_state_root if log_backend_unselected?(log_options)
       store = build_store(log_options)
       rows = log_rows(store, options)
       return log_sync(log_options, rows) if options[:sync]
@@ -3275,13 +3278,25 @@ module AgentCoord
     def validate_log_sync_scope!(options)
       return unless options[:sync]
 
-      narrowed = LOG_SYNC_REJECTED_OPTIONS.select { |field| options[field] }
+      narrowed = LOG_TRAIL_FILTERS.select { |field| options[field] }
       narrowed << :work_item if options[:work_item]
       return if narrowed.empty?
 
       raise Error,
             "--sync mirrors the complete trail and cannot be narrowed by " \
             "#{narrowed.map { |field| "--#{field.to_s.tr('_', '-')}" }.join(', ')}"
+    end
+
+    # --repo/--target are registered for every command, so they are accepted here
+    # whether or not this command reads them. Honor them as an alternate spelling
+    # of the positional rather than silently answering for the whole fleet.
+    def log_work_item_scope(options)
+      scoped = [options[:repo], options[:target]].compact
+      return options[:work_item] if scoped.empty?
+      raise Error, "give the work item either positionally or with --repo/--target, not both" if options[:work_item]
+      raise Error, "--repo and --target must be given together" unless scoped.length == 2
+
+      "#{options[:repo]}##{options[:target]}"
     end
 
     # Mirrors the precondition resolve_default_local_backend already applies. An
@@ -3426,10 +3441,14 @@ module AgentCoord
       log_joined("-> #{destination}", note)
     end
 
+    def validate_log_format!(options)
+      return if ["", "text", "tsv"].include?(options[:format].to_s)
+
+      raise Error, "--format must be text or tsv"
+    end
+
     def emit_log(rows, options, claim_note = nil)
       format = options[:format].to_s
-      raise Error, "--format must be text or tsv" unless ["", "text", "tsv"].include?(format)
-
       if options[:json]
         events = rows.map { |row| row.slice(*LOG_TSV_FIELDS) }
         @stdout.puts JSON.pretty_generate({ "events" => events, "claim" => claim_note }.compact)
@@ -3569,18 +3588,27 @@ module AgentCoord
     # partial file is ever visible at the mirror's path.
     def log_sync_replace(path, lines)
       temp = "#{path}.#{Process.pid}.tmp"
-      File.open(temp, File::WRONLY | File::CREAT | File::TRUNC, 0o644, encoding: "UTF-8") do |file|
+      mode = File.exist?(path) ? File.stat(path).mode & 0o777 : 0o644
+      File.open(temp, File::WRONLY | File::CREAT | File::TRUNC, mode, encoding: "UTF-8") do |file|
         lines.each { |line| file.puts(line) }
         file.flush
         file.fsync
       end
+      # CREAT applies the umask, so an operator's restrictive mode is only really
+      # preserved by setting it explicitly before the file is published.
+      File.chmod(mode, temp)
       File.rename(temp, path)
     ensure
       FileUtils.rm_f(temp) if temp && File.exist?(temp)
     end
 
+    # Ties break on event id exactly as log_rows does, so a grep of the mirror and
+    # a `log` invocation cannot disagree about what happened last.
     def log_sync_ordered(lines)
-      lines.sort_by.with_index { |line, index| [log_at_key(line.split("\t", 2).first), index] }
+      lines.sort_by.with_index do |line, index|
+        fields = line.split("\t")
+        [log_at_key(fields.first), fields[LOG_TSV_FIELDS.index("event_id")].to_s, index]
+      end
     end
 
     def log_sync_path(options)
@@ -4415,10 +4443,11 @@ module AgentCoord
       section_notes["events"] = "events filtered by scoped token" if filtered_status_list?(store, prefix)
       entries
     rescue OperationalError => e
-      raise unless listing_degradation(e, prefix)
+      degradation = listing_degradation(e, prefix)
+      raise unless degradation
 
       section_notes["events"] =
-        if listing_degradation(e, prefix) == :forbidden
+        if degradation == :forbidden
           "events not readable by scoped token"
         else
           "event state not supported by backend"
