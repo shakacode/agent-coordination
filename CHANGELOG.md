@@ -101,7 +101,9 @@ when releases begin.
   the rename, the way `LocalStore` already does, since a rename is not durable
   until the directory entry reaches stable storage, and the temporary file it
   renames from is created exclusively under an unpredictable name so a symlink
-  planted at that path cannot be followed. Filesystem faults while writing the
+  planted at that path cannot be followed; a mirror that does not yet exist
+  follows the operator's umask, while an existing file's mode is reasserted
+  across replacement. Filesystem faults while writing the
   mirror are reported as operational errors rather than a Ruby backtrace. The
   control scrub covers C1 controls as well as C0 and DEL, since terminals that
   decode C1 act on `U+009B` the way they act on `ESC[`. A positive `--limit` no
@@ -113,10 +115,13 @@ when releases begin.
   all: `claim` permits omitting `--batch-id` and no lifecycle event is emitted
   without a batch, so a work item can carry stale events and a live claim at the
   same time, and answering with the last event would have named the wrong place.
-  A claim whose `expires_at` has passed is labelled `expired` in text and carries
-  `expired`/`expires_at` in JSON rather than being presented as current custody;
-  the fleet holds many claims left active with an expiry long past, and recency
-  alone does not make one live. A synthetic claim is marked the way synthetic
+  A claim whose lease has run out is reported as `lease elapsed <time>` in text
+  and carries `lease_elapsed`/`expires_at` in JSON rather than being presented as
+  current custody; the fleet holds many claims left active with a lease long past,
+  and recency alone does not make one live. The elapsed lease is reported as a
+  fact rather than as expired custody, because whether custody truly ended also
+  depends on the holder's heartbeat, and deciding that here would be the state
+  inference this command exists to avoid. A synthetic claim is marked the way synthetic
   events are.
 - An `AGENT_COORD_LOCAL` environment opt-in that explicitly selects the implicit
   local backend. It accepts `1`, `true`, or `yes` (case-insensitive); any other

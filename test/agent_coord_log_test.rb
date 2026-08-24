@@ -806,8 +806,9 @@ class AgentCoordLogTest < AgentCoordLogTestCase
     stdout = run_log("shakacode/example#10112").stdout
 
     assert_includes stdout, "claim active"
-    assert_includes stdout, "expired"
+    assert_includes stdout, "lease elapsed"
     assert_includes stdout, "2026-07-18T12:42:44Z"
+    refute_includes stdout, "expired", "an elapsed lease is a fact; expired custody is a verdict"
   end
 
   def test_log_does_not_mark_a_live_claim_as_expired
@@ -816,7 +817,7 @@ class AgentCoordLogTest < AgentCoordLogTestCase
                 "host" => "codex", "updated_at" => "2099-01-01T00:00:00Z",
                 "expires_at" => "2099-01-01T04:00:00Z")
 
-    refute_includes run_log("shakacode/example#10112").stdout, "expired"
+    refute_includes run_log("shakacode/example#10112").stdout, "lease elapsed"
   end
 
   def test_log_json_reports_claim_expiry
@@ -827,7 +828,7 @@ class AgentCoordLogTest < AgentCoordLogTestCase
 
     claim = JSON.parse(run_log("shakacode/example#10112", "--json").stdout).fetch("claim")
 
-    assert_equal true, claim.fetch("expired")
+    assert_equal true, claim.fetch("lease_elapsed")
     assert_equal "2026-07-18T12:42:44Z", claim.fetch("expires_at")
   end
 
@@ -1007,6 +1008,16 @@ class AgentCoordLogSyncTest < AgentCoordLogTestCase
     mirror = File.readlines(File.join(@state_root, "log.tsv"), encoding: "UTF-8").map { |l| l.split("\t")[4] }
 
     assert_equal run_log("shakacode/example#5").stdout.lines.map { |l| l.split(/\s+/)[4] }, mirror
+  end
+
+  def test_log_sync_respects_the_umask_for_a_new_mirror
+    write_trace
+    previous = File.umask(0o077)
+    run_log("--sync")
+
+    assert_equal 0o600, File.stat(File.join(@state_root, "log.tsv")).mode & 0o777
+  ensure
+    File.umask(previous)
   end
 
   def test_log_sync_preserves_restrictive_mirror_permissions

@@ -3568,16 +3568,19 @@ module AgentCoord
         "expires_at" => log_present(data["expires_at"])
       }.transform_values { |value| log_scrub(value) }
        .merge(
-         "expired" => log_claim_expired?(data, now),
+         "lease_elapsed" => log_claim_lease_elapsed?(data, now),
          "synthetic" => data["synthetic"] ? true : false,
          "synthetic_kind" => log_scrub(log_present(data["synthetic_kind"]))
        )
     end
 
-    # The fleet carries claims left active with an expiry long past, so a claim
-    # cannot be reported as current custody on recency alone. It is still shown
-    # -- a stale record is worth knowing about -- but labelled for what it is.
-    def log_claim_expired?(data, now)
+    # The fleet carries claims left active with a lease long past, so a claim
+    # cannot be reported as current custody on recency alone. It is still shown --
+    # a stale record is worth knowing about -- and the elapsed lease is reported
+    # as the fact it is. Whether custody truly ended also depends on the holder's
+    # heartbeat; deciding that here would be the state inference this command
+    # exists to avoid, so the reader is given the lease time instead of a verdict.
+    def log_claim_lease_elapsed?(data, now)
       expires = data["expires_at"].to_s
       return false if expires.empty?
 
@@ -3589,7 +3592,7 @@ module AgentCoord
       parts << "[synthetic]" if claim.fetch("synthetic")
       parts.push(claim.fetch("machine"), claim.fetch("host"), claim.fetch("agent_id"),
                  "phase", claim.fetch("phase"), "updated", claim.fetch("updated_at"))
-      parts.push("expired", claim.fetch("expires_at")) if claim.fetch("expired")
+      parts.push("lease elapsed", claim.fetch("expires_at")) if claim.fetch("lease_elapsed")
       parts.join(" ")
     end
 
@@ -3660,7 +3663,8 @@ module AgentCoord
     # partial file is ever visible at the mirror's path.
     def log_sync_replace(path, lines)
       temp = "#{path}.tmp-#{Process.pid}-#{SecureRandom.hex(8)}"
-      mode = File.exist?(path) ? File.stat(path).mode & 0o777 : 0o644
+      inherited = File.exist?(path) ? File.stat(path).mode & 0o777 : nil
+      mode = inherited || 0o666
       # EXCL with an unpredictable name, so a symlink planted at the temporary
       # path cannot be followed and its target overwritten before the rename.
       File.open(temp, File::WRONLY | File::CREAT | File::EXCL, mode, encoding: "UTF-8") do |file|
@@ -3668,9 +3672,9 @@ module AgentCoord
         file.flush
         file.fsync
       end
-      # CREAT applies the umask, so an operator's restrictive mode is only really
-      # preserved by setting it explicitly before the file is published.
-      File.chmod(mode, temp)
+      # CREAT applies the umask, which is what a new mirror should follow. Only an
+      # existing file's mode is reasserted, since preserving that is the point.
+      File.chmod(inherited, temp) if inherited
       File.rename(temp, path)
       AgentCoord.fsync_parent_directory(path)
     ensure
