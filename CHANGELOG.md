@@ -9,6 +9,38 @@ when releases begin.
 
 ### Added
 
+- An `agent-coord log` command that renders the per-work-item custody trail the
+  event store already records, so an operator can ask where the work on one issue
+  or PR stands without reading the full coordination dump (issue #129).
+  `agent-coord log OWNER/REPO#TARGET` prints one line per event, oldest first,
+  with columns for timestamp, machine, host family, work item, event type, phase,
+  agent, and detail. Where a work item sits now is the last line; a move is a
+  change in the machine, host, or agent column; when it was last worked on is the
+  timestamp. The command derives no verdict beyond ordering events by time.
+  Filters: `--since` (a `3d`/`12h`/`30m` duration or an ISO8601 timestamp),
+  `--machine`, `--host`, `--type`, and `--limit`. Output: aligned text by default,
+  `--format tsv` for a tab-separated record that also carries the unnormalized
+  host and the event id, or `--json`. `--sync` appends unseen rows to
+  `<state-root>/log.tsv` so plain `grep` answers the same questions offline, and
+  because it only ever appends, that local trail survives `gc` pruning the hot
+  events behind it. Simulation and smoke records are excluded unless
+  `--include-synthetic` is passed. The many recorded spellings of `host` (`codex`,
+  `codex-subagent`, `codex-desktop`, `codex-collaboration@its`, `claude-code`)
+  normalize onto the `codex`/`claude` families already used by
+  `lib/agent_coordination/host_adapters.rb`, with the raw value preserved in the
+  tsv column beside it. Events recorded before machine stamping report `?` rather
+  than an inferred machine. `log` is read-only: it never writes coordination
+  state, and it is not a split-brain write command, so it keeps the existing
+  advisory that warns when local state is being read instead of the fleet.
+  Work-item, machine, host, and type matching is case-insensitive, because the
+  event store has recorded the same repository under more than one casing and an
+  exact match would split one work item's history into two partial answers. When
+  a work item has no events at all, any claim record for it is reported instead
+  of a bare "no events", so a claim written before lifecycle auto-emit does not
+  read as absent custody. `--sync` reads and writes the mirror as UTF-8 rather
+  than trusting the locale; under a non-UTF-8 locale a row carrying a non-ASCII
+  character would otherwise never match the line regenerated from state and would
+  re-append on every sync.
 - An `AGENT_COORD_LOCAL` environment opt-in that explicitly selects the implicit
   local backend. It accepts `1`, `true`, or `yes` (case-insensitive); any other
   value, including empty and `0`, is not an opt-in. Setting it both satisfies the

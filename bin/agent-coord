@@ -197,6 +197,16 @@ module AgentCoord
     "incomplete" => 1,
     "unknown" => EXIT_OPERATIONAL
   }.freeze
+  # Column contract for `agent-coord log` (issue #129). `detail` carries free
+  # text so it stays last, and `host_raw` preserves the unnormalized host beside
+  # the family the trail groups on.
+  LOG_TSV_FIELDS = %w[
+    at machine host work_item type phase agent_id batch_id detail host_raw event_id
+  ].freeze
+  LOG_TEXT_COLUMNS = %w[at machine host work_item type phase agent_id].freeze
+  LOG_SYNC_FILENAME = "log.tsv"
+  LOG_UNKNOWN = "?"
+  LOG_SINCE_UNITS = { "m" => 60, "h" => 3600, "d" => 86_400, "w" => 604_800 }.freeze
   BATCH_AUDIT_TERMINAL_REQUIRED_FACT_FIELDS = %w[event_id repo target terminal workspace at].freeze
   BATCH_AUDIT_TERMINAL_OPTIONAL_FACT_FIELDS = %w[
     batch_id lane agent_id branch pr_url pr_state evidence_url
@@ -325,6 +335,9 @@ module AgentCoord
         record_event(parse_options(command, @argv))
       when "status"
         render_status(parse_options(command, @argv))
+      when "log"
+        work_item = @argv.shift unless @argv.first.to_s.start_with?("-")
+        render_log(parse_options(command, @argv).merge(work_item: work_item))
       when "batch-audit"
         batch_audit(parse_options(command, @argv))
       when "gc"
@@ -376,6 +389,7 @@ module AgentCoord
           record-event
                      append a lane or batch event into coordination state
           status     render full or scoped coordination state
+          log        trace which machine and host worked an issue or PR, and when
           batch-audit
                      report per-lane lifecycle-event completeness for a batch
           gc         archive and purge terminal coordination state
@@ -430,6 +444,7 @@ module AgentCoord
       add_doctor_options(opts, options, command, parse_state)
       add_gc_options(opts, options, command)
       add_status_options(opts, options, command)
+      add_log_options(opts, options, command)
       add_bootstrap_options(opts, options)
       add_help_option(opts)
       [parser, opts]
@@ -528,7 +543,9 @@ module AgentCoord
     end
 
     def add_event_options(opts, options)
-      opts.on("--type TYPE", "record-event only: event type") { |value| options[:type] = value }
+      opts.on("--type TYPE", "event type to record (record-event) or to filter on (log)") do |value|
+        options[:type] = value
+      end
       opts.on("--lane NAME", "record-event only: batch lane name") { |value| options[:lane] = value }
       opts.on("--message TEXT", "record-event only: event message") { |value| options[:message] = value }
       add_typed_event_options(opts, options)
@@ -600,6 +617,20 @@ module AgentCoord
       opts.on("--include-archived", "include archived records in status output") do
         options[:include_archived] = true
       end
+    end
+
+    def add_log_options(opts, options, command)
+      return unless command == "log"
+
+      opts.on("--since VALUE", "only events at or after a duration or ISO8601 timestamp") do |value|
+        options[:since] = value
+      end
+      opts.on("--machine ID", "only events recorded by one machine") { |value| options[:machine] = value }
+      opts.on("--host FAMILY", "only events recorded by one host family") { |value| options[:host] = value }
+      opts.on("--limit N", Integer, "keep only the N most recent events") { |value| options[:limit] = value }
+      opts.on("--format FORMAT", "log output format: text or tsv") { |value| options[:format] = value }
+      opts.on("--sync", "append unseen events to the local greppable log") { options[:sync] = true }
+      opts.on("--include-synthetic", "include simulation and smoke records") { options[:include_synthetic] = true }
     end
 
     def add_bootstrap_options(opts, options)
@@ -675,7 +706,7 @@ module AgentCoord
     end
 
     def backend_command?(command)
-      %w[claim release heartbeat register-batch record-event status batch-audit gc doctor].include?(command)
+      %w[claim release heartbeat register-batch record-event status log batch-audit gc doctor].include?(command)
     end
 
     def default_options
@@ -945,6 +976,8 @@ module AgentCoord
         opts.separator ""
       when "record-event"
         add_record_event_command_help(opts)
+      when "log"
+        add_log_command_help(opts)
       when "batch-audit"
         add_batch_audit_command_help(opts)
       when "release"
@@ -968,6 +1001,23 @@ module AgentCoord
       opts.separator "    escalation_requested  --from-route ROUTE --to-route ROUTE --evidence TEXT"
       opts.separator "    error                 --severity P0|P1|P2|P3 --category CAT --message TEXT"
       opts.separator "    human_intervention    --kind takeover|supersede|manual-fix|drain"
+      opts.separator ""
+    end
+
+    def add_log_command_help(opts)
+      opts.separator ""
+      opts.separator "Work-item custody trail:"
+      opts.separator "    agent-coord log OWNER/REPO#TARGET   every event for one issue or PR"
+      opts.separator "Columns: at, machine, host, work item, type, phase, agent, detail."
+      opts.separator "Where it is now is the last line; a move is a change of machine, host, or agent."
+      opts.separator "    --since VALUE        3d, 12h, 30m, or an ISO8601 timestamp"
+      opts.separator "    --machine ID         only events from one machine, e.g. m1"
+      opts.separator "    --host FAMILY        only events from codex or claude"
+      opts.separator "    --type TYPE          only one event type, e.g. claim.acquired"
+      opts.separator "    --limit N            keep only the N most recent events"
+      opts.separator "    --format tsv         tab-separated with raw host and event id"
+      opts.separator "    --sync               append unseen events to <state-root>/log.tsv for grep"
+      opts.separator "    --include-synthetic  include simulation and smoke records"
       opts.separator ""
     end
 
@@ -3182,6 +3232,233 @@ module AgentCoord
 
     def build_event_id(now)
       "#{now.utc.strftime('%Y%m%dT%H%M%S.%6NZ')}-#{SecureRandom.hex(4)}"
+    end
+
+    # Operator-facing custody trail (issue #129). The event store already records
+    # which machine and host touched each work item and when; `log` orders those
+    # facts by timestamp and prints them, one line per event. It deliberately
+    # derives no verdict: where a work item is now is simply the last line, and a
+    # move is a change in the machine, host, or agent column. Read-only, and
+    # defaulting to the local status state root like `status`.
+    def render_log(options)
+      log_options = options.dup
+      log_options[:state_root] ||= default_status_state_root unless log_options[:api_url]
+      store = build_store(log_options)
+      rows = log_rows(store, options)
+      return log_sync(log_options, rows) if options[:sync]
+
+      emit_log(rows, options, rows.empty? ? log_claim_note(store, options) : nil)
+      0
+    rescue JSON::ParserError => e
+      raise OperationalError, "state unreadable: #{e.message}"
+    ensure
+      close_store(store)
+    end
+
+    def log_rows(store, options)
+      since = log_since_timestamp(options)
+      rows = store.list_json("events").map { |entry| log_row(entry.data) }
+      rows = rows.reject { |row| row.fetch("synthetic") } unless options[:include_synthetic]
+      rows = log_filtered(rows, options, since).sort_by { |row| [row.fetch("at"), row.fetch("event_id")] }
+      options[:limit] ? rows.last(options[:limit]) : rows
+    end
+
+    def log_filtered(rows, options, since)
+      rows.select do |row|
+        log_matches?(row, "work_item", options[:work_item]) &&
+          log_matches?(row, "machine", options[:machine]) &&
+          log_matches?(row, "host", options[:host]) &&
+          log_matches?(row, "type", options[:type]) &&
+          (since.nil? || row.fetch("at") >= since)
+      end
+    end
+
+    # Repo names are case-insensitive on GitHub, and the event store has recorded
+    # the same repo under more than one casing. Matching case-sensitively would
+    # split one work item's history into two partial answers.
+    def log_matches?(row, field, wanted)
+      wanted.nil? || row.fetch(field).casecmp?(wanted.to_s)
+    end
+
+    def log_row(data)
+      {
+        "at" => log_present(data["at"]),
+        "machine" => log_present(data["machine_id"]),
+        "host" => log_host_family(data["host"]),
+        "work_item" => log_work_item(data),
+        "type" => log_present(data["type"]),
+        "phase" => log_present(data["phase"] || data["new_phase"] || data["terminal"] || data["status"]),
+        "agent_id" => log_present(data["agent_id"]),
+        "batch_id" => log_present(data["batch_id"]),
+        "detail" => log_detail(data),
+        "host_raw" => log_present(data["host"]),
+        "event_id" => log_present(data["event_id"]),
+        "synthetic" => data["synthetic"] ? true : false
+      }
+    end
+
+    # Missing identity is reported as unknown rather than inferred. Roughly a
+    # tenth of the recorded events predate machine stamping, and guessing which
+    # machine ran them would make the trail confidently wrong.
+    def log_present(value)
+      text = value.to_s.strip
+      text.empty? ? LOG_UNKNOWN : text
+    end
+
+    # Hosts are recorded with many spellings (codex, codex-subagent,
+    # codex-desktop, codex-collaboration@its, claude-code). Collapse them onto
+    # the codex/claude families that lib/agent_coordination/host_adapters.rb
+    # already uses, and keep the raw value in the tsv column beside it.
+    def log_host_family(value)
+      text = value.to_s.strip.downcase
+      return LOG_UNKNOWN if text.empty?
+      return "codex" if text.start_with?("codex")
+      return "claude" if text.start_with?("claude")
+
+      text
+    end
+
+    def log_work_item(data)
+      repo = data["repo"].to_s.strip
+      target = data["target"].to_s.strip
+      return "-" if repo.empty? && target.empty?
+
+      "#{repo.empty? ? LOG_UNKNOWN : repo}##{target.empty? ? LOG_UNKNOWN : target}"
+    end
+
+    def log_detail(data)
+      case data["type"]
+      when "phase.changed" then log_phase_detail(data)
+      when "claim.released", "handoff" then log_handoff_detail(data)
+      when "escalation_requested" then "#{log_present(data['from_route'])} -> #{log_present(data['to_route'])}"
+      when "error" then log_joined(data["severity"], data["category"], data["message"])
+      when "help_requested" then log_joined(data["reason"], data["message"])
+      when "human_intervention" then log_joined(data["kind"], data["message"])
+      else data["message"].to_s
+      end.to_s.strip.tr("\t\n", "  ")
+    end
+
+    def log_joined(*values)
+      values.map(&:to_s).reject(&:empty?).join(" ")
+    end
+
+    def log_phase_detail(data)
+      from = data["old_phase"] || data["previous_phase"]
+      to = data["phase"] || data["new_phase"]
+      return data["message"].to_s if from.nil? || to.nil?
+
+      "#{from} -> #{to}"
+    end
+
+    def log_handoff_detail(data)
+      destination = data["handoff_to"]
+      note = data["handoff_note"] || data["message"]
+      return note.to_s if destination.to_s.strip.empty?
+
+      log_joined("-> #{destination}", note)
+    end
+
+    def emit_log(rows, options, claim_note = nil)
+      format = options[:format].to_s
+      raise Error, "--format must be text or tsv" unless ["", "text", "tsv"].include?(format)
+
+      if options[:json]
+        @stdout.puts JSON.pretty_generate({ "events" => rows, "claim" => claim_note }.compact)
+      elsif format == "tsv"
+        rows.each { |row| @stdout.puts log_tsv_line(row) }
+      elsif rows.empty?
+        @stdout.puts "no events for #{options[:work_item] || 'the current filters'}"
+        @stdout.puts claim_note if claim_note
+      else
+        widths = log_text_widths(rows)
+        rows.each { |row| @stdout.puts log_text_line(row, widths) }
+      end
+    end
+
+    # Columns are sized to the rows actually being rendered so a single-work-item
+    # trace stays tight while a mixed feed still lines up. `detail` is free text
+    # and carries no width, which is why it is always last.
+    def log_text_widths(rows)
+      LOG_TEXT_COLUMNS.to_h { |field| [field, rows.map { |row| row.fetch(field).length }.max] }
+    end
+
+    def log_text_line(row, widths)
+      columns = LOG_TEXT_COLUMNS.map { |field| row.fetch(field).ljust(widths.fetch(field)) }
+      columns.push(row.fetch("detail")).join("  ").rstrip
+    end
+
+    # A work item can hold a claim while having no event trail, because claims
+    # predating auto-emit were overwritten in place rather than appended. A bare
+    # "no events" would hide live custody, so the claim record is reported with
+    # its own provenance rather than being folded into the trail as an event.
+    def log_claim_note(store, options)
+      wanted = options[:work_item].to_s
+      return nil if wanted.empty?
+
+      entry = store.list_json("claims").find do |candidate|
+        next false if candidate.data["synthetic"] && !options[:include_synthetic]
+
+        log_work_item(candidate.data).casecmp?(wanted)
+      end
+      entry && log_claim_note_line(entry.data)
+    rescue OperationalError
+      nil
+    end
+
+    def log_claim_note_line(data)
+      row = log_row(data)
+      "claim #{log_present(data['status'])} #{row.fetch('machine')} #{row.fetch('host')} " \
+        "#{row.fetch('agent_id')} phase #{row.fetch('phase')} updated #{log_present(data['updated_at'])}"
+    end
+
+    def log_tsv_line(row)
+      LOG_TSV_FIELDS.map { |field| row.fetch(field) }.join("\t")
+    end
+
+    # `--sync` mirrors the event store into a plain tab-separated file so grep
+    # answers the same questions offline and instantly. It appends only lines the
+    # file has not already seen, which keeps the local trail durable after `gc`
+    # prunes hot events from the backend.
+    def log_sync(options, rows)
+      path = log_sync_path(options)
+      FileUtils.mkdir_p(File.dirname(path))
+      seen = log_sync_seen(path)
+      fresh = rows.map { |row| log_tsv_line(row) }.reject { |line| seen.key?(line) }
+      File.open(path, "a", encoding: "UTF-8") { |file| fresh.each { |line| file.puts(line) } }
+      @stdout.puts "synced #{fresh.length} new #{fresh.length == 1 ? 'event' : 'events'} to #{path}"
+      0
+    end
+
+    # Read the mirror as UTF-8 rather than trusting the locale. Under a non-UTF-8
+    # locale an appended row reads back tagged with the locale encoding, so a row
+    # carrying any non-ASCII character would never match the line regenerated from
+    # state and would re-append on every sync, growing the file without bound.
+    def log_sync_seen(path)
+      return {} unless File.exist?(path)
+
+      File.readlines(path, chomp: true, encoding: "UTF-8").to_h { |line| [line, true] }
+    end
+
+    def log_sync_path(options)
+      File.join(options[:state_root] || default_status_state_root || default_local_state_root, LOG_SYNC_FILENAME)
+    end
+
+    def log_since_timestamp(options)
+      value = options[:since]
+      return nil if value.nil?
+
+      match = /\A(\d+)([mhdw])\z/.match(value.to_s.strip)
+      return log_iso8601(now_utc - (Integer(match[1]) * LOG_SINCE_UNITS.fetch(match[2]))) if match
+
+      begin
+        log_iso8601(Time.iso8601(value.to_s.strip))
+      rescue ArgumentError
+        raise Error, "--since expects a duration like 3d or an ISO8601 timestamp, got #{value.inspect}"
+      end
+    end
+
+    def log_iso8601(time)
+      time.utc.strftime("%Y-%m-%dT%H:%M:%SZ")
     end
 
     def render_status(options)

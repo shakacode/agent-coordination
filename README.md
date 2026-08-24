@@ -397,6 +397,7 @@ bin/agent-coord status [--json] [--include-archived]
 bin/agent-coord status --repo OWNER/REPO --target ISSUE_OR_PR [--json]
 bin/agent-coord status --batch-id ID [--json]
 bin/agent-coord batch-audit --batch-id ID [--json]
+bin/agent-coord log [OWNER/REPO#TARGET] [--since VALUE] [--machine ID] [--host codex|claude] [--type TYPE] [--limit N] [--format text|tsv] [--json] [--sync] [--include-synthetic]
 bin/agent-coord version [--json]
 bin/agent-coord config [show] [--json]
 bin/agent-coord doctor [--json|--stack-json] [--deep] [--doctor-prefix PREFIX] [--state-root PATH|--api-url URL|--backend OWNER/REPO]
@@ -492,6 +493,73 @@ the target uniquely identifies one registered lane. Terminal events
 default `workspace` to `default` and identify the closer in `closed_by` using
 the agent id and `--host` machine value. The public producer/consumer contract
 is [`contracts/state-schema-v2.json`](contracts/state-schema-v2.json).
+
+### Reading the trail: where is the work on an issue or PR?
+
+`agent-coord log` answers the operator questions the lifecycle events above were
+recorded to answer, without reading the full coordination dump:
+
+```bash
+agent-coord log ShakaCode/hichee#9765
+```
+
+```text
+2026-07-24T14:21:00Z  m1   codex   ShakaCode/hichee#9765   claim.acquired  verification-complete  codex-hichee-9765-r3-worker
+2026-07-24T14:41:28Z  m1   codex   ShakaCode/hichee#9765   phase.changed   qa-fix-handoff         codex-hichee-9765-r3-worker  handoff -> qa-fix-handoff
+```
+
+One line per event, oldest first. Nothing is inferred beyond ordering by time:
+
+| Question | Where the answer is |
+| --- | --- |
+| Where is it now? | The last line |
+| Codex or Claude? Which machine? | The host and machine columns |
+| Was it moved? | Any line where the machine, host, or agent column changes, plus `handoff` and `claim.released` rows |
+| When was it last worked on? | The timestamp on the last line |
+
+Filter a broader feed with `--since` (a `3d`/`12h`/`30m` duration or an ISO8601
+timestamp), `--machine`, `--host`, `--type`, and `--limit`. Simulation and smoke
+records are excluded unless `--include-synthetic` is passed.
+
+`--format tsv` emits a tab-separated record that also carries the unnormalized
+host and the event id, and `--json` emits the same fields as structured output.
+`--sync` appends unseen rows to `<state-root>/log.tsv`, so plain `grep` answers
+the same questions offline and instantly:
+
+```bash
+agent-coord log --sync && grep 9765 ~/.local/state/agent-coordination/log.tsv
+```
+
+Because `--sync` only ever appends, that local trail keeps history after `gc`
+prunes the hot events behind it. Match on `#9765` rather than a bare `9765`:
+event ids are hex, so a bare number also matches incidental digits inside them.
+
+Matching is case-insensitive for the work item, machine, host, and type. That
+matters for the work item in particular, because the event store has recorded the
+same repository under more than one casing, and an exact match would return only
+half of a work item's history.
+
+A work item can also hold a claim while having no event trail, since claims
+written before lifecycle auto-emit were overwritten in place rather than
+appended. Rather than reporting a bare "no events" and hiding live custody, `log`
+falls back to the claim record and labels it as one:
+
+```text
+no events for ShakaCode/hichee#issue:10112
+claim active m5 codex codex-whimstay-queue-20260801 phase implementing updated 2026-08-01T01:13:03Z
+```
+
+Two reporting rules worth knowing. Hosts are recorded with many spellings
+(`codex`, `codex-subagent`, `codex-desktop`, `codex-collaboration@its`,
+`claude-code`); `log` normalizes them onto the `codex` and `claude` families used
+by `lib/agent_coordination/host_adapters.rb` and keeps the raw value in the tsv
+column beside it. Events recorded before machine stamping report `?` rather than
+an inferred machine, so an unknown origin stays visibly unknown.
+
+`log` never writes coordination state. It is not a split-brain write command, so
+it keeps the advisory that warns when a consumer env file configures a fleet API
+URL but the CLI is reading local state — the trail you are reading is then the
+local one, not the fleet's.
 
 ### Typed operational-signal events
 
