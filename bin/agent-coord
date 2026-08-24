@@ -3328,7 +3328,7 @@ module AgentCoord
     # the same repo under more than one casing. Matching case-sensitively would
     # split one work item's history into two partial answers.
     def log_matches?(row, field, wanted)
-      return true if wanted.nil?
+      return true if wanted.nil? || wanted.to_s.empty?
 
       # The host column holds a family, so the flag value is normalized the same
       # way -- otherwise --host claude-code matches nothing, even though that is
@@ -3466,7 +3466,7 @@ module AgentCoord
     def emit_log(rows, options, claim = nil)
       format = options[:format].to_s
       if options[:json]
-        events = rows.map { |row| row.slice(*LOG_TSV_FIELDS) }
+        events = rows.map { |row| log_scrub_values(row.slice(*LOG_TSV_FIELDS)) }
         @stdout.puts JSON.pretty_generate({ "events" => events, "claim" => claim }.compact)
       elsif format == "tsv"
         # tsv is a data stream, so notes go to stderr rather than inventing a row
@@ -3626,6 +3626,12 @@ module AgentCoord
       return row unless row.fetch("synthetic")
 
       row.merge("detail" => log_joined("[synthetic]", row.fetch("detail")))
+    end
+
+    # Only strings carry control characters; booleans must survive as booleans so
+    # a --json consumer does not get "true" where it expects true.
+    def log_scrub_values(row)
+      row.transform_values { |value| value.is_a?(String) ? log_scrub(value) : value }
     end
 
     def log_scrub(value)

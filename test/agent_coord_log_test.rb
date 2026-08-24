@@ -889,6 +889,31 @@ class AgentCoordLogTest < AgentCoordLogTestCase
     assert_includes result.stderr, "--json"
     assert_includes result.stderr, "--format"
   end
+
+  # Ruby's JSON encoder escapes C0 but not C1: U+009B is emitted raw as UTF-8, so
+  # `--json` piped to a terminal carried the same hazard the text renderer strips.
+  def test_log_json_output_strips_terminal_controls
+    write_event("b1", "e1", "type" => "progress", "repo" => "shakacode/example", "target" => "5",
+                            "machine_id" => "m5", "host" => "codex",
+                            "message" => "before\u009B2Jafter", "at" => "2026-08-01T00:00:00Z")
+
+    raw = run_log("shakacode/example#5", "--json").stdout
+
+    refute_includes raw, "\u009B"
+    assert_includes JSON.parse(raw).fetch("events").first.fetch("detail"), "before"
+  end
+
+  # `--machine "$UNSET_VAR"` should not silently match nothing; an empty value is
+  # the absence of a filter, not a filter for emptiness.
+  def test_log_treats_an_empty_filter_value_as_unset
+    write_trace
+
+    %w[--machine --host --type].each do |flag|
+      stdout = run_log(flag, "").stdout
+
+      assert_equal 6, stdout.lines.length, "expected #{flag} '' to behave as no filter"
+    end
+  end
 end
 
 # The durable `--sync` mirror: scope, ordering, locking, and replacement.
