@@ -1471,6 +1471,39 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     end
   end
 
+  def test_token_only_config_set_rejects_a_concurrent_saved_url_change
+    with_private_user_config("AGENT_COORD_API_URL=https://old.example\n") do |config_home|
+      env_file = File.join(config_home, "agent-coord", "env")
+      token_runner = AgentCoord::Runner.new([], stdout: StringIO.new, stderr: StringIO.new)
+      token_runner.instance_variable_set(:@stdin, StringIO.new("private-token\n"))
+      url_runner = AgentCoord::Runner.new([], stdout: StringIO.new, stderr: StringIO.new)
+
+      with_process_env(
+        "XDG_CONFIG_HOME" => config_home,
+        "AGENT_COORD_API_URL" => nil,
+        "AGENT_COORD_API_TOKEN" => nil
+      ) do
+        token_runner.send(:load_user_configuration!)
+        token_runner.send(:restore_injected_user_configuration!)
+        url_runner.send(:load_user_configuration!)
+        url_runner.send(:persist_config, api_url_cli: true, api_url: "https://new.example")
+        url_runner.send(:restore_injected_user_configuration!)
+
+        error = assert_raises(AgentCoord::Error) do
+          token_runner.send(:persist_config, token_stdin: true)
+        end
+        assert_includes error.message, "saved API URL changed"
+      ensure
+        [token_runner, url_runner].each { |runner| runner.send(:restore_injected_user_configuration!) }
+      end
+
+      contents = File.read(env_file)
+      assert_includes contents, "AGENT_COORD_API_URL=https://new.example"
+      refute_includes contents, "AGENT_COORD_API_TOKEN"
+      refute_includes contents, "private-token"
+    end
+  end
+
   def test_config_set_rejects_empty_token_stdin_cleanly
     with_private_config_tmpdir("agent-coord-empty-token") do |root|
       config_home = File.join(root, "config")
@@ -1939,6 +1972,20 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     assert_equal "configured-ref", options.fetch(:ref)
   end
 
+  def test_backend_resolution_normalizes_a_blank_ref
+    runner = AgentCoord::Runner.new([])
+    runner.instance_variable_set(
+      :@process_config,
+      AgentCoord::USER_CONFIG_ENV_KEYS.to_h { |key| [key, nil] }
+    )
+    runner.instance_variable_set(:@user_config, { "AGENT_COORD_REF" => "" })
+    options = runner.send(:default_options)
+
+    runner.send(:resolve_backend_env, options)
+
+    assert_equal AgentCoord::DEFAULT_REF, options.fetch(:ref)
+  end
+
   def test_backend_resolution_normalizes_a_blank_backend
     runner = AgentCoord::Runner.new([])
     runner.instance_variable_set(
@@ -1956,11 +2003,11 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
 
   def test_config_read_lock_does_not_retry_an_enoent_from_the_reader
     with_private_user_config("AGENT_COORD_POLICY=required\n") do |config_home|
-      lock_path = File.join(config_home, "agent-coord", ".config.lock")
-      File.write(lock_path, "")
-      File.chmod(0o600, lock_path)
       runner = AgentCoord::Runner.new([])
       runner.instance_variable_set(:@user_config_path, File.join(config_home, "agent-coord", "env"))
+      lock_path = runner.send(:user_config_lock_path, File.join(config_home, "agent-coord"))
+      File.write(lock_path, "")
+      File.chmod(0o600, lock_path)
       calls = 0
 
       assert_raises(Errno::ENOENT) do
@@ -1973,13 +2020,26 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     end
   end
 
+  def test_user_config_lock_identity_uses_the_resolved_destination
+    runner = AgentCoord::Runner.new([])
+    runner.instance_variable_set(:@user_config_path, "/aliased/shared/coord.env")
+    resolved_directory = "/resolved/shared"
+    resolved_destination = File.join(resolved_directory, "coord.env")
+    digest = Digest::SHA256.hexdigest(resolved_destination)[0, 16]
+
+    assert_equal(
+      File.join(resolved_directory, ".agent-coord-config-#{digest}.lock"),
+      runner.send(:user_config_lock_path, resolved_directory)
+    )
+  end
+
   def test_config_read_lock_closes_the_descriptor_when_unlock_fails
     with_private_user_config("AGENT_COORD_POLICY=required\n") do |config_home|
-      lock_path = File.join(config_home, "agent-coord", ".config.lock")
-      File.write(lock_path, "")
-      File.chmod(0o600, lock_path)
       runner = AgentCoord::Runner.new([])
       runner.instance_variable_set(:@user_config_path, File.join(config_home, "agent-coord", "env"))
+      lock_path = runner.send(:user_config_lock_path, File.join(config_home, "agent-coord"))
+      File.write(lock_path, "")
+      File.chmod(0o600, lock_path)
       original_open = File.method(:open)
       opened_lock = nil
 
@@ -2229,13 +2289,17 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
   end
 
   def test_config_set_does_not_harden_an_explicit_nondedicated_parent
+    # rubocop:disable Metrics/BlockLength
     with_private_config_tmpdir("agent-coord-explicit-parent") do |root|
       parent = File.join(root, "shared-parent")
       env_file = File.join(parent, "coord.env")
+      unrelated_lock = File.join(parent, ".config.lock")
       FileUtils.mkdir_p(parent)
       File.chmod(0o755, parent)
       File.write(env_file, "AGENT_COORD_POLICY=required\n")
       File.chmod(0o600, env_file)
+      File.write(unrelated_lock, "unrelated\n")
+      File.chmod(0o644, unrelated_lock)
 
       result = run_command(
         { "AGENT_COORD_ENV_FILE" => env_file },
@@ -2249,10 +2313,16 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
 
       assert_equal 0, result.status.exitstatus, result.stderr
       assert_equal 0o755, File.stat(parent).mode & 0o777
+      assert_equal "unrelated\n", File.read(unrelated_lock)
+      assert_equal 0o644, File.stat(unrelated_lock).mode & 0o777
+      namespaced_locks = Dir.glob(File.join(parent, ".agent-coord-config-*.lock"))
+      assert_equal 1, namespaced_locks.length
+      assert_equal 0o600, File.stat(namespaced_locks.first).mode & 0o777
       contents = File.read(env_file)
       assert_includes contents, "AGENT_COORD_POLICY=required"
       assert_includes contents, "AGENT_COORD_MACHINE_ID=m1"
     end
+    # rubocop:enable Metrics/BlockLength
   end
 
   def test_process_policy_overrides_persisted_policy

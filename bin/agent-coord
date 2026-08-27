@@ -1029,7 +1029,8 @@ module AgentCoord
     def resolve_effective_ref!(options)
       return if options[:ref_cli]
 
-      options[:ref] = effective_config_value("AGENT_COORD_REF") || DEFAULT_REF
+      configured_ref = effective_config_value("AGENT_COORD_REF")
+      options[:ref] = configured_ref.to_s.empty? ? DEFAULT_REF : configured_ref
     end
 
     def resolve_cli_backend?(options, cli_api, env_api)
@@ -2077,6 +2078,7 @@ module AgentCoord
 
       with_config_write_lock do
         current = read_user_env_file(@user_config_path, required: false)
+        validate_token_update_url_stability!(current, updates)
         validate_api_url_token_transition!(current, updates)
         merged = current.merge(updates)
         validate_config_token_binding!(merged)
@@ -2086,6 +2088,14 @@ module AgentCoord
         unless updates.empty?
       @stdout.puts "updated coordination policy in canonical config: #{@user_config_path}" if policy
       0
+    end
+
+    def validate_token_update_url_stability!(current, updates)
+      return unless updates.key?("AGENT_COORD_API_TOKEN")
+      return if updates.key?("AGENT_COORD_API_URL")
+      return if @user_config.fetch("AGENT_COORD_API_URL", nil) == current.fetch("AGENT_COORD_API_URL", nil)
+
+      raise Error, "saved API URL changed while reading --token-stdin; retry with --api-url in the same transaction"
     end
 
     def validate_api_url_token_transition!(current, updates)
@@ -2143,7 +2153,7 @@ module AgentCoord
     def with_optional_config_read_lock
       return yield unless @user_config_path
 
-      lock_path = File.join(File.dirname(@user_config_path), ".config.lock")
+      lock_path = user_config_lock_path(File.dirname(@user_config_path))
       lock = begin
         File.open(lock_path, File::RDONLY | File::NOFOLLOW)
       rescue Errno::ENOENT
@@ -2183,7 +2193,7 @@ module AgentCoord
         create: true,
         private_leaf: dedicated_user_config_parent?
       )
-      lock_path = File.join(directory, ".config.lock")
+      lock_path = user_config_lock_path(directory)
       File.open(lock_path, File::RDWR | File::CREAT | File::NOFOLLOW, 0o600) do |lock|
         validate_private_config_file!(lock, lock_path)
         raise OperationalError, "cannot acquire config write lock: #{lock_path}" unless lock.flock(File::LOCK_EX)
@@ -2196,6 +2206,12 @@ module AgentCoord
       raise OperationalError, "config lock must not be a symlink: #{lock_path}"
     rescue SystemCallError => e
       raise OperationalError, "cannot acquire config write lock #{lock_path}: #{e.message}"
+    end
+
+    def user_config_lock_path(directory)
+      destination = File.join(directory, File.basename(@user_config_path))
+      digest = Digest::SHA256.hexdigest(destination)[0, 16]
+      File.join(directory, ".agent-coord-config-#{digest}.lock")
     end
 
     def validate_secure_directory_chain!(directory, create:, private_leaf: true)

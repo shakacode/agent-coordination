@@ -963,10 +963,14 @@ canonical mode-`0600` file, syncs it, atomically renames it under an exclusive
 config lock, and syncs the containing directory. Endpoint, token, identity, and
 policy therefore become visible together through one rename. Each setter
 re-reads under the lock, so concurrent updates preserve unspecified supported
-keys; readers use a shared lock once the lock file exists.
+keys; readers use a shared lock once the lock file exists. The adjacent lock is
+namespaced to the selected config file, so an explicit file in a shared parent
+does not reuse or modify an unrelated `.config.lock`.
 A saved URL cannot be changed while preserving its old token:
 `--token-stdin` is required in the same transaction. The command never prints
-token values.
+token values. A token-only update also fails if another writer changes the saved
+URL after the command reads it; retry with `--api-url` in the same transaction
+to bind the credential explicitly.
 `config set` rewrites the file as a canonical list of supported
 `AGENT_COORD_*` assignments. Comments, blank lines, and non-`AGENT_COORD_*`
 assignments in that dedicated file are intentionally not preserved. An
