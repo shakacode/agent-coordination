@@ -197,6 +197,26 @@ module AgentCoord
     "incomplete" => 1,
     "unknown" => EXIT_OPERATIONAL
   }.freeze
+  # Column contract for `agent-coord log` (issue #129). `detail` carries free
+  # text so it stays last, and `host_raw` preserves the unnormalized host beside
+  # the family the trail groups on.
+  LOG_TSV_FIELDS = %w[
+    at machine host work_item type phase agent_id batch_id detail host_raw event_id synthetic synthetic_kind
+  ].freeze
+  LOG_TEXT_COLUMNS = %w[at machine host work_item type phase agent_id].freeze
+  # Options that narrow the trail. Suppressing the claim fallback and rejecting a
+  # narrowed --sync are the same question -- "was this answer filtered?" -- so
+  # they read one list and a new filter cannot be added to only one of them.
+  LOG_TRAIL_FILTERS = %i[since machine host type limit].freeze
+  LOG_SYNC_FILENAME = "log.tsv"
+  LOG_SYNC_LOCK_SUFFIX = ".lock"
+  # C0 controls and DEL, minus the tab/CR/LF handled separately above. Text and
+  # tsv go straight to a terminal, where an escape sequence from a recorded
+  # message could clear or rewrite the trail being read. JSON is left alone: its
+  # encoder escapes these already.
+  LOG_CONTROL_CHARACTERS = /[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F\u0080-\u009F]/
+  LOG_UNKNOWN = "?"
+  LOG_SINCE_UNITS = { "m" => 60, "h" => 3600, "d" => 86_400, "w" => 604_800 }.freeze
   BATCH_AUDIT_TERMINAL_REQUIRED_FACT_FIELDS = %w[event_id repo target terminal workspace at].freeze
   BATCH_AUDIT_TERMINAL_OPTIONAL_FACT_FIELDS = %w[
     batch_id lane agent_id branch pr_url pr_state evidence_url
@@ -325,6 +345,8 @@ module AgentCoord
         record_event(parse_options(command, @argv))
       when "status"
         render_status(parse_options(command, @argv))
+      when "log"
+        render_log(parse_options(command, @argv, positional: :work_item))
       when "batch-audit"
         batch_audit(parse_options(command, @argv))
       when "gc"
@@ -376,6 +398,7 @@ module AgentCoord
           record-event
                      append a lane or batch event into coordination state
           status     render full or scoped coordination state
+          log        trace which machine and host worked an issue or PR, and when
           batch-audit
                      report per-lane lifecycle-event completeness for a batch
           gc         archive and purge terminal coordination state
@@ -400,7 +423,7 @@ module AgentCoord
       ["-h", "--help", "help"].include?(value)
     end
 
-    def parse_options(command, argv, parse_state: nil)
+    def parse_options(command, argv, parse_state: nil, positional: nil)
       options = default_options
       parse_state ||= { stack_json: false, backend_selector_count: 0, empty_backend_selector: false }
       parser, = build_option_parser(command, options, parse_state)
@@ -410,6 +433,9 @@ module AgentCoord
       raise Error, "doctor --json and --stack-json are mutually exclusive" if options[:json] && options[:stack_json]
 
       validate_stack_json_backend_selector_count!(options, parse_state)
+      # OptionParser permutes, so the positional can appear before or after the
+      # options; take it only after parsing rather than shifting it up front.
+      options[positional] = argv.shift if positional
       raise Error, "unexpected arguments: #{argv.join(' ')}" unless argv.empty?
 
       finalize_options(command, options)
@@ -430,6 +456,7 @@ module AgentCoord
       add_doctor_options(opts, options, command, parse_state)
       add_gc_options(opts, options, command)
       add_status_options(opts, options, command)
+      add_log_options(opts, options, command)
       add_bootstrap_options(opts, options)
       add_help_option(opts)
       [parser, opts]
@@ -528,7 +555,9 @@ module AgentCoord
     end
 
     def add_event_options(opts, options)
-      opts.on("--type TYPE", "record-event only: event type") { |value| options[:type] = value }
+      opts.on("--type TYPE", "event type to record (record-event) or to filter on (log)") do |value|
+        options[:type] = value
+      end
       opts.on("--lane NAME", "record-event only: batch lane name") { |value| options[:lane] = value }
       opts.on("--message TEXT", "record-event only: event message") { |value| options[:message] = value }
       add_typed_event_options(opts, options)
@@ -600,6 +629,23 @@ module AgentCoord
       opts.on("--include-archived", "include archived records in status output") do
         options[:include_archived] = true
       end
+    end
+
+    def add_log_options(opts, options, command)
+      return unless command == "log"
+
+      opts.on("--since VALUE", "only events at or after a duration or ISO8601 timestamp") do |value|
+        options[:since] = value
+      end
+      opts.on("--machine ID", "only events recorded by one machine") { |value| options[:machine] = value }
+      opts.on("--limit N", Integer, "keep only the N most recent events") do |value|
+        raise Error, "--limit must not be negative, got #{value}" if value.negative?
+
+        options[:limit] = value
+      end
+      opts.on("--format FORMAT", "log output format: text or tsv") { |value| options[:format] = value }
+      opts.on("--sync", "append unseen events to the local greppable log") { options[:sync] = true }
+      opts.on("--include-synthetic", "include simulation and smoke records") { options[:include_synthetic] = true }
     end
 
     def add_bootstrap_options(opts, options)
@@ -675,7 +721,7 @@ module AgentCoord
     end
 
     def backend_command?(command)
-      %w[claim release heartbeat register-batch record-event status batch-audit gc doctor].include?(command)
+      %w[claim release heartbeat register-batch record-event status log batch-audit gc doctor].include?(command)
     end
 
     def default_options
@@ -734,7 +780,7 @@ module AgentCoord
     # write-mode local default. batch-audit reads coordination state exactly like
     # status, so it resolves and warns identically.
     def status_read_command?(command)
-      %w[status doctor batch-audit].include?(command)
+      %w[status log doctor batch-audit].include?(command)
     end
 
     def warn_consumer_split_brain(command, options)
@@ -945,6 +991,8 @@ module AgentCoord
         opts.separator ""
       when "record-event"
         add_record_event_command_help(opts)
+      when "log"
+        add_log_command_help(opts)
       when "batch-audit"
         add_batch_audit_command_help(opts)
       when "release"
@@ -968,6 +1016,23 @@ module AgentCoord
       opts.separator "    escalation_requested  --from-route ROUTE --to-route ROUTE --evidence TEXT"
       opts.separator "    error                 --severity P0|P1|P2|P3 --category CAT --message TEXT"
       opts.separator "    human_intervention    --kind takeover|supersede|manual-fix|drain"
+      opts.separator ""
+    end
+
+    def add_log_command_help(opts)
+      opts.separator ""
+      opts.separator "Work-item custody trail:"
+      opts.separator "    agent-coord log OWNER/REPO#TARGET   every event for one issue or PR"
+      opts.separator "Columns: at, machine, host, work item, type, phase, agent, detail."
+      opts.separator "Where it is now is the last line; a move is a change of machine, host, or agent."
+      opts.separator "    --since VALUE        3d, 12h, 30m, or an ISO8601 timestamp"
+      opts.separator "    --machine ID         only events from one machine, e.g. m1"
+      opts.separator "    --host FAMILY        only events from codex or claude"
+      opts.separator "    --type TYPE          only one event type, e.g. claim.acquired"
+      opts.separator "    --limit N            keep only the N most recent events"
+      opts.separator "    --format tsv         tab-separated with raw host and event id"
+      opts.separator "    --sync               append unseen events to <state-root>/log.tsv for grep"
+      opts.separator "    --include-synthetic  include simulation and smoke records"
       opts.separator ""
     end
 
@@ -3184,6 +3249,504 @@ module AgentCoord
       "#{now.utc.strftime('%Y%m%dT%H%M%S.%6NZ')}-#{SecureRandom.hex(4)}"
     end
 
+    # Operator-facing custody trail (issue #129). The event store already records
+    # which machine and host touched each work item and when; `log` orders those
+    # facts by timestamp and prints them, one line per event. It deliberately
+    # derives no verdict: where a work item is now is simply the last line, and a
+    # move is a change in the machine, host, or agent column. Read-only, and
+    # defaulting to the local status state root like `status`.
+    def render_log(options)
+      options = options.merge(work_item: log_work_item_scope(options))
+      validate_log_format!(options)
+      validate_log_sync_scope!(options)
+
+      log_options = options.dup
+      store = build_store(log_options)
+      rows = log_rows(store, options)
+      if options[:sync]
+        # A partial listing would write a partial mirror that later reads as
+        # complete -- the same hazard the narrowing options are rejected for.
+        raise OperationalError, "refusing to sync an incomplete trail: #{@log_incomplete}" if @log_incomplete
+
+        return log_sync(log_options, rows)
+      end
+
+      emit_log(rows, options, log_claim_for(store, options, rows))
+      0
+    rescue JSON::ParserError, SystemCallError => e
+      raise OperationalError, "state unreadable: #{e.message}"
+    ensure
+      close_store(store)
+    end
+
+    # The mirror is a complete durable copy, not a view. Appending a narrow sync
+    # and then a broader one would place older events after newer ones, so the
+    # file's last line would stop being the current state -- and --limit would
+    # drop the rest for good once gc pruned the events behind it.
+    def validate_log_sync_scope!(options)
+      return unless options[:sync]
+
+      # An empty flag value is unset on the read path, so it is unset here too.
+      # --limit is the exception in the other direction: any limit narrows the
+      # mirror, including zero, whereas only zero narrows an already-empty trail.
+      narrowed = LOG_TRAIL_FILTERS.reject { |field| options[field].to_s.empty? }
+                                  .map { |field| "--#{field.to_s.tr('_', '-')}" }
+      narrowed << "a work item" if options[:work_item]
+      return if narrowed.empty?
+
+      raise Error, "--sync mirrors the complete trail and cannot be narrowed by #{narrowed.join(', ')}"
+    end
+
+    # --repo/--target are registered for every command, so they are accepted here
+    # whether or not this command reads them. Honor them as an alternate spelling
+    # of the positional rather than silently answering for the whole fleet.
+    def log_work_item_scope(options)
+      scoped = [options[:repo], options[:target]].compact
+      return options[:work_item] if scoped.empty?
+      raise Error, "give the work item either positionally or with --repo/--target, not both" if options[:work_item]
+      raise Error, "--repo and --target must be given together" unless scoped.length == 2
+
+      "#{options[:repo]}##{options[:target]}"
+    end
+
+    def log_rows(store, options)
+      since = log_since_timestamp(options)
+      rows = log_event_entries(store).map { |entry| log_row(entry.data) }
+      rows = rows.reject { |row| row.fetch("synthetic") } unless options[:include_synthetic]
+      rows = log_filtered(rows, options, since).sort_by { |row| [row.fetch("at_key"), row.fetch("event_id")] }
+      options[:limit] ? rows.last(options[:limit]) : rows
+    end
+
+    def log_filtered(rows, options, since)
+      rows.select do |row|
+        log_matches?(row, "work_item", options[:work_item]) &&
+          log_matches?(row, "machine", options[:machine]) &&
+          log_matches?(row, "host", options[:host]) &&
+          log_matches?(row, "type", options[:type]) &&
+          (since.nil? || row.fetch("at_key") >= since)
+      end
+    end
+
+    # Repo names are case-insensitive on GitHub, and the event store has recorded
+    # the same repo under more than one casing. Matching case-sensitively would
+    # split one work item's history into two partial answers.
+    def log_matches?(row, field, wanted)
+      return true if wanted.nil? || wanted.to_s.empty?
+
+      # The host column holds a family, so the flag value is normalized the same
+      # way -- otherwise --host claude-code matches nothing, even though that is
+      # the spelling the records actually carry and the flag's help advertises.
+      wanted = log_host_family(wanted) if field == "host"
+      row.fetch(field).casecmp?(wanted.to_s)
+    end
+
+    def log_row(data)
+      {
+        "at" => log_present(data["at"]),
+        "at_key" => log_at_key(data["at"]),
+        "machine" => log_present(data["machine_id"] || log_closed_by(data, "machine")),
+        "host" => log_host_family(data["host"]),
+        "work_item" => log_work_item(data),
+        "type" => log_present(data["type"]),
+        "phase" => log_present(data["phase"] || data["new_phase"] || data["terminal"] || data["status"]),
+        "agent_id" => log_present(data["agent_id"] || log_closed_by(data, "agent_id")),
+        "batch_id" => log_present(data["batch_id"]),
+        "detail" => log_detail(data),
+        "host_raw" => log_present(data["host"]),
+        "event_id" => log_present(data["event_id"]),
+        "synthetic" => data["synthetic"] ? true : false,
+        "synthetic_kind" => log_present(data["synthetic_kind"])
+      }
+    end
+
+    # Degrade the way status does rather than hard-failing: a scoped token or an
+    # older backend must not turn a read-only query into a crash. Every degraded
+    # path says so on stderr, because a silently short trail reads exactly like a
+    # complete one.
+    def log_event_entries(store)
+      log_listing(store, "events") { |reason| "warning: events #{reason}; this trail may be incomplete" }
+    end
+
+    # One listing path for both families: warn on a partial or degraded read,
+    # remember that it happened, and hand back whatever was legible.
+    def log_listing(store, prefix)
+      entries = store.list_json(prefix)
+      log_note_incomplete(prefix, yield("filtered by scoped token")) if filtered_status_list?(store, prefix)
+      entries
+    rescue OperationalError => e
+      degradation = listing_degradation(e, prefix)
+      raise unless degradation
+
+      reason = degradation == :forbidden ? "not readable by scoped token" : "not supported by backend"
+      log_note_incomplete(prefix, yield(reason))
+      []
+    end
+
+    def log_note_incomplete(prefix, message)
+      @log_incomplete = prefix
+      @stderr.puts message
+    end
+
+    # Order on a parsed instant, never on the rendered string. Lexical comparison
+    # breaks once a timestamp carries an offset or fractional seconds, and the
+    # unknown marker "?" sorts after every digit, which would float an undated
+    # legacy event to the end and make it read as the current state. Undated
+    # events precede everything stamped, and no window includes them.
+    def log_at_key(value)
+      Time.iso8601(value.to_s).to_r
+    rescue ArgumentError, TypeError
+      -Float::INFINITY
+    end
+
+    # Missing identity is reported as unknown rather than inferred. Roughly a
+    # tenth of the recorded events predate machine stamping, and guessing which
+    # machine ran them would make the trail confidently wrong.
+    def log_present(value)
+      text = value.to_s.strip
+      text.empty? ? LOG_UNKNOWN : text
+    end
+
+    # Hosts are recorded with many spellings (codex, codex-subagent,
+    # codex-desktop, codex-collaboration@its, claude-code). Collapse them onto
+    # the codex/claude families that lib/agent_coordination/host_adapters.rb
+    # already uses, and keep the raw value in the tsv column beside it.
+    def log_host_family(value)
+      text = value.to_s.strip.downcase
+      return LOG_UNKNOWN if text.empty?
+      return "codex" if text.start_with?("codex")
+      return "claude" if text.start_with?("claude")
+
+      text
+    end
+
+    # A contract-compliant v2 lane_closed supplies its identity only under
+    # closed_by (see contracts/fixtures/v2/lane_closed.json), so the closer would
+    # otherwise render unknown on exactly the event that ends a lane.
+    def log_closed_by(data, field)
+      closed_by = data["closed_by"]
+      closed_by.is_a?(Hash) ? closed_by[field] : nil
+    end
+
+    def log_work_item(data)
+      repo = data["repo"].to_s.strip
+      target = data["target"].to_s.strip
+      return "-" if repo.empty? && target.empty?
+
+      "#{repo.empty? ? LOG_UNKNOWN : repo}##{target.empty? ? LOG_UNKNOWN : target}"
+    end
+
+    def log_detail(data)
+      case data["type"]
+      when "phase.changed" then log_phase_detail(data)
+      when "claim.released", "handoff" then log_handoff_detail(data)
+      when "escalation_requested" then "#{log_present(data['from_route'])} -> #{log_present(data['to_route'])}"
+      when "error" then log_joined(data["severity"], data["category"], data["message"])
+      when "help_requested" then log_joined(data["reason"], data["message"])
+      when "human_intervention" then log_joined(data["kind"], data["message"])
+      else data["message"].to_s
+      end.to_s.strip.tr("\t\n", "  ")
+    end
+
+    def log_joined(*values)
+      values.map(&:to_s).reject(&:empty?).join(" ")
+    end
+
+    def log_phase_detail(data)
+      from = data["old_phase"] || data["previous_phase"]
+      to = data["phase"] || data["new_phase"]
+      return data["message"].to_s if from.nil? || to.nil?
+
+      "#{from} -> #{to}"
+    end
+
+    def log_handoff_detail(data)
+      destination = data["handoff_to"]
+      note = data["handoff_note"] || data["message"]
+      return note.to_s if destination.to_s.strip.empty?
+
+      log_joined("-> #{destination}", note)
+    end
+
+    def validate_log_format!(options)
+      raise Error, "--format must be text or tsv" unless ["", "text", "tsv"].include?(options[:format].to_s)
+      return unless options[:json] && !options[:format].to_s.empty?
+
+      raise Error, "--json and --format are mutually exclusive"
+    end
+
+    def emit_log(rows, options, claim = nil)
+      format = options[:format].to_s
+      if options[:json]
+        events = rows.map { |row| log_scrub_values(row.slice(*LOG_TSV_FIELDS)) }
+        @stdout.puts JSON.pretty_generate({ "events" => events, "claim" => claim }.compact)
+      elsif format == "tsv"
+        # tsv is a data stream, so notes go to stderr rather than inventing a row
+        # a consumer would have to parse around.
+        rows.each { |row| @stdout.puts log_tsv_line(row) }
+        log_report_trailer(options, claim, rows, @stderr)
+      else
+        log_report_rows(rows)
+        log_report_trailer(options, claim, rows, @stdout)
+      end
+    end
+
+    def log_report_rows(rows)
+      return if rows.empty?
+
+      scrubbed = rows.map { |row| log_text_scrubbed(log_text_row(row)) }
+      widths = log_text_widths(scrubbed)
+      scrubbed.each { |row| @stdout.puts log_text_line(row, widths) }
+    end
+
+    # A claim reaches here only when it is the latest thing known about the work
+    # item, so it always belongs last: it is the answer to "where is it now".
+    def log_report_trailer(options, claim, rows, stream)
+      stream.puts "no events for #{options[:work_item] || 'the current filters'}" if rows.empty?
+      stream.puts log_claim_note_line(claim) if claim
+    end
+
+    # Columns are sized to the rows actually being rendered so a single-work-item
+    # trace stays tight while a mixed feed still lines up. `detail` is free text
+    # and carries no width, which is why it is always last.
+    def log_text_scrubbed(row)
+      (LOG_TEXT_COLUMNS + ["detail"]).to_h { |field| [field, log_scrub(row.fetch(field))] }
+    end
+
+    def log_text_widths(rows)
+      LOG_TEXT_COLUMNS.to_h { |field| [field, rows.map { |row| row.fetch(field).length }.max] }
+    end
+
+    def log_text_line(row, widths)
+      columns = LOG_TEXT_COLUMNS.map { |field| row.fetch(field).ljust(widths.fetch(field)) }
+      columns.push(row.fetch("detail")).join("  ").rstrip
+    end
+
+    # A work item can hold a claim while having no event trail, because claims
+    # predating auto-emit were overwritten in place rather than appended. A bare
+    # "no events" would hide live custody, so the claim record is reported with
+    # its own provenance rather than being folded into the trail as an event.
+    # A claim can be newer than the last event, because `claim` permits omitting
+    # --batch-id and no lifecycle event is emitted without a batch. Reporting it
+    # only on an empty trail would answer "where is it now" with the last thing
+    # that happened to leave a trace, while a live claim sat unmentioned.
+    def log_claim_for(store, options, rows)
+      claim = log_claim_lookup(store, options)
+      return nil unless claim
+      return claim if rows.empty?
+
+      claim if log_at_key(claim.fetch("updated_at")) >= rows.last.fetch("at_key")
+    end
+
+    def log_claim_lookup(store, options)
+      wanted = options[:work_item].to_s
+      return nil if wanted.empty?
+      # A filter emptying the trail is a different answer from having no trail;
+      # the claim is not evaluated against those filters, so reporting it here
+      # would answer a question the operator did not ask.
+      return nil if LOG_TRAIL_FILTERS.any? { |field| log_narrowing_option?(options, field) }
+
+      claims = log_listing(store, "claims") do |reason|
+        "warning: claims #{reason}; a claim for this work item would not be reported"
+      end
+      matches = claims.select do |candidate|
+        next false if candidate.data["synthetic"] && !options[:include_synthetic]
+
+        log_claim_work_item(candidate).casecmp?(wanted)
+      end
+      # Casing variants produce two claim paths for one work item; the newest is
+      # the one that describes where the work actually is.
+      newest = matches.max_by { |candidate| log_at_key(candidate.data["updated_at"]) }
+      newest && log_claim_record(newest.data, now_utc)
+    end
+
+    # Built from claim fields directly rather than through log_row, whose "phase"
+    # falls back to "status" for events -- which printed a claim whose status is
+    # active as "phase active".
+    # --limit only narrows a trail that had rows to drop; on an already-empty
+    # trail a positive limit removed nothing, so it must not suppress the claim.
+    def log_narrowing_option?(options, field)
+      return options[field]&.zero? if field == :limit
+
+      # Matches log_matches?: an empty value is the absence of a filter, so the
+      # two halves of one query cannot disagree about whether it was narrowed.
+      !options[field].to_s.empty?
+    end
+
+    # Structured so a --json consumer reads the claim's fields instead of
+    # re-parsing the sentence the text renderer builds from them.
+    # Claims written before repo/target became explicit payload fields carry them
+    # only in the path, which is why claim_status_hash falls back to it. Reading
+    # the payload alone would leave such a claim unmatchable.
+    def log_claim_work_item(entry)
+      data = entry.data
+      repo = data["repo"] || AgentCoord.repo_from_claim_path(entry.path)
+      target = data["target"] || AgentCoord.target_from_path(entry.path)
+      log_work_item("repo" => repo, "target" => target)
+    end
+
+    def log_claim_record(data, now)
+      {
+        "status" => log_present(data["status"]),
+        "machine" => log_present(data["machine_id"]),
+        "host" => log_host_family(data["host"]),
+        "agent_id" => log_present(data["agent_id"]),
+        "phase" => log_phase_or_dash(data["phase"]),
+        "updated_at" => log_present(data["updated_at"]),
+        "expires_at" => log_present(data["expires_at"])
+      }.transform_values { |value| log_scrub(value) }
+       .merge(
+         "lease_elapsed" => log_claim_lease_elapsed?(data, now),
+         "synthetic" => data["synthetic"] ? true : false,
+         "synthetic_kind" => log_scrub(log_present(data["synthetic_kind"]))
+       )
+    end
+
+    # The fleet carries claims left active with a lease long past, so a claim
+    # cannot be reported as current custody on recency alone. It is still shown --
+    # a stale record is worth knowing about -- and the elapsed lease is reported
+    # as the fact it is. Whether custody truly ended also depends on the holder's
+    # heartbeat; deciding that here would be the state inference this command
+    # exists to avoid, so the reader is given the lease time instead of a verdict.
+    def log_claim_lease_elapsed?(data, now)
+      expires = data["expires_at"].to_s
+      return false if expires.empty?
+
+      log_at_key(expires) < now.to_r
+    end
+
+    def log_claim_note_line(claim)
+      parts = ["claim", claim.fetch("status")]
+      parts << "[synthetic]" if claim.fetch("synthetic")
+      parts.push(claim.fetch("machine"), claim.fetch("host"), claim.fetch("agent_id"),
+                 "phase", claim.fetch("phase"), "updated", claim.fetch("updated_at"))
+      parts.push("lease elapsed", claim.fetch("expires_at")) if claim.fetch("lease_elapsed")
+      parts.join(" ")
+    end
+
+    def log_phase_or_dash(value)
+      value.to_s.strip.empty? ? "-" : value.to_s.strip
+    end
+
+    # Any field can carry operator- or agent-supplied text, so all of them are
+    # scrubbed. An embedded tab would invent a column and an embedded newline
+    # would split one event across two rows, silently corrupting the mirror.
+    def log_tsv_line(row)
+      LOG_TSV_FIELDS.map { |field| log_scrub(row.fetch(field)) }.join("\t")
+    end
+
+    # Text output stays compact, so provenance rides in the detail column there.
+    def log_text_row(row)
+      return row unless row.fetch("synthetic")
+
+      row.merge("detail" => log_joined("[synthetic]", row.fetch("detail")))
+    end
+
+    # Only strings carry control characters; booleans must survive as booleans so
+    # a --json consumer does not get "true" where it expects true.
+    def log_scrub_values(row)
+      row.transform_values { |value| value.is_a?(String) ? log_scrub(value) : value }
+    end
+
+    def log_scrub(value)
+      value.to_s.gsub(/[\t\r\n]+/, " ").gsub(LOG_CONTROL_CHARACTERS, "")
+    end
+
+    # `--sync` mirrors the event store into a plain tab-separated file so grep
+    # answers the same questions offline and instantly. It appends only lines the
+    # file has not already seen, which keeps the local trail durable after `gc`
+    # prunes hot events from the backend.
+    def log_sync(options, rows)
+      path = log_sync_path(options)
+      log_sync_write(path, rows, options)
+    rescue SystemCallError => e
+      raise OperationalError, "log mirror unwritable: #{e.message}"
+    end
+
+    def log_sync_write(path, rows, options)
+      FileUtils.mkdir_p(File.dirname(path))
+      fresh = log_sync_append(path, rows.map { |row| log_tsv_line(row) })
+      if options[:json]
+        @stdout.puts JSON.pretty_generate({ "synced" => fresh.length, "path" => path })
+      else
+        @stdout.puts "synced #{fresh.length} new #{fresh.length == 1 ? 'event' : 'events'} to #{path}"
+      end
+      0
+    end
+
+    # Dedup and append under one exclusive lock. Two writers that each read before
+    # either appended would both decide the same rows were new and write them
+    # twice, and an append-only mirror has no later pass to clean that up.
+    # A later sync can still discover an older event -- a concurrent writer, or a
+    # backfill -- so the merged set is rewritten in timestamp order rather than
+    # appended blindly. Nothing already recorded is ever dropped, and the rewrite
+    # happens under the same exclusive lock as the read.
+    def log_sync_append(path, lines)
+      File.open("#{path}#{LOG_SYNC_LOCK_SUFFIX}", File::RDWR | File::CREAT, 0o600) do |lock|
+        lock.flock(File::LOCK_EX)
+        existing = log_sync_existing(path)
+        seen = existing.to_h { |line| [line, true] }
+        fresh = lines.reject { |line| seen.key?(line) }
+        log_sync_replace(path, log_sync_ordered(existing + fresh)) unless fresh.empty?
+        fresh
+      end
+    end
+
+    def log_sync_existing(path)
+      return [] unless File.exist?(path)
+
+      File.readlines(path, chomp: true, encoding: "UTF-8").reject(&:empty?)
+    end
+
+    # Written beside the mirror so the rename stays on one filesystem, flushed to
+    # disk before it is published, and moved into place in a single step. No
+    # partial file is ever visible at the mirror's path.
+    def log_sync_replace(path, lines)
+      temp = "#{path}.tmp-#{Process.pid}-#{SecureRandom.hex(8)}"
+      inherited = File.exist?(path) ? File.stat(path).mode & 0o777 : nil
+      mode = inherited || 0o666
+      # EXCL with an unpredictable name, so a symlink planted at the temporary
+      # path cannot be followed and its target overwritten before the rename.
+      File.open(temp, File::WRONLY | File::CREAT | File::EXCL, mode, encoding: "UTF-8") do |file|
+        lines.each { |line| file.puts(line) }
+        file.flush
+        file.fsync
+      end
+      # CREAT applies the umask, which is what a new mirror should follow. Only an
+      # existing file's mode is reasserted, since preserving that is the point.
+      File.chmod(inherited, temp) if inherited
+      File.rename(temp, path)
+      AgentCoord.fsync_parent_directory(path)
+    ensure
+      FileUtils.rm_f(temp) if temp && File.exist?(temp)
+    end
+
+    # Ties break on event id exactly as log_rows does, so a grep of the mirror and
+    # a `log` invocation cannot disagree about what happened last.
+    def log_sync_ordered(lines)
+      lines.sort_by.with_index do |line, index|
+        fields = line.split("\t")
+        [log_at_key(fields.first), fields[LOG_TSV_FIELDS.index("event_id")].to_s, index]
+      end
+    end
+
+    def log_sync_path(options)
+      File.join(options[:state_root] || default_status_state_root || default_local_state_root, LOG_SYNC_FILENAME)
+    end
+
+    def log_since_timestamp(options)
+      value = options[:since]
+      return nil if value.to_s.strip.empty?
+
+      match = /\A(\d+)([mhdw])\z/.match(value.to_s.strip)
+      return (now_utc - (Integer(match[1], 10) * LOG_SINCE_UNITS.fetch(match[2]))).to_r if match
+
+      begin
+        Time.iso8601(value.to_s.strip).to_r
+      rescue ArgumentError
+        raise Error, "--since expects a duration like 3d or an ISO8601 timestamp, got #{value.inspect}"
+      end
+    end
+
     def render_status(options)
       status_options = options.dup
       status_options[:state_root] ||= default_status_state_root unless status_options[:api_url]
@@ -3987,7 +4550,9 @@ module AgentCoord
       section_notes[prefix] = "#{prefix} filtered by scoped token" if filtered_status_list?(store, prefix)
       entries
     rescue OperationalError => e
-      raise unless scoped_http_forbidden_listing?(e, prefix)
+      # Deliberately narrower than status_event_entries: these sections have no
+      # "unsupported by backend" note, so an old backend must still surface.
+      raise unless listing_degradation(e, prefix) == :forbidden
 
       section_notes[prefix] = "#{prefix} not readable by scoped token"
       []
@@ -3998,15 +4563,26 @@ module AgentCoord
       section_notes["events"] = "events filtered by scoped token" if filtered_status_list?(store, prefix)
       entries
     rescue OperationalError => e
-      raise unless unsupported_resource_listing?(e) || scoped_http_forbidden_listing?(e, prefix)
+      degradation = listing_degradation(e, prefix)
+      raise unless degradation
 
       section_notes["events"] =
-        if scoped_http_forbidden_listing?(e, prefix)
+        if degradation == :forbidden
           "events not readable by scoped token"
         else
           "event state not supported by backend"
         end
       []
+    end
+
+    # Classifies the two listing failures a read-only command may degrade through
+    # rather than crash: a scoped token forbidden from the prefix, and a backend
+    # too old to serve it. Anything else is a real failure and must propagate.
+    def listing_degradation(error, prefix)
+      return :forbidden if scoped_http_forbidden_listing?(error, prefix)
+      return :unsupported if unsupported_resource_listing?(error)
+
+      nil
     end
 
     def filtered_status_list?(store, prefix)
@@ -4738,16 +5314,15 @@ module AgentCoord
       FileUtils.rm_f(temporary) if temporary
     end
 
+    # Passes its own fsync_directory so the shared rule applies while the actual
+    # syscall stays overridable: the suite subclasses LocalStore and replaces
+    # that method to observe the fsync and to inject failures.
     def fsync_parent_directory(file)
-      return if Gem.win_platform?
-
-      fsync_directory(File.dirname(file))
-    rescue Errno::EINVAL, Errno::ENOTSUP
-      nil
+      AgentCoord.fsync_parent_directory(file) { |directory| fsync_directory(directory) }
     end
 
     def fsync_directory(directory)
-      File.open(directory, File::RDONLY, &:fsync)
+      AgentCoord.fsync_directory(directory)
     end
 
     def expanded_path(path)
@@ -5254,6 +5829,21 @@ module AgentCoord
     return if segment.to_s.match?(/\A[A-Za-z0-9_:-]+(?:\.[A-Za-z0-9_:-]+)*\z/)
 
     raise PathValidationError, "invalid #{field}: #{segment}"
+  end
+
+  # Renaming a file into place is not durable until the directory entry itself
+  # reaches stable storage, so every atomic replacement in this file follows its
+  # rename with this.
+  def self.fsync_parent_directory(file, &fsync)
+    return if Gem.win_platform?
+
+    (fsync || method(:fsync_directory)).call(File.dirname(file))
+  rescue Errno::EINVAL, Errno::ENOTSUP
+    nil
+  end
+
+  def self.fsync_directory(directory)
+    File.open(directory, File::RDONLY, &:fsync)
   end
 
   def self.claim_path(repo, target)

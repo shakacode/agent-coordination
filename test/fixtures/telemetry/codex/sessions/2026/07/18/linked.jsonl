@@ -1,0 +1,4 @@
+{"type":"session_meta","payload":{"id":"codex-fixture-session","timestamp":"2026-07-18T01:00:00Z","cwd":"/redacted/worktrees/ac-d-78-harvester","pricing_profile":"standard"}}
+{"type":"turn_context","payload":{"model":"gpt-5.6-sol","effort":"xhigh"}}
+{"type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":1000,"cached_input_tokens":200,"cache_write_input_tokens":100,"output_tokens":50,"reasoning_output_tokens":10,"total_tokens":1360},"total_token_usage":{"input_tokens":9000000,"output_tokens":9000000}}}}
+{"type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":100,"cached_input":20,"cache_write_input":10,"output_tokens":5,"reasoning_output":1,"total_tokens":136},"total_token_usage":{"input_tokens":9999999,"output_tokens":9999999}}}}

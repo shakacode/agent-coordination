@@ -3,10 +3,11 @@ base_branch: main
 follow_up_prefix: 'Follow-up:'
 review_gate: n/a
 approval_exempt: n/a
-coordination_backend: n/a
+coordination_backend: agent-coord # claims/heartbeats namespaced by full repo name
 changelog: n/a
 benchmark_labels: n/a
 merge_ledger: n/a
 ci_parity_environment: n/a
 hosted_ci_trigger: n/a
 ci_change_detector: n/a
+repo_prefix: AC

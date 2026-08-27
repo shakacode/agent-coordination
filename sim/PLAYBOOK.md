@@ -11,6 +11,9 @@ sim repos seeded (`sim/bin/seed <repo> --reset`).
 3. Same on beta with `claude`.
 4. Score: `sim/bin/verify-batch --repo-slug shakacode/agent-coord-sim-alpha --live` (and beta).
    Expect `SCORE 3/3` on both.
+5. To include an already-harvested aggregate ledger scorecard, append
+   `--telemetry-ledger <sqlite-path> --batch-id <batch-id>`. This reads only
+   scorecard JSON; it does not read or print host transcripts.
 
 ## Scenario B -- contention: both hosts, same issue
 
