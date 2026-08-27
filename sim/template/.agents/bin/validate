@@ -21,7 +21,7 @@ if [ -n "$base_ref" ]; then
     printf 'Could not resolve simulation merge base.\n' >&2
     exit 1
   }
-  changed="$(git diff --name-only "$merge_base")"
+  changed="$(git diff --no-renames --name-only "$merge_base")"
   changed_count="$(printf '%s\n' "$changed" | sed '/^$/d' | wc -l | tr -d ' ')"
   tests="$(printf '%s\n' "$changed" |
     sed -n 's#^lib/\(task_.*\)\.rb$#test/\1_test.rb#p' |

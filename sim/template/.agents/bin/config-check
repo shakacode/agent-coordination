@@ -24,7 +24,7 @@ allowed_paths = %w[
 task_path = %r{\Alib/task_[[:alnum:]_]+\.rb\z}
 # Regenerate after a reviewed validator update with:
 # ruby -rdigest -e 'puts Digest::SHA256.file(".agents/bin/validate").hexdigest'
-expected_validator_sha256 = "c94cf49bae080835f0b8742187827bb4eb1c4e0a3a9a67c5bfc8c802205bf190"
+expected_validator_sha256 = "6d24f02017401c12564808201a78891a21f548c0f1c0d52226960e6fa7d0848e"
 
 base_commit, base_status = Open3.capture2("git", "-C", root, "rev-parse", "--verify", "#{base_ref}^{commit}")
 abort "Could not resolve config-check base ref." unless base_status.success?
@@ -32,7 +32,7 @@ merge_base, merge_base_status = Open3.capture2("git", "-C", root, "merge-base", 
 abort "Could not resolve config-check merge base." unless merge_base_status.success?
 
 changed_output, changed_status = Open3.capture2(
-  "git", "-C", root, "diff", "--name-only", "-z", merge_base.strip
+  "git", "-C", root, "diff", "--no-renames", "--name-only", "-z", merge_base.strip
 )
 abort "Could not inspect simulation changes." unless changed_status.success?
 

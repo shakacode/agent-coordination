@@ -133,6 +133,26 @@ class SimulationTemplateTest < Minitest::Test
     assert_includes err, "Unexpected guarded paths: .github/workflows/ci.yml"
   end
 
+  def test_trusted_seam_guard_rejects_protected_workflow_renamed_as_task
+    git("mv", ".github/workflows/ci.yml", "lib/task_workflow.rb")
+    git("commit", "-qm", "hide protected workflow as task")
+
+    _out, err, status = seam_guard("HEAD^", "HEAD")
+
+    refute status.success?
+    assert_includes err, ".github/workflows/ci.yml"
+  end
+
+  def test_config_check_rejects_protected_workflow_renamed_as_task
+    git("mv", ".github/workflows/ci.yml", "lib/task_workflow.rb")
+    git("commit", "-qm", "hide protected workflow as task")
+
+    _out, err, status = config_check("HEAD^")
+
+    refute status.success?
+    assert_includes err, ".github/workflows/ci.yml"
+  end
+
   def test_seam_guard_workflow_scopes_private_repository_auth_to_fetch
     workflow = File.read(File.join(TEMPLATE, ".github/workflows/seam-guard.yml"))
 

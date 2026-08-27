@@ -31,7 +31,7 @@ abort "Could not resolve the simulation merge base." if merge_base.empty?
 merge_tree = git_capture(root, "merge-tree", "--write-tree", base_commit, head_commit).lines.first&.strip
 abort "Could not resolve the simulation merge tree." if merge_tree.nil? || merge_tree.empty?
 
-changed_output = git_capture(root, "diff", "--name-only", "-z", merge_base, head_commit)
+changed_output = git_capture(root, "diff", "--no-renames", "--name-only", "-z", merge_base, head_commit)
 changed_paths = changed_output.split("\0")
 
 task_path = %r{\Alib/task_[[:alnum:]_]+\.rb\z}
