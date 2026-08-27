@@ -74,6 +74,18 @@ class HttpStoreTestCase < Minitest::Test
 end
 
 class HttpStoreReadTest < HttpStoreTestCase
+  def test_constructor_rejects_query_and_fragment_components_in_base_url
+    [
+      "https://agent-coord.example?tenant=one",
+      "https://agent-coord.example#section"
+    ].each do |base_url|
+      error = assert_raises(AgentCoord::OperationalError) do
+        AgentCoord::HttpStore.new(base_url:, token: "tok")
+      end
+      assert_includes error.message, "query or fragment"
+    end
+  end
+
   def test_reuses_http_session_across_requests
     starts = 0
     original_start = Net::HTTP.method(:start)

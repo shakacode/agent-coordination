@@ -1610,6 +1610,30 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     end
   end
 
+  def test_config_set_rejects_api_urls_with_query_or_fragment_components
+    {
+      "https://coordination.example?tenant=one" => "query",
+      "https://coordination.example#section" => "fragment"
+    }.each do |api_url, component|
+      with_private_config_tmpdir("agent-coord-ambiguous-api-url") do |root|
+        config_home = File.join(root, "config")
+        result = run_command(
+          { "XDG_CONFIG_HOME" => config_home },
+          RbConfig.ruby,
+          BIN,
+          "config",
+          "set",
+          "--api-url",
+          api_url
+        )
+
+        assert_equal 1, result.status.exitstatus
+        assert_includes result.stderr, component
+        refute_path_exists File.join(config_home, "agent-coord", "env")
+      end
+    end
+  end
+
   def test_config_set_accepts_loopback_plain_http_url
     with_private_config_tmpdir("agent-coord-loopback-api-url") do |root|
       config_home = File.join(root, "config")
@@ -1852,6 +1876,63 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     ensure
       Dir.define_singleton_method(:mkdir, original_mkdir) if original_mkdir
     end
+  end
+
+  def test_root_owned_config_parent_symlink_trust_does_not_depend_on_symlink_mode
+    runner = AgentCoord::Runner.new([])
+    root_owned_symlink = Struct.new(:uid, :mode).new(0, 0o120777)
+    user_owned_symlink = Struct.new(:uid, :mode).new(12_345, 0o120700)
+
+    assert runner.send(:trusted_config_parent_symlink?, root_owned_symlink)
+    refute runner.send(:trusted_config_parent_symlink?, user_owned_symlink)
+  end
+
+  def test_resolved_config_parent_chain_rejects_an_unsafe_ancestor
+    with_private_config_tmpdir("agent-coord-resolved-parent") do |root|
+      unsafe = File.join(root, "unsafe")
+      target = File.join(unsafe, "target")
+      FileUtils.mkdir_p(target)
+      File.chmod(0o770, unsafe)
+      File.chmod(0o700, target)
+      runner = AgentCoord::Runner.new([])
+
+      error = assert_raises(AgentCoord::OperationalError) do
+        runner.send(:validate_resolved_directory_chain!, target, leaf: true)
+      end
+      assert_includes error.message, "config parent permissions are unsafe: #{unsafe}"
+    end
+  end
+
+  def test_backend_resolution_applies_saved_ref_without_a_backend_selector
+    runner = AgentCoord::Runner.new([])
+    runner.instance_variable_set(
+      :@process_config,
+      AgentCoord::USER_CONFIG_ENV_KEYS.to_h { |key| [key, nil] }
+    )
+    runner.instance_variable_set(
+      :@user_config,
+      { "AGENT_COORD_REF" => "configured-ref" }
+    )
+    options = runner.send(:default_options)
+
+    runner.send(:resolve_backend_env, options)
+
+    assert_equal "configured-ref", options.fetch(:ref)
+  end
+
+  def test_backend_resolution_normalizes_a_blank_backend
+    runner = AgentCoord::Runner.new([])
+    runner.instance_variable_set(
+      :@process_config,
+      AgentCoord::USER_CONFIG_ENV_KEYS.to_h { |key| [key, nil] }
+    )
+    runner.instance_variable_set(:@user_config, { "AGENT_COORD_BACKEND" => "" })
+    options = runner.send(:default_options)
+
+    runner.send(:resolve_backend_env, options)
+
+    assert_nil options.fetch(:backend)
+    refute options.key?(:backend_source)
   end
 
   def test_config_read_lock_does_not_retry_an_enoent_from_the_reader
@@ -2534,26 +2615,28 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     fake_bin = Dir.mktmpdir("agent-coord-gh")
     write_fake_gh(fake_bin)
 
-    with_agent_coord_without_source_state do |bin|
-      result = run_command(
-        {
-          "AGENT_COORD_STATE_ROOT" => nil,
-          "AGENT_COORD_STATUS_STATE_ROOT" => nil,
-          "PATH" => [fake_bin, File.dirname(RbConfig.ruby)].join(File::PATH_SEPARATOR)
-        },
-        RbConfig.ruby,
-        bin,
-        "doctor",
-        "--backend",
-        "shakacode/agent-coordination-state",
-        "--ref",
-        "missing-ref"
-      )
+    with_private_config_tmpdir("agent-coord-status-root") do |status_root|
+      with_agent_coord_without_source_state do |bin|
+        result = run_command(
+          {
+            "AGENT_COORD_STATE_ROOT" => nil,
+            "AGENT_COORD_STATUS_STATE_ROOT" => status_root,
+            "PATH" => [fake_bin, File.dirname(RbConfig.ruby)].join(File::PATH_SEPARATOR)
+          },
+          RbConfig.ruby,
+          bin,
+          "doctor",
+          "--backend",
+          "shakacode/agent-coordination-state",
+          "--ref",
+          "missing-ref"
+        )
 
-      assert_equal 2, result.status.exitstatus
-      assert_includes result.stderr, "backend ref"
-      assert_includes result.stderr, "missing-ref"
-      refute_includes result.stdout, "status: ok"
+        assert_equal 2, result.status.exitstatus
+        assert_includes result.stderr, "backend ref"
+        assert_includes result.stderr, "missing-ref"
+        refute_includes result.stdout, "status: ok"
+      end
     end
   ensure
     FileUtils.remove_entry(fake_bin) if fake_bin && Dir.exist?(fake_bin)
@@ -7792,6 +7875,18 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     end
 
     private
+
+    # These fixtures intentionally run Runner instances concurrently in one
+    # process. Keep their injected stores independent of Runner#run's temporary,
+    # process-wide user-configuration ENV projection.
+    def load_user_configuration!
+      @process_config = AgentCoord::USER_CONFIG_ENV_KEYS.to_h { |key| [key, nil] }
+      @user_config_path = nil
+      @policy_file_path = nil
+      @user_config = {}
+      @policy_file_value = nil
+      @injected_user_config_keys = []
+    end
 
     def build_store(_options)
       @injected_store

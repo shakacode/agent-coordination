@@ -968,6 +968,10 @@ token values.
 `AGENT_COORD_*` assignments. Comments, blank lines, and non-`AGENT_COORD_*`
 assignments in that dedicated file are intentionally not preserved. An
 unrecognized `AGENT_COORD_*` key fails closed instead of being dropped.
+If the existing file fails ownership, permission, encoding, or syntax
+validation, `config set` refuses to overwrite it. Repair or remove that file
+out of band, then rerun `config set`; the command will not discard an unreadable
+configuration while preserving unspecified keys.
 A process `AGENT_COORD_POLICY` overrides the persisted policy for one
 invocation. The old sibling `agent-coord/policy` file remains a read-only
 legacy fallback only when neither the process nor canonical env file supplies a
