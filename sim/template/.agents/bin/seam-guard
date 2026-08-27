@@ -80,8 +80,12 @@ required_readme_rows = [
   "| `config-check` | Validate allowed config-only paths, canonical seam content, policy YAML, and script syntax. |",
   "| `seam-guard` | Base-trusted pull-request guard; rejects changes to CI and validator entrypoints before head code runs. |"
 ]
-required_readme_text = "`Seam Guard / guard` as a required status check"
-unless required_readme_rows.all? { |row| readme.include?(row) } && readme.include?(required_readme_text)
+required_readme_texts = [
+  "`Seam Guard / guard` as a required status check",
+  "strict up-to-date branch requirement"
+]
+unless required_readme_rows.all? { |row| readme.include?(row) } &&
+       required_readme_texts.all? { |text| readme.include?(text) }
   abort "Simulation command README does not document guarded validation."
 end
 

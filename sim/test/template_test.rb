@@ -45,6 +45,14 @@ class SimulationTemplateTest < Minitest::Test
     readme = File.read(File.join(TEMPLATE, ".agents/bin/README.md"))
 
     assert_includes readme, "`Seam Guard / guard` as a required status check"
+    assert_includes readme, "strict up-to-date branch requirement"
+  end
+
+  def test_seam_guard_workflow_revalidates_retargeted_prs_with_the_documented_check_name
+    workflow = File.read(File.join(TEMPLATE, ".github/workflows/seam-guard.yml"))
+
+    assert_includes workflow, "types: [opened, synchronize, reopened, edited]"
+    assert_includes workflow, "name: Seam Guard / guard"
   end
 
   def test_policy_allowlists_only_the_template_workflow_actions

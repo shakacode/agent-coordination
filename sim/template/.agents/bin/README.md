@@ -16,4 +16,6 @@ guard runs before accepting ordinary task or config PRs again. Hash pins in
 `ci` and `config-check` are local drift diagnostics, not the root of trust.
 
 Generated repositories must configure `Seam Guard / guard` as a required status check
-on every protected target branch before ordinary PRs rely on this boundary.
+on every protected target branch before ordinary PRs rely on this boundary. They
+must also configure a strict up-to-date branch requirement so a PR cannot merge
+after the target branch moves beyond the base commit checked by the guard.
