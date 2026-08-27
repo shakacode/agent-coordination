@@ -24,7 +24,7 @@ allowed_paths = %w[
 task_path = %r{\Alib/task_[[:alnum:]_]+\.rb\z}
 # Regenerate after a reviewed validator update with:
 # ruby -rdigest -e 'puts Digest::SHA256.file(".agents/bin/validate").hexdigest'
-expected_validator_sha256 = "fce620ecaba324e4b00df7bcfd1c5ae8c233195409b1da29e721e6b503876ce4"
+expected_validator_sha256 = "c94cf49bae080835f0b8742187827bb4eb1c4e0a3a9a67c5bfc8c802205bf190"
 
 base_commit, base_status = Open3.capture2("git", "-C", root, "rev-parse", "--verify", "#{base_ref}^{commit}")
 abort "Could not resolve config-check base ref." unless base_status.success?
@@ -93,6 +93,9 @@ required_readme_rows = [
   "| `config-check` | Validate allowed config-only paths, canonical seam content, policy YAML, and script syntax. |",
   "| `seam-guard` | Base-trusted pull-request guard; rejects changes to CI and validator entrypoints before head code runs. |"
 ]
-abort "Simulation command README does not document config-only validation." unless required_readme_rows.all? { |row| readme.include?(row) }
+required_readme_text = "`Seam Guard / guard` as a required status check"
+unless required_readme_rows.all? { |row| readme.include?(row) } && readme.include?(required_readme_text)
+  abort "Simulation command README does not document config-only validation."
+end
 
 puts changed_paths.empty? ? "NO_CHANGES" : "CONFIG_ONLY"

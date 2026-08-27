@@ -3,6 +3,7 @@ set -euo pipefail
 root="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
 cd "$root"
 
+# Keep this base-ref resolution aligned with .agents/bin/ci.
 base_ref="${AGENT_SIM_BASE_REF:-}"
 if [ -z "$base_ref" ] && [ -n "${GITHUB_BASE_REF:-}" ]; then
   git fetch --quiet origin "$GITHUB_BASE_REF"

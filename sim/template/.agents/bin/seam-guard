@@ -17,8 +17,8 @@ def git_capture(root, *args)
   output
 end
 
-def head_file(root, head_commit, path)
-  output, status = Open3.capture2("git", "-C", root, "show", "#{head_commit}:#{path}")
+def tree_file(root, tree, path)
+  output, status = Open3.capture2("git", "-C", root, "show", "#{tree}:#{path}")
   abort "Missing required simulation file: #{path}" unless status.success?
 
   output
@@ -28,6 +28,8 @@ base_commit = git_capture(root, "rev-parse", "--verify", "#{base_ref}^{commit}")
 head_commit = git_capture(root, "rev-parse", "--verify", "#{head_ref}^{commit}").strip
 merge_base = git_capture(root, "merge-base", base_commit, head_commit).strip
 abort "Could not resolve the simulation merge base." if merge_base.empty?
+merge_tree = git_capture(root, "merge-tree", "--write-tree", base_commit, head_commit).lines.first&.strip
+abort "Could not resolve the simulation merge tree." if merge_tree.nil? || merge_tree.empty?
 
 changed_output = git_capture(root, "diff", "--name-only", "-z", merge_base, head_commit)
 changed_paths = changed_output.split("\0")
@@ -54,7 +56,7 @@ abort "Unexpected guarded paths: #{unexpected_paths.join(', ')}" unless unexpect
 
 # Keep these duplicated checks aligned with config-check. Duplication is
 # intentional: this base-trusted guard must never require candidate code.
-agents = head_file(root, head_commit, "AGENTS.md")
+agents = tree_file(root, merge_tree, "AGENTS.md")
 heading = "## Agent Workflow Configuration"
 section_start = agents.index(heading)
 abort "Missing canonical Agent Workflow Configuration pointer." unless section_start
@@ -69,15 +71,18 @@ MARKDOWN
 actual_pointer = agents[section_start..].rstrip
 abort "Agent Workflow Configuration pointer is not canonical." unless actual_pointer == expected_pointer
 
-policy = YAML.safe_load(head_file(root, head_commit, ".agents/agent-workflow.yml"), aliases: false)
+policy = YAML.safe_load(tree_file(root, merge_tree, ".agents/agent-workflow.yml"), aliases: false)
 abort "Agent workflow policy must be a YAML mapping." unless policy.is_a?(Hash)
 
-readme = head_file(root, head_commit, ".agents/bin/README.md")
+readme = tree_file(root, merge_tree, ".agents/bin/README.md")
 required_readme_rows = [
   "| `validate` | Sim-aware gate: one task file runs its matching test; task/config mixes and unrelated diffs are rejected. |",
   "| `config-check` | Validate allowed config-only paths, canonical seam content, policy YAML, and script syntax. |",
   "| `seam-guard` | Base-trusted pull-request guard; rejects changes to CI and validator entrypoints before head code runs. |"
 ]
-abort "Simulation command README does not document guarded validation." unless required_readme_rows.all? { |row| readme.include?(row) }
+required_readme_text = "`Seam Guard / guard` as a required status check"
+unless required_readme_rows.all? { |row| readme.include?(row) } && readme.include?(required_readme_text)
+  abort "Simulation command README does not document guarded validation."
+end
 
 puts changed_paths.empty? ? "NO_CHANGES" : "CONFIG_ONLY"

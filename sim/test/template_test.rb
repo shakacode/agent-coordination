@@ -4,6 +4,7 @@ require "fileutils"
 require "minitest/autorun"
 require "open3"
 require "tmpdir"
+require "yaml"
 
 SIM_ROOT = File.expand_path("..", __dir__)
 TEMPLATE = File.join(SIM_ROOT, "template")
@@ -40,12 +41,24 @@ class SimulationTemplateTest < Minitest::Test
     assert_equal POINTER, section
   end
 
+  def test_readme_documents_required_seam_guard_status_check
+    readme = File.read(File.join(TEMPLATE, ".agents/bin/README.md"))
+
+    assert_includes readme, "`Seam Guard / guard` as a required status check"
+  end
+
+  def test_policy_allowlists_only_the_template_workflow_actions
+    policy = YAML.safe_load_file(File.join(TEMPLATE, ".agents/agent-workflow.yml"), aliases: false)
+
+    assert_equal ["actions/checkout", "ruby/setup-ruby"], policy.fetch("trusted_actions")
+  end
+
   def test_validate_allows_policy_only_configuration_change
     File.open(File.join(@repo, ".agents/agent-workflow.yml"), "a") do |file|
       file << "repo_prefix: ACSA\n"
     end
 
-    _out, err, status = validate
+    _out, err, status = run_ci_gate
 
     assert status.success?, err
   end
@@ -53,7 +66,7 @@ class SimulationTemplateTest < Minitest::Test
   def test_validate_rejects_invalid_policy_yaml
     File.write(File.join(@repo, ".agents/agent-workflow.yml"), "- not\n- a mapping\n")
 
-    _out, err, status = validate
+    _out, err, status = run_ci_gate
 
     refute status.success?
     assert_includes err, "Agent workflow policy must be a YAML mapping."
@@ -63,7 +76,7 @@ class SimulationTemplateTest < Minitest::Test
     agents = File.join(@repo, "AGENTS.md")
     File.write(agents, File.read(agents).sub("(`setup`, `validate`, `test`, ...)", "(`ci`, `validate`, `test`)"))
 
-    _out, err, status = validate
+    _out, err, status = run_ci_gate
 
     refute status.success?
     assert_includes err, "Agent Workflow Configuration pointer is not canonical."
@@ -73,7 +86,7 @@ class SimulationTemplateTest < Minitest::Test
     validator = File.join(@repo, ".agents/bin/validate")
     File.write(validator, "#!/usr/bin/env bash\nexit 0\n")
 
-    _out, err, status = validate
+    _out, err, status = run_ci_gate
 
     refute status.success?
     assert_includes err, "Simulation validator does not match the checked contract."
@@ -82,7 +95,7 @@ class SimulationTemplateTest < Minitest::Test
   def test_ci_rejects_modified_config_check
     File.open(File.join(@repo, ".agents/bin/config-check"), "a") { |file| file << "\n# bypass\n" }
 
-    _out, err, status = validate
+    _out, err, status = run_ci_gate
 
     refute status.success?
     assert_includes err, "config-check does not match the CI-pinned contract."
@@ -110,6 +123,14 @@ class SimulationTemplateTest < Minitest::Test
 
     refute status.success?
     assert_includes err, "Unexpected guarded paths: .github/workflows/ci.yml"
+  end
+
+  def test_seam_guard_workflow_scopes_private_repository_auth_to_fetch
+    workflow = File.read(File.join(TEMPLATE, ".github/workflows/seam-guard.yml"))
+
+    assert_includes workflow, "GITHUB_TOKEN: ${{ github.token }}"
+    assert_includes workflow, 'git -c http.extraheader="AUTHORIZATION: basic ${auth_header}" fetch --no-tags origin'
+    assert_includes workflow, "persist-credentials: false"
   end
 
   def test_trusted_seam_guard_accepts_policy_only_change
@@ -194,6 +215,31 @@ class SimulationTemplateTest < Minitest::Test
     assert_includes out, "TASK_ONLY"
   end
 
+  def test_trusted_seam_guard_validates_stale_config_branch_as_merge_tree
+    agents = File.join(@repo, "AGENTS.md")
+    File.write(agents, File.read(agents).sub("(`setup`, `validate`, `test`, ...)", "(`ci`, `validate`, `test`)"))
+    git("add", "AGENTS.md")
+    git("commit", "-qm", "old pointer contract")
+    git("branch", "config-change")
+
+    File.write(agents, File.read(agents).sub("(`ci`, `validate`, `test`)", "(`setup`, `validate`, `test`, ...)"))
+    git("add", "AGENTS.md")
+    git("commit", "-qm", "base pointer contract")
+    base_commit = git_output("rev-parse", "HEAD")
+
+    git("checkout", "-q", "config-change")
+    File.open(File.join(@repo, ".agents/agent-workflow.yml"), "a") do |file|
+      file << "repo_prefix: ACSA\n"
+    end
+    git("add", ".agents/agent-workflow.yml")
+    git("commit", "-qm", "stale policy change")
+
+    out, err, status = seam_guard(base_commit, "HEAD")
+
+    assert status.success?, err
+    assert_includes out, "CONFIG_ONLY"
+  end
+
   def test_config_check_reports_usage_without_base_ref
     _out, err, status = Open3.capture3(
       File.join(@repo, ".agents/bin/config-check"),
@@ -205,19 +251,20 @@ class SimulationTemplateTest < Minitest::Test
     refute_includes err, "IndexError"
   end
 
-  def test_validate_rejects_invalid_validator_syntax
-    File.open(File.join(@repo, ".agents/bin/validate"), "a") { |file| file << "\nif\n" }
+  def test_config_check_rejects_invalid_ci_script_syntax
+    File.open(File.join(@repo, ".agents/bin/ci"), "a") { |file| file << "\nif\n" }
 
-    _out, _err, status = validate
+    _out, err, status = config_check
 
     refute status.success?
+    assert_includes err, "Invalid shell syntax in simulation command scripts."
   end
 
   def test_validate_rejects_non_executable_validator
     validator = File.join(@repo, ".agents/bin/validate")
     File.chmod(0o644, validator)
 
-    _out, err, status = validate
+    _out, err, status = run_ci_gate
 
     refute status.success?
     assert_includes err, "Simulation command scripts must remain executable."
@@ -270,7 +317,7 @@ class SimulationTemplateTest < Minitest::Test
     git("add", "lib/task_one.rb")
     git("commit", "-qm", "task change")
 
-    out, err, status = validate(base_commit)
+    out, err, status = run_ci_gate(base_commit)
 
     assert status.success?, err
     assert_includes out, "2 runs, 2 assertions"
@@ -280,7 +327,7 @@ class SimulationTemplateTest < Minitest::Test
     readme = File.join(@repo, ".agents/bin/README.md")
     File.write(readme, File.read(readme).sub("| `config-check` |", "| `unchecked-config` |"))
 
-    _out, err, status = validate
+    _out, err, status = run_ci_gate
 
     refute status.success?
     assert_includes err, "Simulation command README does not document config-only validation."
@@ -290,7 +337,7 @@ class SimulationTemplateTest < Minitest::Test
     task = File.join(@repo, "lib/task_one.rb")
     File.write(task, File.read(task).sub("numbers.sum", "numbers.reject(&:negative?).sum"))
 
-    out, err, status = validate
+    out, err, status = run_ci_gate
 
     assert status.success?, err
     assert_includes out, "2 runs, 2 assertions"
@@ -299,7 +346,7 @@ class SimulationTemplateTest < Minitest::Test
   def test_validate_rejects_unrelated_change
     File.open(File.join(@repo, "README.md"), "a") { |file| file << "\nunrelated\n" }
 
-    _out, err, status = validate
+    _out, err, status = run_ci_gate
 
     refute status.success?
     assert_includes err, "Unexpected config-only paths:"
@@ -311,7 +358,7 @@ class SimulationTemplateTest < Minitest::Test
     File.write(task, File.read(task).sub("numbers.sum", "numbers.reject(&:negative?).sum"))
     File.open(File.join(@repo, "AGENTS.md"), "a") { |file| file << "\nconfiguration change\n" }
 
-    _out, err, status = validate
+    _out, err, status = run_ci_gate
 
     refute status.success?
     assert_includes err, "Task changes cannot be combined with config or unrelated paths:"
@@ -332,7 +379,7 @@ class SimulationTemplateTest < Minitest::Test
     output.strip
   end
 
-  def validate(base_ref = "HEAD")
+  def run_ci_gate(base_ref = "HEAD")
     Open3.capture3(
       { "AGENT_SIM_BASE_REF" => base_ref },
       File.join(@repo, ".agents/bin/ci"),

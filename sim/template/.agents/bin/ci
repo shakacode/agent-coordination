@@ -5,7 +5,7 @@ cd "$root"
 
 # Local drift check only; the base-trusted seam-guard is the security boundary.
 # Regenerate with: ruby -rdigest -e 'puts Digest::SHA256.file(".agents/bin/config-check").hexdigest'
-expected_config_check_sha256="9db6622d1a48eaf93cf8d192b24faceeb9bd27fdd901b1eb94d7fc9683db6819"
+expected_config_check_sha256="1f5174651b94f52a334b4fece244734e10314cc57883519ab7304c16fad04cf0"
 actual_config_check_sha256="$(ruby -rdigest -e 'print Digest::SHA256.file(ARGV.fetch(0)).hexdigest' \
   "$root/.agents/bin/config-check")"
 if [ "$actual_config_check_sha256" != "$expected_config_check_sha256" ]; then
@@ -13,6 +13,7 @@ if [ "$actual_config_check_sha256" != "$expected_config_check_sha256" ]; then
   exit 1
 fi
 
+# Keep this base-ref resolution aligned with .agents/bin/validate.
 base_ref="${AGENT_SIM_BASE_REF:-}"
 if [ -z "$base_ref" ] && [ -n "${GITHUB_BASE_REF:-}" ]; then
   git fetch --quiet origin "$GITHUB_BASE_REF"
