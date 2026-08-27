@@ -1493,6 +1493,55 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     end
   end
 
+  def test_config_set_rejects_token_without_an_api_url
+    with_private_config_tmpdir("agent-coord-orphan-token") do |root|
+      config_home = File.join(root, "config")
+      result = run_command(
+        { "XDG_CONFIG_HOME" => config_home },
+        RbConfig.ruby,
+        BIN,
+        "config",
+        "set",
+        "--token-stdin",
+        stdin_data: "private-token\n"
+      )
+
+      assert_equal 1, result.status.exitstatus
+      assert_includes result.stderr, "requires a saved API URL"
+      refute_path_exists File.join(config_home, "agent-coord", "env")
+    end
+  end
+
+  def test_config_set_round_trips_a_token_with_trailing_space
+    with_private_config_tmpdir("agent-coord-token-whitespace") do |root|
+      config_home = File.join(root, "config")
+      result = run_command(
+        { "XDG_CONFIG_HOME" => config_home },
+        RbConfig.ruby,
+        BIN,
+        "config",
+        "set",
+        "--api-url",
+        "https://coordination.example",
+        "--token-stdin",
+        stdin_data: "private-token \n"
+      )
+
+      assert_equal 0, result.status.exitstatus, result.stderr
+      runner = AgentCoord::Runner.new([], stdout: StringIO.new, stderr: StringIO.new)
+      with_process_env(
+        "XDG_CONFIG_HOME" => config_home,
+        "AGENT_COORD_API_URL" => nil,
+        "AGENT_COORD_API_TOKEN" => nil
+      ) do
+        runner.send(:load_user_configuration!)
+        assert_equal "private-token ", runner.instance_variable_get(:@user_config).fetch("AGENT_COORD_API_TOKEN")
+      ensure
+        runner.send(:restore_injected_user_configuration!)
+      end
+    end
+  end
+
   def test_config_set_rejects_non_loopback_plain_http_url
     with_private_config_tmpdir("agent-coord-insecure-api-url") do |root|
       config_home = File.join(root, "config")
@@ -1954,6 +2003,30 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
       assert_equal 2, result.status.exitstatus
       assert_includes result.stderr, "permissions are unsafe"
       refute_path_exists File.join(config_home, "agent-coord", "env")
+    end
+  end
+
+  def test_existing_safe_config_directory_is_hardened_to_0700_before_read
+    with_private_config_tmpdir("agent-coord-config-directory-migration") do |root|
+      config_home = File.join(root, "config")
+      directory = File.join(config_home, "agent-coord")
+      env_file = File.join(directory, "env")
+      FileUtils.mkdir_p(directory)
+      File.chmod(0o755, directory)
+      File.write(env_file, "AGENT_COORD_POLICY=required\n")
+      File.chmod(0o600, env_file)
+
+      result = run_command(
+        { "XDG_CONFIG_HOME" => config_home },
+        RbConfig.ruby,
+        BIN,
+        "config",
+        "show",
+        "--json"
+      )
+
+      assert_equal 0, result.status.exitstatus, result.stderr
+      assert_equal 0o700, File.stat(directory).mode & 0o777
     end
   end
 

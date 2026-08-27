@@ -501,7 +501,7 @@ module AgentCoord
         stripped = line.strip
         next if stripped.empty? || stripped.start_with?("#")
 
-        assignment = stripped.sub(/\Aexport\s+/, "")
+        assignment = line.lstrip.sub(/\Aexport\s+/, "")
         match = assignment.match(/\A([A-Z][A-Z0-9_]*)=(.*)\z/)
         raise OperationalError, "unsafe user config syntax at #{path}:#{index + 1}" unless match
 
@@ -2031,7 +2031,9 @@ module AgentCoord
       with_config_write_lock do
         current = read_user_env_file(@user_config_path, required: false)
         validate_api_url_token_transition!(current, updates)
-        write_canonical_config_file(@user_config_path, render_user_env(current.merge(updates)))
+        merged = current.merge(updates)
+        validate_config_token_binding!(merged)
+        write_canonical_config_file(@user_config_path, render_user_env(merged))
       end
       @stdout.puts "updated user configuration: #{@user_config_path} (#{updates.keys.sort.join(', ')})" \
         unless updates.empty?
@@ -2046,6 +2048,13 @@ module AgentCoord
       return if current.fetch("AGENT_COORD_API_TOKEN", "").empty?
 
       raise Error, "--token-stdin is required when changing an API URL that has a saved token"
+    end
+
+    def validate_config_token_binding!(values)
+      return if values.fetch("AGENT_COORD_API_TOKEN", "").empty?
+      return unless values.fetch("AGENT_COORD_API_URL", "").empty?
+
+      raise Error, "--token-stdin requires a saved API URL or --api-url in the same transaction"
     end
 
     def validate_config_api_url!(value)
@@ -2185,9 +2194,28 @@ module AgentCoord
       return unless leaf
 
       raise OperationalError, "config parent leaf is not owned by the current user: #{path}" if stat.uid != Process.uid
+
+      stat = harden_legacy_config_leaf!(stat, path) unless stat.mode.nobits?(0o077)
       return if stat.mode.nobits?(0o077)
 
       raise OperationalError, "config parent leaf permissions are unsafe (expected 0700): #{path}"
+    end
+
+    def harden_legacy_config_leaf!(expected_stat, path)
+      File.open(path, File::RDONLY | File::NOFOLLOW) do |directory|
+        current_stat = directory.stat
+        unless current_stat.directory? && current_stat.dev == expected_stat.dev && current_stat.ino == expected_stat.ino
+          raise OperationalError, "config parent leaf changed while hardening permissions: #{path}"
+        end
+        if current_stat.uid != Process.uid || !current_stat.mode.nobits?(0o022)
+          raise OperationalError, "config parent leaf became unsafe while hardening permissions: #{path}"
+        end
+
+        directory.chmod(0o700)
+        directory.stat
+      end
+    rescue Errno::ELOOP
+      raise OperationalError, "config parent leaf must not be a symlink: #{path}"
     end
 
     def write_canonical_config_file(path, contents)

@@ -294,6 +294,8 @@ The file must be regular, current-user-owned, and have no group or world
 permissions. Its resolved parent chain may contain only root- or
 current-user-owned directories with no group or world write permission, and the
 `agent-coord` leaf directory must be current-user-owned with mode `0700`.
+For compatibility with older documented setup commands, a safe current-user-owned
+leaf that is not group/world-writable is automatically hardened to `0700` when read.
 An explicitly selected missing file, an insecure file, duplicate keys, or
 ambiguous syntax is an operational failure rather than a fallback to another
 backend.
@@ -1048,6 +1050,7 @@ export BRANCH=jg-codex/3969-agent-coord-backend
 export AGENT_COORD_REPO="$(pwd)"
 export AGENT_COORD_ENV_FILE="$HOME/.config/agent-coord/env"
 mkdir -p "$(dirname "$AGENT_COORD_ENV_FILE")"
+chmod 700 "$(dirname "$AGENT_COORD_ENV_FILE")"
 install -m 600 /dev/null "$AGENT_COORD_ENV_FILE"
 cat > "$AGENT_COORD_ENV_FILE" <<'EOF'
 AGENT_COORD_API_URL=<worker-url>
