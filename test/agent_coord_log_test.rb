@@ -1395,3 +1395,116 @@ class AgentCoordLogConcurrentLaneClaimTest < AgentCoordLogTestCase
     assert_equal "parent-worker", claim_for("319").fetch("agent_id")
   end
 end
+
+# Folding aliases finds more claims, and must not therefore report fewer holders.
+# `claim` writes raw target paths, so `9832` and `pr:9832` are independently
+# claimable and the fleet does hold both live under different agents.
+class AgentCoordLogAliasClaimTest < AgentCoordLogTestCase
+  def write_alias_claims
+    write_claim("shakacode/example", "9832", "status" => "active", "agent_id" => "bare-holder",
+                                             "updated_at" => "2026-08-03T02:00:00Z")
+    write_claim("shakacode/example", "pr:9832", "status" => "active", "agent_id" => "prefixed-holder",
+                                                "updated_at" => "2026-08-03T05:00:00Z")
+  end
+
+  def payload_for(target)
+    JSON.parse(run_log("shakacode/example##{target}", "--json").stdout)
+  end
+
+  def test_every_alias_holder_is_reported_not_just_the_newest
+    write_alias_claims
+
+    holders = payload_for("9832").fetch("claims").map { |claim| claim.fetch("agent_id") }
+
+    assert_equal %w[bare-holder prefixed-holder], holders.sort
+  end
+
+  def test_singular_claim_stays_the_newest_for_existing_consumers
+    write_alias_claims
+
+    assert_equal "prefixed-holder", payload_for("9832").fetch("claim").fetch("agent_id")
+  end
+
+  def test_text_output_shows_every_alias_holder
+    write_alias_claims
+
+    stdout = run_log("shakacode/example#9832").stdout
+
+    assert_includes stdout, "bare-holder"
+    assert_includes stdout, "prefixed-holder"
+  end
+
+  def test_a_single_holder_still_reports_one_claim
+    write_claim("shakacode/example", "issue:9832", "status" => "active", "agent_id" => "only-holder",
+                                                   "updated_at" => "2026-08-03T02:00:00Z")
+
+    payload = payload_for("9832")
+
+    assert_equal "only-holder", payload.fetch("claim").fetch("agent_id")
+    assert_equal(["only-holder"], payload.fetch("claims").map { |claim| claim.fetch("agent_id") })
+  end
+
+  # A lane event cannot supersede the parent's separately leased custody, so it
+  # must not decide whether the parent claim is still the latest thing known.
+  def test_a_newer_lane_event_does_not_suppress_the_parent_claim
+    write_claim("shakacode/example", "319", "status" => "active", "agent_id" => "parent-holder",
+                                            "updated_at" => "2026-08-03T02:00:00Z")
+    write_event("b1", "e1", "type" => "phase.changed", "repo" => "shakacode/example",
+                            "target" => "issue:319:qa", "machine_id" => "m1", "host" => "codex",
+                            "at" => "2026-08-03T09:00:00Z")
+
+    assert_equal "parent-holder", payload_for("319").fetch("claim").fetch("agent_id")
+  end
+
+  # adhoc ids are operator-chosen slugs, not GitHub numbers, so a numeric one is
+  # its own work item and must not merge with the issue of the same number.
+  def test_numeric_adhoc_target_is_not_the_github_item
+    write_event("b1", "e1", "type" => "claim.acquired", "repo" => "shakacode/example", "target" => "issue:319",
+                            "machine_id" => "m1", "host" => "codex", "at" => "2026-08-03T01:00:00Z")
+    write_event("b1", "e2", "type" => "claim.acquired", "repo" => "shakacode/example", "target" => "adhoc:319",
+                            "machine_id" => "m2", "host" => "codex", "at" => "2026-08-03T02:00:00Z")
+
+    assert_equal ["issue:319"], payload_for("319").dig("work_item", "matched_targets")
+    assert_equal ["adhoc:319"], payload_for("adhoc:319").dig("work_item", "matched_targets")
+  end
+
+  # The slug case that made adhoc foldable in the first place still folds.
+  def test_slug_adhoc_target_still_folds_with_its_bare_spelling
+    write_event("b1", "e1", "type" => "claim.acquired", "repo" => "shakacode/example",
+                            "target" => "20260731-backend-policy", "machine_id" => "m1", "host" => "codex",
+                            "at" => "2026-08-03T01:00:00Z")
+    write_event("b1", "e2", "type" => "phase.changed", "repo" => "shakacode/example",
+                            "target" => "adhoc:20260731-backend-policy", "machine_id" => "m1", "host" => "codex",
+                            "at" => "2026-08-03T02:00:00Z")
+
+    assert_equal 2, payload_for("20260731-backend-policy").fetch("events").length
+  end
+end
+
+# The difference between "two records" and "two holders" is the exact claim key.
+class AgentCoordLogClaimKeyTest < AgentCoordLogTestCase
+  def test_one_key_recorded_under_two_casings_reports_only_the_newest
+    write_claim("shakacode/example", "9832", "status" => "released", "agent_id" => "old-worker",
+                                             "updated_at" => "2026-07-01T00:00:00Z")
+    # Same lease, repo casing differs, so this is the same key recorded twice.
+    write_claim("ShakaCode/example", "9832", "status" => "active", "agent_id" => "current-worker",
+                                             "updated_at" => "2026-08-01T00:00:00Z")
+
+    holders = JSON.parse(run_log("shakacode/example#9832", "--json").stdout)
+                  .fetch("claims").map { |claim| claim.fetch("agent_id") }
+
+    assert_equal ["current-worker"], holders
+  end
+
+  def test_two_distinct_keys_report_both_holders
+    write_claim("shakacode/example", "9832", "status" => "active", "agent_id" => "bare-holder",
+                                             "updated_at" => "2026-07-01T00:00:00Z")
+    write_claim("shakacode/example", "pr:9832", "status" => "active", "agent_id" => "prefixed-holder",
+                                                "updated_at" => "2026-08-01T00:00:00Z")
+
+    holders = JSON.parse(run_log("shakacode/example#9832", "--json").stdout)
+                  .fetch("claims").map { |claim| claim.fetch("agent_id") }
+
+    assert_equal %w[bare-holder prefixed-holder], holders.sort
+  end
+end

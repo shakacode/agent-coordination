@@ -312,7 +312,22 @@ when releases begin.
   reported claim follows that same rule: it folds casing and kind prefixes, which
   name one lease, but matches the lane exactly, so a parent and a lane that are
   live at the same time are each reported under their own query instead of the
-  newer one hiding the other (issue #141).
+  newer one hiding the other. `claim` writes raw target paths, so `9832` and
+  `pr:9832` are independently claimable and the fleet holds such pairs live under
+  different agents; `--json` therefore gained a `claims` array carrying every
+  holder, with the singular `claim` still the newest for existing consumers, and
+  text output prints one line per holder. One key recorded under two casings is
+  still a single lease written twice, so those collapse to the newest as before —
+  the grouping is on the exact claim key, not on the work-item identity. Whether a claim is still the latest
+  thing known is judged against events in its own lane only, since an event on
+  `issue:319:qa` says nothing about the parent's separately leased custody
+  (issue #141).
+- `adhoc:` targets are no longer folded into the GitHub number space when their id
+  is a bare number. Ad hoc ids are operator-chosen slugs, and nothing stops one
+  being named `adhoc:319`, which would otherwise have merged with issue 319 — the
+  same wrong answer this identity exists to prevent, reached from the other
+  direction. A slug id such as `adhoc:20260731-backend-policy` still folds with
+  its bare spelling, which is the case that made the prefix foldable (issue #141).
 - `agent-coord log --json` now reports `work_item.matched_targets` and a `trail`
   of `complete` or `incomplete`. The degraded-listing warning went only to stderr,
   so a trail cut short by a scoped token was byte-identical to a complete empty
