@@ -2059,7 +2059,7 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
   end
 
   def test_config_set_rejects_symlinked_config_parent
-    Dir.mktmpdir("agent-coord-parent-symlink") do |root|
+    with_private_config_tmpdir("agent-coord-parent-symlink") do |root|
       actual = File.join(root, "actual")
       selected = File.join(root, "selected")
       FileUtils.mkdir_p(actual)
