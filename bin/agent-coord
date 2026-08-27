@@ -333,6 +333,9 @@ module AgentCoord
       # Set on the first degraded listing; read by both the --sync guard and the
       # --json trail state, so it must exist before either runs.
       @log_incomplete = nil
+      # The spelling the reported claim was filed under. The rendered claim record
+      # carries no repo or target, and --json provenance has to name it.
+      @log_claim_work_item = nil
     end
 
     def run # rubocop:disable Metrics/CyclomaticComplexity
@@ -3355,7 +3358,7 @@ module AgentCoord
     # answers with whichever third of its history shares the queried spelling.
     # A query that names a lane keeps its narrower meaning; a query that does not
     # covers the item and every lane under it.
-    def log_work_item_same?(candidate, wanted)
+    def log_work_item_same?(candidate, wanted, lane_exact: false)
       candidate_repo, candidate_target = log_split_work_item(candidate)
       wanted_repo, wanted_target = log_split_work_item(wanted)
       return false unless candidate_repo.casecmp?(wanted_repo)
@@ -3363,6 +3366,7 @@ module AgentCoord
       candidate_base, candidate_lane = AgentCoord.work_item_parts(candidate_target)
       wanted_base, wanted_lane = AgentCoord.work_item_parts(wanted_target)
       return false unless candidate_base == wanted_base
+      return wanted_lane == candidate_lane if lane_exact
 
       wanted_lane.nil? || wanted_lane == candidate_lane
     end
@@ -3512,7 +3516,7 @@ module AgentCoord
       format = options[:format].to_s
       if options[:json]
         events = rows.map { |row| log_scrub_values(row.slice(*LOG_TSV_FIELDS)) }
-        payload = { "work_item" => log_work_item_summary(options, rows), "trail" => log_trail_state,
+        payload = { "work_item" => log_work_item_summary(options, rows, claim), "trail" => log_trail_state,
                     "events" => events, "claim" => claim }.compact
         @stdout.puts JSON.pretty_generate(payload)
       elsif format == "tsv"
@@ -3530,12 +3534,17 @@ module AgentCoord
     # ever worked" needs to see that `issue:319` and `pr:319` were folded in, and
     # an empty list is the explicit "searched, matched nothing" that a bare empty
     # events array cannot say on its own.
-    def log_work_item_summary(options, rows)
+    def log_work_item_summary(options, rows, claim = nil)
       wanted = options[:work_item].to_s
       return nil if wanted.empty?
 
       repo, target = log_split_work_item(wanted)
-      matched = rows.map { |row| log_split_work_item(row.fetch("work_item")).last }.uniq.sort
+      # A live claim with no events is a supported answer, so its target counts as
+      # a match; reporting the claim while reporting that nothing matched would
+      # contradict itself.
+      sources = rows.map { |row| row.fetch("work_item") }
+      sources << @log_claim_work_item if claim && @log_claim_work_item
+      matched = sources.map { |value| log_split_work_item(value).last }.uniq.sort
       { "repo" => repo, "target" => target, "matched_targets" => matched }
     end
 
@@ -3586,10 +3595,11 @@ module AgentCoord
     # that happened to leave a trace, while a live claim sat unmentioned.
     def log_claim_for(store, options, rows)
       claim = log_claim_lookup(store, options)
-      return nil unless claim
-      return claim if rows.empty?
-
-      claim if log_at_key(claim.fetch("updated_at")) >= rows.last.fetch("at_key")
+      kept = claim && (rows.empty? || log_at_key(claim.fetch("updated_at")) >= rows.last.fetch("at_key"))
+      # A claim the trail has already superseded is not part of the answer, so its
+      # spelling must not appear in the provenance either.
+      @log_claim_work_item = nil unless kept
+      kept ? claim : nil
     end
 
     def log_claim_lookup(store, options)
@@ -3606,11 +3616,15 @@ module AgentCoord
       matches = claims.select do |candidate|
         next false if candidate.data["synthetic"] && !options[:include_synthetic]
 
-        log_work_item_same?(log_claim_work_item(candidate), wanted)
+        log_work_item_same?(log_claim_work_item(candidate), wanted, lane_exact: true)
       end
-      # Casing variants produce two claim paths for one work item; the newest is
-      # the one that describes where the work actually is.
+      # Casing and kind-prefix variants produce several claim paths for one lease;
+      # the newest is the one that describes where the work actually is. Lanes are
+      # matched exactly rather than rolled up, because a lane holds its own lease
+      # and can be live at the same time as its parent -- picking the newest of
+      # those two would report one live custodian and hide the other.
       newest = matches.max_by { |candidate| log_at_key(candidate.data["updated_at"]) }
+      @log_claim_work_item = newest && log_claim_work_item(newest)
       newest && log_claim_record(newest.data, now_utc)
     end
 
@@ -5962,7 +5976,9 @@ module AgentCoord
   # purpose -- a lane holds its own lease -- so this is a read-path identity
   # only. Folding the two together in a claim key would break lease exclusion.
   def self.work_item_parts(target)
-    segments = target.to_s.strip.split(":")
+    # -1 keeps a trailing empty field: `319:` is a legal claim segment and a
+    # different key from `319`, so dropping it would answer for both at once.
+    segments = target.to_s.strip.split(":", -1)
     segments.shift if segments.length > 1 && WORK_ITEM_KINDS.include?(segments.first.downcase)
     base = segments.shift.to_s.downcase
     [base, segments.empty? ? nil : segments.join(":").downcase]

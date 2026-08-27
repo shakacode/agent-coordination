@@ -1333,3 +1333,65 @@ class AgentCoordLogWorkItemIdentityTest < AgentCoordLogTestCase
     assert_empty payload.dig("work_item", "matched_targets")
   end
 end
+
+# Rolling lanes into the item is right for history and wrong for custody: a lane
+# holds its own lease, so a parent and its lane can both be live at once. The
+# fleet does exactly this (`pr:32389` and `pr:32389:qa`, both active).
+class AgentCoordLogConcurrentLaneClaimTest < AgentCoordLogTestCase
+  def write_parent_and_lane_claims
+    write_event("b1", "e1", "type" => "claim.acquired", "repo" => "shakacode/example", "target" => "issue:319",
+                            "machine_id" => "m1", "host" => "codex", "at" => "2026-08-03T01:00:00Z")
+    write_claim("shakacode/example", "319", "status" => "active", "agent_id" => "parent-worker",
+                                            "updated_at" => "2026-08-03T02:00:00Z")
+    # Newer, so a max_by over both would prefer it and hide the parent.
+    write_claim("shakacode/example", "issue:319:qa", "status" => "active", "agent_id" => "qa-worker",
+                                                     "updated_at" => "2026-08-03T05:00:00Z")
+  end
+
+  def claim_for(target)
+    JSON.parse(run_log("shakacode/example##{target}", "--json").stdout)["claim"]
+  end
+
+  def test_item_query_reports_the_item_claim_not_a_newer_lane_claim
+    write_parent_and_lane_claims
+
+    assert_equal "parent-worker", claim_for("319").fetch("agent_id")
+  end
+
+  def test_prefixed_item_query_still_finds_the_bare_item_claim
+    write_parent_and_lane_claims
+
+    assert_equal "parent-worker", claim_for("issue:319").fetch("agent_id")
+  end
+
+  def test_lane_query_reports_the_lane_claim
+    write_parent_and_lane_claims
+
+    assert_equal "qa-worker", claim_for("issue:319:qa").fetch("agent_id")
+  end
+
+  # A live claim with no events is an explicitly supported fallback. Reporting the
+  # claim while also reporting that nothing matched contradicts itself.
+  def test_claim_only_work_item_reports_the_claim_target_as_matched
+    write_claim("shakacode/example", "issue:404", "status" => "active", "agent_id" => "solo-worker",
+                                                  "updated_at" => "2026-08-03T02:00:00Z")
+
+    payload = JSON.parse(run_log("shakacode/example#404", "--json").stdout)
+
+    assert_equal "solo-worker", payload.fetch("claim").fetch("agent_id")
+    assert_empty payload.fetch("events")
+    assert_equal ["issue:404"], payload.dig("work_item", "matched_targets")
+  end
+
+  # `319:` is a legal claim segment. split(":") drops the trailing empty field, so
+  # without an explicit limit it would collapse into the bare item and two distinct
+  # claim keys would answer as one.
+  def test_trailing_colon_target_is_not_the_bare_work_item
+    write_claim("shakacode/example", "319", "status" => "active", "agent_id" => "parent-worker",
+                                            "updated_at" => "2026-08-03T02:00:00Z")
+    write_claim("shakacode/example", "319:", "status" => "active", "agent_id" => "colon-worker",
+                                             "updated_at" => "2026-08-03T05:00:00Z")
+
+    assert_equal "parent-worker", claim_for("319").fetch("agent_id")
+  end
+end
