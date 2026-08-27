@@ -31,7 +31,10 @@ module StackDoctorTestFixtures
         ]
       )
     when %r{\Aapi repos/example/coordination/contents/heartbeats/unrequested\.json\?ref=(?:state|configured-ref)\z}
-      puts JSON.generate("content" => Base64.strict_encode64("{"), "sha" => "broken")
+      puts JSON.generate(
+        "content" => Base64.strict_encode64(JSON.generate("schema_version" => 1)),
+        "sha" => "heartbeat"
+      )
     else
       warn "unexpected gh command: #{command}"
       exit 1
@@ -605,7 +608,7 @@ class ExplicitBackendPrecedenceStackDoctorTest < Minitest::Test
       StackDoctorTestFixtures.write_fake_github(fake_bin)
 
       result = run_doctor(
-        "--stack-json", "--backend", "example/coordination",
+        "--stack-json", "--deep", "--backend", "example/coordination",
         env: {
           "AGENT_COORD_REF" => "configured-ref",
           "GH_LOG" => log_path,
@@ -617,6 +620,10 @@ class ExplicitBackendPrecedenceStackDoctorTest < Minitest::Test
       assert_includes(
         File.readlines(log_path, chomp: true),
         "api repos/example/coordination/git/trees/configured-ref?recursive=1"
+      )
+      assert_includes(
+        File.readlines(log_path, chomp: true),
+        "api repos/example/coordination/contents/heartbeats/unrequested.json?ref=configured-ref"
       )
     end
   end

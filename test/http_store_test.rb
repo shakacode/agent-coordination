@@ -453,6 +453,7 @@ class HttpEnvTestCase < Minitest::Test
   ensure
     saved.each { |key, value| value.nil? ? ENV.delete(key) : ENV[key] = value }
   end
+
   def with_private_config_tmpdir(prefix, &)
     Dir.mktmpdir(prefix, PRIVATE_CONFIG_TMP_PARENT, &)
   end

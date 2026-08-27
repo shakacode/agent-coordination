@@ -1559,6 +1559,54 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     end
   end
 
+  def test_canonical_policy_ignores_an_invalid_legacy_fallback
+    with_private_user_config("AGENT_COORD_POLICY=required\n") do |config_home|
+      legacy_policy = File.join(config_home, "agent-coord", "policy")
+      File.write(legacy_policy, "invalid\n")
+      File.chmod(0o644, legacy_policy)
+
+      result = run_command(
+        { "XDG_CONFIG_HOME" => config_home },
+        RbConfig.ruby,
+        BIN,
+        "config",
+        "show",
+        "--json"
+      )
+
+      assert_equal 0, result.status.exitstatus, result.stderr
+      coordination = JSON.parse(result.stdout).fetch("coordination")
+      assert_equal "required", coordination.fetch("policy")
+      assert_equal "user_config", coordination.dig("source", "policy")
+    end
+  end
+
+  def test_process_policy_ignores_an_invalid_legacy_fallback
+    with_private_config_tmpdir("agent-coord-process-policy-legacy-fallback") do |root|
+      config_home = File.join(root, "config")
+      directory = File.join(config_home, "agent-coord")
+      legacy_policy = File.join(directory, "policy")
+      FileUtils.mkdir_p(directory)
+      File.chmod(0o700, directory)
+      File.write(legacy_policy, "invalid\n")
+      File.chmod(0o644, legacy_policy)
+
+      result = run_command(
+        { "XDG_CONFIG_HOME" => config_home, "AGENT_COORD_POLICY" => "disabled" },
+        RbConfig.ruby,
+        BIN,
+        "config",
+        "show",
+        "--json"
+      )
+
+      assert_equal 0, result.status.exitstatus, result.stderr
+      coordination = JSON.parse(result.stdout).fetch("coordination")
+      assert_equal "disabled", coordination.fetch("policy")
+      assert_equal "process_env", coordination.dig("source", "policy")
+    end
+  end
+
   def test_failed_canonical_config_rename_preserves_all_old_values
     # rubocop:disable Metrics/BlockLength
     with_private_user_config(
@@ -1642,7 +1690,7 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
         ]
         2.times { ready.pop }
         2.times { start << true }
-        workers.each(&:join)
+        thread_values!(workers, "concurrent config set writers")
         worker_error = errors.pop unless errors.empty?
         assert_nil worker_error, worker_error&.full_message
 
@@ -1881,7 +1929,8 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
       )
 
       assert_equal 2, result.status.exitstatus
-      refute_path_exists File.join(actual, "agent-coord", "policy")
+      assert_includes result.stderr, "user-controlled symlink"
+      refute_path_exists File.join(actual, "agent-coord", "env")
     end
   end
 
@@ -1904,7 +1953,7 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
 
       assert_equal 2, result.status.exitstatus
       assert_includes result.stderr, "permissions are unsafe"
-      refute_path_exists File.join(config_home, "agent-coord", "policy")
+      refute_path_exists File.join(config_home, "agent-coord", "env")
     end
   end
 

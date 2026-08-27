@@ -963,8 +963,9 @@ A saved URL cannot be changed while preserving its old token:
 `--token-stdin` is required in the same transaction. The command never prints
 token values.
 `config set` rewrites the file as a canonical list of supported
-`AGENT_COORD_*` assignments. Comments, blank lines, and unrelated assignments
-in that dedicated file are intentionally not preserved.
+`AGENT_COORD_*` assignments. Comments, blank lines, and non-`AGENT_COORD_*`
+assignments in that dedicated file are intentionally not preserved. An
+unrecognized `AGENT_COORD_*` key fails closed instead of being dropped.
 A process `AGENT_COORD_POLICY` overrides the persisted policy for one
 invocation. The old sibling `agent-coord/policy` file remains a read-only
 legacy fallback only when neither the process nor canonical env file supplies a
