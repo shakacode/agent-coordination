@@ -298,6 +298,29 @@ when releases begin.
 
 ### Fixed
 
+- `agent-coord log` now matches a target on the work item it names rather than on
+  its literal spelling, so one item's custody trail stops splitting into partial
+  answers. Issues and pull requests share one number sequence per repository, and
+  the store holds the same item as `319`, `issue:319`, and `pr:319`; every
+  spelling now returns the whole trail. Against the live fleet backend,
+  `--target 319` returned 7 events and `--target issue:319` returned 28 for the
+  same issue, with neither reporting that it was showing a share of the history;
+  all spellings now return the union of 35. A trailing segment stays a lane within
+  the item (`issue:319:qa`): asking for the item covers its lanes, asking for a
+  lane stays narrow. Claim keys are unchanged — this is a read-path identity only,
+  because a lane holds its own lease and merging keys would break exclusion
+  (issue #141).
+- `agent-coord log --json` now reports `work_item.matched_targets` and a `trail`
+  of `complete` or `incomplete`. The degraded-listing warning went only to stderr,
+  so a trail cut short by a scoped token was byte-identical to a complete empty
+  one for any JSON consumer, and "searched everything, found nothing" could not be
+  told apart from "could not search" (issue #141).
+- `agent-coord status --repo R --target N` now reports the `batches` and `events`
+  sections it does not read as `null` rather than as empty arrays, and its section
+  note names `agent-coord log` as the command that can answer for that target.
+  Claims and heartbeats are cleared on release and expiry, so target scope alone
+  cannot tell "never worked" from "worked and finished" — and two empty arrays
+  read like an answer to exactly that question (issue #141).
 - The consumer env-file probe no longer reads a commented-out assignment such as
   `AGENT_COORD_API_URL= # remote disabled` as a configured fleet URL. Sourcing
   that file leaves the variable empty, so it selects no fleet backend; the value

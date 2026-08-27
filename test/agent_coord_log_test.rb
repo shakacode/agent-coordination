@@ -1209,3 +1209,114 @@ class AgentCoordLogSyncTest < AgentCoordLogTestCase
     FileUtils.chmod(0o700, @state_root)
   end
 end
+
+# One GitHub number is one work item, however the target was spelled when it was
+# recorded. The store holds the same item as a bare number, as `issue:N`, and as
+# `pr:N`, so matching the literal string splits one custody trail into partial
+# answers -- the same hazard the repo-casing match already guards against.
+class AgentCoordLogWorkItemIdentityTest < AgentCoordLogTestCase
+  # A trail for one work item recorded under three spellings, plus a QA sub-lane
+  # and a lookalike slug that must stay a different work item.
+  def write_mixed_spellings
+    write_event("b1", "e1", "type" => "claim.acquired", "repo" => "shakacode/example", "target" => "319",
+                            "machine_id" => "m1", "host" => "codex", "at" => "2026-08-03T01:00:00Z")
+    write_event("b1", "e2", "type" => "phase.changed", "repo" => "shakacode/example", "target" => "issue:319",
+                            "machine_id" => "m1", "host" => "codex", "at" => "2026-08-03T02:00:00Z")
+    write_event("b1", "e3", "type" => "lane_closed", "repo" => "shakacode/example", "target" => "pr:319",
+                            "machine_id" => "m2", "host" => "claude-code", "at" => "2026-08-03T03:00:00Z")
+    write_event("b1", "e4", "type" => "claim.acquired", "repo" => "shakacode/example", "target" => "issue:319:qa",
+                            "machine_id" => "m3", "host" => "codex", "at" => "2026-08-03T04:00:00Z")
+    write_event("b1", "e5", "type" => "claim.acquired", "repo" => "shakacode/example", "target" => "319-fix",
+                            "machine_id" => "m9", "host" => "codex", "at" => "2026-08-03T05:00:00Z")
+  end
+
+  def json_targets(result)
+    JSON.parse(result.stdout).fetch("events").map { |event| event.fetch("work_item") }
+  end
+
+  def test_bare_number_query_matches_prefixed_spellings
+    write_mixed_spellings
+
+    result = run_log("shakacode/example#319", "--json")
+
+    assert_equal 0, result.status.exitstatus, result.stderr
+    assert_equal(
+      ["shakacode/example#319", "shakacode/example#issue:319", "shakacode/example#pr:319",
+       "shakacode/example#issue:319:qa"],
+      json_targets(result)
+    )
+  end
+
+  def test_prefixed_query_matches_the_bare_spelling
+    write_mixed_spellings
+
+    assert_equal 4, json_targets(run_log("shakacode/example#issue:319", "--json")).length
+  end
+
+  def test_issue_and_pr_prefixes_are_the_same_work_item
+    write_mixed_spellings
+
+    assert_equal(
+      json_targets(run_log("shakacode/example#issue:319", "--json")),
+      json_targets(run_log("shakacode/example#pr:319", "--json"))
+    )
+  end
+
+  # Asking for a lane is a narrower question than asking for the work item, so it
+  # must not answer with the parent's events.
+  def test_explicit_lane_query_matches_only_that_lane
+    write_mixed_spellings
+
+    assert_equal ["shakacode/example#issue:319:qa"], json_targets(run_log("shakacode/example#issue:319:qa", "--json"))
+  end
+
+  def test_lane_events_roll_up_under_the_bare_work_item
+    write_mixed_spellings
+
+    assert_includes json_targets(run_log("shakacode/example#319", "--json")), "shakacode/example#issue:319:qa"
+  end
+
+  # `319-fix` is a slug, not a lane of 319. Prefix-stripping must not widen into
+  # substring matching.
+  def test_lookalike_slug_is_a_different_work_item
+    write_mixed_spellings
+
+    refute_includes json_targets(run_log("shakacode/example#319", "--json")), "shakacode/example#319-fix"
+  end
+
+  def test_slug_target_still_matches_itself
+    write_mixed_spellings
+
+    assert_equal ["shakacode/example#319-fix"], json_targets(run_log("shakacode/example#319-fix", "--json"))
+  end
+
+  def test_claim_recorded_under_a_prefixed_target_is_found_by_the_bare_query
+    write_mixed_spellings
+    write_claim("shakacode/example", "issue:319", "status" => "active", "agent_id" => "acd-worker",
+                                                  "updated_at" => "2026-08-03T06:00:00Z")
+
+    claim = JSON.parse(run_log("shakacode/example#319", "--json").stdout).fetch("claim")
+
+    assert_equal "acd-worker", claim.fetch("agent_id")
+  end
+
+  # A JSON consumer sees only the payload, so "searched everything and found
+  # nothing" must not render identically to "could not search".
+  def test_json_reports_the_spellings_that_matched
+    write_mixed_spellings
+
+    payload = JSON.parse(run_log("shakacode/example#319", "--json").stdout)
+
+    assert_equal ["319", "issue:319", "issue:319:qa", "pr:319"], payload.dig("work_item", "matched_targets").sort
+  end
+
+  def test_json_reports_a_complete_trail_with_no_records_as_searched
+    write_mixed_spellings
+
+    payload = JSON.parse(run_log("shakacode/example#999", "--json").stdout)
+
+    assert_empty payload.fetch("events")
+    assert_equal "complete", payload.fetch("trail")
+    assert_empty payload.dig("work_item", "matched_targets")
+  end
+end

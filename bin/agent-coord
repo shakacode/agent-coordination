@@ -216,6 +216,10 @@ module AgentCoord
   # encoder escapes these already.
   LOG_CONTROL_CHARACTERS = /[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F\u0080-\u009F]/
   LOG_UNKNOWN = "?"
+  # Kind prefixes decorate a target without changing which work item it names.
+  # Issues and pull requests share one number sequence per repository, so
+  # `319`, `issue:319`, and `pr:319` are the same item.
+  WORK_ITEM_KINDS = %w[issue pr adhoc].freeze
   LOG_SINCE_UNITS = { "m" => 60, "h" => 3600, "d" => 86_400, "w" => 604_800 }.freeze
   BATCH_AUDIT_TERMINAL_REQUIRED_FACT_FIELDS = %w[event_id repo target terminal workspace at].freeze
   BATCH_AUDIT_TERMINAL_OPTIONAL_FACT_FIELDS = %w[
@@ -326,6 +330,9 @@ module AgentCoord
       @stderr = stderr
       @clock = clock
       @backend_conflict_warnings = backend_conflict_warnings
+      # Set on the first degraded listing; read by both the --sync guard and the
+      # --json trail state, so it must exist before either runs.
+      @log_incomplete = nil
     end
 
     def run # rubocop:disable Metrics/CyclomaticComplexity
@@ -1025,6 +1032,8 @@ module AgentCoord
       opts.separator "    agent-coord log OWNER/REPO#TARGET   every event for one issue or PR"
       opts.separator "Columns: at, machine, host, work item, type, phase, agent, detail."
       opts.separator "Where it is now is the last line; a move is a change of machine, host, or agent."
+      opts.separator "TARGET names a work item, not a spelling: 319, issue:319, and pr:319 are one trail."
+      opts.separator "A trailing segment is a lane (issue:319:qa); the bare item covers its lanes."
       opts.separator "    --since VALUE        3d, 12h, 30m, or an ISO8601 timestamp"
       opts.separator "    --machine ID         only events from one machine, e.g. m1"
       opts.separator "    --host FAMILY        only events from codex or claude"
@@ -3332,12 +3341,37 @@ module AgentCoord
     # split one work item's history into two partial answers.
     def log_matches?(row, field, wanted)
       return true if wanted.nil? || wanted.to_s.empty?
+      return log_work_item_same?(row.fetch("work_item"), wanted) if field == "work_item"
 
       # The host column holds a family, so the flag value is normalized the same
       # way -- otherwise --host claude-code matches nothing, even though that is
       # the spelling the records actually carry and the flag's help advertises.
       wanted = log_host_family(wanted) if field == "host"
       row.fetch(field).casecmp?(wanted.to_s)
+    end
+
+    # Compare on work-item identity rather than the literal string: the store
+    # holds one item as `319`, `issue:319`, and `pr:319`, and matching literally
+    # answers with whichever third of its history shares the queried spelling.
+    # A query that names a lane keeps its narrower meaning; a query that does not
+    # covers the item and every lane under it.
+    def log_work_item_same?(candidate, wanted)
+      candidate_repo, candidate_target = log_split_work_item(candidate)
+      wanted_repo, wanted_target = log_split_work_item(wanted)
+      return false unless candidate_repo.casecmp?(wanted_repo)
+
+      candidate_base, candidate_lane = AgentCoord.work_item_parts(candidate_target)
+      wanted_base, wanted_lane = AgentCoord.work_item_parts(wanted_target)
+      return false unless candidate_base == wanted_base
+
+      wanted_lane.nil? || wanted_lane == candidate_lane
+    end
+
+    # Targets contain colons, repos do not contain "#", so the last "#" is the
+    # boundary.
+    def log_split_work_item(value)
+      repo, _, target = value.to_s.rpartition("#")
+      [repo, target]
     end
 
     def log_row(data)
@@ -3478,7 +3512,9 @@ module AgentCoord
       format = options[:format].to_s
       if options[:json]
         events = rows.map { |row| log_scrub_values(row.slice(*LOG_TSV_FIELDS)) }
-        @stdout.puts JSON.pretty_generate({ "events" => events, "claim" => claim }.compact)
+        payload = { "work_item" => log_work_item_summary(options, rows), "trail" => log_trail_state,
+                    "events" => events, "claim" => claim }.compact
+        @stdout.puts JSON.pretty_generate(payload)
       elsif format == "tsv"
         # tsv is a data stream, so notes go to stderr rather than inventing a row
         # a consumer would have to parse around.
@@ -3488,6 +3524,25 @@ module AgentCoord
         log_report_rows(rows)
         log_report_trailer(options, claim, rows, @stdout)
       end
+    end
+
+    # Which spellings actually answered the query. An operator auditing "was this
+    # ever worked" needs to see that `issue:319` and `pr:319` were folded in, and
+    # an empty list is the explicit "searched, matched nothing" that a bare empty
+    # events array cannot say on its own.
+    def log_work_item_summary(options, rows)
+      wanted = options[:work_item].to_s
+      return nil if wanted.empty?
+
+      repo, target = log_split_work_item(wanted)
+      matched = rows.map { |row| log_split_work_item(row.fetch("work_item")).last }.uniq.sort
+      { "repo" => repo, "target" => target, "matched_targets" => matched }
+    end
+
+    # stderr already warns, but a --json consumer never sees it: without this a
+    # trail cut short by a scoped token is byte-identical to a complete empty one.
+    def log_trail_state
+      @log_incomplete ? "incomplete" : "complete"
     end
 
     def log_report_rows(rows)
@@ -3551,7 +3606,7 @@ module AgentCoord
       matches = claims.select do |candidate|
         next false if candidate.data["synthetic"] && !options[:include_synthetic]
 
-        log_claim_work_item(candidate).casecmp?(wanted)
+        log_work_item_same?(log_claim_work_item(candidate), wanted)
       end
       # Casing variants produce two claim paths for one work item; the newest is
       # the one that describes where the work actually is.
@@ -4193,10 +4248,12 @@ module AgentCoord
         heartbeat = read_status_heartbeat(store, holder)
         heartbeat_entries << heartbeat if valid_status_heartbeat?(heartbeat)
       end
-      section_notes = {
-        "batches" => "not checked in target scope",
-        "events" => "not checked in target scope"
-      }
+      # Claims and heartbeats are cleared on release and expiry, so this scope
+      # alone cannot distinguish "never worked" from "worked and finished". Name
+      # the command that can, rather than leaving the operator with two empty
+      # sections that read like an answer.
+      unchecked = "not checked in target scope; run `agent-coord log` for this target's history"
+      section_notes = { "batches" => unchecked, "events" => unchecked }
       if claim && heartbeat_entries.empty?
         section_notes["heartbeats"] = if heartbeat == :invalid
                                         "holder heartbeat unreadable"
@@ -4218,8 +4275,8 @@ module AgentCoord
         section_notes: section_notes,
         claim_entries: [claim].compact,
         heartbeat_entries: heartbeat_entries,
-        batch_entries: [],
-        event_entries: [],
+        batch_entries: nil,
+        event_entries: nil,
         heartbeats_by_agent: heartbeats_by_agent(heartbeat_entries),
         lane_states: {},
         now: now
@@ -4343,8 +4400,11 @@ module AgentCoord
         "section_notes" => section_notes,
         "claims" => claim_entries.map { |entry| claim_status_hash(entry) },
         "heartbeats" => heartbeat_entries.map { |entry| heartbeat_status_hash(entry, now) },
-        "batches" => batch_entries.map { |entry| batch_status_hash(entry, heartbeats_by_agent, lane_states, now) },
-        "events" => event_entries.map { |entry| event_status_hash(entry) }
+        # nil is "this section was not read"; [] is "read, and there is nothing".
+        # Collapsing the two lets an unchecked scope answer a question it never
+        # asked -- see the section note for which command can answer it.
+        "batches" => batch_entries&.map { |entry| batch_status_hash(entry, heartbeats_by_agent, lane_states, now) },
+        "events" => event_entries&.map { |entry| event_status_hash(entry) }
       }
     end
     # rubocop:enable Metrics/ParameterLists
@@ -4378,7 +4438,7 @@ module AgentCoord
       end
 
       @stdout.puts "batches"
-      if payload.fetch("batches").empty?
+      if payload.fetch("batches").to_a.empty?
         @stdout.puts "- #{status_section_note(payload, 'batches') || 'none'}"
       else
         payload.fetch("batches").each do |batch|
@@ -4536,7 +4596,7 @@ module AgentCoord
 
     def render_status_events(payload)
       @stdout.puts "events"
-      if payload.fetch("events").empty?
+      if payload.fetch("events").to_a.empty?
         @stdout.puts "- #{status_section_note(payload, 'events') || 'none'}"
       else
         payload.fetch("events").each do |event|
@@ -5895,6 +5955,17 @@ module AgentCoord
 
   def self.target_from_path(path)
     File.basename(path, ".json")
+  end
+
+  # Split a target into the work item it names and the sub-lane within it:
+  # `issue:319:qa` is the qa lane of item 319. Claims key those separately on
+  # purpose -- a lane holds its own lease -- so this is a read-path identity
+  # only. Folding the two together in a claim key would break lease exclusion.
+  def self.work_item_parts(target)
+    segments = target.to_s.strip.split(":")
+    segments.shift if segments.length > 1 && WORK_ITEM_KINDS.include?(segments.first.downcase)
+    base = segments.shift.to_s.downcase
+    [base, segments.empty? ? nil : segments.join(":").downcase]
   end
 
   def self.source_root

@@ -560,6 +560,19 @@ matters for the work item in particular, because the event store has recorded th
 same repository under more than one casing, and an exact match would return only
 half of a work item's history.
 
+For the same reason, the target is matched on the work item it names rather than
+on its literal spelling. Issues and pull requests share one number sequence per
+repository, so `9765`, `issue:9765`, and `pr:9765` are one work item and one
+trail; the store holds all three spellings, and matching literally answers with
+whichever share of the history happens to use the queried one. A trailing segment
+is a lane within the item (`issue:9765:qa`): asking for the item covers its lanes,
+and asking for a lane stays narrow and does not widen to the parent. This is a
+read-path identity only — claims keep their exact key, because a lane holds its
+own lease and folding two keys together would break exclusion. `--json` reports
+the spellings that actually matched under `work_item.matched_targets`, and a
+`trail` of `complete` or `incomplete` alongside them, so an empty `events` array
+from a scoped token is never mistaken for a work item that was never touched.
+
 A work item can also hold a claim while having no event trail, since claims
 written before lifecycle auto-emit were overwritten in place rather than
 appended. Rather than reporting a bare "no events" and hiding live custody, `log`
