@@ -1634,6 +1634,25 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     end
   end
 
+  def test_user_config_rejects_relative_state_roots
+    %w[AGENT_COORD_STATE_ROOT AGENT_COORD_STATUS_STATE_ROOT].each do |key|
+      with_private_user_config("#{key}=relative-state\n") do |config_home|
+        result = run_command(
+          { "XDG_CONFIG_HOME" => config_home },
+          RbConfig.ruby,
+          BIN,
+          "config",
+          "show",
+          "--json"
+        )
+
+        assert_equal 2, result.status.exitstatus
+        assert_includes result.stderr, key
+        assert_includes result.stderr, "absolute path"
+      end
+    end
+  end
+
   def test_config_set_accepts_loopback_plain_http_url
     with_private_config_tmpdir("agent-coord-loopback-api-url") do |root|
       config_home = File.join(root, "config")
@@ -2206,6 +2225,33 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
 
       assert_equal 0, result.status.exitstatus, result.stderr
       assert_equal 0o700, File.stat(directory).mode & 0o777
+    end
+  end
+
+  def test_config_set_does_not_harden_an_explicit_nondedicated_parent
+    with_private_config_tmpdir("agent-coord-explicit-parent") do |root|
+      parent = File.join(root, "shared-parent")
+      env_file = File.join(parent, "coord.env")
+      FileUtils.mkdir_p(parent)
+      File.chmod(0o755, parent)
+      File.write(env_file, "AGENT_COORD_POLICY=required\n")
+      File.chmod(0o600, env_file)
+
+      result = run_command(
+        { "AGENT_COORD_ENV_FILE" => env_file },
+        RbConfig.ruby,
+        BIN,
+        "config",
+        "set",
+        "--machine-id",
+        "m1"
+      )
+
+      assert_equal 0, result.status.exitstatus, result.stderr
+      assert_equal 0o755, File.stat(parent).mode & 0o777
+      contents = File.read(env_file)
+      assert_includes contents, "AGENT_COORD_POLICY=required"
+      assert_includes contents, "AGENT_COORD_MACHINE_ID=m1"
     end
   end
 
@@ -7882,6 +7928,7 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     def load_user_configuration!
       @process_config = AgentCoord::USER_CONFIG_ENV_KEYS.to_h { |key| [key, nil] }
       @user_config_path = nil
+      @user_config_path_explicit = false
       @policy_file_path = nil
       @user_config = {}
       @policy_file_value = nil

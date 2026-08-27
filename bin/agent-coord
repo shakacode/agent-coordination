@@ -60,6 +60,10 @@ module AgentCoord
     AGENT_COORD_LOCAL
     AGENT_COORD_POLICY
   ].freeze
+  ABSOLUTE_USER_CONFIG_PATH_KEYS = %w[
+    AGENT_COORD_STATE_ROOT
+    AGENT_COORD_STATUS_STATE_ROOT
+  ].freeze
   SESSION_SOURCE_AGENT_COORD = "agent_coord_session_id"
   SESSION_SOURCE_CODEX = "codex_thread_id"
   SESSION_SOURCE_UNSET = "unset"
@@ -404,12 +408,12 @@ module AgentCoord
       @process_config = USER_CONFIG_ENV_KEYS.to_h { |key| [key, ENV.fetch(key, nil)] }
       process_policy = @process_config.fetch(POLICY_ENV, nil)
       validate_policy!(process_policy, "process environment:#{POLICY_ENV}") unless process_policy.to_s.empty?
-      @user_config_path, explicit = selected_user_config_path
+      @user_config_path, @user_config_path_explicit = selected_user_config_path
       @policy_file_path = File.join(File.dirname(@user_config_path), "policy") if @user_config_path
       @user_config = {}
       @policy_file_value = nil
       with_optional_config_read_lock do
-        @user_config = @user_config_path ? read_user_env_file(@user_config_path, required: explicit) : {}
+        @user_config = read_selected_user_configuration
         user_policy = @user_config.fetch(POLICY_ENV, nil)
         if @policy_file_path && process_policy.to_s.empty? && user_policy.to_s.empty?
           @policy_file_value = read_policy_file(@policy_file_path)
@@ -430,6 +434,12 @@ module AgentCoord
 
       ENV[POLICY_ENV] = @policy_file_value
       @injected_user_config_keys << POLICY_ENV unless @injected_user_config_keys.include?(POLICY_ENV)
+    end
+
+    def read_selected_user_configuration
+      return {} unless @user_config_path
+
+      read_user_env_file(@user_config_path, required: @user_config_path_explicit)
     end
 
     def restore_injected_user_configuration!
@@ -495,7 +505,11 @@ module AgentCoord
         raise OperationalError, "user config permissions are insecure (expected 0600): #{path}"
       end
 
-      validate_secure_directory_chain!(File.dirname(path), create: false)
+      validate_secure_directory_chain!(
+        File.dirname(path),
+        create: false,
+        private_leaf: dedicated_user_config_parent?
+      )
     end
 
     def parse_user_env(lines, path)
@@ -519,7 +533,20 @@ module AgentCoord
         values[key] = parse_env_assignment_value(match[2], path, index + 1)
       end
       validate_policy!(values[POLICY_ENV], "#{path}:AGENT_COORD_POLICY") if values.key?(POLICY_ENV)
+      validate_user_config_paths!(values, path)
       values
+    end
+
+    def validate_user_config_paths!(values, path)
+      ABSOLUTE_USER_CONFIG_PATH_KEYS.each do |key|
+        value = values.fetch(key, nil)
+        next if value.to_s.empty?
+        next if Pathname.new(value).absolute?
+
+        raise OperationalError, "#{key} in #{path} must be an absolute path"
+      end
+    rescue ArgumentError
+      raise OperationalError, "user config path in #{path} must be an absolute path"
     end
 
     def parse_env_assignment_value(raw, path, line_number)
@@ -2151,7 +2178,11 @@ module AgentCoord
     end
 
     def with_config_write_lock
-      directory = validate_secure_directory_chain!(File.dirname(@user_config_path), create: true)
+      directory = validate_secure_directory_chain!(
+        File.dirname(@user_config_path),
+        create: true,
+        private_leaf: dedicated_user_config_parent?
+      )
       lock_path = File.join(directory, ".config.lock")
       File.open(lock_path, File::RDWR | File::CREAT | File::NOFOLLOW, 0o600) do |lock|
         validate_private_config_file!(lock, lock_path)
@@ -2167,16 +2198,16 @@ module AgentCoord
       raise OperationalError, "cannot acquire config write lock #{lock_path}: #{e.message}"
     end
 
-    def validate_secure_directory_chain!(directory, create:)
+    def validate_secure_directory_chain!(directory, create:, private_leaf: true)
       expanded = File.expand_path(directory)
       current = File::SEPARATOR
-      validate_secure_directory_component!(File.lstat(current), current, leaf: expanded == current)
+      validate_secure_directory_component!(File.lstat(current), current, leaf: private_leaf && expanded == current)
       components = expanded.split(File::SEPARATOR).reject(&:empty?)
 
       components.each_with_index do |component, index|
         candidate = File.join(current, component)
         stat = secure_directory_lstat(candidate, create:)
-        leaf = index == components.length - 1
+        leaf = private_leaf && index == components.length - 1
         if stat.symlink?
           unless trusted_config_parent_symlink?(stat)
             raise OperationalError, "config parent must not contain a user-controlled symlink: #{candidate}"
@@ -2193,6 +2224,10 @@ module AgentCoord
       current
     rescue SystemCallError => e
       raise OperationalError, "cannot validate config parent #{directory}: #{e.message}"
+    end
+
+    def dedicated_user_config_parent?
+      !@user_config_path_explicit
     end
 
     # POSIX ignores symlink permission bits (Linux reports them as 0777), so
@@ -2263,13 +2298,21 @@ module AgentCoord
     end
 
     def write_canonical_config_file(path, contents)
-      directory = validate_secure_directory_chain!(File.dirname(path), create: true)
+      directory = validate_secure_directory_chain!(
+        File.dirname(path),
+        create: true,
+        private_leaf: dedicated_user_config_parent?
+      )
       destination = File.join(directory, File.basename(path))
       temp_path = File.join(directory, ".#{File.basename(path)}.tmp-#{Process.pid}-#{SecureRandom.hex(6)}")
       write_private_config_temp_file(temp_path, contents)
       File.rename(temp_path, destination)
       File.open(directory, File::RDONLY | File::NOFOLLOW) do |directory_file|
-        validate_secure_directory_component!(directory_file.stat, directory, leaf: true)
+        validate_secure_directory_component!(
+          directory_file.stat,
+          directory,
+          leaf: dedicated_user_config_parent?
+        )
         directory_file.fsync
       end
     rescue SystemCallError => e
