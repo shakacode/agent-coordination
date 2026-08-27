@@ -1310,6 +1310,19 @@ class AgentCoordLogWorkItemIdentityTest < AgentCoordLogTestCase
     assert_equal ["319", "issue:319", "issue:319:qa", "pr:319"], payload.dig("work_item", "matched_targets").sort
   end
 
+  # Claims are cleared on release, so a finished work item has events and no live
+  # claim. That is the case target-scoped status cannot tell from "never worked",
+  # and the whole reason this trail has to be reachable by any spelling.
+  def test_finished_work_item_reports_its_events_with_no_live_claim
+    write_mixed_spellings
+
+    payload = JSON.parse(run_log("shakacode/example#319", "--json").stdout)
+
+    assert_nil payload["claim"]
+    refute_empty payload.fetch("events")
+    assert_equal "complete", payload.fetch("trail")
+  end
+
   def test_json_reports_a_complete_trail_with_no_records_as_searched
     write_mixed_spellings
 

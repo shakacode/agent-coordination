@@ -554,6 +554,13 @@ agent-coord log --sync && grep 9765 ~/.local/state/agent-coordination/log.tsv
 Because `--sync` only ever appends, that local trail keeps history after `gc`
 prunes the hot events behind it. Match on `#9765` rather than a bare `9765`:
 event ids are hex, so a bare number also matches incidental digits inside them.
+The mirror records each event's target as it was written, so `grep` does not get
+the work-item matching the command does — anchor on the spellings instead, or the
+same split this command fixes reappears offline:
+
+```bash
+grep -E '#(issue:|pr:)?9765(:|\t)' ~/.local/state/agent-coordination/log.tsv
+```
 
 Matching is case-insensitive for the work item, machine, host, and type. That
 matters for the work item in particular, because the event store has recorded the
