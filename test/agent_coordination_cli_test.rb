@@ -1493,6 +1493,28 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     end
   end
 
+  def test_config_set_rejects_invalid_utf8_token_without_writing_config
+    with_private_config_tmpdir("agent-coord-invalid-token-encoding") do |root|
+      config_home = File.join(root, "config")
+      result = run_command(
+        { "XDG_CONFIG_HOME" => config_home },
+        RbConfig.ruby,
+        BIN,
+        "config",
+        "set",
+        "--api-url",
+        "https://coordination.example",
+        "--token-stdin",
+        stdin_data: "\xFF\n".b
+      )
+
+      assert_equal 1, result.status.exitstatus
+      assert_includes result.stderr, "--token-stdin token must be valid UTF-8"
+      refute_includes result.stderr, "bin/agent-coord:"
+      refute_path_exists File.join(config_home, "agent-coord", "env")
+    end
+  end
+
   def test_config_set_rejects_token_without_an_api_url
     with_private_config_tmpdir("agent-coord-orphan-token") do |root|
       config_home = File.join(root, "config")
@@ -1632,6 +1654,31 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
       coordination = JSON.parse(result.stdout).fetch("coordination")
       assert_equal "required", coordination.fetch("policy")
       assert_equal "policy_file", coordination.dig("source", "policy")
+    end
+  end
+
+  def test_legacy_policy_with_invalid_utf8_fails_as_an_operational_error
+    with_private_config_tmpdir("agent-coord-invalid-policy-encoding") do |root|
+      config_home = File.join(root, "config")
+      directory = File.join(config_home, "agent-coord")
+      policy_file = File.join(directory, "policy")
+      FileUtils.mkdir_p(directory)
+      File.chmod(0o700, directory)
+      File.binwrite(policy_file, "\xFF\n".b)
+      File.chmod(0o600, policy_file)
+
+      result = run_command(
+        { "XDG_CONFIG_HOME" => config_home },
+        RbConfig.ruby,
+        BIN,
+        "config",
+        "show",
+        "--json"
+      )
+
+      assert_equal 2, result.status.exitstatus
+      assert_includes result.stderr, "invalid UTF-8"
+      refute_includes result.stderr, "bin/agent-coord:"
     end
   end
 

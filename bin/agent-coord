@@ -466,16 +466,16 @@ module AgentCoord
       contents = read_private_config_file(path, required:)
       return {} unless contents
 
-      contents = contents.dup.force_encoding(Encoding::UTF_8)
-      raise OperationalError, "user config contains invalid UTF-8: #{path}" unless contents.valid_encoding?
-
       parse_user_env(contents.lines(chomp: true), path)
     end
 
     def read_private_config_file(path, required:)
       File.open(path, File::RDONLY | File::NOFOLLOW) do |file|
         validate_private_config_file!(file, path)
-        file.read
+        contents = file.read.dup.force_encoding(Encoding::UTF_8)
+        raise OperationalError, "user config contains invalid UTF-8: #{path}" unless contents.valid_encoding?
+
+        contents
       end
     rescue Errno::ENOENT
       raise OperationalError, "configured user env file does not exist: #{path}" if required
@@ -2089,6 +2089,9 @@ module AgentCoord
     def read_token_from_stdin
       token = @stdin.read(65_537).to_s
       raise Error, "--token-stdin input is too large" if token.bytesize > 65_536
+
+      token = token.dup.force_encoding(Encoding::UTF_8)
+      raise Error, "--token-stdin token must be valid UTF-8" unless token.valid_encoding?
 
       token = token.sub(/\r?\n\z/, "")
       raise Error, "--token-stdin requires a non-empty token" if token.empty?
