@@ -466,6 +466,9 @@ module AgentCoord
       contents = read_private_config_file(path, required:)
       return {} unless contents
 
+      contents = contents.dup.force_encoding(Encoding::UTF_8)
+      raise OperationalError, "user config contains invalid UTF-8: #{path}" unless contents.valid_encoding?
+
       parse_user_env(contents.lines(chomp: true), path)
     end
 
@@ -899,6 +902,7 @@ module AgentCoord
       validate_doctor_prefix!(command, options)
       validate_closeout_option_usage!(command, options)
       validate_register_batch_option_usage!(command, options)
+      validate_config_set_backend_option_usage!(command, options)
 
       if backend_command?(command)
         resolve_backend_env(options)
@@ -907,6 +911,19 @@ module AgentCoord
         refuse_split_brain_write!(command, options)
       end
       options
+    end
+
+    def validate_config_set_backend_option_usage!(command, options)
+      return unless command == "config-set"
+
+      unsupported = {
+        state_root_cli: "--state-root",
+        backend_cli: "--backend",
+        ref_cli: "--ref"
+      }.find { |field, _option| options[field] }
+      return unless unsupported
+
+      raise Error, "#{unsupported.last} is not valid for config set"
     end
 
     def validate_doctor_prefix!(command, options)
