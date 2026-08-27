@@ -9,7 +9,7 @@ Gem::Specification.new do |spec|
   spec.version = version_match[1]
   spec.authors = ["ShakaCode"]
   spec.summary = "Coordinate concurrent agent work from the command line"
-  spec.description = "The agent-coord CLI for local and HTTP-backed claims, heartbeats, batches, and events."
+  spec.description = "Coordination and aggregate telemetry CLIs for local and HTTP-backed agent workflows."
   spec.homepage = "https://github.com/shakacode/agent-coordination"
   spec.license = "MIT"
   spec.required_ruby_version = ">= 3.2"
@@ -25,6 +25,8 @@ Gem::Specification.new do |spec|
     LICENSE
     README.md
     bin/agent-coord
+    bin/agent-coord-harvest
+    config/telemetry-pricing-v1.json
     contracts/state-schema-v2.json
     docs/adr/0007-host-limit-state-contract.md
     docs/adr/0008-capacity-reservation-state-contract.md
@@ -34,6 +36,12 @@ Gem::Specification.new do |spec|
     docs/adr/0012-batch-completion-state-contract.md
     docs/adr/0013-batch-blocker-state-contract.md
     docs/protocol-curl.md
+    docs/telemetry-ledger.md
+    lib/agent_coordination/harvester.rb
+    lib/agent_coordination/host_adapters.rb
+    lib/agent_coordination/ledger.rb
+    lib/agent_coordination/pricing.rb
+    lib/agent_coordination/scorecards.rb
     schema/state/v1/batch-blocker/batch-blocker.schema.json
     schema/state/v1/batch-blocker/fixtures/invalid/blocker-decision-not-string.json
     schema/state/v1/batch-blocker/fixtures/invalid/blocker-empty-decision-string.json
@@ -142,9 +150,13 @@ Gem::Specification.new do |spec|
     schema/state/v1/usage/fixtures/valid/usage-known.json
     schema/state/v1/usage/fixtures/valid/usage-unknown-metrics.json
     schema/state/v1/usage/usage-record.schema.json
+    schema/telemetry-ledger/0001_initial.sql
+    schema/telemetry-ledger/0002_host_usage.sql
+    schema/telemetry-ledger/0003_pricing_scorecards.sql
   ]
   spec.bindir = "bin"
-  spec.executables = ["agent-coord"]
+  spec.executables = %w[agent-coord agent-coord-harvest]
 
   spec.add_dependency "base64", ">= 0.1.1", "< 1.0"
+  spec.add_dependency "sqlite3", ">= 2.9.5", "< 3.0"
 end

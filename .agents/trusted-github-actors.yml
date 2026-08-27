@@ -1,5 +1,9 @@
 ---
-trusted_users: []
-trusted_bots: []
+trusted_users:
+  - justin808
+trusted_bots:
+  - claude
+  - coderabbitai
+  - chatgpt-codex-connector
 trusted_metadata_bots: []
 trusted_teams: []

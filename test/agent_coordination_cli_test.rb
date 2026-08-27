@@ -7,6 +7,7 @@ require "minitest/autorun"
 require "open3"
 require "rbconfig"
 require "shellwords"
+require "socket"
 require "stringio"
 require "tmpdir"
 require "timeout"
@@ -66,19 +67,23 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
       index && ARGV.fetch(index + 1)
     end
 
+    def port_arg
+      index = ARGV.index("--port")
+      index && ARGV.fetch(index + 1)
+    end
+
     if ARGV[0, 5] == %w[wrangler d1 migrations apply agent-coord] &&
         ARGV.include?("--local") &&
         persist_to_arg
       exit 0
     elsif ARGV[0, 2] == %w[wrangler dev] &&
         ARGV.include?("--local") &&
-        ARGV.include?("--port") &&
-        ARGV.include?("8787") &&
+        (port = port_arg) &&
         persist_to_arg
       require "socket"
 
       File.write(ENV.fetch("FAKE_WRANGLER_PID"), Process.pid.to_s)
-      server = TCPServer.new("127.0.0.1", 8787)
+      server = TCPServer.new("127.0.0.1", Integer(port))
       trap("TERM") do
         write_event("signal" => "TERM")
         File.write(ENV.fetch("FAKE_WRANGLER_STOPPED"), "1")
@@ -1187,6 +1192,25 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
 
       assert_equal 42, result.status.exitstatus, "#{result.stdout}\n#{result.stderr}"
       assert_fake_harness_cleanup(paths)
+    end
+  end
+
+  def test_http_integration_harness_threads_configured_port_to_wrangler_and_health_check
+    with_fake_http_harness do |env, paths|
+      port = allocate_ephemeral_port
+      result = run_command(
+        env.merge("AGENT_COORD_TEST_HTTP_PORT" => port.to_s),
+        "bash",
+        HTTP_INTEGRATION_BIN
+      )
+
+      assert_fake_http_harness_run(result, paths)
+      dev = fake_harness_events(paths).find { |event| event["argv"][0, 2] == %w[wrangler dev] }
+      assert dev, "no wrangler dev command was recorded"
+      assert_equal port.to_s, http_integration_port_arg(dev.fetch("argv")),
+                   "expected AGENT_COORD_TEST_HTTP_PORT to be threaded through to wrangler dev"
+      refute_equal "8787", http_integration_port_arg(dev.fetch("argv")),
+                   "harness must not fall back to the historically hard-coded port"
     end
   end
 
@@ -8907,6 +8931,7 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     assert dev, "no wrangler dev command was recorded: #{events.inspect}"
     assert_includes dev.fetch("wrangler_output_log"), paths.fetch(:tmpdir)
     assert_fake_harness_persistence(paths, migration, execute, dev)
+    assert_fake_harness_threads_a_port(dev)
     assert_fake_harness_cleanup(paths)
   end
 
@@ -8919,6 +8944,27 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
   def persist_to_arg(argv)
     index = argv.index("--persist-to")
     index && argv.fetch(index + 1)
+  end
+
+  # Guards the ephemeral-port allocation: a regression to a hard-coded port
+  # (e.g. reintroducing a literal 8787) fails this assertion even when no
+  # other process happens to be holding that port during the test run.
+  def assert_fake_harness_threads_a_port(dev)
+    port = http_integration_port_arg(dev.fetch("argv"))
+    assert_match(/\A\d+\z/, port.to_s, "expected wrangler dev to receive a numeric --port: #{dev.inspect}")
+    refute_equal "8787", port, "harness must not fall back to the historically hard-coded port"
+  end
+
+  def http_integration_port_arg(argv)
+    index = argv.index("--port")
+    index && argv.fetch(index + 1)
+  end
+
+  def allocate_ephemeral_port
+    server = TCPServer.new("127.0.0.1", 0)
+    server.addr[1]
+  ensure
+    server&.close
   end
 
   def assert_fake_harness_cleanup(paths)

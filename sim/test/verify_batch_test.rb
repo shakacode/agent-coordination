@@ -9,6 +9,9 @@ require "tmpdir"
 
 class VerifyBatchTest < Minitest::Test
   VERIFY = File.expand_path("../bin/verify-batch", __dir__)
+  ROOT = File.expand_path("../..", __dir__)
+  HARVEST = File.join(ROOT, "bin", "agent-coord-harvest")
+  TELEMETRY_FIXTURE = File.join(ROOT, "test", "fixtures", "telemetry", "coordination.json")
   LOCAL_COORDINATION_ENV = {
     "AGENT_COORD_API_URL" => nil,
     "AGENT_COORD_API_TOKEN" => nil,
@@ -18,6 +21,7 @@ class VerifyBatchTest < Minitest::Test
     "AGENT_COORD_MACHINE_ID" => nil,
     "AGENT_COORD_POLICY" => nil,
     "AGENT_COORD_REF" => nil,
+    "AGENT_COORD_SESSION_ID" => nil,
     "AGENT_COORD_STATUS_STATE_ROOT" => nil
   }.freeze
 
@@ -63,6 +67,31 @@ class VerifyBatchTest < Minitest::Test
       assert_equal 1, status.exitstatus
       assert_includes stdout, "FAIL task_two"
       assert_includes stdout, "SCORE 1/3"
+    end
+  end
+
+  def test_optional_telemetry_ledger_prints_aggregate_batch_scorecard
+    Dir.mktmpdir do |dir|
+      state = File.join(dir, "state")
+      ledger = File.join(dir, "telemetry.sqlite3")
+      %w[task_one task_two task_three].each do |target|
+        write(state, "claims/sim/verify/#{target}.json", released_claim(target))
+      end
+      harvest_out, harvest_err, harvest_status = Open3.capture3(
+        HARVEST, "harvest", "--ledger", ledger,
+        "--coordination-json", TELEMETRY_FIXTURE, "--batch-id", "batch-fixture"
+      )
+      assert harvest_status.success?, "harvest failed:\n#{harvest_out}\n#{harvest_err}"
+
+      stdout, stderr, status = Open3.capture3(
+        local_coordination_env(state),
+        VERIFY, "--repo-slug", "sim/verify",
+        "--telemetry-ledger", ledger, "--batch-id", "batch-fixture"
+      )
+      assert_equal 0, status.exitstatus, stderr
+      assert_includes stdout,
+                      "TELEMETRY batch=batch-fixture target_units=2 cost_microusd=0 unknown_cost_sessions=0"
+      assert_includes stdout, "SCORE 3/3"
     end
   end
 

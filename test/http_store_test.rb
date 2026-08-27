@@ -453,17 +453,8 @@ class HttpEnvTestCase < Minitest::Test
   ensure
     saved.each { |key, value| value.nil? ? ENV.delete(key) : ENV[key] = value }
   end
-
   def with_private_config_tmpdir(prefix, &)
     Dir.mktmpdir(prefix, PRIVATE_CONFIG_TMP_PARENT, &)
-  end
-end
-
-class HttpBackendSelectionTest < HttpEnvTestCase # rubocop:disable Metrics/ClassLength
-  CONSUMER_ENV_CONTENT = "AGENT_COORD_API_URL=https://agent-coord.example\nAGENT_COORD_API_TOKEN=secret\n"
-
-  def claim_args(*extra)
-    ["claim", "--agent-id", "split-brain-worker", "--repo", "demo/example", "--target", "1", *extra]
   end
 
   def run_cli(args, _env)
@@ -476,6 +467,14 @@ class HttpBackendSelectionTest < HttpEnvTestCase # rubocop:disable Metrics/Class
       e.exit_code
     end
     [code, stdout.string, stderr.string]
+  end
+end
+
+class HttpBackendSelectionTest < HttpEnvTestCase # rubocop:disable Metrics/ClassLength
+  CONSUMER_ENV_CONTENT = "AGENT_COORD_API_URL=https://agent-coord.example\nAGENT_COORD_API_TOKEN=secret\n"
+
+  def claim_args(*extra)
+    ["claim", "--agent-id", "split-brain-worker", "--repo", "demo/example", "--target", "1", *extra]
   end
 
   # Isolated consumer env file plus isolated XDG state so the implicit local
@@ -1702,5 +1701,113 @@ class HttpDoctorTest < HttpEnvTestCase
     assert_equal "scoped", payload.dig("identity", "machine")
     prefixes = %w[claims heartbeats batches events archive].map { |prefix| "/v1/state?prefix=#{prefix}" }
     assert_equal(["/v1/health", *prefixes, "/v1/whoami"], stub.requests.map { |request| request[:path] })
+  end
+end
+
+# `agent-coord log` over the HTTP backend: a scoped token must never turn a
+# read-only trail query into a crash, and never into a silently short answer.
+class LogHttpBackendTest < HttpEnvTestCase
+  # A scoped token can return a partial event listing. Rendering those entries as
+  # a whole custody trail would let `log` report the wrong current state with no
+  # sign anything was withheld (PR #131 review).
+  def test_log_warns_when_the_event_trail_is_filtered_by_a_scoped_token
+    stub = HttpStoreStub.new([[200, { "entries" => [], "filtered" => true }]])
+    with_env("AGENT_COORD_API_URL" => stub.base_url, "AGENT_COORD_API_TOKEN" => "tok") do
+      code, _out, err = run_cli(["log"], {})
+
+      assert_equal 0, code
+      assert_includes err, "filtered by scoped token"
+      assert_includes err, "may be incomplete"
+    end
+  ensure
+    stub.shutdown
+  end
+
+  # A read-only query must degrade the way status does rather than crashing when a
+  # scoped token cannot list events, and it must say the trail is short (PR #131).
+  def test_log_degrades_when_the_event_listing_is_forbidden_to_a_scoped_token
+    stub = HttpStoreStub.new([[403, { "error" => "forbidden" }]])
+    with_env("AGENT_COORD_API_URL" => stub.base_url, "AGENT_COORD_API_TOKEN" => "tok") do
+      code, _out, err = run_cli(["log"], {})
+
+      assert_equal 0, code
+      assert_includes err, "not readable by scoped token"
+      assert_includes err, "may be incomplete"
+    end
+  ensure
+    stub.shutdown
+  end
+
+  # The event store records one repo under two casings, and the HTTP backend is
+  # case-sensitive, so both claim paths match the query. Taking whichever the
+  # listing yields first is a coin flip; both orders are exercised here because
+  # listing order alone would otherwise decide the outcome.
+  def test_log_claim_note_selects_the_most_recently_updated_case_variant
+    newer = { "schema_version" => 1, "repo" => "ShakaCode/example", "target" => "1", "status" => "active",
+              "agent_id" => "current-worker", "machine_id" => "m5", "host" => "codex",
+              "updated_at" => "2026-08-01T03:13:03Z" }
+    older = { "schema_version" => 1, "repo" => "shakacode/example", "target" => "1", "status" => "released",
+              "agent_id" => "old-worker", "machine_id" => "m1", "host" => "codex",
+              "updated_at" => "2026-07-01T00:00:00Z" }
+    [[newer, older], [older, newer]].each do |first, second|
+      stub = HttpStoreStub.new([
+                                 [200, { "entries" => [] }],
+                                 [200, { "entries" => [
+                                   { "path" => "claims/a/1.json", "data" => first, "version" => 1 },
+                                   { "path" => "claims/b/1.json", "data" => second, "version" => 1 }
+                                 ] }]
+                               ])
+      with_env("AGENT_COORD_API_URL" => stub.base_url, "AGENT_COORD_API_TOKEN" => "tok") do
+        _code, out, = run_cli(["log", "shakacode/example#1"], {})
+
+        assert_includes out, "current-worker"
+        refute_includes out, "old-worker"
+      end
+      stub.shutdown
+    end
+  end
+
+  # A partial listing would write a partial mirror that later reads as complete --
+  # the same hazard the narrowing options are rejected for.
+  def test_log_sync_refuses_to_write_a_mirror_from_a_filtered_listing
+    stub = HttpStoreStub.new([[200, { "entries" => [], "filtered" => true }]])
+    with_env("AGENT_COORD_API_URL" => stub.base_url, "AGENT_COORD_API_TOKEN" => "tok") do
+      code, _out, err = run_cli(["log", "--sync"], {})
+
+      assert_equal 2, code
+      assert_includes err, "incomplete"
+    end
+  ensure
+    stub.shutdown
+  end
+
+  # A filtered claims listing can hide the very claim being asked about, so a
+  # silent "no claim" would be indistinguishable from a real absence.
+  def test_log_warns_when_the_claim_listing_is_filtered_by_a_scoped_token
+    stub = HttpStoreStub.new([[200, { "entries" => [] }], [200, { "entries" => [], "filtered" => true }]])
+    with_env("AGENT_COORD_API_URL" => stub.base_url, "AGENT_COORD_API_TOKEN" => "tok") do
+      code, out, err = run_cli(["log", "shakacode/example#1"], {})
+
+      assert_equal 0, code
+      assert_includes out, "no events"
+      assert_includes err, "claims filtered by scoped token"
+    end
+  ensure
+    stub.shutdown
+  end
+
+  # Swallowing every claims failure made "this token cannot read claims" print
+  # identically to "this work item has no claim".
+  def test_log_warns_when_the_claim_lookup_is_forbidden_to_a_scoped_token
+    stub = HttpStoreStub.new([[200, { "entries" => [] }], [403, { "error" => "forbidden" }]])
+    with_env("AGENT_COORD_API_URL" => stub.base_url, "AGENT_COORD_API_TOKEN" => "tok") do
+      code, out, err = run_cli(["log", "shakacode/example#1"], {})
+
+      assert_equal 0, code
+      assert_includes out, "no events"
+      assert_includes err, "claims not readable by scoped token"
+    end
+  ensure
+    stub.shutdown
   end
 end
