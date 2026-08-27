@@ -308,8 +308,11 @@ when releases begin.
   all spellings now return the union of 35. A trailing segment stays a lane within
   the item (`issue:319:qa`): asking for the item covers its lanes, asking for a
   lane stays narrow. Claim keys are unchanged — this is a read-path identity only,
-  because a lane holds its own lease and merging keys would break exclusion
-  (issue #141).
+  because a lane holds its own lease and merging keys would break exclusion. The
+  reported claim follows that same rule: it folds casing and kind prefixes, which
+  name one lease, but matches the lane exactly, so a parent and a lane that are
+  live at the same time are each reported under their own query instead of the
+  newer one hiding the other (issue #141).
 - `agent-coord log --json` now reports `work_item.matched_targets` and a `trail`
   of `complete` or `incomplete`. The degraded-listing warning went only to stderr,
   so a trail cut short by a scoped token was byte-identical to a complete empty
