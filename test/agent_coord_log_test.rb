@@ -2150,7 +2150,74 @@ class AgentCoordLogArchiveTest < AgentCoordLogTestCase
     assert_equal %w[e1 e2 e3 e4 e5], tsv_rows_event_ids(result)
   end
 
+  # gc retains at least the first and last event of every generation, so an
+  # envelope naming consumed source paths while retaining nothing is corruption.
+  # Accepting it quietly let --sync exit 0 over a mirror missing those events.
+  def test_log_reports_a_compacted_envelope_that_retained_nothing
+    write_trace
+    write_archive_json("archive/events/b9/compact-empty.json",
+                       "schema_version" => 1, "record_family" => "compacted_events",
+                       "source_paths" => ["events/b9/x1.json", "events/b9/x2.json"],
+                       "archived_at" => "2026-08-05T00:00:00Z", "delete_after" => "2026-09-04T00:00:00Z",
+                       "records" => [])
+
+    result = run_log("shakacode/example#104", "--format", "tsv")
+    sync = run_log("--sync")
+
+    assert_equal 0, result.status.exitstatus, result.stderr
+    assert_includes result.stderr, "no retained records for 2 source paths at archive/events/b9/compact-empty.json"
+    assert_equal %w[e1 e2 e3 e4 e5], tsv_rows_event_ids(result)
+    assert_equal 2, sync.status.exitstatus, "a mirror must not be written over a corrupt envelope"
+    assert_includes sync.stderr, "refusing to sync an incomplete trail: archive/events"
+  end
+
+  # Both empty is degenerate but not self-contradictory: the envelope consumed
+  # nothing and retained nothing, so there is nothing to report.
+  def test_log_accepts_a_compacted_envelope_that_consumed_nothing
+    write_trace
+    write_archive_json("archive/events/b9/compact-degenerate.json",
+                       "schema_version" => 1, "record_family" => "compacted_events",
+                       "source_paths" => [], "archived_at" => "2026-08-05T00:00:00Z",
+                       "delete_after" => "2026-09-04T00:00:00Z", "records" => [])
+
+    result = run_log("shakacode/example#104")
+
+    assert_equal 0, result.status.exitstatus, result.stderr
+    refute_includes result.stderr, "no retained records"
+    assert_equal 0, run_log("--sync").status.exitstatus, "an envelope that consumed nothing is not corruption"
+  end
+
+  # event_payload stamps event_id and batch_id together, but that is one
+  # producer's behavior rather than a rule the store enforces. A record carrying
+  # an id without a batch must not key as [nil, event_id], which would collide
+  # across contexts exactly the way the bare id did.
+  def test_log_keeps_records_that_carry_an_event_id_without_a_batch
+    write_raw_event("b1", "legacy", "schema_version" => 2, "event_id" => "shared",
+                                    "type" => "claim.acquired", "repo" => "shakacode/example",
+                                    "target" => "104", "machine_id" => "m5", "host" => "codex",
+                                    "at" => "2026-08-01T00:00:00Z")
+    write_archive_json("archive/events/b2/compact-legacy.json",
+                       "schema_version" => 1, "record_family" => "compacted_events",
+                       "source_paths" => ["events/b2/legacy.json"],
+                       "archived_at" => "2026-08-05T00:00:00Z", "delete_after" => "2026-09-04T00:00:00Z",
+                       "records" => [{ "schema_version" => 2, "event_id" => "shared", "type" => "lane_closed",
+                                       "repo" => "shakacode/other", "target" => "7", "machine_id" => "m9",
+                                       "host" => "codex", "terminal" => "done",
+                                       "at" => "2026-08-02T00:00:00Z" }])
+
+    assert_equal %w[shared], tsv_event_ids("shakacode/example#104")
+    assert_equal %w[shared], tsv_event_ids("shakacode/other#7"), "the archived record must survive"
+  end
+
   private
+
+  # Written verbatim, because write_event always stamps a batch_id and these
+  # fixtures exist to exercise a record that carries none.
+  def write_raw_event(batch_id, name, record)
+    path = File.join(@state_root, "events", batch_id, "#{name}.json")
+    FileUtils.mkdir_p(File.dirname(path))
+    File.write(path, "#{JSON.generate(record)}\n")
+  end
 
   def write_closed_lane_trace(repo: "shakacode/example", target: "104", batch: "b1", synthetic: false)
     @lane_identity = { repo: repo, target: target, batch: batch, synthetic: synthetic }

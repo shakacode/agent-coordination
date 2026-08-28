@@ -3472,30 +3472,41 @@ module AgentCoord
       end
     end
 
-    # Scoped to the batch, because event_id is not unique across the store: a
-    # terminal event takes its id from the lane name alone (see
+    # The batch and the event id together, because event_id is not unique across
+    # the store: a terminal event takes its id from the lane name alone (see
     # stable_terminal_event_id), so two batches that each register a lane named
     # "qa" write the same event_id under different batch paths. Deduplicating on
     # the bare id let a live event in one batch suppress an archived event in
     # another -- reporting no events for a work item whose history is sitting in
     # the archive, which is the failure this read exists to remove. The real
     # duplicate this still has to collapse, one event readable from both events/
-    # and archive/events/ after an interrupted compaction, shares its batch id,
-    # and event_payload always stamps batch_id, so scoping does not weaken it.
+    # and archive/events/ after an interrupted compaction, carries both halves.
     #
-    # Identity falls back to the whole record because roughly a tenth of the
-    # recorded events predate event ids; collapsing those onto one missing-id key
-    # would drop real history as a false duplicate. That fallback is not scoped,
-    # and does not need to be: the record it keys on already contains batch_id
-    # when the event carries one. The residual collision it cannot narrow is two
-    # records identical in every recorded field -- same batch, instant, type,
-    # work item, machine, and agent, or none of them stamped at all. Those two
-    # render as the same line, so the trail loses a repeat rather than a fact.
+    # Both halves are required rather than assumed. event_payload does stamp them
+    # together, but that is one producer's behavior, not a rule the store
+    # enforces: a hand-migrated record, a future producer, or a record written
+    # after event ids but before batch stamping would key as [nil, event_id] and
+    # collide across contexts exactly the way the bare id did. A record missing
+    # either half falls back to the whole record instead.
+    #
+    # That fallback also covers the roughly one in ten recorded events that
+    # predate event ids; collapsing those onto one missing-id key would drop real
+    # history as a false duplicate. It needs no batch scope of its own, since the
+    # record it keys on already carries batch_id when the event has one. The
+    # residual collision it cannot narrow is two records identical in every
+    # recorded field -- same batch, instant, type, work item, machine, and agent,
+    # or none of them stamped at all. Those two render as the same line, so the
+    # trail loses a repeat rather than a fact.
     def log_event_identity(data)
       event_id = data["event_id"]
-      return data unless event_id.is_a?(String) && !event_id.empty?
+      batch_id = data["batch_id"]
+      return data unless log_identity_part?(event_id) && log_identity_part?(batch_id)
 
-      [data["batch_id"], event_id]
+      [batch_id, event_id]
+    end
+
+    def log_identity_part?(value)
+      value.is_a?(String) && !value.empty?
     end
 
     # Only families whose payload is an event, and only from the archived events
@@ -3510,12 +3521,27 @@ module AgentCoord
     def log_archived_event_data(entry)
       data = entry.data
       case data.is_a?(Hash) ? data["record_family"] : nil
-      when "compacted_events" then log_archived_records(entry, data["records"])
+      when "compacted_events" then log_compacted_records(entry, data)
       when "archived_record" then log_archived_records(entry, [data["data"]])
       else
         log_archive_incomplete(entry, "unknown archived record family")
         []
       end
+    end
+
+    # gc retains at least the first and last event of every generation it
+    # compacts (see gc_compacted_entries), so an envelope that names the source
+    # paths it consumed while retaining nothing is corruption rather than an
+    # empty generation -- and accepting it quietly let --sync exit 0 over a
+    # mirror missing the events those paths held. An envelope with both empty is
+    # degenerate but not self-contradictory: it consumed nothing and retained
+    # nothing, so there is nothing to report.
+    def log_compacted_records(entry, data)
+      sources = Array(data["source_paths"]).length
+      return log_archived_records(entry, data["records"]) unless data["records"] == [] && sources.positive?
+
+      log_archive_incomplete(entry, "no retained records for #{sources} source #{sources == 1 ? 'path' : 'paths'}")
+      []
     end
 
     # A recognized family with a malformed body was the quieter half of the same
@@ -3567,6 +3593,26 @@ module AgentCoord
     # the live events beside it. SystemCallError is named because the local store
     # reads each record outside the listing's own guard, so a record file the
     # process cannot open arrives here as a bare Errno, not an OperationalError.
+    #
+    # The breadth is deliberate, so do not narrow this rescue to match the two
+    # shapes log_listing can classify. listing_degradation only recognizes
+    # :forbidden and :unsupported; a malformed pagination response, a 500, or any
+    # other backend defect falls outside both, and from here they are all the
+    # same fact -- the archive did not answer -- layered onto a query that
+    # already has an answer without it.
+    #
+    # Degrading is not the same as swallowing. Every path through here warns on
+    # stderr on every invocation and marks the trail incomplete, and an
+    # incomplete trail makes --sync refuse with exit 2 and write nothing, which
+    # is the operation where completeness actually matters. (The marker reaches
+    # the operator through those two channels; it is not yet a field in --json
+    # output.)
+    #
+    # The asymmetry with the live events prefix, which fails hard on the same
+    # listing errors, is intended at this level: an unreadable events prefix
+    # means the query has no answer at all, so failing is the honest result
+    # there, while an unreadable archive only means the answer is shorter. The
+    # record-level asymmetry is not intended and is tracked in issue #176.
     def log_archived_event_entries(store)
       log_listing(store, LOG_ARCHIVED_EVENTS_PREFIX) do |reason|
         "warning: archived events #{reason}; this trail may be incomplete"
