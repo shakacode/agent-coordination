@@ -984,7 +984,10 @@ configuration while preserving unspecified keys.
 A process `AGENT_COORD_POLICY` overrides the persisted policy for one
 invocation. The old sibling `agent-coord/policy` file remains a read-only
 legacy fallback only when neither the process nor canonical env file supplies a
-policy; `config set` never updates or deletes that legacy file.
+policy; `config set` never updates or deletes that legacy file. That fallback is
+only consulted beside a conventional `agent-coord/env` path, so an
+`AGENT_COORD_ENV_FILE` pointed at a shared directory never reads an unrelated
+sibling named `policy`.
 
 A token read from the user file is credential-bound to that file's saved API
 URL. A differing `--api-url` or process `AGENT_COORD_API_URL` requires a

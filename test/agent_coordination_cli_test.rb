@@ -1777,6 +1777,39 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     end
   end
 
+  # An explicit AGENT_COORD_ENV_FILE can live in a shared directory. Deriving the
+  # legacy fallback as the generic sibling named "policy" there parsed an
+  # unrelated file and subjected it to the 0600 checks, failing every command
+  # despite a perfectly valid explicit config.
+  def test_legacy_policy_fallback_is_not_derived_beside_an_explicit_env_file
+    with_private_config_tmpdir("agent-coord-explicit-policy-sibling") do |root|
+      shared = File.join(root, "shared")
+      env_file = File.join(shared, "coord.env")
+      unrelated_policy = File.join(shared, "policy")
+      FileUtils.mkdir_p(shared)
+      File.chmod(0o755, shared)
+      File.write(env_file, "AGENT_COORD_MACHINE_ID=m1\n")
+      File.chmod(0o600, env_file)
+      File.write(unrelated_policy, "some unrelated project policy\n")
+      File.chmod(0o644, unrelated_policy)
+
+      result = run_command(
+        { "AGENT_COORD_ENV_FILE" => env_file },
+        RbConfig.ruby,
+        BIN,
+        "config",
+        "show",
+        "--json"
+      )
+
+      assert_equal 0, result.status.exitstatus, result.stderr
+      coordination = JSON.parse(result.stdout).fetch("coordination")
+      assert_equal "optional", coordination.fetch("policy")
+      assert_equal "default", coordination.dig("source", "policy")
+      assert_equal "some unrelated project policy\n", File.read(unrelated_policy)
+    end
+  end
+
   def test_legacy_policy_with_invalid_utf8_fails_as_an_operational_error
     with_private_config_tmpdir("agent-coord-invalid-policy-encoding") do |root|
       config_home = File.join(root, "config")

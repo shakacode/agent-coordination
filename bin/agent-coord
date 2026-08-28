@@ -409,7 +409,7 @@ module AgentCoord
       process_policy = @process_config.fetch(POLICY_ENV, nil)
       validate_policy!(process_policy, "process environment:#{POLICY_ENV}") unless process_policy.to_s.empty?
       @user_config_path, @user_config_path_explicit = selected_user_config_path
-      @policy_file_path = File.join(File.dirname(@user_config_path), "policy") if @user_config_path
+      @policy_file_path = legacy_policy_file_path
       @user_config = {}
       @policy_file_value = nil
       with_optional_config_read_lock do
@@ -434,6 +434,21 @@ module AgentCoord
 
       ENV[POLICY_ENV] = @policy_file_value
       @injected_user_config_keys << POLICY_ENV unless @injected_user_config_keys.include?(POLICY_ENV)
+    end
+
+    # The legacy policy file is a compatibility fallback for the conventional
+    # <config home>/agent-coord/env layout only. AGENT_COORD_ENV_FILE can point
+    # at a shared directory, where an unrelated sibling named "policy" would
+    # otherwise be parsed and subjected to the 0600 checks, failing every command
+    # despite a perfectly valid explicit config.
+    def legacy_policy_file_path
+      return nil unless @user_config_path
+
+      directory = File.dirname(@user_config_path)
+      return nil unless File.basename(@user_config_path) == "env"
+      return nil unless File.basename(directory) == "agent-coord"
+
+      File.join(directory, "policy")
     end
 
     def read_selected_user_configuration
