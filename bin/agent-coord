@@ -2153,7 +2153,14 @@ module AgentCoord
     def with_optional_config_read_lock
       return yield unless @user_config_path
 
-      lock_path = user_config_lock_path(File.dirname(@user_config_path))
+      # The writer derives its lock identity from the resolved config directory,
+      # so the reader has to resolve the same chain first. Digesting the
+      # unresolved path puts the two sides on different lock files whenever an
+      # ancestor is a symlink, and the reader then degrades to no lock forever.
+      directory = resolved_user_config_directory
+      return yield unless directory
+
+      lock_path = user_config_lock_path(directory)
       lock = begin
         File.open(lock_path, File::RDONLY | File::NOFOLLOW)
       rescue Errno::ENOENT
@@ -2206,6 +2213,21 @@ module AgentCoord
       raise OperationalError, "config lock must not be a symlink: #{lock_path}"
     rescue SystemCallError => e
       raise OperationalError, "cannot acquire config write lock #{lock_path}: #{e.message}"
+    end
+
+    # Resolution runs before any ownership check, exactly like the write path:
+    # the lock is still opened with NOFOLLOW and validate_private_config_file!
+    # re-validates the resolved parent chain before the lock is honored. A
+    # missing config directory is the ordinary "nothing configured yet" case and
+    # must stay lock-free rather than fail closed; anything else still fails.
+    def resolved_user_config_directory
+      File.realpath(File.dirname(@user_config_path))
+    rescue Errno::ENOENT, Errno::ENOTDIR
+      nil
+    rescue Errno::ELOOP
+      raise OperationalError, "config parent must not be a symlink loop: #{File.dirname(@user_config_path)}"
+    rescue SystemCallError => e
+      raise OperationalError, "cannot resolve config parent #{File.dirname(@user_config_path)}: #{e.message}"
     end
 
     def user_config_lock_path(directory)

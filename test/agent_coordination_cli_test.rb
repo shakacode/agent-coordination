@@ -2055,6 +2055,56 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     )
   end
 
+  # The writer locks inside the resolved config directory. A reader that digests
+  # the unresolved directory lands on a different filename whenever an ancestor
+  # is a symlink, gets ENOENT, and silently degrades to no lock forever. Drive
+  # the real reader rather than the lock-path helper, because the helper is
+  # correct in isolation; only the caller was aliased.
+  def test_config_read_lock_uses_the_same_inode_as_the_writer_across_a_symlinked_chain
+    # rubocop:disable Metrics/BlockLength
+    with_private_config_tmpdir("agent-coord-lock-symlink") do |root|
+      actual = File.join(root, "actual")
+      selected = File.join(root, "selected")
+      FileUtils.mkdir_p(actual)
+      File.chmod(0o700, actual)
+      File.symlink(actual, selected)
+      set_result = run_command(
+        { "XDG_CONFIG_HOME" => selected }, RbConfig.ruby, BIN, "config", "set", "--policy", "required"
+      )
+      assert_equal 0, set_result.status.exitstatus, set_result.stderr
+      writer_locks = Dir.glob(File.join(actual, "agent-coord", ".agent-coord-config-*.lock"))
+      assert_equal 1, writer_locks.length, "expected exactly one writer lock, got #{writer_locks.inspect}"
+
+      reader_locks = []
+      original_open = File.method(:open)
+      File.define_singleton_method(:open) do |path, *args, &block|
+        reader_locks << path if path.to_s.end_with?(".lock")
+        original_open.call(path, *args, &block)
+      end
+      runner = AgentCoord::Runner.new([], stdout: StringIO.new, stderr: StringIO.new)
+      with_process_env(
+        "XDG_CONFIG_HOME" => selected,
+        "AGENT_COORD_ENV_FILE" => nil,
+        "AGENT_COORD_POLICY" => nil,
+        "AGENT_COORD_API_URL" => nil,
+        "AGENT_COORD_API_TOKEN" => nil
+      ) do
+        runner.send(:load_user_configuration!)
+      ensure
+        runner.send(:restore_injected_user_configuration!)
+      end
+
+      assert_equal 1, reader_locks.length, "reader must open exactly one config lock"
+      assert_path_exists reader_locks.first
+      writer_stat = File.stat(writer_locks.first)
+      reader_stat = File.stat(reader_locks.first)
+      assert_equal [writer_stat.dev, writer_stat.ino], [reader_stat.dev, reader_stat.ino]
+    ensure
+      File.define_singleton_method(:open, original_open) if original_open
+    end
+    # rubocop:enable Metrics/BlockLength
+  end
+
   def test_config_read_lock_closes_the_descriptor_when_unlock_fails
     with_private_user_config("AGENT_COORD_POLICY=required\n") do |config_home|
       runner = AgentCoord::Runner.new([])
