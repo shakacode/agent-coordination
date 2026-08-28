@@ -22,6 +22,7 @@ class VerifyBatchTest < Minitest::Test
     "AGENT_COORD_POLICY" => nil,
     "AGENT_COORD_REF" => nil,
     "AGENT_COORD_SESSION_ID" => nil,
+    "AGENT_COORD_STATE_ROOT" => nil,
     "AGENT_COORD_STATUS_STATE_ROOT" => nil
   }.freeze
 
@@ -191,14 +192,45 @@ class VerifyBatchTest < Minitest::Test
     end
   end
 
+  # Six of these tests hand Dir.mktmpdir's own root in as the state root, so a
+  # config home derived from the state root's parent landed in the shared OS
+  # temp root instead of inside the tree the test owns.
+  def test_local_coordination_env_confines_the_config_home_to_the_test_tmp_tree
+    Dir.mktmpdir do |root|
+      nested = File.join(root, "state")
+      FileUtils.mkdir_p(nested)
+
+      [root, nested].each do |state|
+        config_home = local_coordination_env(state).fetch("XDG_CONFIG_HOME")
+
+        assert_operator config_home, :start_with?, "#{root}#{File::SEPARATOR}",
+                        "config home escaped the test tmp root for state root #{state}"
+        refute_equal File.dirname(root), File.dirname(config_home),
+                     "config home landed in the shared OS temp root for state root #{state}"
+      end
+    end
+  end
+
   private
 
+  # XDG_CONFIG_HOME has to point at a directory this test owns so an ambient
+  # developer config cannot reach the CLI. Deriving it from the state root's
+  # *parent* only worked when the caller nested the state root: most callers
+  # pass the Dir.mktmpdir root itself, so the config home landed in the shared
+  # OS temp root instead of inside the test tree. Derive it from the state root
+  # itself, which every caller owns by construction. The leaf is never created
+  # (agent-coord only reads config) and is outside every coordination state
+  # prefix, so it cannot be mistaken for state.
   def local_coordination_env(state)
     LOCAL_COORDINATION_ENV.merge(
       "AGENT_COORD_STATE_ROOT" => state,
-      "XDG_CONFIG_HOME" => File.join(File.dirname(state), "xdg-config"),
+      "XDG_CONFIG_HOME" => config_home_for(state),
       "PATH" => [File.dirname(RbConfig.ruby), ENV.fetch("PATH")].join(File::PATH_SEPARATOR)
     )
+  end
+
+  def config_home_for(state)
+    File.join(state, ".xdg-config")
   end
 
   def with_fake_gh(check_buckets: ["pass"], checks_stdout: nil, checks_exit: nil, open_empty: false, multi_prs: false)

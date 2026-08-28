@@ -20,8 +20,19 @@ class RaceTest < Minitest::Test
     "AGENT_COORD_POLICY" => nil,
     "AGENT_COORD_REF" => nil,
     "AGENT_COORD_SESSION_ID" => nil,
+    "AGENT_COORD_STATE_ROOT" => nil,
     "AGENT_COORD_STATUS_STATE_ROOT" => nil
   }.freeze
+
+  # The point of this table is to scrub every ambient backend selector before
+  # the sim workers run. AGENT_COORD_STATE_ROOT was missing from it, harmless
+  # only because every caller happens to merge its own value over the gap.
+  def test_local_coordination_env_scrubs_every_ambient_backend_selector
+    %w[AGENT_COORD_API_URL AGENT_COORD_STATE_ROOT AGENT_COORD_BACKEND].each do |key|
+      assert LOCAL_COORDINATION_ENV.key?(key), "#{key} is not neutralized"
+      assert_nil LOCAL_COORDINATION_ENV.fetch(key)
+    end
+  end
 
   def test_concurrent_workers_one_winner
     with_seeded_origin do |dir, state, origin|
