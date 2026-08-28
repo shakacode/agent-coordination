@@ -2202,6 +2202,7 @@ module AgentCoord
         raise Error, "--api-url must be an absolute HTTP(S) URL"
       end
       raise Error, "--api-url must not include a query or fragment" if uri.query || uri.fragment
+      raise Error, "--api-url port must be between 1 and 65535" unless HttpStore::VALID_PORT_RANGE.cover?(uri.port)
       if uri.scheme == "http" && !HttpStore::LOOPBACK_HOSTS.include?(uri.hostname)
         raise Error, "--api-url must use https unless it points at localhost"
       end
@@ -6349,6 +6350,10 @@ module AgentCoord
     OPEN_TIMEOUT = 5
     READ_TIMEOUT = 10
     LOOPBACK_HOSTS = %w[localhost 127.0.0.1 ::1].freeze
+    # URI.parse accepts any integer port, but a TCP port is 16-bit. An
+    # out-of-range port is a typo that must fail closed here rather than
+    # reach a resolver, which may reject it or silently truncate it.
+    VALID_PORT_RANGE = (1..65_535)
     PERCENT_ENCODE_UNSAFE = /[^A-Za-z0-9._~-]/
     RETRYABLE_REUSED_CONNECTION_ERRORS = [EOFError, Errno::ECONNRESET, Errno::EPIPE].freeze
 
@@ -6478,6 +6483,9 @@ module AgentCoord
       end
       if uri.query || uri.fragment
         raise OperationalError, "invalid HTTP backend URL: must not include a query or fragment"
+      end
+      unless VALID_PORT_RANGE.cover?(uri.port)
+        raise OperationalError, "invalid HTTP backend URL: port must be between 1 and 65535"
       end
       if uri.scheme == "http" && !LOOPBACK_HOSTS.include?(uri.hostname)
         raise OperationalError, "HTTP backend URL must use https unless it points at localhost"

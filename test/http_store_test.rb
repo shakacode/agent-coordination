@@ -82,6 +82,14 @@ class HttpStoreReadTest < HttpStoreTestCase
     store&.close
   end
 
+  def test_constructor_rejects_out_of_range_port_in_base_url
+    error = assert_raises(AgentCoord::OperationalError) do
+      AgentCoord::HttpStore.new(base_url: "http://127.0.0.1:99999", token: "tok")
+    end
+
+    assert_includes error.message, "port must be between 1 and 65535"
+  end
+
   def test_constructor_rejects_query_and_fragment_components_in_base_url
     [
       "https://agent-coord.example?tenant=one",

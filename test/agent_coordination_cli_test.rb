@@ -1972,6 +1972,28 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     end
   end
 
+  # URI.parse accepts a port above 65535, so an out-of-range port used to be
+  # persisted and only failed later at the socket layer, where some resolvers
+  # truncate it to 16 bits and reach a different service.
+  def test_config_set_rejects_api_url_with_out_of_range_port
+    with_private_config_tmpdir("agent-coord-out-of-range-port-api-url") do |root|
+      config_home = File.join(root, "config")
+      result = run_command(
+        { "XDG_CONFIG_HOME" => config_home },
+        RbConfig.ruby,
+        BIN,
+        "config",
+        "set",
+        "--api-url",
+        "http://127.0.0.1:99999"
+      )
+
+      assert_equal 1, result.status.exitstatus
+      assert_includes result.stderr, "port must be between 1 and 65535"
+      refute_path_exists File.join(config_home, "agent-coord", "env")
+    end
+  end
+
   def test_config_set_rejects_api_urls_with_query_or_fragment_components
     {
       "https://coordination.example?tenant=one" => "query",
