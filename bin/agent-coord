@@ -2247,10 +2247,15 @@ module AgentCoord
     end
 
     # POSIX ignores symlink permission bits (Linux reports them as 0777), so
-    # ownership is the meaningful control boundary. The resolved target chain is
-    # validated separately before traversal continues.
+    # ownership is the meaningful control boundary. Root- and current-user-owned
+    # links are trusted for the same reason root- and current-user-owned
+    # directories are: the standard dotfiles layouts (GNU stow, dotbot) link
+    # ~/.config into a user-owned repository, and refusing that would break every
+    # command rather than just config writes. The resolved target chain is
+    # validated separately before traversal continues, so a trusted link cannot
+    # smuggle in an unsafe destination.
     def trusted_config_parent_symlink?(stat)
-      stat.uid.zero?
+      stat.uid.zero? || stat.uid == Process.uid
     end
 
     def validate_resolved_directory_chain!(directory, leaf:)

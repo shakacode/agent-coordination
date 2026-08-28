@@ -1951,13 +1951,14 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     end
   end
 
-  def test_root_owned_config_parent_symlink_trust_does_not_depend_on_symlink_mode
+  def test_config_parent_symlink_trust_follows_ownership_not_symlink_mode
     runner = AgentCoord::Runner.new([])
-    root_owned_symlink = Struct.new(:uid, :mode).new(0, 0o120777)
-    user_owned_symlink = Struct.new(:uid, :mode).new(12_345, 0o120700)
+    symlink_stat = Struct.new(:uid, :mode)
+    foreign_uid = [12_345, Process.uid, 0].max + 1
 
-    assert runner.send(:trusted_config_parent_symlink?, root_owned_symlink)
-    refute runner.send(:trusted_config_parent_symlink?, user_owned_symlink)
+    assert runner.send(:trusted_config_parent_symlink?, symlink_stat.new(0, 0o120777))
+    assert runner.send(:trusted_config_parent_symlink?, symlink_stat.new(Process.uid, 0o120777))
+    refute runner.send(:trusted_config_parent_symlink?, symlink_stat.new(foreign_uid, 0o120700))
   end
 
   def test_resolved_config_parent_chain_rejects_an_unsafe_ancestor
@@ -2239,11 +2240,69 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     end
   end
 
-  def test_config_set_rejects_symlinked_config_parent
+  # The GNU stow / dotbot dotfiles layout links ~/.config into a user-owned
+  # repository. Refusing that made load_user_configuration! raise before command
+  # dispatch, so every command — including `version` — exited 2.
+  def test_unrelated_command_traverses_a_user_owned_config_parent_symlink
+    with_private_config_tmpdir("agent-coord-parent-symlink-read") do |root|
+      actual = File.join(root, "dotfiles-config")
+      selected = File.join(root, "selected")
+      env_file = File.join(actual, "agent-coord", "env")
+      FileUtils.mkdir_p(File.dirname(env_file))
+      File.chmod(0o700, actual, File.dirname(env_file))
+      File.write(env_file, "AGENT_COORD_POLICY=required\n")
+      File.chmod(0o600, env_file)
+      File.symlink(actual, selected)
+
+      version_result = run_command({ "XDG_CONFIG_HOME" => selected }, RbConfig.ruby, BIN, "version")
+      show_result = run_command(
+        { "XDG_CONFIG_HOME" => selected }, RbConfig.ruby, BIN, "config", "show", "--json"
+      )
+
+      assert_equal 0, version_result.status.exitstatus, version_result.stderr
+      assert_equal 0, show_result.status.exitstatus, show_result.stderr
+      coordination = JSON.parse(show_result.stdout).fetch("coordination")
+      assert_equal "required", coordination.fetch("policy")
+      assert_equal "user_config", coordination.dig("source", "policy")
+    end
+  end
+
+  def test_config_set_writes_through_a_user_owned_config_parent_symlink
     with_private_config_tmpdir("agent-coord-parent-symlink") do |root|
       actual = File.join(root, "actual")
       selected = File.join(root, "selected")
       FileUtils.mkdir_p(actual)
+      File.chmod(0o700, actual)
+      File.symlink(actual, selected)
+
+      result = run_command(
+        { "XDG_CONFIG_HOME" => selected },
+        RbConfig.ruby,
+        BIN,
+        "config",
+        "set",
+        "--policy",
+        "required"
+      )
+
+      assert_equal 0, result.status.exitstatus, result.stderr
+      env_file = File.join(actual, "agent-coord", "env")
+      assert_path_exists env_file
+      assert_includes File.read(env_file), "AGENT_COORD_POLICY=required"
+      assert_equal 0o600, File.stat(env_file).mode & 0o777
+    end
+  end
+
+  # Trusting the link must not trust its destination: the resolved chain is
+  # still re-validated component by component.
+  def test_user_owned_config_parent_symlink_into_an_unsafe_directory_is_rejected
+    with_private_config_tmpdir("agent-coord-parent-symlink-unsafe") do |root|
+      unsafe = File.join(root, "unsafe")
+      actual = File.join(unsafe, "config")
+      selected = File.join(root, "selected")
+      FileUtils.mkdir_p(actual)
+      File.chmod(0o700, actual)
+      File.chmod(0o777, unsafe)
       File.symlink(actual, selected)
 
       result = run_command(
@@ -2257,7 +2316,7 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
       )
 
       assert_equal 2, result.status.exitstatus
-      assert_includes result.stderr, "user-controlled symlink"
+      assert_includes result.stderr, "config parent permissions are unsafe: #{unsafe}"
       refute_path_exists File.join(actual, "agent-coord", "env")
     end
   end

@@ -291,8 +291,10 @@ from `$XDG_CONFIG_HOME/agent-coord/env` (falling back to
 file as shell code, accepts only the documented `AGENT_COORD_*` allowlist, and
 opens it with no-follow semantics, then validates and reads that same descriptor.
 The file must be regular, current-user-owned, and have no group or world
-permissions. Its resolved parent chain may contain only root- or
-current-user-owned directories with no group or world write permission. The
+permissions. Its parent chain may contain only root- or current-user-owned
+directories and symlinks — the standard dotfiles layout links `~/.config` into a
+user-owned repository — and every directory in the chain, before and after
+symlink resolution, must have no group or world write permission. The
 conventional `agent-coord` leaf directory must be current-user-owned with mode
 `0700`; an explicit `AGENT_COORD_ENV_FILE` parent is validated but never
 automatically chmodded because it may contain unrelated files.
