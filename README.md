@@ -322,7 +322,8 @@ same-named user-file values for authentication and identity.
 
 When both `AGENT_COORD_API_URL` and `AGENT_COORD_STATE_ROOT` are set, the CLI
 uses the HTTP backend and warns once. Pass `--state-root` only for an explicit
-local smoke check.
+local smoke check. Each CLI flag that outranks a configured backend warns once
+the same way, `--backend` included.
 
 The last selection is *implicit* local. The canonical user file is loaded
 automatically. When the older compatibility file

@@ -1036,7 +1036,7 @@ module AgentCoord
       env_root = nil if env_root == ""
       env_backend = nil if env_backend == ""
 
-      return if resolve_cli_backend?(options, cli_api, env_api)
+      return if resolve_cli_backend?(options, cli_api, env_api, env_root)
 
       resolve_configured_backend(options, env_api, env_root, env_backend)
     end
@@ -1048,7 +1048,7 @@ module AgentCoord
       options[:ref] = configured_ref.to_s.empty? ? DEFAULT_REF : configured_ref
     end
 
-    def resolve_cli_backend?(options, cli_api, env_api)
+    def resolve_cli_backend?(options, cli_api, env_api, env_root)
       if options[:state_root_cli]
         if cli_api
           emit_backend_conflict_warning(
@@ -1064,7 +1064,6 @@ module AgentCoord
       end
 
       if cli_api
-        env_root = effective_backend_env_value("AGENT_COORD_STATE_ROOT")
         unless env_root.to_s.empty?
           emit_backend_conflict_warning(
             "warning: --api-url and AGENT_COORD_STATE_ROOT are both set; " \
@@ -1077,8 +1076,29 @@ module AgentCoord
 
       return false unless options[:backend_cli]
 
+      warn_cli_backend_override(options, env_api, env_root)
       options[:backend_source] = "cli"
       true
+    end
+
+    # --backend silently outranks a configured fleet backend exactly the way
+    # --state-root and --api-url do, so it has to announce the same conflict. An
+    # empty --backend value is not an override: resolution falls through to the
+    # implicit local default, so claiming the GitHub backend won would be a lie.
+    def warn_cli_backend_override(options, env_api, env_root)
+      return if options[:backend].to_s.empty?
+
+      if env_api && !env_api.empty?
+        emit_backend_conflict_warning(
+          "warning: AGENT_COORD_API_URL and --backend are both set; " \
+          "using the legacy GitHub backend.", options:
+        )
+      elsif env_root && !env_root.empty?
+        emit_backend_conflict_warning(
+          "warning: AGENT_COORD_STATE_ROOT and --backend are both set; " \
+          "using the legacy GitHub backend.", options:
+        )
+      end
     end
 
     def resolve_configured_backend(options, env_api, env_root, env_backend)

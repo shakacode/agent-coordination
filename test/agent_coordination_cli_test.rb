@@ -1399,6 +1399,55 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     end
   end
 
+  # --state-root and --api-url both announce that they outrank a configured
+  # fleet backend; --backend used to override one silently.
+  def test_cli_backend_warns_when_it_overrides_a_configured_api_url
+    with_private_user_config(
+      "AGENT_COORD_API_URL=https://fleet.example\nAGENT_COORD_API_TOKEN=fleet-token\n"
+    ) do |config_home|
+      result = run_command(
+        { "XDG_CONFIG_HOME" => config_home, "PATH" => "/nonexistent" },
+        RbConfig.ruby, BIN, "status", "--backend", "acme/legacy-repo"
+      )
+
+      assert_includes result.stderr,
+                      "warning: AGENT_COORD_API_URL and --backend are both set; " \
+                      "using the legacy GitHub backend."
+      refute_includes result.stderr, "fleet-token"
+    end
+  end
+
+  def test_cli_backend_warns_when_it_overrides_a_configured_state_root
+    with_private_config_tmpdir("agent-coord-backend-over-state-root") do |root|
+      state_root = File.join(root, "state")
+      FileUtils.mkdir_p(state_root)
+      result = run_command(
+        { "AGENT_COORD_STATE_ROOT" => state_root, "PATH" => "/nonexistent" },
+        RbConfig.ruby, BIN, "status", "--backend", "acme/legacy-repo"
+      )
+
+      assert_includes result.stderr,
+                      "warning: AGENT_COORD_STATE_ROOT and --backend are both set; " \
+                      "using the legacy GitHub backend."
+    end
+  end
+
+  # An empty --backend is not an override, so it must not claim the GitHub
+  # backend won.
+  def test_empty_cli_backend_does_not_warn_about_overriding_a_configured_state_root
+    with_private_config_tmpdir("agent-coord-empty-backend-no-warning") do |root|
+      state_root = File.join(root, "state")
+      FileUtils.mkdir_p(state_root)
+      result = run_command(
+        { "AGENT_COORD_STATE_ROOT" => state_root },
+        RbConfig.ruby, BIN, "status", "--backend", "", "--json"
+      )
+
+      assert_equal 0, result.status.exitstatus, result.stderr
+      refute_includes result.stderr, "using the legacy GitHub backend"
+    end
+  end
+
   def test_config_set_persists_policy_in_canonical_env_and_config_show_resolves_it
     # rubocop:disable Metrics/BlockLength
     with_private_config_tmpdir("agent-coord-config-set-policy") do |root|
