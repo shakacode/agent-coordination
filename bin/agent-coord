@@ -3454,8 +3454,15 @@ module AgentCoord
     # interleave rather than arriving in two blocks.
     def log_archived_event_rows(store, seen)
       log_archived_event_entries(store).flat_map do |entry|
+        # Records first. log_archived_event_data is what rejects a record this
+        # version cannot read, and log_archive_provenance reaches into the same
+        # envelope, so asking for provenance ahead of that check let a record
+        # that is not an object end the command with a raw TypeError.
+        records = log_archived_event_data(entry)
+        next [] if records.empty?
+
         provenance = log_archive_provenance(entry)
-        log_archived_event_data(entry).filter_map do |data|
+        records.filter_map do |data|
           identity = log_event_identity(data)
           next if seen.key?(identity)
 
@@ -3478,10 +3485,15 @@ module AgentCoord
     # archive/claims or archive/heartbeats, and folding one in would report it as
     # an event it never was. An unrecognized family is reported rather than
     # skipped -- silently dropping archived history is the bug being fixed.
+    # A record that is not a JSON object has no family at all. Truncated JSON
+    # already degrades through the listing, but valid JSON holding an array or a
+    # scalar reached this far, and the http backend does not shape-check the
+    # payload it hands back, so it takes the same reported-not-skipped path.
     def log_archived_event_data(entry)
-      case entry.data["record_family"]
-      when "compacted_events" then Array(entry.data["records"]).grep(Hash)
-      when "archived_record" then [entry.data["data"]].grep(Hash)
+      data = entry.data
+      case data.is_a?(Hash) ? data["record_family"] : nil
+      when "compacted_events" then Array(data["records"]).grep(Hash)
+      when "archived_record" then [data["data"]].grep(Hash)
       else
         log_note_incomplete(LOG_ARCHIVED_EVENTS_PREFIX,
                             "warning: unknown archived record family at #{entry.path}; " \
@@ -3510,12 +3522,15 @@ module AgentCoord
     # and must never turn a trail that reads today into a failure. So every
     # archive read failure degrades, including the ones log_listing re-raises --
     # an archive directory that is unreadable, or holds a record that will not
-    # parse, is not a reason to stop reporting the live events beside it.
+    # parse or that this process cannot open, is not a reason to stop reporting
+    # the live events beside it. SystemCallError is named because the local store
+    # reads each record outside the listing's own guard, so a record file the
+    # process cannot open arrives here as a bare Errno, not an OperationalError.
     def log_archived_event_entries(store)
       log_listing(store, LOG_ARCHIVED_EVENTS_PREFIX) do |reason|
         "warning: archived events #{reason}; this trail may be incomplete"
       end
-    rescue OperationalError, JSON::ParserError => e
+    rescue OperationalError, JSON::ParserError, SystemCallError => e
       log_note_incomplete(LOG_ARCHIVED_EVENTS_PREFIX,
                           "warning: archived events unreadable (#{e.message}); this trail may be incomplete")
       []
@@ -3534,10 +3549,7 @@ module AgentCoord
 
       envelopes = archived.uniq { |row| row.fetch("archive_path") }
       dropped = envelopes.sum { |row| row.fetch("archive_dropped") }
-      # The soonest clock, ordered on the parsed instant like every other
-      # comparison here, so an offset timestamp cannot sort ahead of a Z one.
-      expires = envelopes.map { |row| row.fetch("archive_delete_after") }
-                         .reject(&:empty?).min_by { |value| log_at_key(value) }
+      expires = log_archive_soonest_expiry(envelopes)
       parts = ["note: #{archived.length} of #{rows.length} events read from the archive"]
       if dropped.positive?
         parts << "#{dropped} source #{dropped == 1 ? 'event was' : 'events were'} dropped by compaction"
@@ -3545,6 +3557,21 @@ module AgentCoord
       parts << "archive deleted after #{expires}" if expires
       parts << "mirror it with log --sync" unless options[:sync]
       @stderr.puts log_scrub(parts.join("; "))
+    end
+
+    # The soonest clock, ordered on the parsed instant like every other
+    # comparison here, so an offset timestamp cannot sort ahead of a Z one. A
+    # value that is not a timestamp is not a clock, so it is dropped rather than
+    # compared: log_at_key floors an unparseable string to -Infinity, which let
+    # one unreadable delete_after sort first and hide the real date the rest of
+    # the archive is deleted on.
+    def log_archive_soonest_expiry(envelopes)
+      dated = envelopes.filter_map do |row|
+        value = row.fetch("archive_delete_after")
+        key = log_at_key(value)
+        [value, key] unless key == -Float::INFINITY
+      end
+      dated.min_by { |_value, key| key }&.first
     end
 
     # One listing path for both families: warn on a partial or degraded read,

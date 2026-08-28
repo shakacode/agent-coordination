@@ -2015,6 +2015,68 @@ class AgentCoordLogArchiveTest < AgentCoordLogTestCase
     assert_empty result.stderr
   end
 
+  # One archive record the process cannot open is still an archive read problem,
+  # not a reason to stop reporting the live events beside it. The local store
+  # reads each record outside the listing's own SystemCallError guard, so this
+  # arrived as a bare Errno and emptied the whole trail.
+  def test_log_degrades_when_an_archived_record_file_is_unreadable
+    write_closed_lane_trace
+    compact_events!
+    write_live_event("e6", "type" => "merged", "machine_id" => "m2", "host" => "codex",
+                           "at" => "2026-08-01T05:00:00Z")
+    archive_record_paths.each { |path| FileUtils.chmod(0o000, path) }
+
+    result = run_log("shakacode/example#104", "--format", "tsv")
+
+    assert_equal 0, result.status.exitstatus, result.stderr
+    assert_includes result.stderr, "archived events unreadable"
+    assert_includes result.stderr, "this trail may be incomplete"
+    refute_includes result.stderr, "SystemCallError", "must not leak the exception class"
+    refute_match(%r{\bfrom .*bin/agent-coord:\d+}, result.stderr, "must not leak a Ruby backtrace")
+    assert_equal %w[e6], tsv_rows_event_ids(result), "the live events must still be reported"
+  ensure
+    archive_record_paths.each { |path| FileUtils.chmod(0o600, path) }
+  end
+
+  # Truncated JSON already degraded, but valid JSON that is not an object reached
+  # the record readers, which assume a Hash. A backend that ships one must not be
+  # able to end the command with a raw TypeError.
+  def test_log_reports_an_archived_record_that_is_not_an_object
+    write_trace
+    write_archive_json("archive/events/b9/array.json", [1, 2, 3])
+
+    result = run_log("shakacode/example#104", "--format", "tsv")
+
+    assert_equal 0, result.status.exitstatus, result.stderr
+    assert_includes result.stderr, "unknown archived record family at archive/events/b9/array.json"
+    refute_match(/TypeError|no implicit conversion/, result.stderr, "must not leak a raw type error")
+    assert_equal %w[e1 e2 e3 e4 e5], tsv_rows_event_ids(result)
+  end
+
+  # The note reports the soonest clock, and log_at_key floors an unparseable
+  # timestamp to -Infinity -- so one unreadable delete_after would sort first and
+  # hide the real date the rest of the archive is deleted on.
+  def test_log_reports_the_soonest_parsable_archive_expiry
+    write_closed_lane_trace
+    compact_events!
+    write_archive_json("archive/events/b9/compact-undated.json",
+                       "schema_version" => 1, "record_family" => "compacted_events",
+                       "source_paths" => ["events/b9/x1.json"],
+                       "archived_at" => "2026-08-05T00:00:00Z", "delete_after" => "garbage",
+                       "records" => [{ "schema_version" => 2, "event_id" => "x1", "batch_id" => "b9",
+                                       "type" => "merged", "repo" => "shakacode/example", "target" => "104",
+                                       "machine_id" => "m9", "host" => "codex",
+                                       "at" => "2026-08-02T00:00:00Z" }])
+    dated = archive_envelopes.map { |envelope| envelope.fetch("delete_after") }.reject { |v| v == "garbage" }
+
+    result = run_log("shakacode/example#104")
+
+    assert_equal 0, result.status.exitstatus, result.stderr
+    assert_equal 1, dated.length, "exactly one envelope carries a parsable delete_after"
+    assert_includes result.stderr, "archive deleted after #{dated.fetch(0)}"
+    refute_includes result.stderr, "garbage"
+  end
+
   private
 
   def write_closed_lane_trace(repo: "shakacode/example", target: "104", batch: "b1", synthetic: false)
@@ -2055,10 +2117,12 @@ class AgentCoordLogArchiveTest < AgentCoordLogTestCase
     File.join(@state_root, "archive", "events")
   end
 
+  def archive_record_paths
+    Dir.glob(File.join(archive_events_directory, "**", "*.json"))
+  end
+
   def archive_envelopes
-    Dir.glob(File.join(archive_events_directory, "**", "*.json")).map do |path|
-      JSON.parse(File.read(path))
-    end
+    archive_record_paths.map { |path| JSON.parse(File.read(path)) }
   end
 
   def retained_event_ids
