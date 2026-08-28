@@ -1809,4 +1809,19 @@ class LogHttpBackendTest < HttpEnvTestCase
   ensure
     stub.shutdown
   end
+
+  # The refusal names every prefix that degraded, in read order. The trail is
+  # read from two listings, so recording only the most recent degradation told an
+  # operator whose live events were unreadable to go and look at the archive.
+  def test_log_sync_refusal_names_every_prefix_that_degraded
+    stub = HttpStoreStub.new([[403, { "error" => "forbidden" }], [403, { "error" => "forbidden" }]])
+    with_env("AGENT_COORD_API_URL" => stub.base_url, "AGENT_COORD_API_TOKEN" => "tok") do
+      code, _out, err = run_cli(["log", "--sync"], {})
+
+      assert_equal 2, code
+      assert_includes err, "refusing to sync an incomplete trail: events, archive/events"
+    end
+  ensure
+    stub.shutdown
+  end
 end

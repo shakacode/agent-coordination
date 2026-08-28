@@ -3284,7 +3284,7 @@ module AgentCoord
       if options[:sync]
         # A partial listing would write a partial mirror that later reads as
         # complete -- the same hazard the narrowing options are rejected for.
-        raise OperationalError, "refusing to sync an incomplete trail: #{@log_incomplete}" if @log_incomplete
+        raise OperationalError, "refusing to sync an incomplete trail: #{log_incomplete_prefixes}" if @log_incomplete
 
         return log_sync(log_options, rows)
       end
@@ -3472,12 +3472,30 @@ module AgentCoord
       end
     end
 
+    # Scoped to the batch, because event_id is not unique across the store: a
+    # terminal event takes its id from the lane name alone (see
+    # stable_terminal_event_id), so two batches that each register a lane named
+    # "qa" write the same event_id under different batch paths. Deduplicating on
+    # the bare id let a live event in one batch suppress an archived event in
+    # another -- reporting no events for a work item whose history is sitting in
+    # the archive, which is the failure this read exists to remove. The real
+    # duplicate this still has to collapse, one event readable from both events/
+    # and archive/events/ after an interrupted compaction, shares its batch id,
+    # and event_payload always stamps batch_id, so scoping does not weaken it.
+    #
     # Identity falls back to the whole record because roughly a tenth of the
     # recorded events predate event ids; collapsing those onto one missing-id key
-    # would drop real history as a false duplicate.
+    # would drop real history as a false duplicate. That fallback is not scoped,
+    # and does not need to be: the record it keys on already contains batch_id
+    # when the event carries one. The residual collision it cannot narrow is two
+    # records identical in every recorded field -- same batch, instant, type,
+    # work item, machine, and agent, or none of them stamped at all. Those two
+    # render as the same line, so the trail loses a repeat rather than a fact.
     def log_event_identity(data)
       event_id = data["event_id"]
-      event_id.is_a?(String) && !event_id.empty? ? event_id : data
+      return data unless event_id.is_a?(String) && !event_id.empty?
+
+      [data["batch_id"], event_id]
     end
 
     # Only families whose payload is an event, and only from the archived events
@@ -3492,14 +3510,37 @@ module AgentCoord
     def log_archived_event_data(entry)
       data = entry.data
       case data.is_a?(Hash) ? data["record_family"] : nil
-      when "compacted_events" then Array(data["records"]).grep(Hash)
-      when "archived_record" then [data["data"]].grep(Hash)
+      when "compacted_events" then log_archived_records(entry, data["records"])
+      when "archived_record" then log_archived_records(entry, [data["data"]])
       else
-        log_note_incomplete(LOG_ARCHIVED_EVENTS_PREFIX,
-                            "warning: unknown archived record family at #{entry.path}; " \
-                            "this trail may be incomplete")
+        log_archive_incomplete(entry, "unknown archived record family")
         []
       end
+    end
+
+    # A recognized family with a malformed body was the quieter half of the same
+    # bug. Array(nil).grep(Hash) and [non_hash].grep(Hash) both return [], so an
+    # envelope whose records key is absent, is not an array, or holds entries
+    # that are not objects dropped archived history without a word -- and a
+    # silently short trail is exactly what --sync would then persist as complete.
+    # Legible siblings are still reported; only the loss is announced.
+    def log_archived_records(entry, records)
+      unless records.is_a?(Array)
+        log_archive_incomplete(entry, "malformed archived record body")
+        return []
+      end
+
+      events = records.grep(Hash)
+      dropped = records.length - events.length
+      if dropped.positive?
+        log_archive_incomplete(entry, "#{dropped} unreadable archived #{dropped == 1 ? 'record' : 'records'}")
+      end
+      events
+    end
+
+    def log_archive_incomplete(entry, reason)
+      log_note_incomplete(LOG_ARCHIVED_EVENTS_PREFIX,
+                          "warning: #{reason} at #{entry.path}; this trail may be incomplete")
     end
 
     # Provenance for the note, not for the rendered row. It is keyed by archive
@@ -3589,9 +3630,18 @@ module AgentCoord
       []
     end
 
+    # Every prefix that degraded, not the last one to degrade. The trail is read
+    # from two listings now, so a scalar named whichever wrote last -- telling an
+    # operator whose live events were unreadable to go look at the archive.
     def log_note_incomplete(prefix, message)
-      @log_incomplete = prefix
+      @log_incomplete ||= []
+      @log_incomplete << prefix unless @log_incomplete.include?(prefix)
       @stderr.puts message
+    end
+
+    # Read order, so the prefix an operator reads first is the one read first.
+    def log_incomplete_prefixes
+      Array(@log_incomplete).join(", ")
     end
 
     # Order on a parsed instant, never on the rendered string. Lexical comparison

@@ -1942,7 +1942,9 @@ class AgentCoordLogArchiveTest < AgentCoordLogTestCase
   end
 
   # Compaction writes the archive envelope before deleting its sources, so a run
-  # interrupted between the two leaves one event readable from both places.
+  # interrupted between the two leaves one event readable from both places. This
+  # is also the duplicate that batch-scoped identity must still collapse: both
+  # copies carry the same batch id, so scoping does not weaken it.
   def test_log_reports_an_event_readable_from_both_prefixes_once
     write_closed_lane_trace
     compact_events!
@@ -2075,6 +2077,77 @@ class AgentCoordLogArchiveTest < AgentCoordLogTestCase
     assert_equal 1, dated.length, "exactly one envelope carries a parsable delete_after"
     assert_includes result.stderr, "archive deleted after #{dated.fetch(0)}"
     refute_includes result.stderr, "garbage"
+  end
+
+  # event_id is unique within a batch, not across the store: a terminal event
+  # takes its id from the lane name alone, so two batches that each register a
+  # lane with the same name write the same event_id -- which is what "e5" in two
+  # batches is standing in for here. Deduplicating on the bare id let this live
+  # record suppress the archived one, and a scoped query for the archived work
+  # item answered "no events" while its history sat in the archive.
+  def test_log_scopes_deduplication_by_batch_so_one_lane_name_cannot_erase_another
+    write_closed_lane_trace
+    compact_events!
+    write_event("b2", "e5", "type" => "lane_closed", "repo" => "shakacode/other", "target" => "7",
+                            "lane" => "lane-a", "terminal" => "done", "workspace" => "default",
+                            "closed_by" => { "agent_id" => "other-finisher", "machine" => "m9" },
+                            "at" => "2026-08-05T00:00:00Z")
+
+    archived = run_log("shakacode/example#104")
+
+    assert_equal 0, archived.status.exitstatus, archived.stderr
+    refute_includes archived.stdout, "no events"
+    assert_equal retained_event_ids, tsv_event_ids("shakacode/example#104").sort
+    assert_equal %w[e5], tsv_event_ids("shakacode/other#7"), "the live batch keeps its own event"
+  end
+
+  # A recognized family with a body this version cannot read used to drop
+  # archived history silently, which is the defect the whole archive read exists
+  # to remove -- and --sync would then persist the short trail as complete.
+  def test_log_reports_a_compacted_envelope_whose_records_are_missing
+    write_trace
+    write_archive_json("archive/events/b9/compact-bodyless.json",
+                       "schema_version" => 1, "record_family" => "compacted_events",
+                       "source_paths" => ["events/b9/x1.json"],
+                       "archived_at" => "2026-08-05T00:00:00Z", "delete_after" => "2026-09-04T00:00:00Z")
+
+    result = run_log("shakacode/example#104", "--format", "tsv")
+
+    assert_equal 0, result.status.exitstatus, result.stderr
+    assert_includes result.stderr, "malformed archived record body at archive/events/b9/compact-bodyless.json"
+    assert_equal %w[e1 e2 e3 e4 e5], tsv_rows_event_ids(result)
+  end
+
+  def test_log_reports_archived_records_it_cannot_read_and_keeps_their_siblings
+    write_trace
+    write_archive_json("archive/events/b9/compact-mixed.json",
+                       "schema_version" => 1, "record_family" => "compacted_events",
+                       "source_paths" => ["events/b9/x1.json"],
+                       "archived_at" => "2026-08-05T00:00:00Z", "delete_after" => "2026-09-04T00:00:00Z",
+                       "records" => [{ "schema_version" => 2, "event_id" => "x1", "batch_id" => "b9",
+                                       "type" => "merged", "repo" => "shakacode/example", "target" => "104",
+                                       "machine_id" => "m9", "host" => "codex",
+                                       "at" => "2026-08-06T00:00:00Z" }, 5, "not-an-event"])
+
+    result = run_log("shakacode/example#104", "--format", "tsv")
+
+    assert_equal 0, result.status.exitstatus, result.stderr
+    assert_includes result.stderr, "2 unreadable archived records at archive/events/b9/compact-mixed.json"
+    assert_equal %w[e1 e2 e3 e4 e5 x1], tsv_rows_event_ids(result), "the legible sibling is still reported"
+  end
+
+  def test_log_reports_an_archived_record_whose_payload_is_not_an_object
+    write_trace
+    write_archive_json("archive/events/b9/archived-scalar.json",
+                       "schema_version" => 1, "record_family" => "archived_record",
+                       "source_path" => "events/b9/x1.json", "archived_at" => "2026-08-05T00:00:00Z",
+                       "delete_after" => "2026-09-04T00:00:00Z", "data" => "not-an-event")
+
+    result = run_log("shakacode/example#104", "--format", "tsv")
+
+    assert_equal 0, result.status.exitstatus, result.stderr
+    assert_includes result.stderr, "1 unreadable archived record at archive/events/b9/archived-scalar.json"
+    assert_equal %w[e1 e2 e3 e4 e5], tsv_rows_event_ids(result)
   end
 
   private
