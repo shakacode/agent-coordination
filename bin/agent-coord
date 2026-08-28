@@ -3673,15 +3673,27 @@ module AgentCoord
     # log_compaction_defect has just warned is unreadable.
     def log_archive_record_envelope(entry, records)
       data = entry.data
-      sources = data["source_paths"]
       (@log_archive_ledger ||= []) << {
         "path" => entry.path,
         "delete_after" => data["delete_after"].to_s,
-        "sources" => sources.is_a?(Array) ? sources : [],
+        "sources" => log_archive_sources(data),
         "identities" => records.map { |record| log_event_identity(record) },
         "records" => records,
         "synthetic" => data["synthetic"] == true
       }
+    end
+
+    # archived_record names the one path it consumed as a singular source_path,
+    # where compacted_events carries an array. Recording no sources for it while
+    # still counting its identity as retained made the two cancel: a compacted
+    # envelope that genuinely dropped a source reported none as soon as an
+    # archived_record sat beside it in the same scope.
+    def log_archive_sources(data)
+      sources = data["source_paths"]
+      return sources if sources.is_a?(Array)
+
+      source = data["source_path"]
+      source.is_a?(String) && !source.empty? ? [source] : []
     end
 
     # Scoped by the work item the query names, not by which rows survived

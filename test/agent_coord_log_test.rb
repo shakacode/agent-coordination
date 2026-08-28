@@ -2390,6 +2390,30 @@ class AgentCoordLogArchiveTest < AgentCoordLogTestCase
     assert_includes since.stderr, "archive deleted after #{envelope.fetch('delete_after')}"
   end
 
+  # archived_record names its one consumed path as a singular source_path. The
+  # ledger counted no sources for it while still counting its identity as
+  # retained, so the extra identity cancelled a genuinely dropped compacted
+  # source and the note reported none.
+  def test_log_counts_the_singular_source_of_an_archived_record
+    write_archive_json("archive/events/b9/compact-two.json",
+                       "schema_version" => 1, "record_family" => "compacted_events",
+                       "source_paths" => ["events/b9/e1.json", "events/b9/e2.json", "events/b9/e3.json"],
+                       "archived_at" => "2026-08-05T00:00:00Z", "delete_after" => "2026-09-04T00:00:00Z",
+                       "records" => [overlap_event("e1", "2026-08-01T00:00:00Z"),
+                                     overlap_event("e3", "2026-08-03T00:00:00Z")])
+    write_archive_json("archive/events/b9/archived-one.json",
+                       "schema_version" => 1, "record_family" => "archived_record",
+                       "source_path" => "events/b9/e4.json", "archived_at" => "2026-08-05T00:00:00Z",
+                       "delete_after" => "2026-09-04T00:00:00Z",
+                       "data" => overlap_event("e4", "2026-08-04T00:00:00Z"))
+
+    result = run_log("shakacode/example#104")
+
+    assert_equal 0, result.status.exitstatus, result.stderr
+    assert_equal %w[e1 e3 e4], tsv_event_ids("shakacode/example#104")
+    assert_includes result.stderr, "1 source event was dropped by compaction"
+  end
+
   private
 
   def overlap_event(event_id, at)
