@@ -3,4 +3,48 @@ set -euo pipefail
 root="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
 cd "$root"
 
-"$root/.agents/bin/validate"
+# Local drift check only; the base-trusted seam-guard is the security boundary.
+# Regenerate with: ruby -rdigest -e 'puts Digest::SHA256.file(".agents/bin/config-check").hexdigest'
+expected_config_check_sha256="27b9dd917e1b0e3a8a01d01201fafbda085e3d0b9141ec2a90502b8cf0d29fa4"
+actual_config_check_sha256="$(ruby -rdigest -e 'print Digest::SHA256.file(ARGV.fetch(0)).hexdigest' \
+  "$root/.agents/bin/config-check")"
+if [ "$actual_config_check_sha256" != "$expected_config_check_sha256" ]; then
+  printf 'config-check does not match the CI-pinned contract.\n' >&2
+  exit 1
+fi
+
+# Keep this base-ref resolution aligned with .agents/bin/validate.
+base_ref="${AGENT_SIM_BASE_REF:-}"
+if [ -z "$base_ref" ] && [ -n "${GITHUB_BASE_REF:-}" ]; then
+  git fetch --quiet origin "$GITHUB_BASE_REF"
+  base_ref="$(git rev-parse FETCH_HEAD)"
+elif [ -z "$base_ref" ] && [ "$(git branch --show-current)" != "main" ]; then
+  if git rev-parse --verify -q main >/dev/null; then
+    base_ref="main"
+  elif git rev-parse --verify -q origin/main >/dev/null; then
+    base_ref="origin/main"
+  fi
+fi
+
+if [ -z "$base_ref" ]; then
+  exec "$root/.agents/bin/test"
+fi
+
+mode="$("$root/.agents/bin/config-check" "$base_ref")"
+case "$mode" in
+  CONFIG_ONLY)
+    # The trusted guard validates the same config contract without executing head tests.
+    exit 0
+    ;;
+  TASK_ONLY)
+    export AGENT_SIM_BASE_REF="$base_ref"
+    exec "$root/.agents/bin/validate"
+    ;;
+  NO_CHANGES)
+    exec "$root/.agents/bin/test"
+    ;;
+  *)
+    printf 'Unexpected config-check mode: %s\n' "$mode" >&2
+    exit 1
+    ;;
+esac

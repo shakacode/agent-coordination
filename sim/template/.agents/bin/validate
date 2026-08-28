@@ -3,9 +3,10 @@ set -euo pipefail
 root="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
 cd "$root"
 
+# Keep this base-ref resolution aligned with .agents/bin/ci.
 base_ref="${AGENT_SIM_BASE_REF:-}"
 if [ -z "$base_ref" ] && [ -n "${GITHUB_BASE_REF:-}" ]; then
-  git fetch --quiet origin "$GITHUB_BASE_REF" --depth=1
+  git fetch --quiet origin "$GITHUB_BASE_REF"
   base_ref="$(git rev-parse FETCH_HEAD)"
 elif [ -z "$base_ref" ] && [ "$(git branch --show-current)" != "main" ]; then
   if git rev-parse --verify -q main >/dev/null; then
@@ -16,7 +17,11 @@ elif [ -z "$base_ref" ] && [ "$(git branch --show-current)" != "main" ]; then
 fi
 
 if [ -n "$base_ref" ]; then
-  changed="$(git diff --name-only "$base_ref")"
+  merge_base="$(git merge-base "$base_ref" HEAD)" || {
+    printf 'Could not resolve simulation merge base.\n' >&2
+    exit 1
+  }
+  changed="$(git diff --no-renames --name-only "$merge_base")"
   changed_count="$(printf '%s\n' "$changed" | sed '/^$/d' | wc -l | tr -d ' ')"
   tests="$(printf '%s\n' "$changed" |
     sed -n 's#^lib/\(task_.*\)\.rb$#test/\1_test.rb#p' |
