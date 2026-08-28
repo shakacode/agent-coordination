@@ -3347,12 +3347,11 @@ module AgentCoord
       end
     end
 
-    # Repo names are case-insensitive on GitHub, and the event store has recorded
-    # the same repo under more than one casing. Matching case-sensitively would
-    # split one work item's history into two partial answers.
+    # The scalar column filters. The work item is not one of them: it is matched on
+    # parsed identity in log_filtered, because one item's records carry several
+    # spellings and a string compare would answer with only the queried one.
     def log_matches?(row, field, wanted)
       return true if wanted.nil? || wanted.to_s.empty?
-      return log_identity_match?(row.fetch("identity"), wanted) if field == "work_item"
 
       # The host column holds a family, so the flag value is normalized the same
       # way -- otherwise --host claude-code matches nothing, even though that is
@@ -3707,8 +3706,9 @@ module AgentCoord
     def log_narrowing_option?(options, field)
       return options[field]&.zero? if field == :limit
 
-      # Matches log_matches?: an empty value is the absence of a filter, so the
-      # two halves of one query cannot disagree about whether it was narrowed.
+      # Matches the column filters and the work-item match in log_filtered: an
+      # empty value is the absence of a filter, so the two halves of one query
+      # cannot disagree about whether it was narrowed.
       !options[field].to_s.empty?
     end
 
