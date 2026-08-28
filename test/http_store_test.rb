@@ -787,6 +787,40 @@ class HttpBackendSelectionTest < HttpEnvTestCase # rubocop:disable Metrics/Class
     stub.shutdown
   end
 
+  # The API_URL branch returned before AGENT_COORD_BACKEND was ever consulted,
+  # so the HTTP backend displaced a configured legacy GitHub backend in silence
+  # while every other configured-tier pair announced which side won.
+  def test_configured_api_url_warns_when_it_shadows_a_configured_backend
+    stub = HttpStoreStub.new(Array.new(4) { [200, { "entries" => [] }] })
+    with_env("AGENT_COORD_API_URL" => stub.base_url, "AGENT_COORD_API_TOKEN" => "tok",
+             "AGENT_COORD_BACKEND" => "acme/legacy-repo") do
+      code, _, err = run_cli(["status"], {})
+      assert_equal 0, code
+      assert_includes err, "warning: AGENT_COORD_API_URL and AGENT_COORD_BACKEND are both set; " \
+                           "using the HTTP backend. Pass --backend to force the legacy GitHub backend."
+      refute_empty stub.requests
+    end
+  ensure
+    stub.shutdown
+  end
+
+  # All three selectors displace two losers at once. Naming only the
+  # next-highest keeps one decision to one warning; the backend conflict
+  # surfaces on the next run once the state root is removed.
+  def test_all_three_configured_selectors_warn_once_naming_the_state_root
+    stub = HttpStoreStub.new(Array.new(4) { [200, { "entries" => [] }] })
+    with_env("AGENT_COORD_API_URL" => stub.base_url, "AGENT_COORD_API_TOKEN" => "tok",
+             "AGENT_COORD_STATE_ROOT" => "/tmp/nonexistent-root",
+             "AGENT_COORD_BACKEND" => "acme/legacy-repo") do
+      code, _, err = run_cli(["status"], {})
+      assert_equal 0, code
+      assert_includes err, "AGENT_COORD_API_URL and AGENT_COORD_STATE_ROOT are both set"
+      refute_includes err, "AGENT_COORD_BACKEND are both set"
+    end
+  ensure
+    stub.shutdown
+  end
+
   def test_api_url_flag_warning_names_flag_when_state_root_env_set
     responses = [
       [200, { "entries" => [] }],

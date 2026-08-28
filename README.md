@@ -324,7 +324,11 @@ When both `AGENT_COORD_API_URL` and `AGENT_COORD_STATE_ROOT` are set, the CLI
 uses the HTTP backend and warns once. Pass `--state-root` only for an explicit
 local smoke check. When both `AGENT_COORD_STATE_ROOT` and `AGENT_COORD_BACKEND`
 are set, the CLI uses the local backend and warns once; pass `--backend` to
-force the legacy GitHub backend. Each CLI flag that selects a different backend
+force the legacy GitHub backend. When both `AGENT_COORD_API_URL` and
+`AGENT_COORD_BACKEND` are set, the CLI uses the HTTP backend and warns once;
+pass `--backend` to force the legacy GitHub backend. With all three set the
+warning names the state root only; remove it and the next run reports the
+remaining backend conflict. Each CLI flag that selects a different backend
 than the configured selectors warns once the same way — `--state-root`,
 `--api-url`, and `--backend` alike, and including when the configured selector
 is `AGENT_COORD_BACKEND`. Replacing a configured selector with the same kind of

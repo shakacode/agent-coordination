@@ -1131,6 +1131,12 @@ module AgentCoord
       !configured.fetch(key).to_s.empty?
     end
 
+    # Configured-tier precedence is API_URL > STATE_ROOT > BACKEND, and every
+    # pair in which a selector is displaced warns once. The winning branch names
+    # only the next-highest loser, so all three set reports the state root and
+    # then the backend on the next run once that is removed; two warnings for one
+    # "HTTP wins" decision would only train operators to skip them. A selector on
+    # its own is an unambiguous selection and stays quiet.
     def resolve_configured_backend(options, env_api, env_root, env_backend)
       options[:api_url] = env_api
       if env_api
@@ -1139,6 +1145,11 @@ module AgentCoord
           emit_backend_conflict_warning(
             "warning: AGENT_COORD_API_URL and AGENT_COORD_STATE_ROOT are both set; " \
             "using the HTTP backend. Pass --state-root to force local.", options:
+          )
+        elsif env_backend
+          emit_backend_conflict_warning(
+            "warning: AGENT_COORD_API_URL and AGENT_COORD_BACKEND are both set; " \
+            "using the HTTP backend. Pass --backend to force the legacy GitHub backend.", options:
           )
         end
         return
