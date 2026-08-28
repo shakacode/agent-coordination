@@ -2952,9 +2952,15 @@ module AgentCoord
       )
     end
 
+    # Must use the same normalization as validate_config_api_url! and
+    # HttpStore#parse_base_url. URI#host keeps IPv6 brackets and preserves
+    # casing, so a configurable URL like http://LOCALHOST:8787 or
+    # http://[::1]:8787 would not be recognized as loopback here and the
+    # recovery hint would omit --local, pointing the operator at the remote
+    # database instead of the local backend.
     def local_http_url?(url)
-      host = URI(url.to_s).host
-      HttpStore::LOOPBACK_HOSTS.include?(host)
+      hostname = URI(url.to_s).hostname.to_s.downcase
+      HttpStore::LOOPBACK_HOSTS.include?(hostname)
     rescue URI::InvalidURIError
       false
     end

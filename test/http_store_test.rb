@@ -1547,6 +1547,33 @@ class HttpDoctorTest < HttpEnvTestCase
     stub&.shutdown
   end
 
+  def test_doctor_deep_recovery_recognizes_mixed_case_loopback_as_local
+    stub = HttpStoreStub.new([
+                               [200, { "status" => "ok" }],
+                               [401, { "error" => "unknown_token" }]
+                             ])
+    mixed_case_url = stub.base_url.sub("http://127.0.0.1", "http://LOCALHOST")
+    with_env("AGENT_COORD_API_URL" => mixed_case_url, "AGENT_COORD_API_TOKEN" => "stale") do
+      error = assert_raises(AgentCoord::OperationalError) do
+        AgentCoord::Runner.new(["doctor", "--deep"], stdout: StringIO.new, stderr: StringIO.new).run
+      end
+
+      assert_includes error.message,
+                      "worker/bin/provision-token <machine-name> --local --database <database-name>"
+    end
+  ensure
+    stub&.shutdown
+  end
+
+  def test_doctor_deep_recovery_recognizes_bracketed_ipv6_loopback_as_local
+    assert AgentCoord::Runner.new([], stdout: StringIO.new, stderr: StringIO.new)
+                             .send(:local_http_url?, "http://[::1]:8787"),
+           "bracketed IPv6 loopback must be recognized as local"
+    refute AgentCoord::Runner.new([], stdout: StringIO.new, stderr: StringIO.new)
+                             .send(:local_http_url?, "https://coord.example"),
+           "a remote host must not be recognized as local"
+  end
+
   def test_doctor_deep_tolerates_worker_without_whoami_route
     responses = [
       [200, { "status" => "ok" }],
