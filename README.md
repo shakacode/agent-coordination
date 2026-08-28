@@ -993,7 +993,10 @@ sibling named `policy`.
 A token read from the user file is credential-bound to that file's saved API
 URL. A differing `--api-url` or process `AGENT_COORD_API_URL` requires a
 process-scoped `AGENT_COORD_API_TOKEN`; the CLI never forwards the persisted
-token to an override endpoint.
+token to an override endpoint. A process-scoped token, by contrast, still wins
+for every selected URL, so the CLI warns on stderr when one is used with a URL
+it was not set alongside — for example a stale exported token reaching an API URL
+saved by `config set`. The warning never prints a token value.
 
 Default `doctor` verifies the current
 backend without writing state or parsing every record; `doctor --deep` adds full

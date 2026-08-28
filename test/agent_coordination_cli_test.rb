@@ -1539,6 +1539,49 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
   end
   # rubocop:enable Metrics/MethodLength
 
+  # A saved token is bound to its saved URL, but a process token wins for every
+  # selected URL. A stale exported token therefore reached a URL it was never
+  # paired with, silently, while the correctly bound saved token went unused.
+  def test_process_token_paired_with_a_user_config_api_url_warns_without_printing_tokens
+    # rubocop:disable Metrics/BlockLength
+    with_private_config_tmpdir("agent-coord-unbound-process-token") do |root|
+      config_home = File.join(root, "config")
+      set_result = run_command(
+        { "XDG_CONFIG_HOME" => config_home },
+        RbConfig.ruby, BIN, "config", "set", "--api-url", "http://127.0.0.1:9", "--token-stdin",
+        stdin_data: "saved-token\n"
+      )
+      assert_equal 0, set_result.status.exitstatus, set_result.stderr
+
+      warned = run_command(
+        { "XDG_CONFIG_HOME" => config_home, "AGENT_COORD_API_TOKEN" => "stale-process-token" },
+        RbConfig.ruby, BIN, "status"
+      )
+      saved_only = run_command({ "XDG_CONFIG_HOME" => config_home }, RbConfig.ruby, BIN, "status")
+      process_pair = run_command(
+        {
+          "XDG_CONFIG_HOME" => config_home,
+          "AGENT_COORD_API_URL" => "http://127.0.0.1:9",
+          "AGENT_COORD_API_TOKEN" => "stale-process-token"
+        },
+        RbConfig.ruby, BIN, "status"
+      )
+
+      warning = "warning: process-scoped AGENT_COORD_API_TOKEN is being used with http://127.0.0.1:9, " \
+                "which it was not set alongside; the process token takes precedence over any saved token."
+      assert_includes warned.stderr, warning
+      %w[stale-process-token saved-token].each do |secret|
+        refute_includes warned.stderr, secret
+        refute_includes warned.stdout, secret
+      end
+      # The saved token is bound to this URL, so pairing it is not a mismatch.
+      refute_includes saved_only.stderr, "process-scoped AGENT_COORD_API_TOKEN is being used with"
+      # A process token beside its own process URL is an explicit, visible pair.
+      refute_includes process_pair.stderr, "process-scoped AGENT_COORD_API_TOKEN is being used with"
+    end
+    # rubocop:enable Metrics/BlockLength
+  end
+
   def test_config_set_rejects_url_change_without_replacement_token
     with_private_user_config(
       "AGENT_COORD_API_URL=https://old.example\nAGENT_COORD_API_TOKEN=old-private-token\n"

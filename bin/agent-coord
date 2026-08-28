@@ -5412,6 +5412,7 @@ module AgentCoord
 
       if options[:api_url]
         token = resolved_http_token(options.fetch(:api_url))
+        warn_unbound_process_token(options.fetch(:api_url), options)
 
         return HttpStore.new(base_url: options[:api_url], token: token)
       end
@@ -5437,6 +5438,22 @@ module AgentCoord
 
       raise OperationalError,
             "process-scoped AGENT_COORD_API_TOKEN is required when the selected API URL differs from user config"
+    end
+
+    # A saved token is only ever used with the URL it was saved beside, but a
+    # process-scoped token wins for every selected URL. That pairing is invisible
+    # when the URL comes from the canonical config file or the command line, so a
+    # stale exported token can reach an unrelated deployment while the correctly
+    # bound saved token sits unused. Surface it; the precedence is unchanged and
+    # no token value is ever printed.
+    def warn_unbound_process_token(selected_url, options)
+      return if @process_config&.fetch("AGENT_COORD_API_TOKEN", nil).to_s.empty?
+      return if selected_url == @process_config&.fetch("AGENT_COORD_API_URL", nil)
+
+      emit_backend_conflict_warning(
+        "warning: process-scoped AGENT_COORD_API_TOKEN is being used with #{selected_url}, " \
+        "which it was not set alongside; the process token takes precedence over any saved token.", options:
+      )
     end
 
     def close_store(store)
