@@ -2913,6 +2913,39 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     FileUtils.remove_entry(fake_bin) if fake_bin && Dir.exist?(fake_bin)
   end
 
+  # Regression for issue #132: an explicit --backend must win over a configured
+  # status state root, not be silently answered from local state.
+  def test_status_prefers_explicit_backend_over_status_state_root
+    now = Time.now.utc
+    write_heartbeat(
+      "worker-local-must-not-appear",
+      updated_at: now - (5 * 60),
+      expires_at: now + (10 * 60)
+    )
+    fake_bin = Dir.mktmpdir("agent-coord-gh")
+    File.write(File.join(fake_bin, "gh"), "#!/bin/sh\necho explicit-backend-reached-gh >&2\nexit 1\n")
+    FileUtils.chmod(0o755, File.join(fake_bin, "gh"))
+
+    result = run_command(
+      {
+        "AGENT_COORD_STATE_ROOT" => nil,
+        "AGENT_COORD_STATUS_STATE_ROOT" => @state_root,
+        "PATH" => [fake_bin, File.dirname(RbConfig.ruby), "/usr/bin", "/bin"].join(File::PATH_SEPARATOR)
+      },
+      RbConfig.ruby,
+      BIN,
+      "status",
+      "--backend",
+      "some/repo"
+    )
+
+    assert_equal 2, result.status.exitstatus, result.stderr
+    assert_includes result.stderr, "explicit-backend-reached-gh"
+    refute_includes result.stdout, "worker-local-must-not-appear"
+  ensure
+    FileUtils.remove_entry(fake_bin) if fake_bin && Dir.exist?(fake_bin)
+  end
+
   def test_doctor_defaults_to_status_state_root_without_global_state_root
     now = Time.now.utc
     write_heartbeat(
@@ -2939,6 +2972,40 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     assert_includes result.stdout, "backend: local"
     assert_includes result.stdout, "state_root: #{@state_root}"
     refute_includes result.stderr, "unexpected gh"
+  ensure
+    FileUtils.remove_entry(fake_bin) if fake_bin && Dir.exist?(fake_bin)
+  end
+
+  # Regression for issue #132: an explicit --backend must win over a configured
+  # status state root, not be silently answered from local state.
+  def test_doctor_prefers_explicit_backend_over_status_state_root
+    now = Time.now.utc
+    write_heartbeat(
+      "worker-doctor-local-must-not-appear",
+      updated_at: now - (5 * 60),
+      expires_at: now + (10 * 60)
+    )
+    fake_bin = Dir.mktmpdir("agent-coord-gh")
+    File.write(File.join(fake_bin, "gh"), "#!/bin/sh\necho explicit-backend-reached-gh >&2\nexit 1\n")
+    FileUtils.chmod(0o755, File.join(fake_bin, "gh"))
+
+    result = run_command(
+      {
+        "AGENT_COORD_STATE_ROOT" => nil,
+        "AGENT_COORD_STATUS_STATE_ROOT" => @state_root,
+        "PATH" => [fake_bin, File.dirname(RbConfig.ruby), "/usr/bin", "/bin"].join(File::PATH_SEPARATOR)
+      },
+      RbConfig.ruby,
+      BIN,
+      "doctor",
+      "--backend",
+      "some/repo"
+    )
+
+    assert_equal 2, result.status.exitstatus, result.stderr
+    assert_includes result.stderr, "explicit-backend-reached-gh"
+    refute_includes result.stdout, "backend: local"
+    refute_includes result.stdout, "worker-doctor-local-must-not-appear"
   ensure
     FileUtils.remove_entry(fake_bin) if fake_bin && Dir.exist?(fake_bin)
   end
@@ -5865,6 +5932,40 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     assert_includes result.stdout, "batch-audit batch-status-root incomplete"
     refute_includes result.stderr, "local mode — single-machine only"
     refute_includes result.stderr, "unexpected gh"
+  ensure
+    FileUtils.remove_entry(fake_bin) if fake_bin && Dir.exist?(fake_bin)
+  end
+
+  # Regression for issue #132: an explicit --backend must win over a configured
+  # status state root, not be silently answered from local state.
+  def test_batch_audit_prefers_explicit_backend_over_status_state_root
+    write_batch(
+      "batch-local-must-not-appear",
+      lanes: [{ "name" => "code", "owner" => "worker-a", "targets" => ["101"] }]
+    )
+    fake_bin = Dir.mktmpdir("agent-coord-gh")
+    File.write(File.join(fake_bin, "gh"), "#!/bin/sh\necho explicit-backend-reached-gh >&2\nexit 1\n")
+    FileUtils.chmod(0o755, File.join(fake_bin, "gh"))
+
+    result = run_command(
+      {
+        "AGENT_COORD_STATE_ROOT" => nil,
+        "AGENT_COORD_STATUS_STATE_ROOT" => @state_root,
+        "PATH" => [fake_bin, File.dirname(RbConfig.ruby), "/usr/bin", "/bin"].join(File::PATH_SEPARATOR)
+      },
+      RbConfig.ruby,
+      BIN,
+      "batch-audit",
+      "--batch-id",
+      "batch-local-must-not-appear",
+      "--backend",
+      "some/repo"
+    )
+
+    assert_equal 2, result.status.exitstatus, result.stderr
+    assert_includes result.stdout, "batch-audit batch-local-must-not-appear unknown"
+    assert_includes result.stdout, "explicit-backend-reached-gh"
+    refute_includes result.stdout, "batch-audit batch-local-must-not-appear incomplete"
   ensure
     FileUtils.remove_entry(fake_bin) if fake_bin && Dir.exist?(fake_bin)
   end
