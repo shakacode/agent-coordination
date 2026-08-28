@@ -3720,7 +3720,7 @@ module AgentCoord
 
     # Structured so a --json consumer reads the claim's fields instead of
     # re-parsing the sentence the text renderer builds from them.
-    def log_claim_record(data, now, target = nil)
+    def log_claim_record(data, now, target)
       {
         "status" => log_present(data["status"]),
         "machine" => log_present(data["machine_id"]),

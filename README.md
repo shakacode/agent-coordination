@@ -602,15 +602,23 @@ not evaluated against `--since`, `--machine`, `--host`, or `--type`:
 
 ```text
 no events for ShakaCode/hichee#issue:10112
-claim active m5 codex codex-whimstay-queue-20260801 phase implementing updated 2026-08-01T01:13:03Z
+claim active m5 codex codex-whimstay-queue-20260801 issue:10112 phase implementing updated 2026-08-01T01:13:03Z
 ```
+
+Each claim line names the exact target it holds, because aliases such as `9832`
+and `pr:9832` are independently claimable and the fleet holds such pairs live
+under different agents. One line is printed per holder, oldest first, so the last
+one read is the current one. `--json` mirrors that as a `claims` array; the
+singular `claim` remains the newest holder for consumers that read one value.
+`claims` is omitted entirely when no claim matched, so read it with a default
+rather than assuming the key is present.
 
 A claim whose lease has run out is reported as such rather than presented as
 current custody — recency alone does not make a claim live, and the fleet holds
 many left active with a lease long past:
 
 ```text
-claim released m5 codex codex-whimstay-queue-20260801 phase implementation updated 2026-08-01T06:05:27Z lease elapsed 2026-08-01T06:05:27Z
+claim released m5 codex codex-whimstay-queue-20260801 issue:10112 phase implementation updated 2026-08-01T06:05:27Z lease elapsed 2026-08-01T06:05:27Z
 ```
 
 The elapsed lease is reported as a fact, not as a verdict that custody ended: a

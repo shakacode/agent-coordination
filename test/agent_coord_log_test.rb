@@ -1621,6 +1621,17 @@ class AgentCoordLogEmptyKindIdentifierTest < AgentCoordLogTestCase
 
     assert_equal [":qa"], matched(":qa")
   end
+
+  # The guard is on the id, not on the lane that follows it, so a bare `adhoc:`
+  # is kept whole for the same reason and does not answer for the empty base.
+  def test_bare_adhoc_prefix_with_no_id_stays_whole
+    write_event("b1", "e1", "type" => "claim.acquired", "repo" => "shakacode/example", "target" => "adhoc:",
+                            "machine_id" => "m1", "host" => "codex", "at" => "2026-08-04T01:00:00Z")
+    write_event("b1", "e2", "type" => "claim.acquired", "repo" => "shakacode/example", "target" => "",
+                            "machine_id" => "m2", "host" => "codex", "at" => "2026-08-04T02:00:00Z")
+
+    assert_equal ["adhoc:"], matched("adhoc:")
+  end
 end
 
 # --limit trims what is displayed. It must not trim the evidence that decides
