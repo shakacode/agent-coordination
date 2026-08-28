@@ -5707,12 +5707,22 @@ module AgentCoord
     def selected_coordination_backend(options)
       return ["local", true, "cli"] if options[:state_root_cli]
       return ["http", true, "cli"] if options[:api_url_cli]
-      return ["github", true, "cli"] if options[:backend_cli]
+      return cli_backend_selection(options) if options[:backend_cli]
 
       selectors = effective_backend_selector_set
       return ["http", true, selectors.fetch(:source)] unless selectors.fetch(:api_url).to_s.empty?
       return ["local", true, selectors.fetch(:source)] unless selectors.fetch(:state_root).to_s.empty?
       return ["github", true, selectors.fetch(:source)] unless selectors.fetch(:backend).to_s.empty?
+
+      ["local", false, "default"]
+    end
+
+    # An empty --backend value still short-circuits the configured selectors at
+    # runtime, but resolution then falls through to the implicit local default
+    # rather than the legacy GitHub backend. Report what the run would actually
+    # do instead of reporting a GitHub selection that never happens.
+    def cli_backend_selection(options)
+      return ["github", true, "cli"] unless options[:backend].to_s.empty?
 
       ["local", false, "default"]
     end

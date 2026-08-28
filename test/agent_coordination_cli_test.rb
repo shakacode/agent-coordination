@@ -1356,6 +1356,49 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     end
   end
 
+  # The parser sets backend_cli for an empty flag value, and empty-value
+  # rejection only runs under --stack-json. config show therefore claimed a
+  # configured GitHub backend while runtime resolution fell through to the
+  # implicit local default.
+  def test_config_show_does_not_report_an_empty_backend_flag_as_a_selection
+    Dir.mktmpdir("agent-coord-empty-backend-flag") do |state_home|
+      show_result = run_command(
+        { "XDG_STATE_HOME" => state_home },
+        RbConfig.ruby, BIN, "config", "show", "--backend", "", "--json"
+      )
+      status_result = run_command(
+        { "XDG_STATE_HOME" => state_home },
+        RbConfig.ruby, BIN, "status", "--backend", "", "--json"
+      )
+
+      assert_equal 0, show_result.status.exitstatus, show_result.stderr
+      coordination = JSON.parse(show_result.stdout).fetch("coordination")
+      assert_equal "local", coordination.fetch("backend")
+      assert_equal false, coordination.fetch("configured")
+      assert_equal "default", coordination.dig("source", "backend")
+
+      # Runtime agreement: the same flag resolves to the implicit local store.
+      assert_equal 0, status_result.status.exitstatus, status_result.stderr
+      assert_includes status_result.stderr, "local mode — single-machine only"
+      assert_includes status_result.stderr, File.join(state_home, "agent-coordination")
+    end
+  end
+
+  def test_config_show_still_reports_a_non_empty_backend_flag_as_a_cli_selection
+    with_private_user_config("AGENT_COORD_STATE_ROOT=/tmp/file-selected-agent-coord\n") do |config_home|
+      result = run_command(
+        { "XDG_CONFIG_HOME" => config_home },
+        RbConfig.ruby, BIN, "config", "show", "--backend", "acme/legacy-repo", "--json"
+      )
+
+      assert_equal 0, result.status.exitstatus, result.stderr
+      coordination = JSON.parse(result.stdout).fetch("coordination")
+      assert_equal "github", coordination.fetch("backend")
+      assert_equal true, coordination.fetch("configured")
+      assert_equal "cli", coordination.dig("source", "backend")
+    end
+  end
+
   def test_config_set_persists_policy_in_canonical_env_and_config_show_resolves_it
     # rubocop:disable Metrics/BlockLength
     with_private_config_tmpdir("agent-coord-config-set-policy") do |root|
