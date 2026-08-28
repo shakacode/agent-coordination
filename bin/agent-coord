@@ -1746,18 +1746,17 @@ module AgentCoord
     def doctor(options)
       return stack_doctor(options) if options[:stack_json]
 
-      doctor_options = options.dup
-      backend_kind = doctor_backend_kind(doctor_options)
+      backend_kind = doctor_backend_kind(options)
       begin
-        FileUtils.mkdir_p(doctor_options.fetch(:state_root)) if doctor_options[:implicit_local]
-        store = verify_doctor_store(doctor_options, backend_kind, deep: options[:deep])
+        FileUtils.mkdir_p(options.fetch(:state_root)) if options[:implicit_local]
+        store = verify_doctor_store(options, backend_kind, deep: options[:deep])
         store.verify_layout!(STATE_PREFIXES)
         section_notes, resource_checks, identity = doctor_deep_results(store, backend_kind, options)
       rescue JSON::ParserError, SystemCallError => e
         raise OperationalError, "state unreadable: #{e.message}"
       end
 
-      payload = doctor_payload(doctor_options, backend_kind, options[:deep])
+      payload = doctor_payload(options, backend_kind, options[:deep])
       payload["resource_checks"] = resource_checks if resource_checks
       payload["identity"] = identity if identity
       environment_identity = options[:deep] ? environment_identity_report(identity) : nil
@@ -1770,7 +1769,7 @@ module AgentCoord
         payload["section_notes"] = section_notes
       end
       emit_payload(payload, options) do
-        render_doctor_text(payload, doctor_options, section_notes)
+        render_doctor_text(payload, options, section_notes)
       end
       raise_machine_identity_mismatch!(environment_identity) if environment_identity
       raise_consumer_split_brain!(payload)

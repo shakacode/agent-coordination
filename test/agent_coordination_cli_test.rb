@@ -2978,6 +2978,41 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
 
   # Regression for issue #132: an explicit --backend must win over a configured
   # status state root, not be silently answered from local state.
+  # Regression for issue #132: AGENT_COORD_BACKEND selects a backend exactly like
+  # --backend does, so the status state root must yield to it too. Covered
+  # separately because only --backend sets :explicit_backend, so a future change
+  # that keys off that flag would leave the env-var path silently reading local
+  # state again.
+  def test_status_prefers_backend_env_var_over_status_state_root
+    now = Time.now.utc
+    write_heartbeat(
+      "worker-env-local-must-not-appear",
+      updated_at: now - (5 * 60),
+      expires_at: now + (10 * 60)
+    )
+    fake_bin = Dir.mktmpdir("agent-coord-gh")
+    File.write(File.join(fake_bin, "gh"), "#!/bin/sh\necho explicit-backend-reached-gh >&2\nexit 1\n")
+    FileUtils.chmod(0o755, File.join(fake_bin, "gh"))
+
+    result = run_command(
+      {
+        "AGENT_COORD_STATE_ROOT" => nil,
+        "AGENT_COORD_BACKEND" => "some/repo",
+        "AGENT_COORD_STATUS_STATE_ROOT" => @state_root,
+        "PATH" => [fake_bin, File.dirname(RbConfig.ruby), "/usr/bin", "/bin"].join(File::PATH_SEPARATOR)
+      },
+      RbConfig.ruby,
+      BIN,
+      "status"
+    )
+
+    assert_equal 2, result.status.exitstatus, result.stderr
+    assert_includes result.stderr, "explicit-backend-reached-gh"
+    refute_includes result.stdout, "worker-env-local-must-not-appear"
+  ensure
+    FileUtils.remove_entry(fake_bin) if fake_bin && Dir.exist?(fake_bin)
+  end
+
   def test_doctor_prefers_explicit_backend_over_status_state_root
     now = Time.now.utc
     write_heartbeat(
