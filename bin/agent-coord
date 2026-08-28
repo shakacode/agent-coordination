@@ -2120,7 +2120,7 @@ module AgentCoord
         raise Error, "--api-url must be an absolute HTTP(S) URL"
       end
       raise Error, "--api-url must not include a query or fragment" if uri.query || uri.fragment
-      if uri.scheme == "http" && !HttpStore::LOOPBACK_HOSTS.include?(uri.host)
+      if uri.scheme == "http" && !HttpStore::LOOPBACK_HOSTS.include?(uri.hostname)
         raise Error, "--api-url must use https unless it points at localhost"
       end
     rescue URI::InvalidURIError
@@ -6308,7 +6308,7 @@ module AgentCoord
       if uri.query || uri.fragment
         raise OperationalError, "invalid HTTP backend URL: must not include a query or fragment"
       end
-      if uri.scheme == "http" && !LOOPBACK_HOSTS.include?(uri.host)
+      if uri.scheme == "http" && !LOOPBACK_HOSTS.include?(uri.hostname)
         raise OperationalError, "HTTP backend URL must use https unless it points at localhost"
       end
 

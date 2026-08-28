@@ -74,6 +74,14 @@ class HttpStoreTestCase < Minitest::Test
 end
 
 class HttpStoreReadTest < HttpStoreTestCase
+  def test_constructor_accepts_plain_http_ipv6_loopback_base_url
+    store = AgentCoord::HttpStore.new(base_url: "http://[::1]:8787", token: "tok")
+
+    assert_instance_of AgentCoord::HttpStore, store
+  ensure
+    store&.close
+  end
+
   def test_constructor_rejects_query_and_fragment_components_in_base_url
     [
       "https://agent-coord.example?tenant=one",
