@@ -3441,8 +3441,12 @@ module AgentCoord
     def log_event_rows(store)
       seen = {}
       rows = log_event_entries(store).map do |entry|
-        seen[log_event_identity(entry.data)] = true
-        log_row(entry.data)
+        row = log_row(entry.data)
+        # The row itself, not a marker: an archived duplicate of this event needs
+        # somewhere to record the envelope it came from, and the row that is
+        # reported is the only thing the note can still see.
+        seen[log_event_identity(entry.data)] = row
+        row
       end
       rows + log_archived_event_rows(store, seen)
     end
@@ -3464,12 +3468,28 @@ module AgentCoord
         provenance = log_archive_provenance(entry)
         records.filter_map do |data|
           identity = log_event_identity(data)
-          next if seen.key?(identity)
+          twin = seen[identity]
+          next log_archive_twin(twin, provenance) if twin
 
-          seen[identity] = true
-          log_row(data).merge(provenance)
+          row = log_row(data).merge(provenance)
+          seen[identity] = row
+          row
         end
       end
+    end
+
+    # The live copy wins the row, but the event is in the archive all the same
+    # and on the same delete_after clock, so the envelope is recorded on the row
+    # that is reported. Without this an envelope whose records are all duplicates
+    # -- a compaction interrupted between writing it and deleting its sources --
+    # contributed no rows, and so vanished from the note entirely even though it
+    # had been read and is genuinely expiring. First envelope to claim a row
+    # wins, which keeps a row that was itself read from the archive pointing at
+    # the envelope it actually came from. Returns nil so filter_map drops the
+    # duplicate row.
+    def log_archive_twin(row, provenance)
+      row.merge!(provenance.except("archived")) unless row["archive_path"]
+      nil
     end
 
     # The batch and the event id together, because event_id is not unique across
@@ -3522,46 +3542,68 @@ module AgentCoord
       data = entry.data
       case data.is_a?(Hash) ? data["record_family"] : nil
       when "compacted_events" then log_compacted_records(entry, data)
-      when "archived_record" then log_archived_records(entry, [data["data"]])
+      when "archived_record" then log_archived_record(entry, data["data"])
       else
         log_archive_incomplete(entry, "unknown archived record family")
         []
       end
     end
 
-    # gc retains at least the first and last event of every generation it
-    # compacts (see gc_compacted_entries), so an envelope that names the source
-    # paths it consumed while retaining nothing is corruption rather than an
-    # empty generation -- and accepting it quietly let --sync exit 0 over a
-    # mirror missing the events those paths held. An envelope with both empty is
-    # degenerate but not self-contradictory: it consumed nothing and retained
-    # nothing, so there is nothing to report.
+    # A compacted envelope describes a generation: source_paths is what gc
+    # consumed and records is the subset it kept, so the two have to agree before
+    # either can be trusted. An absent or non-array source_paths used to pass
+    # through Array(), which yields 0 for nil and an arbitrary count for a hash,
+    # and the note then reported no compaction loss for an envelope whose source
+    # metadata was unreadable. Retaining more records than were consumed is
+    # likewise impossible, since compaction keeps a subset.
+    #
+    # One sentence per envelope: the defects are ordered from the most
+    # fundamental, and only the first is reported, so a doubly corrupt record
+    # does not print twice. Legible records are still returned in every case --
+    # a corrupt envelope header does not make the events inside it wrong, and
+    # dropping them would be the silent loss this read exists to remove.
     def log_compacted_records(entry, data)
-      sources = Array(data["source_paths"]).length
-      return log_archived_records(entry, data["records"]) unless data["records"] == [] && sources.positive?
+      records = data["records"]
+      defect = log_compaction_defect(records, data["source_paths"])
+      log_archive_incomplete(entry, defect) if defect
+      records.is_a?(Array) ? records.grep(Hash) : []
+    end
 
-      log_archive_incomplete(entry, "no retained records for #{sources} source #{sources == 1 ? 'path' : 'paths'}")
+    def log_compaction_defect(records, sources)
+      return "malformed archived record body" unless records.is_a?(Array)
+      return "malformed archived source paths" unless sources.is_a?(Array)
+      # gc retains at least the first and last event of every generation it
+      # compacts (see gc_compacted_entries), so retaining nothing while naming
+      # consumed sources is corruption rather than an empty generation. Both
+      # empty is degenerate but not self-contradictory and is left alone.
+      return log_archive_empty_defect(sources) if records.empty?
+      if records.length > sources.length
+        return "#{records.length} retained records exceed #{log_archive_count(sources.length, 'source path')}"
+      end
+
+      dropped = records.length - records.grep(Hash).length
+      log_archive_count(dropped, "unreadable archived record") if dropped.positive?
+    end
+
+    # Both empty is degenerate but not self-contradictory: the envelope consumed
+    # nothing and retained nothing, so there is nothing to report.
+    def log_archive_empty_defect(sources)
+      return nil if sources.empty?
+
+      "no retained records for #{log_archive_count(sources.length, 'source path')}"
+    end
+
+    # One archived event rather than a generation, so there is no source_paths to
+    # agree with and nothing that could have been dropped.
+    def log_archived_record(entry, record)
+      return [record] if record.is_a?(Hash)
+
+      log_archive_incomplete(entry, log_archive_count(1, "unreadable archived record"))
       []
     end
 
-    # A recognized family with a malformed body was the quieter half of the same
-    # bug. Array(nil).grep(Hash) and [non_hash].grep(Hash) both return [], so an
-    # envelope whose records key is absent, is not an array, or holds entries
-    # that are not objects dropped archived history without a word -- and a
-    # silently short trail is exactly what --sync would then persist as complete.
-    # Legible siblings are still reported; only the loss is announced.
-    def log_archived_records(entry, records)
-      unless records.is_a?(Array)
-        log_archive_incomplete(entry, "malformed archived record body")
-        return []
-      end
-
-      events = records.grep(Hash)
-      dropped = records.length - events.length
-      if dropped.positive?
-        log_archive_incomplete(entry, "#{dropped} unreadable archived #{dropped == 1 ? 'record' : 'records'}")
-      end
-      events
+    def log_archive_count(count, noun)
+      "#{count} #{noun}#{'s' unless count == 1}"
     end
 
     def log_archive_incomplete(entry, reason)
@@ -3574,14 +3616,20 @@ module AgentCoord
     # once per row it contributed: a compacted envelope lists every source path
     # it consumed but retains only the first, last, terminal, and phase-changing
     # events, so a restored trail can be shorter than the one gc swallowed.
+    # Only an array-valued source_paths is counted. Array() would turn a hash
+    # into an arbitrary number of pairs and nil into zero, either of which
+    # reports a confident dropped count for an envelope whose source metadata
+    # log_compaction_defect has just warned is unreadable.
     def log_archive_provenance(entry)
       data = entry.data
+      sources = data["source_paths"]
+      consumed = sources.is_a?(Array) ? sources.length : 0
       retained = Array(data["records"]).length
       {
         "archived" => true,
         "archive_path" => entry.path,
         "archive_delete_after" => data["delete_after"].to_s,
-        "archive_dropped" => [Array(data["source_paths"]).length - retained, 0].max
+        "archive_dropped" => [consumed - retained, 0].max
       }
     end
 
@@ -3631,19 +3679,33 @@ module AgentCoord
     # history now sits on a delete_after clock, and that compaction did not
     # retain every source event it consumed.
     def log_note_archived(rows, options)
-      archived = rows.select { |row| row["archived"] }
-      return if archived.empty?
+      # Keyed on the envelope, not on whether the row came from it: a row whose
+      # archived duplicate was skipped still names the envelope that holds it.
+      envelopes = rows.select { |row| row["archive_path"] }.uniq { |row| row.fetch("archive_path") }
+      return if envelopes.empty?
 
-      envelopes = archived.uniq { |row| row.fetch("archive_path") }
       dropped = envelopes.sum { |row| row.fetch("archive_dropped") }
       expires = log_archive_soonest_expiry(envelopes)
-      parts = ["note: #{archived.length} of #{rows.length} events read from the archive"]
+      parts = [log_archive_note_lead(rows)]
       if dropped.positive?
         parts << "#{dropped} source #{dropped == 1 ? 'event was' : 'events were'} dropped by compaction"
       end
       parts << "archive deleted after #{expires}" if expires
       parts << "mirror it with log --sync" unless options[:sync]
       @stderr.puts log_scrub(parts.join("; "))
+    end
+
+    # An envelope whose records were every one of them duplicates of live events
+    # contributes no archived rows, so the count that leads the note would read
+    # zero. It still deserves a sentence -- those events are in the archive and
+    # on its delete_after clock -- but a different one, because nothing in this
+    # answer was actually read from the archive.
+    def log_archive_note_lead(rows)
+      archived = rows.count { |row| row["archived"] }
+      return "note: #{archived} of #{rows.length} events read from the archive" if archived.positive?
+
+      held = rows.count { |row| row["archive_path"] }
+      "note: #{held} of #{rows.length} events are also held in the archive"
     end
 
     # The soonest clock, ordered on the parsed instant like every other

@@ -382,7 +382,8 @@ when releases begin.
   turn a trail that reads today into a failure -- so an older backend, an
   unreadable directory, or an archive record that will not parse degrades to a
   warning that also marks the trail incomplete. One consequence is worth knowing
-  before upgrading: a scoped HTTP token that can read `events` but not `archive`
+  before upgrading: a scoped HTTP token that can read `events` but not
+  `archive/events` (the prefix this read lists, not the whole `archive` tree)
   now prints a warning on every `log` invocation, and `log --sync` refuses to
   write a mirror for it, because a mirror written from a read that could not see
   the archive would later be indistinguishable from a complete one. The README

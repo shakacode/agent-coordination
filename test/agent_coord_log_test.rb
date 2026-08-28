@@ -2122,7 +2122,7 @@ class AgentCoordLogArchiveTest < AgentCoordLogTestCase
     write_trace
     write_archive_json("archive/events/b9/compact-mixed.json",
                        "schema_version" => 1, "record_family" => "compacted_events",
-                       "source_paths" => ["events/b9/x1.json"],
+                       "source_paths" => ["events/b9/x1.json", "events/b9/x2.json", "events/b9/x3.json"],
                        "archived_at" => "2026-08-05T00:00:00Z", "delete_after" => "2026-09-04T00:00:00Z",
                        "records" => [{ "schema_version" => 2, "event_id" => "x1", "batch_id" => "b9",
                                        "type" => "merged", "repo" => "shakacode/example", "target" => "104",
@@ -2207,6 +2207,74 @@ class AgentCoordLogArchiveTest < AgentCoordLogTestCase
 
     assert_equal %w[shared], tsv_event_ids("shakacode/example#104")
     assert_equal %w[shared], tsv_event_ids("shakacode/other#7"), "the archived record must survive"
+  end
+
+  # source_paths is what gc consumed and records is the subset it kept, so an
+  # absent or non-array source_paths leaves the note unable to say anything true
+  # about compaction loss -- and Array() answered 0 for nil and an arbitrary
+  # count for a hash, so it reported no loss at all.
+  def test_log_reports_a_compacted_envelope_with_no_source_paths
+    write_trace
+    write_archive_json("archive/events/b9/compact-sourceless.json",
+                       "schema_version" => 1, "record_family" => "compacted_events",
+                       "archived_at" => "2026-08-05T00:00:00Z", "delete_after" => "2026-09-04T00:00:00Z",
+                       "records" => [{ "schema_version" => 2, "event_id" => "x1", "batch_id" => "b9",
+                                       "type" => "merged", "repo" => "shakacode/example", "target" => "104",
+                                       "machine_id" => "m9", "host" => "codex",
+                                       "at" => "2026-08-06T00:00:00Z" }])
+
+    result = run_log("shakacode/example#104", "--format", "tsv")
+    sync = run_log("--sync")
+
+    assert_equal 0, result.status.exitstatus, result.stderr
+    assert_includes result.stderr, "malformed archived source paths at archive/events/b9/compact-sourceless.json"
+    assert_equal %w[e1 e2 e3 e4 e5 x1], tsv_rows_event_ids(result), "the legible record is still reported"
+    assert_equal 2, sync.status.exitstatus, "a mirror must not be written over an unreadable envelope"
+  end
+
+  # Compaction keeps a subset of what it consumed, so more retained records than
+  # source paths cannot happen and the envelope cannot be trusted to describe
+  # its own loss.
+  def test_log_reports_a_compacted_envelope_retaining_more_than_it_consumed
+    write_trace
+    write_archive_json("archive/events/b9/compact-impossible.json",
+                       "schema_version" => 1, "record_family" => "compacted_events",
+                       "source_paths" => ["events/b9/x1.json"],
+                       "archived_at" => "2026-08-05T00:00:00Z", "delete_after" => "2026-09-04T00:00:00Z",
+                       "records" => [{ "schema_version" => 2, "event_id" => "x1", "batch_id" => "b9",
+                                       "type" => "merged", "repo" => "shakacode/example", "target" => "104",
+                                       "machine_id" => "m9", "host" => "codex",
+                                       "at" => "2026-08-06T00:00:00Z" },
+                                     { "schema_version" => 2, "event_id" => "x2", "batch_id" => "b9",
+                                       "type" => "merged", "repo" => "shakacode/example", "target" => "104",
+                                       "machine_id" => "m9", "host" => "codex",
+                                       "at" => "2026-08-07T00:00:00Z" }])
+
+    result = run_log("shakacode/example#104", "--format", "tsv")
+
+    assert_equal 0, result.status.exitstatus, result.stderr
+    assert_includes result.stderr,
+                    "2 retained records exceed 1 source path at archive/events/b9/compact-impossible.json"
+    assert_equal %w[e1 e2 e3 e4 e5 x1 x2], tsv_rows_event_ids(result), "legible records are still reported"
+  end
+
+  # A compaction interrupted between writing its envelope and deleting its
+  # sources leaves every retained record readable from both prefixes. The live
+  # copies win the rows, so the envelope contributed none -- and its
+  # delete_after clock and dropped-source count fell out of the note entirely.
+  def test_log_reports_archive_provenance_when_every_record_is_also_live
+    write_closed_lane_trace
+    compact_events!
+    CLOSED_LANE_EVENTS.each_key { |event_id| write_closed_lane_event(event_id) }
+    envelope = archive_envelopes.fetch(0)
+
+    result = run_log("shakacode/example#104")
+
+    assert_equal 0, result.status.exitstatus, result.stderr
+    assert_equal %w[e1 e2 e3 e4 e5], tsv_event_ids("shakacode/example#104"), "the live copies are reported"
+    assert_includes result.stderr, "note: 4 of 5 events are also held in the archive"
+    assert_includes result.stderr, "1 source event was dropped by compaction"
+    assert_includes result.stderr, "archive deleted after #{envelope.fetch('delete_after')}"
   end
 
   private
