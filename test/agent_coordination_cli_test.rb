@@ -1526,6 +1526,29 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     end
   end
 
+  # A blank token used to persist verbatim and then latch: the saved URL could no
+  # longer be changed without a replacement --token-stdin.
+  def test_config_set_rejects_a_whitespace_only_token_stdin
+    with_private_config_tmpdir("agent-coord-blank-token") do |root|
+      config_home = File.join(root, "config")
+      result = run_command(
+        { "XDG_CONFIG_HOME" => config_home },
+        RbConfig.ruby,
+        BIN,
+        "config",
+        "set",
+        "--api-url",
+        "https://coordination.example",
+        "--token-stdin",
+        stdin_data: "   \n"
+      )
+
+      assert_equal 1, result.status.exitstatus
+      assert_includes result.stderr, "--token-stdin requires a non-empty token"
+      refute_path_exists File.join(config_home, "agent-coord", "env")
+    end
+  end
+
   def test_config_set_rejects_invalid_utf8_token_without_writing_config
     with_private_config_tmpdir("agent-coord-invalid-token-encoding") do |root|
       config_home = File.join(root, "config")

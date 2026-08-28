@@ -2135,7 +2135,9 @@ module AgentCoord
       raise Error, "--token-stdin token must be valid UTF-8" unless token.valid_encoding?
 
       token = token.sub(/\r?\n\z/, "")
-      raise Error, "--token-stdin requires a non-empty token" if token.empty?
+      # Reject blank input, but persist the unstripped value: internal and
+      # trailing whitespace inside a real token is significant.
+      raise Error, "--token-stdin requires a non-empty token" if token.strip.empty?
       raise Error, "--token-stdin token must be one line" if token.match?(/[\r\n\0]/)
 
       token
