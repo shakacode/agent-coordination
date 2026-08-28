@@ -1,0 +1,19 @@
+# Weekly dependency updates for the three ecosystems in this repo: the
+# Cloudflare Worker's npm packages, the Ruby gem's bundler dependencies, and
+# this repo's GitHub Actions.
+version: 2
+updates:
+  - package-ecosystem: "npm"
+    directory: "/worker"
+    schedule:
+      interval: "weekly"
+
+  - package-ecosystem: "bundler"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
