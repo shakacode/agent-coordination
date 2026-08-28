@@ -423,7 +423,10 @@ module AgentCoord
 
       @user_config.each do |key, value|
         next if key == "AGENT_COORD_API_TOKEN"
-        next unless @process_config[key].to_s.empty?
+        # A whitespace-only process value is not a selection: the downstream
+        # readers strip before testing for empty, so treating it as present here
+        # would drop the saved value without anything taking its place.
+        next unless AgentCoord.environment_identity_value(key, env: @process_config).nil?
 
         ENV[key] = value
         @injected_user_config_keys << key
@@ -6582,8 +6585,12 @@ module AgentCoord
     [nil, SESSION_SOURCE_UNSET]
   end
 
-  def self.environment_identity_value(name)
-    value = ENV.fetch(name, "").strip
+  # Reads from the live process environment by default. load_user_configuration!
+  # passes its pre-injection snapshot instead so that one strip-before-empty rule
+  # decides both whether a process value overrides a saved one and what the
+  # writers later record.
+  def self.environment_identity_value(name, env: ENV)
+    value = env.fetch(name, "").to_s.strip
     value.empty? ? nil : value
   end
 

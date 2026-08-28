@@ -2701,6 +2701,39 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     end
   end
 
+  # A whitespace-only process value is not a selection. The identity readers
+  # strip before testing for empty, so treating it as present here dropped the
+  # configured machine attribution from every write without anything replacing it.
+  def test_whitespace_process_machine_id_uses_and_then_restores_persisted_identity
+    with_private_user_config("AGENT_COORD_MACHINE_ID=m1\n") do |config_home|
+      runner = AgentCoord::Runner.new([])
+      with_process_env(
+        "XDG_CONFIG_HOME" => config_home,
+        "AGENT_COORD_MACHINE_ID" => "  "
+      ) do
+        runner.send(:load_user_configuration!)
+        assert_equal "m1", AgentCoord.environment_machine_id
+        runner.send(:restore_injected_user_configuration!)
+        assert_equal "  ", ENV.fetch("AGENT_COORD_MACHINE_ID")
+      end
+    end
+  end
+
+  def test_whitespace_process_machine_id_still_stamps_writes_with_the_saved_identity
+    with_private_user_config("AGENT_COORD_MACHINE_ID=m1\n") do |config_home|
+      result = run_agent_coord(
+        "heartbeat", "--agent-id", "worker-whitespace-identity",
+        env: { "XDG_CONFIG_HOME" => config_home, "AGENT_COORD_MACHINE_ID" => "  " }
+      )
+
+      assert_equal 0, result.status.exitstatus, result.stderr
+      heartbeat = JSON.parse(
+        File.read(File.join(@state_root, "heartbeats", "worker-whitespace-identity.json"))
+      )
+      assert_equal "m1", heartbeat.fetch("machine_id")
+    end
+  end
+
   def test_unconfigured_status_defaults_to_labeled_xdg_local_store
     Dir.mktmpdir("agent-coord-xdg-state") do |state_home|
       result = run_command(
