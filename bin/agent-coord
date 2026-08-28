@@ -3284,7 +3284,7 @@ module AgentCoord
       end
 
       claims = log_claim_for(store, options, rows)
-      emit_log(log_limited(rows, options), options, claims)
+      emit_log(log_limited(rows, options), options, claims, matched: rows)
       0
     rescue JSON::ParserError, SystemCallError => e
       raise OperationalError, "state unreadable: #{e.message}"
@@ -3530,12 +3530,15 @@ module AgentCoord
       raise Error, "--json and --format are mutually exclusive"
     end
 
-    def emit_log(rows, options, claims = [])
+    def emit_log(rows, options, claims = [], matched: rows)
       format = options[:format].to_s
       records = claims.map { |claim| claim.fetch("record") }
       if options[:json]
         events = rows.map { |row| log_scrub_values(row.slice(*LOG_TSV_FIELDS)) }
-        payload = { "work_item" => log_work_item_summary(options, rows, claims), "trail" => log_trail_state,
+        # Provenance describes the search, so it is built from every matched row.
+        # A display limit that shrank it would understate which spellings answered.
+        payload = { "work_item" => log_work_item_summary(options, matched, claims),
+                    "trail" => log_trail_state,
                     "events" => events, "claim" => records.last }.compact
         # Oldest first, like the trail above it, so the last thing printed or listed
         # is the current one. `claim` stays the newest for consumers that read one;

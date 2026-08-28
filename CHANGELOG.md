@@ -345,7 +345,9 @@ when releases begin.
   of `complete` or `incomplete`. The degraded-listing warning went only to stderr,
   so a trail cut short by a scoped token was byte-identical to a complete empty
   one for any JSON consumer, and "searched everything, found nothing" could not be
-  told apart from "could not search" (issue #141).
+  told apart from "could not search". `matched_targets` describes the search
+  rather than the rendered rows, so a `--limit` that trims the displayed trail
+  does not understate which spellings answered (issue #141).
 - `agent-coord status --repo R --target N` now reports the `batches` and `events`
   sections it does not read as `null` rather than as empty arrays, and its section
   note names `agent-coord log` as the command that can answer for that target.

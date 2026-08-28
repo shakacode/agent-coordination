@@ -1731,3 +1731,31 @@ class AgentCoordLogNonNumericKindTest < AgentCoordLogTestCase
     assert_equal ["issue:319:qa"], matched("319")
   end
 end
+
+# matched_targets is provenance for the search, not a description of the rendered
+# rows, so a display limit must not shrink it.
+class AgentCoordLogLimitProvenanceTest < AgentCoordLogTestCase
+  def write_two_spellings
+    write_event("b1", "e1", "type" => "claim.acquired", "repo" => "shakacode/example", "target" => "issue:1",
+                            "machine_id" => "m1", "host" => "codex", "at" => "2026-08-01T00:00:00Z")
+    write_event("b1", "e2", "type" => "phase.changed", "repo" => "shakacode/example", "target" => "pr:1",
+                            "machine_id" => "m1", "host" => "codex", "at" => "2026-08-02T00:00:00Z")
+  end
+
+  def test_the_limit_does_not_drop_spellings_from_the_provenance
+    write_two_spellings
+
+    payload = JSON.parse(run_log("shakacode/example#1", "--json", "--limit", "1").stdout)
+
+    assert_equal ["issue:1", "pr:1"], payload.dig("work_item", "matched_targets")
+    assert_equal 1, payload.fetch("events").length, "the displayed trail is still limited"
+  end
+
+  def test_the_unlimited_provenance_is_the_same
+    write_two_spellings
+
+    payload = JSON.parse(run_log("shakacode/example#1", "--json").stdout)
+
+    assert_equal ["issue:1", "pr:1"], payload.dig("work_item", "matched_targets")
+  end
+end

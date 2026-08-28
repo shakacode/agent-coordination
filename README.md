@@ -559,8 +559,13 @@ the work-item matching the command does — anchor on the spellings instead, or 
 same split this command fixes reappears offline:
 
 ```bash
-grep -E '#(issue:|pr:)?9765(:|\t)' ~/.local/state/agent-coordination/log.tsv
+grep -E $'#(issue:|pr:)?9765(:|\t)' ~/.local/state/agent-coordination/log.tsv
 ```
+
+The `$'...'` quoting matters: GNU grep does not define `\t` inside an ERE, so the
+plain-quoted form matches a literal `t` rather than a tab — it finds none of the
+bare-number records this example exists to union, and matches unrelated targets
+ending in `t`. ANSI-C quoting puts a real tab in the pattern before grep sees it.
 
 Matching is case-insensitive for the work item, machine, host, and type. That
 matters for the work item in particular, because the event store has recorded the
