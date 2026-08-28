@@ -379,9 +379,14 @@ when releases begin.
   reported events came from the archive, how many source events compaction did
   not retain, and the `delete_after` date on which the rest is deleted. Reading
   the archive is additive by construction -- it can add rows or a warning, never
-  turn a trail that reads today into a failure -- so an older backend, an
-  unreadable directory, or an archive record that will not parse degrades to a
-  warning that also marks the trail incomplete. One consequence is worth knowing
+  turn a trail that reads today into a failure -- so an unreadable directory or
+  an archive record that will not parse degrades to a warning that also marks the
+  trail incomplete. A backend with no `archive/events` prefix is deliberately not
+  treated that way: the Worker change that made that prefix listable is the one
+  that made it writable, so such a backend cannot have stored an archived event
+  and nothing is missing. It warns without marking the trail incomplete, and
+  `log --sync` still writes the mirror -- refusing there would have broken the
+  precondition this same change documents. One consequence is worth knowing
   before upgrading: a scoped HTTP token that can read `events` but not
   `archive/events` (the prefix this read lists, not the whole `archive` tree)
   now prints a warning on every `log` invocation, and `log --sync` refuses to

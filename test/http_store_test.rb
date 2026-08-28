@@ -1810,6 +1810,68 @@ class LogHttpBackendTest < HttpEnvTestCase
     stub.shutdown
   end
 
+  # A backend with no archive prefix cannot have stored an archived event: the
+  # worker change that made archive/events listable is the one that made it
+  # writable. So an unsupported archive listing leaves the trail complete, and
+  # --sync must still write the mirror -- this command's own documentation asks
+  # operators to run it before every gc --execute, and refusing forever on an
+  # older backend breaks that workflow rather than protecting it.
+  def test_log_sync_writes_the_mirror_when_the_backend_has_no_archive_prefix
+    root = Dir.mktmpdir("agent-coord-http-sync")
+    event = { "schema_version" => 2, "event_id" => "e1", "batch_id" => "b1", "type" => "claim.acquired",
+              "repo" => "shakacode/example", "target" => "1", "machine_id" => "m5", "host" => "codex",
+              "agent_id" => "live-worker", "at" => "2026-08-01T00:00:00Z" }
+    stub = HttpStoreStub.new([
+                               [200, { "entries" => [
+                                 { "path" => "events/b1/e1.json", "data" => event, "version" => 1 }
+                               ] }],
+                               [400, { "error" => "invalid_prefix" }]
+                             ])
+    with_env("AGENT_COORD_API_URL" => stub.base_url, "AGENT_COORD_API_TOKEN" => "tok",
+             "AGENT_COORD_STATUS_STATE_ROOT" => root) do
+      code, out, err = run_cli(["log", "--sync"], {})
+
+      assert_equal 0, code, err
+      assert_includes out, "synced 1 new event"
+      assert_includes File.read(File.join(root, "log.tsv")), "live-worker"
+      assert_includes err, "archived events not supported by backend"
+      refute_includes err, "may be incomplete"
+      refute_includes err, "refusing to sync"
+    end
+  ensure
+    stub.shutdown
+    FileUtils.remove_entry(root) if root
+  end
+
+  # Forbidden is the other half of the distinction and must keep refusing: an
+  # archive this token cannot read may still hold events, so the trail is short.
+  def test_log_sync_still_refuses_when_the_archive_is_forbidden_rather_than_unsupported
+    stub = HttpStoreStub.new([[200, { "entries" => [] }], [403, { "error" => "forbidden" }]])
+    with_env("AGENT_COORD_API_URL" => stub.base_url, "AGENT_COORD_API_TOKEN" => "tok") do
+      code, _out, err = run_cli(["log", "--sync"], {})
+
+      assert_equal 2, code
+      assert_includes err, "refusing to sync an incomplete trail: archive/events"
+    end
+  ensure
+    stub.shutdown
+  end
+
+  # An unsupported live events listing keeps marking the trail incomplete: that
+  # prefix is where the answer comes from, so an unimplemented one is a missing
+  # answer rather than an empty one.
+  def test_log_sync_still_refuses_when_the_live_events_listing_is_unsupported
+    stub = HttpStoreStub.new([[400, { "error" => "invalid_prefix" }], [200, { "entries" => [] }]])
+    with_env("AGENT_COORD_API_URL" => stub.base_url, "AGENT_COORD_API_TOKEN" => "tok") do
+      code, _out, err = run_cli(["log", "--sync"], {})
+
+      assert_equal 2, code
+      assert_includes err, "refusing to sync an incomplete trail: events"
+    end
+  ensure
+    stub.shutdown
+  end
+
   # The refusal names every prefix that degraded, in read order. The trail is
   # read from two listings, so recording only the most recent degradation told an
   # operator whose live events were unreadable to go and look at the archive.

@@ -542,11 +542,18 @@ Both numbers matter. Compaction retains only the first event, the last event,
 every terminal event, and actual phase transitions, so the source events it drops
 leave the backend the moment `gc --execute` runs; what it does retain then sits on
 the `delete_after` clock (30 days by default). If the archive cannot be listed —
-an older backend, a token without `archive/events` read scope, an unreadable
-directory — `log` says so on stderr and reports the live events anyway.
-Reading the archive can add rows or a warning, never turn a trail that reads
-today into a failure; `--sync` then refuses to mirror a trail it already knows
-is short.
+a token without `archive/events` read scope, an unreadable directory, a record
+that will not parse — `log` says so on stderr and reports the live events
+anyway. Reading the archive can add rows or a warning, never turn a trail that
+reads today into a failure; `--sync` then refuses to mirror a trail it already
+knows is short.
+
+A backend too old to have an `archive/events` prefix is the one case that is not
+a short trail. The Worker change that made that prefix listable is the same one
+that made it writable, so a backend that cannot list it never stored anything
+there and nothing is missing. `log` says so on stderr and `--sync` still writes
+the mirror — refusing there would break the very step this page asks you to run
+before every `gc --execute`.
 
 Simulation and smoke records are excluded unless `--include-synthetic` is passed.
 When included they are marked `[synthetic]` in text output and carry `synthetic`

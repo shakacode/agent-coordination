@@ -213,6 +213,10 @@ module AgentCoord
   # because a custody trail that ends when the work completes is the one case it
   # was written to answer.
   LOG_ARCHIVED_EVENTS_PREFIX = "archive/events"
+  # The degradation reason for a prefix the backend does not implement, named so
+  # the listing that classifies it and the caller that decides what it means
+  # cannot drift apart.
+  LOG_UNSUPPORTED_REASON = "not supported by backend"
   LOG_SYNC_FILENAME = "log.tsv"
   LOG_SYNC_LOCK_SUFFIX = ".lock"
   # C0 controls and DEL, minus the tab/CR/LF handled separately above. Text and
@@ -3661,8 +3665,20 @@ module AgentCoord
     # means the query has no answer at all, so failing is the honest result
     # there, while an unreadable archive only means the answer is shorter. The
     # record-level asymmetry is not intended and is tracked in issue #176.
+    # A backend with no archive prefix cannot be hiding archived events, because
+    # it cannot have stored any: the worker change that made archive/events
+    # listable is the same one that made it writable. STATE_PATH gained its
+    # archive arm and STATE_PREFIX gained ARCHIVE_PREFIX in one commit, both
+    # built from the same RECORD_PATH and ACTIVE_PREFIX constants, and validPath
+    # gates PUT and DELETE as well as GET -- so a backend that rejects the
+    # listing rejected gc's writes too. Reporting that as an incomplete trail
+    # made --sync refuse forever on older backends, and this command's own
+    # documentation asks operators to run it before every gc.
     def log_archived_event_entries(store)
-      log_listing(store, LOG_ARCHIVED_EVENTS_PREFIX) do |reason|
+      log_listing(store, LOG_ARCHIVED_EVENTS_PREFIX, unsupported_is_empty: true) do |reason|
+        next "warning: archived events #{reason}; nothing can have been archived there" if
+          reason == LOG_UNSUPPORTED_REASON
+
         "warning: archived events #{reason}; this trail may be incomplete"
       end
     rescue OperationalError, JSON::ParserError, SystemCallError => e
@@ -3725,7 +3741,14 @@ module AgentCoord
 
     # One listing path for both families: warn on a partial or degraded read,
     # remember that it happened, and hand back whatever was legible.
-    def log_listing(store, prefix)
+    #
+    # unsupported_is_empty separates two degradations that are not the same fact.
+    # A forbidden prefix may hold records this token cannot see, so the answer is
+    # short and must be reported as such. A prefix the backend does not implement
+    # holds nothing, so nothing is missing -- and treating that as an incomplete
+    # trail is what stopped --sync writing a mirror at all on such a backend. Only
+    # a caller that can show the prefix cannot hold anything may opt in.
+    def log_listing(store, prefix, unsupported_is_empty: false)
       entries = store.list_json(prefix)
       log_note_incomplete(prefix, yield("filtered by scoped token")) if filtered_status_list?(store, prefix)
       entries
@@ -3733,8 +3756,10 @@ module AgentCoord
       degradation = listing_degradation(e, prefix)
       raise unless degradation
 
-      reason = degradation == :forbidden ? "not readable by scoped token" : "not supported by backend"
-      log_note_incomplete(prefix, yield(reason))
+      reason = degradation == :forbidden ? "not readable by scoped token" : LOG_UNSUPPORTED_REASON
+      message = yield(reason)
+      empty = unsupported_is_empty && degradation == :unsupported
+      empty ? @stderr.puts(message) : log_note_incomplete(prefix, message)
       []
     end
 
