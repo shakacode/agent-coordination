@@ -3369,8 +3369,11 @@ module AgentCoord
     # Both sides are parsed from raw repo/target rather than from the rendered
     # work item, which substitutes a "?" placeholder for a missing value -- text
     # meant for a reader, never for deciding identity.
+    #
+    # Both arguments are already-parsed [repo, base, lane] identities. Accepting a
+    # raw string here too would re-split the query once per row compared, which is
+    # the cost log_identity exists to pay exactly once.
     def log_identity_match?(candidate, wanted, lane_exact: false)
-      wanted = log_identity(*log_split_work_item(wanted)) unless wanted.is_a?(Array)
       return false unless candidate.fetch(0).casecmp?(wanted.fetch(0))
       return false unless candidate.fetch(1) == wanted.fetch(1)
       return wanted.fetch(2) == candidate.fetch(2) if lane_exact
@@ -3529,7 +3532,10 @@ module AgentCoord
       raise Error, "--json and --format are mutually exclusive"
     end
 
-    def emit_log(rows, options, claims = [], matched: rows)
+    # `matched` is required rather than defaulting to `rows`: `rows` here is the
+    # --limit-trimmed display slice, and silently falling back to it would rebuild
+    # provenance from the limited set -- the exact bug log_limited exists to avoid.
+    def emit_log(rows, options, claims, matched:)
       format = options[:format].to_s
       records = claims.map { |claim| claim.fetch("record") }
       if options[:json]
@@ -6070,6 +6076,10 @@ module AgentCoord
   end
 
   def self.decorative_work_item_kind?(kind, id)
+    # An absent id decorates nothing. Without this, `adhoc:` comes off an empty
+    # segment and `adhoc::qa` collapses onto the separately keyed `:qa`.
+    return false if id.to_s.empty?
+
     numeric = id.to_s.match?(WORK_ITEM_NUMBER)
     WORK_ITEM_GITHUB_KINDS.include?(kind) ? numeric : !numeric
   end

@@ -1595,6 +1595,34 @@ class AgentCoordLogNumericAdhocTest < AgentCoordLogTestCase
   end
 end
 
+# A kind prefix decorates an identifier. With no identifier to decorate there is
+# nothing to strip, so `adhoc::qa` must stay distinct from the separately keyed
+# `:qa` rather than folding onto it.
+class AgentCoordLogEmptyKindIdentifierTest < AgentCoordLogTestCase
+  def write_empty_identifier_events
+    write_event("b1", "e1", "type" => "claim.acquired", "repo" => "shakacode/example", "target" => "adhoc::qa",
+                            "machine_id" => "m1", "host" => "codex", "at" => "2026-08-04T01:00:00Z")
+    write_event("b1", "e2", "type" => "claim.acquired", "repo" => "shakacode/example", "target" => ":qa",
+                            "machine_id" => "m2", "host" => "codex", "at" => "2026-08-04T02:00:00Z")
+  end
+
+  def matched(target)
+    JSON.parse(run_log("shakacode/example##{target}", "--json").stdout).dig("work_item", "matched_targets")
+  end
+
+  def test_empty_adhoc_identifier_is_not_the_bare_lane_item
+    write_empty_identifier_events
+
+    assert_equal ["adhoc::qa"], matched("adhoc::qa")
+  end
+
+  def test_bare_lane_item_does_not_absorb_the_empty_adhoc_identifier
+    write_empty_identifier_events
+
+    assert_equal [":qa"], matched(":qa")
+  end
+end
+
 # --limit trims what is displayed. It must not trim the evidence that decides
 # whether a claim is still current, or a stale lease reads as live custody.
 class AgentCoordLogLimitFreshnessTest < AgentCoordLogTestCase

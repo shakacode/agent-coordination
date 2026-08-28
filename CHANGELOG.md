@@ -338,9 +338,11 @@ when releases begin.
   bare spelling, which is the case that made the prefix foldable. `issue:` and
   `pr:` are the mirror image and now follow the same rule: they come off ahead of
   a number, which is what they decorate, and stay ahead of a slug, so a bare `foo`
-  and a separately keyed `issue:foo` are no longer merged. Every `issue:`/`pr:`
-  target in the fleet store is numeric, so this splits nothing that folded before
-  (issue #141).
+  and a separately keyed `issue:foo` are no longer merged. A prefix with no id
+  after it decorates nothing and is kept for the same reason, so `adhoc::qa` stays
+  distinct from the separately keyed `:qa` rather than folding onto it. Every
+  `issue:`/`pr:` target in the fleet store is numeric, so this splits nothing that
+  folded before (issue #141).
 - `agent-coord log --json` now reports `work_item.matched_targets` and a `trail`
   of `complete` or `incomplete`. The degraded-listing warning went only to stderr,
   so a trail cut short by a scoped token was byte-identical to a complete empty
