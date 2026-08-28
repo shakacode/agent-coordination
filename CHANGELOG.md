@@ -326,7 +326,8 @@ when releases begin.
   and no longer trims the evidence that decides this, so a release dropped by the
   limit can still supersede a claim. Every reported claim now carries the exact
   `target` it holds, in both JSON and text, since with two holders that key is
-  what a release or handoff has to address (issue #141).
+  what a release or handoff has to address, and claim lines read oldest-first like
+  the trail above them so the last one printed is the current one (issue #141).
 - `adhoc:` targets are no longer folded into the GitHub number space when their id
   is a bare number. Ad hoc ids are operator-chosen slugs, and nothing stops one
   being named `adhoc:319`, which would otherwise have merged with issue 319 — the
@@ -334,7 +335,12 @@ when releases begin.
   direction. A kept prefix stays part of the base rather than making the number a
   lane, so `adhoc:319` is also not swept up by a query for a work item called
   `adhoc`. A slug id such as `adhoc:20260731-backend-policy` still folds with its
-  bare spelling, which is the case that made the prefix foldable (issue #141).
+  bare spelling, which is the case that made the prefix foldable. `issue:` and
+  `pr:` are the mirror image and now follow the same rule: they come off ahead of
+  a number, which is what they decorate, and stay ahead of a slug, so a bare `foo`
+  and a separately keyed `issue:foo` are no longer merged. Every `issue:`/`pr:`
+  target in the fleet store is numeric, so this splits nothing that folded before
+  (issue #141).
 - `agent-coord log --json` now reports `work_item.matched_targets` and a `trail`
   of `complete` or `incomplete`. The degraded-listing warning went only to stderr,
   so a trail cut short by a scoped token was byte-identical to a complete empty
