@@ -33,6 +33,15 @@ module AgentCoord
   DEFAULT_HOT_DAYS = 7
   DEFAULT_ARCHIVE_DAYS = 30
   DEFAULT_SYNTHETIC_HOT_DAYS = 1
+  # Margin gc adds to a claim's lease before reaping it, so a slow renewal on a
+  # paused or throttled machine does not cost a lane its live claim. One day is
+  # six times the default four-hour lease and far longer than any renewal
+  # cadence a working agent keeps.
+  DEFAULT_LEASE_GRACE_DAYS = 1
+  # Terminal claim status gc writes when a lease elapsed and nobody released
+  # it. Deliberately distinct from "released" so an abandoned lane stays
+  # countable instead of being laundered into a clean handoff.
+  CLAIM_EXPIRED_STATUS = "expired"
   MAX_ARCHIVE_STATE_BYTES = 1024 * 1024
   STATUS_STATE_ROOT_ENV = "AGENT_COORD_STATUS_STATE_ROOT"
   # Explicit operator opt-in to the implicit local backend; suppresses the
@@ -618,6 +627,10 @@ module AgentCoord
               "days synthetic state remains hot (default: #{DEFAULT_SYNTHETIC_HOT_DAYS})") do |value|
         options[:synthetic_hot_days] = value
       end
+      opts.on("--lease-grace-days DAYS", Integer,
+              "days past a claim lease before it is reaped (default: #{DEFAULT_LEASE_GRACE_DAYS})") do |value|
+        options[:lease_grace_days] = value
+      end
       opts.on("--prefix PREFIX", "hot family to scan: claims, heartbeats, batches, or events (repeatable)") do |value|
         (options[:prefixes] ||= []) << value
       end
@@ -1054,6 +1067,8 @@ module AgentCoord
       opts.separator "    --hot-days DAYS      hot retention (default: #{DEFAULT_HOT_DAYS})"
       opts.separator "    --archive-days DAYS  archive retention (default: #{DEFAULT_ARCHIVE_DAYS})"
       opts.separator "    --synthetic-hot-days DAYS  synthetic hot retention (default: #{DEFAULT_SYNTHETIC_HOT_DAYS})"
+      opts.separator "    --lease-grace-days DAYS  grace past a claim lease before reaping " \
+                     "(default: #{DEFAULT_LEASE_GRACE_DAYS})"
       opts.separator "    --prefix PREFIX  scan one hot family; repeat for claims, heartbeats, batches, events"
       opts.separator "Exactly one mode is required."
       opts.separator ""
@@ -1068,10 +1083,15 @@ module AgentCoord
         options[:synthetic_hot_days] || DEFAULT_SYNTHETIC_HOT_DAYS,
         "--synthetic-hot-days"
       )
+      lease_grace_days = nonnegative_days(
+        options[:lease_grace_days] || DEFAULT_LEASE_GRACE_DAYS,
+        "--lease-grace-days"
+      )
       prefixes = gc_prefixes(options[:prefixes])
       now = now_utc
       store = build_store(options)
       candidates = gc_candidates(store, now, hot_days, synthetic_hot_days, prefixes)
+      candidates.concat(gc_reap_candidates(store, now, lease_grace_days, prefixes))
       validate_gc_archive_sizes!(candidates, now, archive_days)
       candidates.each { |candidate| execute_gc_candidate(store, candidate, now, archive_days) } if options[:execute]
       candidates.sort_by! do |candidate|
@@ -1084,7 +1104,8 @@ module AgentCoord
         "policy" => {
           "hot_days" => hot_days,
           "archive_days" => archive_days,
-          "synthetic_hot_days" => synthetic_hot_days
+          "synthetic_hot_days" => synthetic_hot_days,
+          "lease_grace_days" => lease_grace_days
         }, "prefixes" => prefixes,
         "actions" => actions
       }
@@ -1130,6 +1151,7 @@ module AgentCoord
       when "replace_archive" then gc_replace_archive_record(store, candidate, now, archive_days)
       when "compact" then gc_compact_events(store, candidate, now, archive_days)
       when "delete" then gc_delete_archive(store, candidate)
+      when "reap" then gc_reap_claim(store, candidate, now)
       end
     end
 
@@ -1175,6 +1197,59 @@ module AgentCoord
           }
         }
       end
+    end
+
+    # An active claim whose lease elapsed is never transitioned by anything
+    # else: expiry is advisory state the takeover path consults, and no writer
+    # stamps it back onto the record. Without this pass a claim that was never
+    # released stays active forever and status stops being a usable signal.
+    # gc reaps it in place to the terminal expired status rather than archiving
+    # it directly, so the abandoned lane stays visible to status, log, and
+    # scorecards for the normal hot window before the ordinary terminal-claim
+    # path collects it.
+    def gc_reap_candidates(store, now, lease_grace_days, prefixes)
+      return [] unless prefixes.include?("claims")
+
+      holder_heartbeats = {}
+      store.list_json("claims").filter_map do |entry|
+        next unless active_claim_record?(entry.data)
+
+        lease_ended_at = gc_claim_lease_expiry(entry.data, entry.path)
+        next unless lease_ended_at && lease_ended_at + (lease_grace_days * 86_400) <= now
+        next unless gc_claim_holder_gone?(store, entry.data, now, holder_heartbeats)
+
+        {
+          entry: entry,
+          action: {
+            "action" => "reap",
+            "source_path" => entry.path,
+            "reason" => "expired_lease",
+            "eligible_at" => timestamp(lease_ended_at)
+          }
+        }
+      end
+    end
+
+    # The reaper borrows the takeover rule instead of restating it. A holder
+    # whose heartbeat is live or stale still owns the lane even past its lease,
+    # and reaping that lane would prune genuinely active work; only a dead,
+    # missing, or unreadable heartbeat falls through to the lease itself.
+    def gc_claim_holder_gone?(store, claim, now, holder_heartbeats)
+      takeover_allowed?(claim_holder_state(store, claim, now, holder_heartbeats))
+    end
+
+    # Reaping turns on the lease itself, so unlike gc_record_time it cannot
+    # fall back to the other retention timestamps. A claim with no expires_at
+    # never recorded a lease, so there is no expiry to act on and it stays hot;
+    # a present but unparseable one is a corrupt record and fails closed with
+    # its path, the way every other gc retention timestamp does.
+    def gc_claim_lease_expiry(data, path)
+      value = data["expires_at"]
+      return nil if value.nil?
+
+      parse_time(value)
+    rescue ArgumentError, TypeError
+      raise OperationalError, "gc claim has invalid expires_at at #{path}: #{value}"
     end
 
     def gc_compaction_candidates(store, now, hot_days, synthetic_hot_days)
@@ -1415,6 +1490,21 @@ module AgentCoord
       raise OperationalError, "gc archive changed at #{entry.path}; #{e.message}"
     end
 
+    # updated_at is left alone on purpose: it records when the holder last
+    # touched the lane, and restamping it would make a seven-week-old
+    # abandonment read as fresh custody in status and log. reaped_at carries
+    # the gc write instead, and the archive pass reads the hot window from it.
+    def gc_reap_claim(store, candidate, now)
+      entry = candidate.fetch(:entry)
+      payload = entry.data.merge(
+        "status" => CLAIM_EXPIRED_STATUS,
+        "reaped_at" => timestamp(now)
+      )
+      store.write_json(entry.path, payload, message: "Reap expired claim #{entry.path}", sha: entry.sha)
+    rescue Conflict => e
+      raise OperationalError, "gc source changed at #{entry.path}; #{e.message}"
+    end
+
     def gc_archive_record(store, candidate, now, archive_days)
       entry = candidate.fetch(:entry)
       action = candidate.fetch(:action)
@@ -1489,6 +1579,10 @@ module AgentCoord
 
       case prefix
       when "claims"
+        # A reaped claim is terminal like a released one, so it keeps the same
+        # archive reason code; only its hot window starts at the reap rather
+        # than at the lease it outlived.
+        return ["terminal_claim", gc_record_time(data, "reaped_at", path)] if data["status"] == CLAIM_EXPIRED_STATUS
         return unless data["status"] == "released" || TERMINAL_STATES.include?(data["terminal"])
 
         ["terminal_claim", gc_record_time(data, nil, path)]
@@ -1528,7 +1622,8 @@ module AgentCoord
     def render_gc_text(payload)
       @stdout.puts "gc #{payload.fetch('mode')} hot=#{payload.dig('policy', 'hot_days')}d " \
                    "archive=#{payload.dig('policy', 'archive_days')}d " \
-                   "synthetic_hot=#{payload.dig('policy', 'synthetic_hot_days')}d"
+                   "synthetic_hot=#{payload.dig('policy', 'synthetic_hot_days')}d " \
+                   "lease_grace=#{payload.dig('policy', 'lease_grace_days')}d"
       if payload.fetch("actions").empty?
         @stdout.puts "- no actions"
       else
@@ -4809,9 +4904,9 @@ module AgentCoord
       claim["status"] == "active"
     end
 
-    def claim_holder_state(store, claim, now)
+    def claim_holder_state(store, claim, now, holder_heartbeats = nil)
       holder = claim["agent_id"].to_s
-      heartbeat = holder.empty? ? nil : read_holder_heartbeat(store, holder)
+      heartbeat = holder.empty? ? nil : holder_heartbeat(store, holder, holder_heartbeats)
       return fallback_holder_state(claim, now, "invalid") if heartbeat == :invalid
 
       liveness = heartbeat && heartbeat_liveness(heartbeat.data, now)
@@ -4827,6 +4922,16 @@ module AgentCoord
         fallback_live: claim_fallback_live?(claim, now),
         fallback_expires_at: claim["expires_at"]
       }
+    end
+
+    # gc inspects every claim in one pass and the fleet concentrates claims on
+    # a handful of holders, so a caller may hand in a memo to keep one gc run
+    # from issuing one heartbeat round trip per claim. The memo belongs to the
+    # caller and dies with the run; nothing here is global.
+    def holder_heartbeat(store, holder, memo = nil)
+      return read_holder_heartbeat(store, holder) unless memo
+
+      memo.fetch(holder) { memo[holder] = read_holder_heartbeat(store, holder) }
     end
 
     def read_holder_heartbeat(store, holder)
