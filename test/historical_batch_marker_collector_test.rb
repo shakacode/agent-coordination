@@ -23,6 +23,30 @@ class HistoricalBatchMarkerCollectorTest < Minitest::Test
   )
   FIXTURE = File.join(ROOT, "test/fixtures/historical-batch-marker-surfaces.json")
 
+  EQUAL_CONTRACT_CONSTANTS = %w[SCHEMA].freeze
+  NON_SHRINKING_CONTRACT_CONSTANTS = %w[
+    SEVERITIES
+    DISPOSITIONS
+    VERIFICATION_STATUSES
+    CURRENT_HEAD_STATES
+    RISK_LENS_STATUSES
+    COVERAGE_STATUSES
+    INDEPENDENT_VALIDATION_STATUSES
+    RECEIPT_TARGET_KINDS
+    RECEIPT_SOURCES
+  ].freeze
+  # STRING_ARRAY_FIELDS is grouped with the required-field lists: adding a field here newly
+  # constrains a previously-unconstrained finding field, so it must not grow either.
+  NON_GROWING_CONTRACT_CONSTANTS = %w[
+    REQUIRED_FINDING_FIELDS
+    REQUIRED_VERIFICATION_FIELDS
+    PROVENANCE_USAGE_FIELDS
+    STRING_ARRAY_FIELDS
+  ].freeze
+  CONTRACT_CONSTANTS = (
+    EQUAL_CONTRACT_CONSTANTS + NON_SHRINKING_CONTRACT_CONSTANTS + NON_GROWING_CONTRACT_CONSTANTS
+  ).freeze
+
   def test_offline_fixture_replay_is_deterministic_and_sanitized
     first = collect_fixture(JSON.parse(File.read(FIXTURE)))
     second = collect_fixture(JSON.parse(File.read(FIXTURE)))
@@ -205,11 +229,13 @@ class HistoricalBatchMarkerCollectorTest < Minitest::Test
     assert_collector_and_shared(lowercase_unknown, expected: false)
   end
 
-  def test_archived_validator_matches_installed_shared_contract
+  def test_installed_shared_validator_still_accepts_archived_contract_surface
     external = installed_shared_validator
     skip "agent-workflows shared validator is not installed" unless external
 
-    assert_equal File.binread(external), File.binread(REVIEW_VALIDATOR)
+    drifts = contract_drifts(contract_surface(REVIEW_VALIDATOR), contract_surface(external))
+
+    assert_empty drifts, drifts.join("\n")
   end
 
   def test_incomplete_pagination_is_rejected
@@ -353,6 +379,65 @@ class HistoricalBatchMarkerCollectorTest < Minitest::Test
     common_dir = File.expand_path(stdout.strip, ROOT)
     candidate = File.join(File.dirname(common_dir, 2), "agent-workflows", "bin", "validate-review-findings")
     File.file?(candidate) ? candidate : nil
+  end
+
+  def contract_surface(validator_path)
+    script = <<~RUBY
+      require "json"
+      load ARGV[0]
+      constants = #{CONTRACT_CONSTANTS.inspect}
+      surface = constants.each_with_object({}) do |name, memo|
+        next unless ValidateReviewFindings.const_defined?(name)
+
+        memo[name] = ValidateReviewFindings.const_get(name)
+      end
+      puts JSON.generate(surface)
+    RUBY
+    stdout, stderr, status = Bundler.with_unbundled_env do
+      Open3.capture3(RbConfig.ruby, "-e", script, validator_path)
+    end
+    raise "failed to read contract surface from #{validator_path}: #{stderr}" unless status.success?
+
+    JSON.parse(stdout)
+  end
+
+  def contract_drifts(archived, installed)
+    CONTRACT_CONSTANTS.flat_map do |name|
+      next [] unless archived.key?(name)
+      next ["#{name}: missing from installed shared validator"] unless installed.key?(name)
+
+      contract_constant_drift(name, archived.fetch(name), installed.fetch(name))
+    end
+  end
+
+  def contract_constant_drift(name, archived_value, installed_value)
+    if EQUAL_CONTRACT_CONSTANTS.include?(name)
+      contract_equality_drift(name, archived_value, installed_value)
+    elsif NON_SHRINKING_CONTRACT_CONSTANTS.include?(name)
+      contract_shrinkage_drift(name, archived_value, installed_value)
+    else
+      contract_growth_drift(name, archived_value, installed_value)
+    end
+  end
+
+  def contract_equality_drift(name, archived_value, installed_value)
+    return [] if archived_value == installed_value
+
+    ["#{name}: expected #{archived_value.inspect}, installed validator has #{installed_value.inspect}"]
+  end
+
+  def contract_shrinkage_drift(name, archived_value, installed_value)
+    removed = Array(archived_value) - Array(installed_value)
+    return [] if removed.empty?
+
+    ["#{name}: installed validator removed #{removed.sort.inspect} from the allowed values"]
+  end
+
+  def contract_growth_drift(name, archived_value, installed_value)
+    added = Array(installed_value) - Array(archived_value)
+    return [] if added.empty?
+
+    ["#{name}: installed validator added #{added.sort.inspect}, which the archived contract did not require"]
   end
 
   def fixture_review_document(fixture)
