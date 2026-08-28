@@ -443,15 +443,16 @@ module AgentCoord
     # <config home>/agent-coord/env layout only. AGENT_COORD_ENV_FILE can point
     # at a shared directory, where an unrelated sibling named "policy" would
     # otherwise be parsed and subjected to the 0600 checks, failing every command
-    # despite a perfectly valid explicit config.
+    # despite a perfectly valid explicit config. An explicit path is the whole
+    # distinction, so gate on the flag rather than on the path's spelling: a
+    # shared layout is free to mirror the conventional directory names. The
+    # remaining path is derived by selected_user_config_path as
+    # <config home>/agent-coord/env, so the sibling is always the conventional one.
     def legacy_policy_file_path
       return nil unless @user_config_path
+      return nil if @user_config_path_explicit
 
-      directory = File.dirname(@user_config_path)
-      return nil unless File.basename(@user_config_path) == "env"
-      return nil unless File.basename(directory) == "agent-coord"
-
-      File.join(directory, "policy")
+      File.join(File.dirname(@user_config_path), "policy")
     end
 
     def read_selected_user_configuration
