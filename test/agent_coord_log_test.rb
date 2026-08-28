@@ -1594,3 +1594,71 @@ class AgentCoordLogNumericAdhocTest < AgentCoordLogTestCase
     assert_equal ["issue:319"], matched("319")
   end
 end
+
+# --limit trims what is displayed. It must not trim the evidence that decides
+# whether a claim is still current, or a stale lease reads as live custody.
+class AgentCoordLogLimitFreshnessTest < AgentCoordLogTestCase
+  def write_superseded_alias_claim
+    write_claim("shakacode/example", "pr:1", "status" => "active", "agent_id" => "stale-holder",
+                                             "updated_at" => "2026-08-01T00:00:00Z")
+    write_event("b1", "e2", "type" => "claim.released", "repo" => "shakacode/example", "target" => "pr:1",
+                            "machine_id" => "m1", "host" => "codex", "at" => "2026-08-02T00:00:00Z")
+    # Newer still, and on a different alias, so --limit 1 keeps only this one.
+    write_event("b1", "e3", "type" => "phase.changed", "repo" => "shakacode/example", "target" => "1",
+                            "machine_id" => "m1", "host" => "codex", "at" => "2026-08-03T00:00:00Z")
+  end
+
+  def claims_for(*)
+    payload = JSON.parse(run_log("shakacode/example#1", "--json", *).stdout)
+    (payload["claims"] || []).map { |claim| claim.fetch("agent_id") }
+  end
+
+  def test_a_release_dropped_by_the_limit_still_supersedes_the_claim
+    write_superseded_alias_claim
+
+    assert_empty claims_for("--limit", "1")
+  end
+
+  def test_the_unlimited_answer_is_unchanged
+    write_superseded_alias_claim
+
+    assert_empty claims_for
+  end
+
+  def test_the_limit_still_trims_the_displayed_trail
+    write_superseded_alias_claim
+
+    events = JSON.parse(run_log("shakacode/example#1", "--json", "--limit", "1").stdout).fetch("events")
+
+    assert_equal 1, events.length
+  end
+end
+
+# Two holders are only actionable if you can tell which lease each one holds.
+class AgentCoordLogClaimTargetTest < AgentCoordLogTestCase
+  def write_two_holders
+    write_claim("shakacode/example", "1", "status" => "active", "agent_id" => "bare-holder",
+                                          "updated_at" => "2026-08-01T00:00:00Z")
+    write_claim("shakacode/example", "pr:1", "status" => "active", "agent_id" => "prefixed-holder",
+                                             "updated_at" => "2026-08-02T00:00:00Z")
+  end
+
+  def test_each_emitted_claim_names_its_own_lease_key
+    write_two_holders
+
+    claims = JSON.parse(run_log("shakacode/example#1", "--json").stdout).fetch("claims")
+
+    assert_equal({ "bare-holder" => "1", "prefixed-holder" => "pr:1" },
+                 claims.to_h { |claim| [claim.fetch("agent_id"), claim.fetch("target")] })
+  end
+
+  def test_text_output_names_the_lease_key_on_each_claim_line
+    write_two_holders
+
+    lines = run_log("shakacode/example#1").stdout.lines.select { |line| line.start_with?("claim ") }
+
+    assert_equal 2, lines.length
+    assert(lines.any? { |line| line.include?("bare-holder") && line.include?(" 1 ") })
+    assert(lines.any? { |line| line.include?("prefixed-holder") && line.include?(" pr:1 ") })
+  end
+end

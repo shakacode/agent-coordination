@@ -322,7 +322,11 @@ when releases begin.
   thing known is judged against events recorded under that claim's own key, since
   a separate lease — whether a lane like `issue:319:qa` or an alias like `pr:319` —
   says nothing about whether this one still stands. That is also what the literal
-  match did before identity folding (issue #141).
+  match did before identity folding. `--limit` trims the trail that is displayed
+  and no longer trims the evidence that decides this, so a release dropped by the
+  limit can still supersede a claim. Every reported claim now carries the exact
+  `target` it holds, in both JSON and text, since with two holders that key is
+  what a release or handoff has to address (issue #141).
 - `adhoc:` targets are no longer folded into the GitHub number space when their id
   is a bare number. Ad hoc ids are operator-chosen slugs, and nothing stops one
   being named `adhoc:319`, which would otherwise have merged with issue 319 — the

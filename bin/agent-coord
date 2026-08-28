@@ -3283,7 +3283,8 @@ module AgentCoord
         return log_sync(log_options, rows)
       end
 
-      emit_log(rows, options, log_claim_for(store, options, rows))
+      claims = log_claim_for(store, options, rows)
+      emit_log(log_limited(rows, options), options, claims)
       0
     rescue JSON::ParserError, SystemCallError => e
       raise OperationalError, "state unreadable: #{e.message}"
@@ -3325,7 +3326,13 @@ module AgentCoord
       since = log_since_timestamp(options)
       rows = log_event_entries(store).map { |entry| log_row(entry.data) }
       rows = rows.reject { |row| row.fetch("synthetic") } unless options[:include_synthetic]
-      rows = log_filtered(rows, options, since).sort_by { |row| [row.fetch("at_key"), row.fetch("event_id")] }
+      log_filtered(rows, options, since).sort_by { |row| [row.fetch("at_key"), row.fetch("event_id")] }
+    end
+
+    # --limit trims the trail that is shown, never the evidence that decides
+    # whether a claim still stands: dropping a release because a newer event on
+    # another alias filled the window would report a stale lease as live custody.
+    def log_limited(rows, options)
       options[:limit] ? rows.last(options[:limit]) : rows
     end
 
@@ -3660,7 +3667,7 @@ module AgentCoord
              .sort_by { |candidate| log_at_key(candidate.data["updated_at"]) }
              .reverse
              .map do |candidate|
-               { "record" => log_claim_record(candidate.data, now_utc),
+               { "record" => log_claim_record(candidate.data, now_utc, log_claim_target(candidate)),
                  "target" => log_claim_target(candidate),
                  "identity" => log_claim_identity(candidate) }
              end
@@ -3702,7 +3709,7 @@ module AgentCoord
 
     # Structured so a --json consumer reads the claim's fields instead of
     # re-parsing the sentence the text renderer builds from them.
-    def log_claim_record(data, now)
+    def log_claim_record(data, now, target = nil)
       {
         "status" => log_present(data["status"]),
         "machine" => log_present(data["machine_id"]),
@@ -3710,7 +3717,10 @@ module AgentCoord
         "agent_id" => log_present(data["agent_id"]),
         "phase" => log_phase_or_dash(data["phase"]),
         "updated_at" => log_present(data["updated_at"]),
-        "expires_at" => log_present(data["expires_at"])
+        "expires_at" => log_present(data["expires_at"]),
+        # Two holders are only actionable if each names the lease it holds: the
+        # exact target is what a release or handoff has to address.
+        "target" => log_present(target)
       }.transform_values { |value| log_scrub(value) }
        .merge(
          "lease_elapsed" => log_claim_lease_elapsed?(data, now),
@@ -3736,7 +3746,8 @@ module AgentCoord
       parts = ["claim", claim.fetch("status")]
       parts << "[synthetic]" if claim.fetch("synthetic")
       parts.push(claim.fetch("machine"), claim.fetch("host"), claim.fetch("agent_id"),
-                 "phase", claim.fetch("phase"), "updated", claim.fetch("updated_at"))
+                 claim.fetch("target"), "phase", claim.fetch("phase"),
+                 "updated", claim.fetch("updated_at"))
       parts.push("lease elapsed", claim.fetch("expires_at")) if claim.fetch("lease_elapsed")
       parts.join(" ")
     end
