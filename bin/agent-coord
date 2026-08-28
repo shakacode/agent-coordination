@@ -42,6 +42,18 @@ module AgentCoord
   # it. Deliberately distinct from "released" so an abandoned lane stays
   # countable instead of being laundered into a clean handoff.
   CLAIM_EXPIRED_STATUS = "expired"
+  # gc plans each disposition in an independent pass, so nothing structural
+  # stops two passes from selecting the same record: a claim that is still
+  # active while carrying a terminal marker is both archive-eligible and
+  # reap-eligible. Two actions on one path cannot both be applied — the first
+  # write moves the record and the second fails its compare-and-swap, aborting
+  # the run after a partial apply and printing no plan at all. One record
+  # therefore gets exactly one action per run, chosen in this order. Reap
+  # outranks archive because archiving a claim nobody released would file it
+  # away still reading "active" and lose the abandonment the reap exists to
+  # record; the reaped record reaches the archive on a later run through the
+  # ordinary terminal-claim path, so nothing is stranded.
+  GC_ACTION_PRECEDENCE = %w[reap replace_archive archive compact delete].freeze
   MAX_ARCHIVE_STATE_BYTES = 1024 * 1024
   STATUS_STATE_ROOT_ENV = "AGENT_COORD_STATUS_STATE_ROOT"
   # Explicit operator opt-in to the implicit local backend; suppresses the
@@ -1092,6 +1104,7 @@ module AgentCoord
       store = build_store(options)
       candidates = gc_candidates(store, now, hot_days, synthetic_hot_days, prefixes)
       candidates.concat(gc_reap_candidates(store, now, lease_grace_days, prefixes))
+      candidates = gc_one_action_per_source(candidates)
       validate_gc_archive_sizes!(candidates, now, archive_days)
       candidates.each { |candidate| execute_gc_candidate(store, candidate, now, archive_days) } if options[:execute]
       candidates.sort_by! do |candidate|
@@ -1143,6 +1156,24 @@ module AgentCoord
         protected_destinations[candidate.dig(:action, "source_path")]
       end
       archive_candidates + compaction_candidates + delete_candidates
+    end
+
+    # Enforces the one-action-per-record invariant behind GC_ACTION_PRECEDENCE,
+    # so a dry-run plan describes exactly what execute applies. Candidates with
+    # no single source path are event compaction generations, which consume
+    # disjoint entry sets by construction and pass through untouched. Ties are
+    # broken by first appearance, so identical state always plans identically.
+    def gc_one_action_per_source(candidates)
+      indexed = candidates.each_with_index.to_a
+      kept = indexed.group_by { |candidate, _index| candidate.dig(:action, "source_path") }
+                    .flat_map do |source_path, group|
+        source_path.nil? ? group : [group.min_by { |candidate, index| [gc_action_rank(candidate), index] }]
+      end
+      kept.sort_by { |_candidate, index| index }.map(&:first)
+    end
+
+    def gc_action_rank(candidate)
+      GC_ACTION_PRECEDENCE.index(candidate.dig(:action, "action")) || GC_ACTION_PRECEDENCE.length
     end
 
     def execute_gc_candidate(store, candidate, now, archive_days)
@@ -1210,46 +1241,86 @@ module AgentCoord
     def gc_reap_candidates(store, now, lease_grace_days, prefixes)
       return [] unless prefixes.include?("claims")
 
-      holder_heartbeats = {}
-      store.list_json("claims").filter_map do |entry|
+      expired = store.list_json("claims").filter_map do |entry|
         next unless active_claim_record?(entry.data)
 
         lease_ended_at = gc_claim_lease_expiry(entry.data, entry.path)
         next unless lease_ended_at && lease_ended_at + (lease_grace_days * 86_400) <= now
+
+        [entry, lease_ended_at]
+      end
+      return gc_report_unreapable_without_heartbeats(expired) unless prefixes.include?("heartbeats")
+
+      holder_heartbeats = {}
+      expired.filter_map do |entry, lease_ended_at|
         next unless gc_claim_holder_gone?(store, entry.data, now, holder_heartbeats)
 
         {
           entry: entry,
           action: {
-            "action" => "reap",
-            "source_path" => entry.path,
-            "reason" => "expired_lease",
-            "eligible_at" => timestamp(lease_ended_at)
+            "action" => "reap", "source_path" => entry.path,
+            "reason" => "expired_lease", "eligible_at" => timestamp(lease_ended_at)
           }
         }
       end
     end
 
-    # The reaper borrows the takeover rule instead of restating it. A holder
-    # whose heartbeat is live or stale still owns the lane even past its lease,
-    # and reaping that lane would prune genuinely active work; only a dead,
-    # missing, or unreadable heartbeat falls through to the lease itself.
-    def gc_claim_holder_gone?(store, claim, now, holder_heartbeats)
-      takeover_allowed?(claim_holder_state(store, claim, now, holder_heartbeats))
+    # Reaping needs holder evidence, and holder evidence lives under heartbeats.
+    # Reading it anyway would silently widen a scoped run past the prefixes the
+    # operator selected, which a least-privileged token answers with a 403 that
+    # would abort archiving and deletion too. So an unselected heartbeats prefix
+    # withdraws the reaper rather than the run, and says so, because "gc planned
+    # nothing" and "gc could not look" are different answers.
+    def gc_report_unreapable_without_heartbeats(expired)
+      unless expired.empty?
+        @stderr.puts "warning: gc left #{expired.length} expired-lease claim(s) unreaped: reaping reads holder " \
+                     "heartbeats, so it needs --prefix heartbeats alongside --prefix claims"
+      end
+      []
     end
 
-    # Reaping turns on the lease itself, so unlike gc_record_time it cannot
-    # fall back to the other retention timestamps. A claim with no expires_at
-    # never recorded a lease, so there is no expiry to act on and it stays hot;
-    # a present but unparseable one is a corrupt record and fails closed with
-    # its path, the way every other gc retention timestamp does.
+    # The reaper borrows the takeover rule instead of restating it. A holder
+    # whose heartbeat is live or stale still owns the lane even past its lease,
+    # and reaping that lane would prune genuinely active work; only a dead or
+    # absent heartbeat falls through to the lease itself. A heartbeat gc is not
+    # permitted to read is not evidence of absence, so it fails closed on the
+    # claim alone: the holder is treated as present, the run keeps planning
+    # every other family, and the memo remembers the refusal so one unreadable
+    # holder costs one round trip and one warning.
+    def gc_claim_holder_gone?(store, claim, now, holder_heartbeats)
+      holder = claim["agent_id"].to_s
+      return false if holder_heartbeats[holder] == :unreadable
+
+      takeover_allowed?(claim_holder_state(store, claim, now, holder_heartbeats))
+    rescue OperationalError => e
+      holder_heartbeats[holder] = :unreadable
+      @stderr.puts "warning: gc cannot read the heartbeat for claim holder #{holder.inspect}; " \
+                   "not reaping its claims: #{e.message}"
+      false
+    end
+
+    # Reaping turns on the lease itself, so unlike gc_record_time it cannot fall
+    # back to the other retention timestamps. A claim with no expires_at never
+    # recorded a lease, so there is no expiry to act on and it stays hot. A
+    # present but unparseable one is a corrupt record: it is never reaped, but
+    # it also cannot deny gc to the rest of the fleet the way a raise here
+    # would, since this runs against every active claim rather than only records
+    # already found eligible. It is reported instead and the run continues.
     def gc_claim_lease_expiry(data, path)
       value = data["expires_at"]
       return nil if value.nil?
 
       parse_time(value)
     rescue ArgumentError, TypeError
-      raise OperationalError, "gc claim has invalid expires_at at #{path}: #{value}"
+      @stderr.puts "warning: gc claim has invalid expires_at at #{path}: #{gc_lease_value_label(value)}; not reaped"
+      nil
+    end
+
+    # A corrupt lease can hold any JSON value, and interpolating one raw would
+    # spill a whole nested record into the warning. Strings are quoted and
+    # escaped; anything else is named by type only.
+    def gc_lease_value_label(value)
+      value.is_a?(String) ? value.inspect : "non-string #{value.class}"
     end
 
     def gc_compaction_candidates(store, now, hot_days, synthetic_hot_days)
