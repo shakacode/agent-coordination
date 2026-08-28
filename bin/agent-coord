@@ -4878,7 +4878,7 @@ module AgentCoord
     end
 
     def load_batch_manifest(path)
-      JSON.parse(File.read(path))
+      JSON.parse(File.read(path, encoding: "UTF-8"))
     rescue JSON::ParserError => e
       raise Error, "batch manifest JSON invalid: #{e.message}"
     rescue SystemCallError => e
@@ -5127,11 +5127,17 @@ module AgentCoord
       raise OperationalError, "state root is not readable: #{@root}"
     end
 
+    # State records are JSON, which is UTF-8 by definition, so every read and
+    # write in this store names that encoding instead of inheriting
+    # Encoding.default_external. Under a non-UTF-8 locale the default is
+    # US-ASCII, and one record holding a non-ASCII byte would otherwise fail
+    # JSON.parse with Encoding::InvalidByteSequenceError and take down every
+    # command that walks the store.
     def read_json(path)
       file = readable_record_file(path)
       return nil unless file
 
-      StoredJson.new(path: path, data: JSON.parse(File.read(file)), sha: file_sha(file))
+      StoredJson.new(path: path, data: JSON.parse(File.read(file, encoding: "UTF-8")), sha: file_sha(file))
     end
 
     # LocalStore keeps GitHubStore's keyword interface; only GitHubStore uses message.
@@ -5152,7 +5158,7 @@ module AgentCoord
 
       list_json_files(directory, prefix).map do |file|
         path = file.delete_prefix("#{@root}/")
-        StoredJson.new(path: path, data: JSON.parse(File.read(file)), sha: file_sha(file))
+        StoredJson.new(path: path, data: JSON.parse(File.read(file, encoding: "UTF-8")), sha: file_sha(file))
       end
     end
 
@@ -5302,7 +5308,7 @@ module AgentCoord
     def atomic_write_json(file, data)
       temporary = File.join(File.dirname(file), ".#{File.basename(file)}.tmp-#{Process.pid}-#{SecureRandom.hex(8)}")
       mode = File.exist?(file) ? File.stat(file).mode & 0o777 : 0o666
-      File.open(temporary, File::WRONLY | File::CREAT | File::EXCL, mode) do |output|
+      File.open(temporary, File::WRONLY | File::CREAT | File::EXCL, mode, encoding: "UTF-8") do |output|
         output.chmod(mode) if File.exist?(file)
         output.write("#{JSON.pretty_generate(data)}\n")
         output.flush
