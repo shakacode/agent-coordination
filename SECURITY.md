@@ -6,11 +6,19 @@ Report suspected vulnerabilities through GitHub's private vulnerability
 reporting, not through a public issue, pull request, or discussion. Private
 reporting keeps details out of public view until a fix is available.
 
-1. Go to the [advisory form](https://github.com/shakacode/agent-coordination/security/advisories/new).
-2. Or, from the repository: **Security** tab → **Report a vulnerability**.
+Reach the advisory form through either of these routes:
 
-Do not email a report. This project does not publish a security contact
-address; the private advisory form is the only supported channel.
+- The [advisory form](https://github.com/shakacode/agent-coordination/security/advisories/new) directly.
+- From the repository: **Security** tab → **Report a vulnerability**.
+
+Do not email a report; this project does not publish a security contact
+address. If the advisory form is unavailable to you (for example, because
+private vulnerability reporting is not yet enabled on this repository),
+open a public issue asking a maintainer to open a private reporting
+channel. That issue must contain no vulnerability details whatsoever — no
+description, no reproduction steps, no affected component, nothing beyond
+the request itself. A maintainer will follow up with a private channel
+once they see it.
 
 ## Scope
 
