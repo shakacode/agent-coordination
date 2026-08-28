@@ -4716,6 +4716,28 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     assert_equal "land the fix — today", JSON.parse(File.read(stored_path, encoding: "UTF-8")).fetch("goal")
   end
 
+  # Scoped status is the single-record read (LocalStore#read_json), which the two
+  # tests above do not reach: they exercise the list scan and the manifest read.
+  # stdout is compared UTF-8-tagged so this pins the CLI's behavior rather than
+  # the locale the test runner itself happens to be started under.
+  def test_scoped_status_reads_a_non_ascii_claim_record_under_an_ascii_locale
+    write_state_record(
+      "claims/shakacode/example/4711.json",
+      "schema_version" => 1, "repo" => "shakacode/example", "target" => "4711",
+      "agent_id" => "worker-café", "status" => "active",
+      "message" => "holding — do not steal"
+    )
+
+    result = run_agent_coord(
+      "status", "--repo", "shakacode/example", "--target", "4711",
+      env: { "LC_ALL" => "C", "LANG" => "C" }
+    )
+
+    assert_equal 0, result.status.exitstatus, result.stderr
+    refute_includes result.stderr, "Encoding::InvalidByteSequenceError"
+    assert_includes result.stdout.dup.force_encoding(Encoding::UTF_8), "worker-café"
+  end
+
   def test_record_event_writes_append_only_event_and_status_metadata
     write_batch(
       "batch-b",
