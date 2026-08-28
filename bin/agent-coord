@@ -2203,7 +2203,7 @@ module AgentCoord
       end
       raise Error, "--api-url must not include a query or fragment" if uri.query || uri.fragment
       raise Error, "--api-url port must be between 1 and 65535" unless HttpStore::VALID_PORT_RANGE.cover?(uri.port)
-      if uri.scheme == "http" && !HttpStore::LOOPBACK_HOSTS.include?(uri.hostname)
+      if uri.scheme == "http" && !HttpStore::LOOPBACK_HOSTS.include?(uri.hostname.to_s.downcase)
         raise Error, "--api-url must use https unless it points at localhost"
       end
     rescue URI::InvalidURIError
@@ -6349,6 +6349,8 @@ module AgentCoord
   class HttpStore
     OPEN_TIMEOUT = 5
     READ_TIMEOUT = 10
+    # DNS hostnames are case-insensitive but URI#hostname preserves the
+    # caller's casing, so compare against this allowlist downcased.
     LOOPBACK_HOSTS = %w[localhost 127.0.0.1 ::1].freeze
     # URI.parse accepts any integer port, but a TCP port is 16-bit. An
     # out-of-range port is a typo that must fail closed here rather than
@@ -6487,7 +6489,7 @@ module AgentCoord
       unless VALID_PORT_RANGE.cover?(uri.port)
         raise OperationalError, "invalid HTTP backend URL: port must be between 1 and 65535"
       end
-      if uri.scheme == "http" && !LOOPBACK_HOSTS.include?(uri.hostname)
+      if uri.scheme == "http" && !LOOPBACK_HOSTS.include?(uri.hostname.to_s.downcase)
         raise OperationalError, "HTTP backend URL must use https unless it points at localhost"
       end
 

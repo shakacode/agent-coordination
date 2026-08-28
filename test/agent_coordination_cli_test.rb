@@ -2079,6 +2079,29 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     end
   end
 
+  # DNS hostnames are case-insensitive, so a mixed-case loopback host is still
+  # a loopback host and must not be rejected as a non-loopback plain-HTTP URL.
+  def test_config_set_accepts_mixed_case_loopback_plain_http_url
+    with_private_config_tmpdir("agent-coord-mixed-case-loopback-api-url") do |root|
+      config_home = File.join(root, "config")
+      result = run_command(
+        { "XDG_CONFIG_HOME" => config_home },
+        RbConfig.ruby,
+        BIN,
+        "config",
+        "set",
+        "--api-url",
+        "http://LOCALHOST:8787"
+      )
+
+      assert_equal 0, result.status.exitstatus, result.stderr
+      assert_includes(
+        File.read(File.join(config_home, "agent-coord", "env")),
+        "AGENT_COORD_API_URL=http://LOCALHOST:8787"
+      )
+    end
+  end
+
   def test_legacy_policy_file_is_read_only_fallback
     with_private_config_tmpdir("agent-coord-legacy-policy") do |root|
       config_home = File.join(root, "config")

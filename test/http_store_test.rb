@@ -82,6 +82,14 @@ class HttpStoreReadTest < HttpStoreTestCase
     store&.close
   end
 
+  def test_constructor_accepts_mixed_case_plain_http_loopback_base_url
+    store = AgentCoord::HttpStore.new(base_url: "http://LOCALHOST:8787", token: "tok")
+
+    assert_instance_of AgentCoord::HttpStore, store
+  ensure
+    store&.close
+  end
+
   def test_constructor_rejects_out_of_range_port_in_base_url
     error = assert_raises(AgentCoord::OperationalError) do
       AgentCoord::HttpStore.new(base_url: "http://127.0.0.1:99999", token: "tok")
