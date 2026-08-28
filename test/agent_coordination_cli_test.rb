@@ -1448,6 +1448,71 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     end
   end
 
+  # Every other pairwise selector conflict in resolve_configured_backend
+  # announces which side won. AGENT_COORD_STATE_ROOT silently shadowed a
+  # configured AGENT_COORD_BACKEND, so an operator whose fleet backend stopped
+  # being used had no diagnostic at all.
+  def test_configured_state_root_warns_when_it_shadows_a_configured_backend
+    with_private_config_tmpdir("agent-coord-state-root-over-backend") do |root|
+      config_home = File.join(root, "config")
+      state_root = File.join(root, "state")
+      env_file = File.join(config_home, "agent-coord", "env")
+      FileUtils.mkdir_p(File.dirname(env_file))
+      File.chmod(0o700, File.dirname(env_file))
+      FileUtils.mkdir_p(state_root)
+      File.write(env_file, "AGENT_COORD_STATE_ROOT=#{state_root}\nAGENT_COORD_BACKEND=acme/legacy-repo\n")
+      File.chmod(0o600, env_file)
+
+      result = run_command(
+        { "XDG_CONFIG_HOME" => config_home },
+        RbConfig.ruby, BIN, "status", "--json"
+      )
+      shown = run_command(
+        { "XDG_CONFIG_HOME" => config_home },
+        RbConfig.ruby, BIN, "config", "show", "--json"
+      )
+
+      assert_equal 0, result.status.exitstatus, result.stderr
+      assert_includes result.stderr,
+                      "warning: AGENT_COORD_STATE_ROOT and AGENT_COORD_BACKEND are both set; " \
+                      "using the local backend. Pass --backend to force the legacy GitHub backend."
+      assert_equal 0, shown.status.exitstatus, shown.stderr
+      assert_equal "local", JSON.parse(shown.stdout).dig("coordination", "backend")
+    end
+  end
+
+  def test_process_state_root_warns_when_it_shadows_a_process_backend
+    with_private_config_tmpdir("agent-coord-process-state-root-over-backend") do |root|
+      state_root = File.join(root, "state")
+      FileUtils.mkdir_p(state_root)
+      result = run_command(
+        { "AGENT_COORD_STATE_ROOT" => state_root, "AGENT_COORD_BACKEND" => "acme/legacy-repo" },
+        RbConfig.ruby, BIN, "status", "--json"
+      )
+
+      assert_equal 0, result.status.exitstatus, result.stderr
+      assert_includes result.stderr,
+                      "warning: AGENT_COORD_STATE_ROOT and AGENT_COORD_BACKEND are both set; " \
+                      "using the local backend. Pass --backend to force the legacy GitHub backend."
+    end
+  end
+
+  # A state root on its own is an unambiguous selection; warning there would
+  # train operators to ignore the message.
+  def test_configured_state_root_alone_does_not_warn_about_a_shadowed_backend
+    with_private_config_tmpdir("agent-coord-state-root-without-backend") do |root|
+      state_root = File.join(root, "state")
+      FileUtils.mkdir_p(state_root)
+      result = run_command(
+        { "AGENT_COORD_STATE_ROOT" => state_root },
+        RbConfig.ruby, BIN, "status", "--json"
+      )
+
+      assert_equal 0, result.status.exitstatus, result.stderr
+      refute_includes result.stderr, "AGENT_COORD_BACKEND are both set"
+    end
+  end
+
   def test_config_set_persists_policy_in_canonical_env_and_config_show_resolves_it
     # rubocop:disable Metrics/BlockLength
     with_private_config_tmpdir("agent-coord-config-set-policy") do |root|

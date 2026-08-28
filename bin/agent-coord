@@ -1119,6 +1119,12 @@ module AgentCoord
       if env_root
         options[:state_root] = env_root
         options[:backend_source] = backend_env_source
+        if env_backend
+          emit_backend_conflict_warning(
+            "warning: AGENT_COORD_STATE_ROOT and AGENT_COORD_BACKEND are both set; " \
+            "using the local backend. Pass --backend to force the legacy GitHub backend.", options:
+          )
+        end
         return
       end
       return unless env_backend
