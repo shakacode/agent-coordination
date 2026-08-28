@@ -1309,6 +1309,38 @@ class HttpDoctorTest < HttpEnvTestCase
     stub.shutdown
   end
 
+  # doctor output is pasted into issues and archived by CI. A configured API URL
+  # may legally carry userinfo, and HttpStore never uses it (auth is the Bearer
+  # token), so both the text report and the JSON payload strip it.
+  def test_doctor_redacts_api_url_credentials_in_text_and_json
+    responses = [
+      [200, { "entries" => [] }],
+      [200, { "status" => "ok" }],
+      [200, { "entries" => [] }],
+      [200, { "status" => "ok" }]
+    ]
+    stub = HttpStoreStub.new(responses)
+    credentialed = stub.base_url.sub(%r{\Ahttp://}, "http://ops:doctor-url-password@")
+    redacted = stub.base_url.sub(%r{\Ahttp://}, "http://***@")
+    with_env("AGENT_COORD_API_URL" => credentialed, "AGENT_COORD_API_TOKEN" => "tok") do
+      text = StringIO.new
+      assert_equal 0, AgentCoord::Runner.new(["doctor"], stdout: text, stderr: StringIO.new).run
+      json = StringIO.new
+      assert_equal 0, AgentCoord::Runner.new(["doctor", "--json"], stdout: json, stderr: StringIO.new).run
+
+      assert_includes text.string, "backend_url: #{redacted}"
+      assert_equal redacted, JSON.parse(json.string).fetch("backend_url")
+      [text.string, json.string].each do |output|
+        refute_includes output, "doctor-url-password"
+        refute_includes output, "ops:"
+        # The host and port still identify the deployment.
+        assert_includes output, stub.base_url.sub(%r{\Ahttp://}, "")
+      end
+    end
+  ensure
+    stub.shutdown
+  end
+
   def test_doctor_uses_custom_http_readable_prefix
     responses = [
       [200, { "entries" => [] }],

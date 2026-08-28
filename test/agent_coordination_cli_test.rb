@@ -1647,6 +1647,39 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     # rubocop:enable Metrics/BlockLength
   end
 
+  # validate_config_api_url! accepts userinfo, so a saved API URL can carry a
+  # password. Command stderr is captured by CI and service logs, so the
+  # unbound-token warning must name the deployment without disclosing the
+  # credential embedded in the URL.
+  def test_unbound_process_token_warning_redacts_api_url_credentials
+    with_private_config_tmpdir("agent-coord-unbound-token-credentials") do |root|
+      config_home = File.join(root, "config")
+      set_result = run_command(
+        { "XDG_CONFIG_HOME" => config_home },
+        RbConfig.ruby, BIN, "config", "set",
+        "--api-url", "http://fleet-user:fleet-url-password@127.0.0.1:9", "--token-stdin",
+        stdin_data: "saved-token\n"
+      )
+      assert_equal 0, set_result.status.exitstatus, set_result.stderr
+
+      warned = run_command(
+        { "XDG_CONFIG_HOME" => config_home, "AGENT_COORD_API_TOKEN" => "stale-process-token" },
+        RbConfig.ruby, BIN, "status"
+      )
+
+      assert_includes warned.stderr,
+                      "warning: process-scoped AGENT_COORD_API_TOKEN is being used with " \
+                      "http://***@127.0.0.1:9, which it was not set alongside; " \
+                      "the process token takes precedence over any saved token."
+      # The host still identifies which deployment the token reached.
+      assert_includes warned.stderr, "127.0.0.1:9"
+      %w[fleet-url-password fleet-user stale-process-token saved-token].each do |secret|
+        refute_includes warned.stderr, secret
+        refute_includes warned.stdout, secret
+      end
+    end
+  end
+
   def test_config_set_rejects_url_change_without_replacement_token
     with_private_user_config(
       "AGENT_COORD_API_URL=https://old.example\nAGENT_COORD_API_TOKEN=old-private-token\n"

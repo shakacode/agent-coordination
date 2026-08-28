@@ -49,6 +49,10 @@ module AgentCoord
     AGENT_COORD_STATE_ROOT
     AGENT_COORD_BACKEND
   ].freeze
+  # `scheme://` followed by an authority that ends in `@`. The authority stops
+  # at the first `/`, `?`, or `#`, so an `@` in a path or query is never
+  # mistaken for credentials.
+  URL_USERINFO_PREFIX = %r{\A([a-zA-Z][a-zA-Z0-9+.-]*://)[^/?\#]*@}
   USER_CONFIG_ENV_KEYS = %w[
     AGENT_COORD_API_URL
     AGENT_COORD_API_TOKEN
@@ -2742,7 +2746,7 @@ module AgentCoord
     def render_doctor_text(payload, options, section_notes)
       @stdout.puts "agent-coord doctor"
       %w[version backend backend_repo].each { |key| @stdout.puts "#{key}: #{payload.fetch(key)}" }
-      @stdout.puts "backend_url: #{options[:api_url]}" if payload.fetch("backend") == "http"
+      @stdout.puts "backend_url: #{payload.fetch('backend_url')}" if payload.fetch("backend") == "http"
       @stdout.puts "doctor_prefix: #{payload.fetch('doctor_prefix')}" if payload["doctor_prefix"]
       @stdout.puts "state_root: #{options[:state_root] || '-'}"
       @stdout.puts "mode: #{payload.fetch('deep') ? 'deep' : 'lightweight'}"
@@ -2908,8 +2912,11 @@ module AgentCoord
       false
     end
 
+    # doctor and stack-doctor both report the selected URL. Both payloads are
+    # diagnostics that operators paste into issues and that CI archives, so the
+    # reported URL never carries userinfo.
     def active_backend_url(options, backend_kind)
-      backend_kind == "http" ? options[:api_url] : nil
+      backend_kind == "http" ? redact_url_userinfo(options[:api_url]) : nil
     end
 
     def bootstrap(options)
@@ -5417,6 +5424,21 @@ module AgentCoord
       values.include?("") ? "all-state" : format_list(values)
     end
 
+    # validate_config_api_url! and HttpStore#parse_base_url both accept a URL
+    # that carries userinfo, so a configured or command-line API URL can hold a
+    # password. Every warning and report goes to stderr/stdout, which CI logs
+    # and service logs capture verbatim, so the credential is stripped before
+    # any URL is interpolated into output. Redaction rather than rejection: the
+    # userinfo is inert (HttpStore authenticates with a Bearer token and only
+    # ever hands Net::HTTP the host and port), so refusing such URLs would break
+    # working configurations to fix a disclosure that stripping already closes.
+    # The scheme, host, port, and path survive, which is all diagnostics need.
+    def redact_url_userinfo(value)
+      return value if value.nil?
+
+      value.to_s.sub(URL_USERINFO_PREFIX) { "#{Regexp.last_match(1)}***@" }
+    end
+
     def build_store(options)
       return LocalStore.new(options.fetch(:state_root)) if options[:state_root]
 
@@ -5454,15 +5476,17 @@ module AgentCoord
     # process-scoped token wins for every selected URL. That pairing is invisible
     # when the URL comes from the canonical config file or the command line, so a
     # stale exported token can reach an unrelated deployment while the correctly
-    # bound saved token sits unused. Surface it; the precedence is unchanged and
-    # no token value is ever printed.
+    # bound saved token sits unused. Surface it; the precedence is unchanged, no
+    # token value is ever printed, and the URL is redacted so userinfo embedded
+    # in the selected URL cannot leak into stderr.
     def warn_unbound_process_token(selected_url, options)
       return if @process_config&.fetch("AGENT_COORD_API_TOKEN", nil).to_s.empty?
       return if selected_url == @process_config&.fetch("AGENT_COORD_API_URL", nil)
 
       emit_backend_conflict_warning(
-        "warning: process-scoped AGENT_COORD_API_TOKEN is being used with #{selected_url}, " \
-        "which it was not set alongside; the process token takes precedence over any saved token.", options:
+        "warning: process-scoped AGENT_COORD_API_TOKEN is being used with " \
+        "#{redact_url_userinfo(selected_url)}, which it was not set alongside; " \
+        "the process token takes precedence over any saved token.", options:
       )
     end
 
