@@ -346,9 +346,13 @@ module AgentCoord
   DemoResult = Struct.new(:code, :stdout, :stderr, keyword_init: true)
 
   class Runner # rubocop:disable Metrics/ClassLength
-    def initialize(argv, stdout: $stdout, stderr: $stderr, clock: Time, backend_conflict_warnings: true)
+    # Every collaborator is an injectable keyword with the process default, so
+    # tests never have to reach into private state. That is one keyword past the
+    # metric's limit; splitting the seam into a bag would only hide it.
+    def initialize(argv, stdin: $stdin, stdout: $stdout, stderr: $stderr, clock: Time, # rubocop:disable Metrics/ParameterLists
+                   backend_conflict_warnings: true)
       @argv = argv
-      @stdin = $stdin
+      @stdin = stdin
       @stdout = stdout
       @stderr = stderr
       @clock = clock

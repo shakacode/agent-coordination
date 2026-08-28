@@ -1758,11 +1758,30 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     end
   end
 
+  # stdin is injectable exactly like stdout and stderr, so a test can supply
+  # --token-stdin input without reaching into private state, and an omitted
+  # stdin: still reads the process stdin.
+  def test_runner_stdin_is_injectable_and_defaults_to_the_process_stdin
+    injected = AgentCoord::Runner.new(
+      [], stdin: StringIO.new("injected-token\n"), stdout: StringIO.new, stderr: StringIO.new
+    )
+
+    assert_equal "injected-token", injected.send(:read_token_from_stdin)
+
+    original_stdin = $stdin
+    $stdin = StringIO.new("process-token\n")
+    default = AgentCoord::Runner.new([], stdout: StringIO.new, stderr: StringIO.new)
+
+    assert_equal "process-token", default.send(:read_token_from_stdin)
+  ensure
+    $stdin = original_stdin if original_stdin
+  end
+
   def test_token_only_config_set_rejects_a_concurrent_saved_url_change
     with_private_user_config("AGENT_COORD_API_URL=https://old.example\n") do |config_home|
       env_file = File.join(config_home, "agent-coord", "env")
-      token_runner = AgentCoord::Runner.new([], stdout: StringIO.new, stderr: StringIO.new)
-      token_runner.instance_variable_set(:@stdin, StringIO.new("private-token\n"))
+      token_stdin = StringIO.new("private-token\n")
+      token_runner = AgentCoord::Runner.new([], stdin: token_stdin, stdout: StringIO.new, stderr: StringIO.new)
       url_runner = AgentCoord::Runner.new([], stdout: StringIO.new, stderr: StringIO.new)
 
       with_process_env(
