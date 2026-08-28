@@ -3618,9 +3618,14 @@ module AgentCoord
       claims.reject { |claim| log_claim_superseded?(claim, rows) }
     end
 
+    # Only the claim's own key can supersede it. Aliases are separate leases, so an
+    # event on `pr:1` says nothing about whether the lease on `1` still stands, and
+    # letting it decide would drop a live holder. This is also what the literal
+    # match did before identity folding: a claim was only ever weighed against
+    # events recorded under its own spelling.
     def log_claim_superseded?(claim, rows)
-      lane = claim.fetch("identity").fetch(2)
-      latest = rows.select { |row| row.fetch("identity").fetch(2) == lane }.last
+      key = claim.fetch("target").downcase
+      latest = rows.select { |row| row.fetch("target").downcase == key }.last
       latest && log_at_key(claim.fetch("record").fetch("updated_at")) < latest.fetch("at_key")
     end
 
@@ -6027,17 +6032,24 @@ module AgentCoord
   def self.work_item_parts(target)
     # -1 keeps a trailing empty field: `319:` is a legal claim segment and a
     # different key from `319`, so dropping it would answer for both at once.
-    segments = target.to_s.strip.split(":", -1)
-    segments.shift if segments.length > 1 && droppable_work_item_kind?(segments)
+    segments = work_item_segments(target.to_s.strip.split(":", -1))
     base = segments.shift.to_s.downcase
     [base, segments.empty? ? nil : segments.join(":").downcase]
   end
 
-  def self.droppable_work_item_kind?(segments)
-    kind = segments.first.downcase
-    return true if WORK_ITEM_GITHUB_KINDS.include?(kind)
+  # `issue:`/`pr:` are decoration on a GitHub number and come off. `adhoc:` comes
+  # off only ahead of a slug; ahead of a number it stays part of the base, so
+  # `adhoc:319` is neither issue 319 nor the `319` lane of a work item called
+  # "adhoc" -- both of which would answer for records that are not it.
+  def self.work_item_segments(segments)
+    return segments unless segments.length > 1
 
-    kind == WORK_ITEM_ADHOC_KIND && !segments[1].to_s.match?(WORK_ITEM_NUMBER)
+    kind = segments.first.downcase
+    return segments.drop(1) if WORK_ITEM_GITHUB_KINDS.include?(kind)
+    return segments unless kind == WORK_ITEM_ADHOC_KIND
+    return segments.drop(1) unless segments[1].to_s.match?(WORK_ITEM_NUMBER)
+
+    [segments.take(2).join(":"), *segments.drop(2)]
   end
 
   def self.source_root

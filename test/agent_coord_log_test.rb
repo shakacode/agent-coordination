@@ -1508,3 +1508,89 @@ class AgentCoordLogClaimKeyTest < AgentCoordLogTestCase
     assert_equal %w[bare-holder prefixed-holder], holders.sort
   end
 end
+
+# Aliases are separate leases, so neither the trail nor another alias may decide
+# whether one of them is still current.
+class AgentCoordLogAliasFreshnessTest < AgentCoordLogTestCase
+  def test_an_event_on_one_alias_does_not_suppress_the_other_alias_claim
+    write_claim("shakacode/example", "1", "status" => "active", "agent_id" => "bare-holder",
+                                          "updated_at" => "2026-08-01T00:00:00Z")
+    write_claim("shakacode/example", "pr:1", "status" => "active", "agent_id" => "prefixed-holder",
+                                             "updated_at" => "2026-08-10T00:00:00Z")
+    # Newer than the bare lease, so a lane-only comparison would suppress it, but
+    # it belongs to the prefixed alias and is older than that alias's own lease.
+    write_event("b1", "e1", "type" => "claim.acquired", "repo" => "shakacode/example", "target" => "pr:1",
+                            "machine_id" => "m1", "host" => "codex", "at" => "2026-08-09T00:00:00Z")
+
+    holders = JSON.parse(run_log("shakacode/example#1", "--json").stdout)
+                  .fetch("claims").map { |claim| claim.fetch("agent_id") }
+
+    assert_equal %w[bare-holder prefixed-holder], holders.sort
+  end
+
+  def test_an_alias_claim_older_than_its_own_event_is_still_superseded
+    write_claim("shakacode/example", "1", "status" => "active", "agent_id" => "bare-holder",
+                                          "updated_at" => "2026-08-01T00:00:00Z")
+    write_claim("shakacode/example", "pr:1", "status" => "active", "agent_id" => "prefixed-holder",
+                                             "updated_at" => "2026-08-02T00:00:00Z")
+    write_event("b1", "e1", "type" => "claim.acquired", "repo" => "shakacode/example", "target" => "pr:1",
+                            "machine_id" => "m1", "host" => "codex", "at" => "2026-08-09T00:00:00Z")
+
+    holders = JSON.parse(run_log("shakacode/example#1", "--json").stdout)
+                  .fetch("claims").map { |claim| claim.fetch("agent_id") }
+
+    assert_equal ["bare-holder"], holders, "the prefixed lease is older than its own event"
+  end
+
+  def test_an_event_on_the_claims_own_key_still_supersedes_it
+    write_claim("shakacode/example", "1", "status" => "active", "agent_id" => "bare-holder",
+                                          "updated_at" => "2026-08-01T00:00:00Z")
+    write_event("b1", "e1", "type" => "claim.released", "repo" => "shakacode/example", "target" => "1",
+                            "machine_id" => "m1", "host" => "codex", "at" => "2026-08-09T00:00:00Z")
+
+    assert_nil JSON.parse(run_log("shakacode/example#1", "--json").stdout)["claim"]
+  end
+end
+
+# Declining to strip a numeric `adhoc:` prefix must keep it in the base, not turn
+# the number into a lane of a work item called "adhoc".
+class AgentCoordLogNumericAdhocTest < AgentCoordLogTestCase
+  def write_adhoc_events
+    write_event("b1", "e1", "type" => "claim.acquired", "repo" => "shakacode/example", "target" => "adhoc:319",
+                            "machine_id" => "m1", "host" => "codex", "at" => "2026-08-03T01:00:00Z")
+    write_event("b1", "e2", "type" => "claim.acquired", "repo" => "shakacode/example", "target" => "adhoc",
+                            "machine_id" => "m2", "host" => "codex", "at" => "2026-08-03T02:00:00Z")
+    write_event("b1", "e3", "type" => "claim.acquired", "repo" => "shakacode/example", "target" => "adhoc:319:qa",
+                            "machine_id" => "m3", "host" => "codex", "at" => "2026-08-03T03:00:00Z")
+  end
+
+  def matched(target)
+    JSON.parse(run_log("shakacode/example##{target}", "--json").stdout).dig("work_item", "matched_targets")
+  end
+
+  def test_bare_adhoc_query_does_not_sweep_in_numeric_adhoc_items
+    write_adhoc_events
+
+    assert_equal ["adhoc"], matched("adhoc")
+  end
+
+  def test_numeric_adhoc_item_covers_its_own_lane
+    write_adhoc_events
+
+    assert_equal ["adhoc:319", "adhoc:319:qa"], matched("adhoc:319")
+  end
+
+  def test_numeric_adhoc_lane_query_stays_narrow
+    write_adhoc_events
+
+    assert_equal ["adhoc:319:qa"], matched("adhoc:319:qa")
+  end
+
+  def test_numeric_adhoc_item_is_still_not_the_github_item
+    write_adhoc_events
+    write_event("b1", "e4", "type" => "claim.acquired", "repo" => "shakacode/example", "target" => "issue:319",
+                            "machine_id" => "m4", "host" => "codex", "at" => "2026-08-03T04:00:00Z")
+
+    assert_equal ["issue:319"], matched("319")
+  end
+end
