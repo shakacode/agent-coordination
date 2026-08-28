@@ -1798,3 +1798,287 @@ class AgentCoordLogLimitProvenanceTest < AgentCoordLogTestCase
     assert_equal ["issue:1", "pr:1"], payload.dig("work_item", "matched_targets")
   end
 end
+
+# Events that `gc` compacted into `archive/` are still this work item's custody
+# trail (issue #139). Before the archive was read, `log` answered "no events"
+# for completed work -- the same words it uses for work that never happened --
+# while the history sat intact under `archive/events` on a delete_after clock.
+# These tests run the real collector rather than hand-writing an envelope: the
+# defect lived in the seam between `gc` and `log`, and a fixture-shaped archive
+# would not have caught it.
+class AgentCoordLogArchiveTest < AgentCoordLogTestCase
+  # Position of event_id in the tsv record, which is the stable way to name the
+  # rows a trail reported without depending on rendered column widths.
+  TSV_EVENT_ID_COLUMN = 10
+  # A lane that ran to completion, which is the shape gc compacts. Compaction
+  # keeps the first event, the last event, every terminal event, and actual
+  # phase transitions, so e3 -- a release carrying no phase -- is the source
+  # event the archive deliberately does not retain.
+  CLOSED_LANE_EVENTS = {
+    "e1" => { "type" => "claim.acquired", "machine_id" => "m5", "host" => "codex", "agent_id" => "acd-worker",
+              "phase" => "implementing", "at" => "2026-08-01T02:40:16Z" },
+    "e2" => { "type" => "phase.changed", "machine_id" => "m5", "host" => "codex", "agent_id" => "acd-worker",
+              "old_phase" => "implementing", "phase" => "waiting_on_checks_or_review",
+              "at" => "2026-08-01T02:45:53Z" },
+    "e3" => { "type" => "claim.released", "machine_id" => "m5", "host" => "codex", "agent_id" => "acd-worker",
+              "handoff_to" => "maintainer", "at" => "2026-08-01T02:56:53Z" },
+    "e4" => { "type" => "claim.acquired", "machine_id" => "m1", "host" => "claude-code",
+              "agent_id" => "acd-finisher", "phase" => "final_merge", "at" => "2026-08-01T03:35:49Z" },
+    "e5" => { "type" => "lane_closed", "terminal" => "done", "workspace" => "default",
+              "closed_by" => { "agent_id" => "acd-finisher", "machine" => "m1" },
+              "at" => "2026-08-01T04:00:08Z" }
+  }.freeze
+
+  def test_log_reads_a_trail_that_gc_compacted_into_the_archive
+    write_closed_lane_trace
+
+    assert_equal %w[e1 e2 e3 e4 e5], tsv_event_ids("shakacode/example#104"), "the live trail before gc"
+
+    compact_events!
+    result = run_log("shakacode/example#104")
+
+    assert_equal 0, result.status.exitstatus, result.stderr
+    refute_includes result.stdout, "no events", "compacted history is not the absence of history"
+    assert_equal retained_event_ids, tsv_event_ids("shakacode/example#104").sort
+    assert_includes result.stdout, "lane_closed"
+  end
+
+  # Ordering is by instant, not by the prefix an event was read from, so a lane
+  # reopened after gc retired its first generation still reads as one history.
+  def test_log_interleaves_archived_and_live_events_for_one_work_item
+    write_closed_lane_trace
+    compact_events!
+    write_live_event("e6", "type" => "claim.acquired", "machine_id" => "m2", "host" => "codex",
+                           "agent_id" => "acd-reopener", "phase" => "implementing", "at" => "2026-08-01T03:00:00Z")
+    write_live_event("e7", "type" => "merged", "machine_id" => "m2", "host" => "codex",
+                           "agent_id" => "acd-reopener", "at" => "2026-08-01T05:00:00Z")
+
+    result = run_log("shakacode/example#104", "--format", "tsv")
+
+    assert_equal 0, result.status.exitstatus, result.stderr
+    assert_equal %w[e1 e2 e6 e4 e5 e7], tsv_rows_event_ids(result)
+    assert_includes result.stderr, "4 of 6 events read from the archive"
+  end
+
+  # The archive is a supplementary source: reading it may add rows or a warning,
+  # and must never turn a trail that reads today into a failure.
+  def test_log_degrades_when_the_archive_cannot_be_listed
+    write_closed_lane_trace
+    compact_events!
+    write_live_event("e6", "type" => "merged", "machine_id" => "m2", "host" => "codex",
+                           "at" => "2026-08-01T05:00:00Z")
+    FileUtils.chmod(0o000, archive_events_directory)
+
+    result = run_log("shakacode/example#104", "--format", "tsv")
+
+    assert_equal 0, result.status.exitstatus, result.stderr
+    assert_includes result.stderr, "archived events unreadable"
+    assert_includes result.stderr, "this trail may be incomplete"
+    assert_equal %w[e6], tsv_rows_event_ids(result), "the live events must still be reported"
+  ensure
+    FileUtils.chmod(0o700, archive_events_directory)
+  end
+
+  # A short trail reads exactly like a complete one once it is in the mirror,
+  # and the mirror is the copy that outlives both compaction and delete_after.
+  def test_log_refuses_to_sync_a_trail_whose_archive_could_not_be_read
+    write_closed_lane_trace
+    compact_events!
+    FileUtils.chmod(0o000, archive_events_directory)
+
+    result = run_log("--sync")
+
+    assert_equal 2, result.status.exitstatus
+    assert_includes result.stderr, "refusing to sync an incomplete trail: archive/events"
+    refute_path_exists File.join(@state_root, "log.tsv")
+  ensure
+    FileUtils.chmod(0o700, archive_events_directory)
+  end
+
+  def test_log_applies_synthetic_filtering_to_archived_events
+    write_closed_lane_trace(repo: "sim/race", target: "task_two", batch: "sim", synthetic: true)
+    compact_events!("--synthetic-hot-days", "0")
+
+    hidden = run_log("sim/race#task_two")
+    shown = run_log("sim/race#task_two", "--include-synthetic")
+
+    assert_includes hidden.stdout, "no events for sim/race#task_two"
+    refute_includes hidden.stdout, "claim.acquired"
+    assert_includes shown.stdout, "[synthetic]"
+    assert_equal retained_event_ids, tsv_event_ids("sim/race#task_two", "--include-synthetic").sort
+  end
+
+  # archive/claims and archive/heartbeats hold a different record family whose
+  # payload is not an event. Folding one in would report it as an event it never
+  # was, so only the archived events prefix is read.
+  def test_log_ignores_archived_records_that_are_not_events
+    write_claim("shakacode/example", "104", "status" => "released", "agent_id" => "acd-worker",
+                                            "machine_id" => "m5", "host" => "codex",
+                                            "updated_at" => "2026-08-01T04:00:08Z",
+                                            "expires_at" => "2026-08-01T05:00:08Z")
+    compact_events!(expect_pruned_events: false)
+
+    result = run_log("shakacode/example#104")
+
+    assert_path_exists File.join(@state_root, "archive", "claims", "shakacode", "example", "104.json")
+    assert_equal 0, result.status.exitstatus, result.stderr
+    assert_includes result.stdout, "no events for shakacode/example#104"
+    refute_includes result.stdout, "released"
+  end
+
+  # Silently skipping an archived record is the bug being fixed, so a family
+  # this version does not understand is reported rather than dropped.
+  def test_log_reports_an_archived_record_whose_family_it_does_not_know
+    write_trace
+    write_archive_json("archive/events/b9/compact-future.json",
+                       "schema_version" => 1, "record_family" => "compacted_events_v3",
+                       "archived_at" => "2026-08-05T00:00:00Z", "delete_after" => "2026-09-04T00:00:00Z")
+
+    result = run_log("shakacode/example#104", "--format", "tsv")
+
+    assert_equal 0, result.status.exitstatus, result.stderr
+    assert_includes result.stderr, "unknown archived record family at archive/events/b9/compact-future.json"
+    assert_equal %w[e1 e2 e3 e4 e5], tsv_rows_event_ids(result)
+  end
+
+  # Compaction writes the archive envelope before deleting its sources, so a run
+  # interrupted between the two leaves one event readable from both places.
+  def test_log_reports_an_event_readable_from_both_prefixes_once
+    write_closed_lane_trace
+    compact_events!
+    write_closed_lane_event("e5")
+
+    ids = tsv_event_ids("shakacode/example#104")
+
+    assert_equal ids.uniq, ids
+    assert_equal retained_event_ids, ids.sort
+  end
+
+  # The mirror deduplicates on the exact tsv line, so this also pins that an
+  # archived row renders byte-identically to the live row it replaced.
+  def test_log_sync_absorbs_archived_events_without_duplicating_them
+    write_closed_lane_trace
+    run_log("--sync")
+    before = File.readlines(File.join(@state_root, "log.tsv"), encoding: "UTF-8")
+    compact_events!
+
+    result = run_log("--sync")
+    after = File.readlines(File.join(@state_root, "log.tsv"), encoding: "UTF-8")
+
+    assert_equal 0, result.status.exitstatus, result.stderr
+    assert_includes result.stdout, "synced 0 new events"
+    assert_equal before, after
+    assert_equal after.uniq, after
+  end
+
+  # The mirror is the only copy that survives delete_after, so an operator who
+  # syncs for the first time after gc ran must still get the compacted history.
+  def test_log_sync_mirrors_archived_events_into_a_fresh_mirror
+    write_closed_lane_trace
+    compact_events!
+
+    result = run_log("--sync")
+
+    assert_equal 0, result.status.exitstatus, result.stderr
+    assert_includes result.stdout, "synced #{retained_event_ids.length} new events"
+    mirrored = File.readlines(File.join(@state_root, "log.tsv"), encoding: "UTF-8")
+
+    assert_equal retained_event_ids, mirrored.map { |line| line.split("\t").fetch(TSV_EVENT_ID_COLUMN) }.sort
+  end
+
+  # An archived event is the same event it always was, so its row is unchanged
+  # and the provenance rides on stderr instead. What the rows cannot show is
+  # that part of this history is now on a delete_after clock, and that
+  # compaction did not retain every source event it consumed.
+  def test_log_notes_archive_provenance_and_the_delete_after_clock
+    write_closed_lane_trace
+    compact_events!
+    envelope = archive_envelopes.fetch(0)
+    retained = envelope.fetch("records").length
+    dropped = envelope.fetch("source_paths").length - retained
+
+    result = run_log("shakacode/example#104")
+
+    assert_equal 1, dropped, "compaction is lossy, which is the fact this note exists to report"
+    assert_includes result.stderr, "note: #{retained} of #{retained} events read from the archive"
+    assert_includes result.stderr, "#{dropped} source event was dropped by compaction"
+    assert_includes result.stderr, "archive deleted after #{envelope.fetch('delete_after')}"
+    assert_includes result.stderr, "mirror it with log --sync"
+  end
+
+  def test_log_says_nothing_about_the_archive_for_a_live_trail
+    write_trace
+
+    result = run_log("shakacode/example#104")
+
+    assert_equal 0, result.status.exitstatus, result.stderr
+    assert_empty result.stderr
+  end
+
+  private
+
+  def write_closed_lane_trace(repo: "shakacode/example", target: "104", batch: "b1", synthetic: false)
+    @lane_identity = { repo: repo, target: target, batch: batch, synthetic: synthetic }
+    CLOSED_LANE_EVENTS.each_key { |event_id| write_closed_lane_event(event_id) }
+  end
+
+  def write_closed_lane_event(event_id)
+    payload = CLOSED_LANE_EVENTS.fetch(event_id).merge(
+      "repo" => @lane_identity.fetch(:repo), "target" => @lane_identity.fetch(:target), "lane" => "lane-a"
+    )
+    payload = payload.merge("synthetic" => true, "synthetic_kind" => "simulation") if @lane_identity.fetch(:synthetic)
+    write_event(@lane_identity.fetch(:batch), event_id, payload)
+  end
+
+  # A live event for the same work item, recorded into a later batch so it is
+  # not swept into the generation gc already retired.
+  def write_live_event(event_id, payload)
+    write_event("b2", event_id,
+                payload.merge("repo" => @lane_identity.fetch(:repo), "target" => @lane_identity.fetch(:target)))
+  end
+
+  # --hot-days 0 retires the generation immediately; everything else is the
+  # collector operators actually run.
+  def compact_events!(*flags, expect_pruned_events: true)
+    result = run_command(COMMAND_ENV.merge("AGENT_COORD_STATE_ROOT" => @state_root),
+                         "ruby", BIN, "gc", "--execute", "--hot-days", "0", *flags)
+
+    assert_equal 0, result.status.exitstatus, result.stderr
+    if expect_pruned_events
+      assert_empty Dir.glob(File.join(@state_root, "events", "**", "*.json")),
+                   "gc must have pruned the hot events for this fixture"
+    end
+    result
+  end
+
+  def archive_events_directory
+    File.join(@state_root, "archive", "events")
+  end
+
+  def archive_envelopes
+    Dir.glob(File.join(archive_events_directory, "**", "*.json")).map do |path|
+      JSON.parse(File.read(path))
+    end
+  end
+
+  def retained_event_ids
+    archive_envelopes.flat_map { |envelope| envelope.fetch("records").map { |record| record.fetch("event_id") } }.sort
+  end
+
+  def write_archive_json(path, data)
+    file = File.join(@state_root, path)
+    FileUtils.mkdir_p(File.dirname(file))
+    File.write(file, "#{JSON.generate(data)}\n")
+  end
+
+  def tsv_event_ids(*)
+    result = run_log(*, "--format", "tsv")
+
+    assert_equal 0, result.status.exitstatus, result.stderr
+    tsv_rows_event_ids(result)
+  end
+
+  def tsv_rows_event_ids(result)
+    result.stdout.lines.map { |line| line.split("\t").fetch(TSV_EVENT_ID_COLUMN) }
+  end
+end

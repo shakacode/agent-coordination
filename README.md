@@ -523,6 +523,30 @@ timestamp), `--machine`, `--host`, `--type`, and `--limit`. `--host` takes eithe
 a family (`codex`, `claude`) or any recorded spelling (`claude-code`,
 `codex-subagent`), since both normalize to the same family.
 
+Events that `gc` has compacted into `archive/events` are part of the trail, not a
+separate view of it, so there is no `--include-archived` to pass: a completed
+lane is exactly the work most likely to be asked about after the fact, and
+answering `no events` for one said the same thing `log` says about work that
+never happened. Archived and live events for a work item interleave by timestamp,
+and an event readable from both prefixes — a compaction interrupted between
+writing its envelope and deleting its sources — is reported once.
+
+Their rows are unchanged, so text, tsv, `--json`, and the `--sync` mirror hold
+exactly what they held before `gc` ran. The provenance goes to stderr instead:
+
+```text
+note: 4 of 6 events read from the archive; 1 source event was dropped by compaction; archive deleted after 2026-09-27T02:27:30Z; mirror it with log --sync
+```
+
+Both numbers matter. Compaction retains only the first event, the last event,
+every terminal event, and actual phase transitions, so the source events it drops
+leave the backend the moment `gc --execute` runs; what it does retain then sits on
+the `delete_after` clock (30 days by default). If the archive cannot be listed —
+an older backend, a token without archive scope, an unreadable directory — `log`
+says so on stderr and reports the live events anyway. Reading the archive can add
+rows or a warning, never turn a trail that reads today into a failure; `--sync`
+then refuses to mirror a trail it already knows is short.
+
 Simulation and smoke records are excluded unless `--include-synthetic` is passed.
 When included they are marked `[synthetic]` in text output and carry `synthetic`
 and `synthetic_kind` columns in tsv and JSON, so a simulation row that has been
@@ -571,6 +595,12 @@ ending in `t`. ANSI-C quoting puts a real tab in the pattern before grep sees it
 command folds case (below). Without it the offline union silently drops a record
 written as `Issue:9765` or `PR:9765` — a partial trail, which is what anchoring on
 the spellings is here to prevent.
+
+**Run `agent-coord log --sync` before `agent-coord gc --execute`.** Treat it as a
+precondition rather than a convenience: the mirror is the only copy that survives
+both halves of retention. Compaction drops the source events it does not retain
+as soon as it runs, and `delete_after` removes the envelope holding the rest 30
+days later. Sync every state root whose history you would want to read back.
 
 Matching is case-insensitive for the work item, machine, host, and type. That
 matters for the work item in particular, because the event store has recorded the
@@ -901,6 +931,14 @@ Likewise, ordinary source mutation after the archive write but before the CAS
 delete can leave a stale expiring envelope, but CAS prevents deletion of the
 new live payload.
 Expired archive envelopes are deleted with the same compare-and-swap guard.
+
+Run `agent-coord log --sync` before `gc --execute`. Compaction is not lossless:
+the source events an envelope does not retain leave the backend as soon as it
+runs, and the envelope holding the rest expires with `delete_after`. `log` reads
+compacted envelopes back, so a completed lane's custody trail does not vanish the
+moment `gc` runs — see
+[Reading the trail](#reading-the-trail-where-is-the-work-on-an-issue-or-pr) —
+but the mirror `--sync` writes is the only copy that outlives both.
 
 | Record state | Hot retention | Archive retention | Result |
 | --- | ---: | ---: | --- |

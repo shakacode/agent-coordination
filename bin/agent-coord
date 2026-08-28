@@ -208,6 +208,11 @@ module AgentCoord
   # narrowed --sync are the same question -- "was this answer filtered?" -- so
   # they read one list and a new filter cannot be added to only one of them.
   LOG_TRAIL_FILTERS = %i[since machine host type limit].freeze
+  # Where gc puts a completed lane's events once it has compacted them and
+  # deleted the hot copies. The trail is read from here as well as from `events`,
+  # because a custody trail that ends when the work completes is the one case it
+  # was written to answer.
+  LOG_ARCHIVED_EVENTS_PREFIX = "archive/events"
   LOG_SYNC_FILENAME = "log.tsv"
   LOG_SYNC_LOCK_SUFFIX = ".lock"
   # C0 controls and DEL, minus the tab/CR/LF handled separately above. Text and
@@ -3275,6 +3280,7 @@ module AgentCoord
       log_options = options.dup
       store = build_store(log_options)
       rows = log_rows(store, options)
+      log_note_archived(rows, options)
       if options[:sync]
         # A partial listing would write a partial mirror that later reads as
         # complete -- the same hazard the narrowing options are rejected for.
@@ -3324,7 +3330,7 @@ module AgentCoord
 
     def log_rows(store, options)
       since = log_since_timestamp(options)
-      rows = log_event_entries(store).map { |entry| log_row(entry.data) }
+      rows = log_event_rows(store)
       rows = rows.reject { |row| row.fetch("synthetic") } unless options[:include_synthetic]
       log_filtered(rows, options, since).sort_by { |row| [row.fetch("at_key"), row.fetch("event_id")] }
     end
@@ -3423,6 +3429,122 @@ module AgentCoord
     # complete one.
     def log_event_entries(store)
       log_listing(store, "events") { |reason| "warning: events #{reason}; this trail may be incomplete" }
+    end
+
+    # gc compacts a completed lane's events into archive/events and deletes the
+    # hot copies, so reading only the live prefix answered "no events" for
+    # precisely the work most likely to be asked about after the fact -- and
+    # said it in the same words it uses for work that never happened. The
+    # archived payloads are the same event records log_row already consumes, so
+    # they are folded back in by default rather than behind a flag: a continuous
+    # custody trail is what this command promises, and the silence was the defect.
+    def log_event_rows(store)
+      seen = {}
+      rows = log_event_entries(store).map do |entry|
+        seen[log_event_identity(entry.data)] = true
+        log_row(entry.data)
+      end
+      rows + log_archived_event_rows(store, seen)
+    end
+
+    # Compaction writes the archive envelope before deleting its sources, so a
+    # run interrupted between the two leaves one event readable from both places.
+    # The live copy wins. Ordering is left to log_rows, which already sorts the
+    # merged set by instant, so archived and live events for one work item
+    # interleave rather than arriving in two blocks.
+    def log_archived_event_rows(store, seen)
+      log_archived_event_entries(store).flat_map do |entry|
+        provenance = log_archive_provenance(entry)
+        log_archived_event_data(entry).filter_map do |data|
+          identity = log_event_identity(data)
+          next if seen.key?(identity)
+
+          seen[identity] = true
+          log_row(data).merge(provenance)
+        end
+      end
+    end
+
+    # Identity falls back to the whole record because roughly a tenth of the
+    # recorded events predate event ids; collapsing those onto one missing-id key
+    # would drop real history as a false duplicate.
+    def log_event_identity(data)
+      event_id = data["event_id"]
+      event_id.is_a?(String) && !event_id.empty? ? event_id : data
+    end
+
+    # Only families whose payload is an event, and only from the archived events
+    # prefix. An archived claim or heartbeat is a different record living under
+    # archive/claims or archive/heartbeats, and folding one in would report it as
+    # an event it never was. An unrecognized family is reported rather than
+    # skipped -- silently dropping archived history is the bug being fixed.
+    def log_archived_event_data(entry)
+      case entry.data["record_family"]
+      when "compacted_events" then Array(entry.data["records"]).grep(Hash)
+      when "archived_record" then [entry.data["data"]].grep(Hash)
+      else
+        log_note_incomplete(LOG_ARCHIVED_EVENTS_PREFIX,
+                            "warning: unknown archived record family at #{entry.path}; " \
+                            "this trail may be incomplete")
+        []
+      end
+    end
+
+    # Provenance for the note, not for the rendered row. It is keyed by archive
+    # path so one envelope's dropped-source count is counted once rather than
+    # once per row it contributed: a compacted envelope lists every source path
+    # it consumed but retains only the first, last, terminal, and phase-changing
+    # events, so a restored trail can be shorter than the one gc swallowed.
+    def log_archive_provenance(entry)
+      data = entry.data
+      retained = Array(data["records"]).length
+      {
+        "archived" => true,
+        "archive_path" => entry.path,
+        "archive_delete_after" => data["delete_after"].to_s,
+        "archive_dropped" => [Array(data["source_paths"]).length - retained, 0].max
+      }
+    end
+
+    # Additive by construction: reading the archive can add rows or a warning,
+    # and must never turn a trail that reads today into a failure. So every
+    # archive read failure degrades, including the ones log_listing re-raises --
+    # an archive directory that is unreadable, or holds a record that will not
+    # parse, is not a reason to stop reporting the live events beside it.
+    def log_archived_event_entries(store)
+      log_listing(store, LOG_ARCHIVED_EVENTS_PREFIX) do |reason|
+        "warning: archived events #{reason}; this trail may be incomplete"
+      end
+    rescue OperationalError, JSON::ParserError => e
+      log_note_incomplete(LOG_ARCHIVED_EVENTS_PREFIX,
+                          "warning: archived events unreadable (#{e.message}); this trail may be incomplete")
+      []
+    end
+
+    # Provenance goes to stderr rather than into the trail. An archived event is
+    # the same event it always was, so its row stays byte-identical: text, tsv,
+    # and --json are read by other tools, and --sync dedupes on the exact tsv
+    # line, so a decorated archived row would mirror as a second copy of an event
+    # the file already holds. What the rows cannot show is that part of this
+    # history now sits on a delete_after clock, and that compaction did not
+    # retain every source event it consumed.
+    def log_note_archived(rows, options)
+      archived = rows.select { |row| row["archived"] }
+      return if archived.empty?
+
+      envelopes = archived.uniq { |row| row.fetch("archive_path") }
+      dropped = envelopes.sum { |row| row.fetch("archive_dropped") }
+      # The soonest clock, ordered on the parsed instant like every other
+      # comparison here, so an offset timestamp cannot sort ahead of a Z one.
+      expires = envelopes.map { |row| row.fetch("archive_delete_after") }
+                         .reject(&:empty?).min_by { |value| log_at_key(value) }
+      parts = ["note: #{archived.length} of #{rows.length} events read from the archive"]
+      if dropped.positive?
+        parts << "#{dropped} source #{dropped == 1 ? 'event was' : 'events were'} dropped by compaction"
+      end
+      parts << "archive deleted after #{expires}" if expires
+      parts << "mirror it with log --sync" unless options[:sync]
+      @stderr.puts log_scrub(parts.join("; "))
     end
 
     # One listing path for both families: warn on a partial or degraded read,
