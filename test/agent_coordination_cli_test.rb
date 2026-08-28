@@ -2739,6 +2739,42 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     end
   end
 
+  # open(2) filters its mode argument through the caller's umask, so a hostile
+  # umask stripped owner-read from the staged config file and the config write
+  # lock. config set still reported success, and every later invocation then
+  # failed to read the configuration that run had just written.
+  def test_config_set_under_a_hostile_umask_keeps_private_files_owner_readable
+    with_private_config_tmpdir("agent-coord-config-set-umask") do |root|
+      config_home = File.join(root, "config")
+      config_dir = File.join(config_home, "agent-coord")
+      FileUtils.mkdir_p(config_dir)
+      [config_home, config_dir].each { |path| File.chmod(0o700, path) }
+
+      saved_umask = File.umask(0o477)
+      set_result = run_command(
+        { "XDG_CONFIG_HOME" => config_home },
+        RbConfig.ruby, BIN, "config", "set", "--policy", "required"
+      )
+      File.umask(saved_umask)
+
+      assert_equal 0, set_result.status.exitstatus, set_result.stderr
+      env_file = File.join(config_dir, "env")
+      assert_equal 0o600, File.stat(env_file).mode & 0o777
+      locks = Dir.glob(File.join(config_dir, ".agent-coord-config-*.lock"))
+      refute_empty locks
+      locks.each { |lock| assert_equal 0o600, File.stat(lock).mode & 0o777 }
+
+      show_result = run_command(
+        { "XDG_CONFIG_HOME" => config_home },
+        RbConfig.ruby, BIN, "config", "show", "--json"
+      )
+      assert_equal 0, show_result.status.exitstatus, show_result.stderr
+      assert_equal "required", JSON.parse(show_result.stdout).dig("coordination", "policy")
+    ensure
+      File.umask(saved_umask) if saved_umask
+    end
+  end
+
   # Trusting the link must not trust its destination: the resolved chain is
   # still re-validated component by component.
   def test_user_owned_config_parent_symlink_into_an_unsafe_directory_is_rejected

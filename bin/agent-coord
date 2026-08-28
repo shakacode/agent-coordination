@@ -2276,6 +2276,10 @@ module AgentCoord
       lock_path = user_config_lock_path(directory)
       File.open(lock_path, File::RDWR | File::CREAT | File::NOFOLLOW, 0o600) do |lock|
         validate_private_config_file!(lock, lock_path)
+        # Same umask hazard as the staged config file, and the reader opens this
+        # lock read-only. Chmod after validation so a pre-existing insecure lock
+        # is still reported instead of quietly repaired.
+        lock.chmod(0o600)
         raise OperationalError, "cannot acquire config write lock: #{lock_path}" unless lock.flock(File::LOCK_EX)
 
         yield
@@ -2439,6 +2443,11 @@ module AgentCoord
 
     def write_private_config_temp_file(path, contents)
       File.open(path, File::WRONLY | File::CREAT | File::EXCL | File::NOFOLLOW, 0o600) do |file|
+        # open(2) filters the requested mode through the caller's umask, so a
+        # restrictive umask can strip owner-read and leave a 0200 file that this
+        # CLI can no longer read back. Restate the mode on the descriptor we
+        # already hold rather than on a path an attacker could swap.
+        file.chmod(0o600)
         file.write(contents)
         file.flush
         file.fsync
