@@ -9,6 +9,21 @@ require "time"
 
 ROOT = File.expand_path("../..", __dir__)
 CLI = File.join(ROOT, "bin", "agent-coord")
+# agent-coord loads its canonical user config on every invocation, so a
+# developer's real ~/.config/agent-coord/env would otherwise reach into this
+# purely --state-root-scoped replay. Isolate the same way the sim tests do.
+LOCAL_COORDINATION_ENV = {
+  "AGENT_COORD_API_URL" => nil,
+  "AGENT_COORD_API_TOKEN" => nil,
+  "AGENT_COORD_BACKEND" => nil,
+  "AGENT_COORD_ENV_FILE" => nil,
+  "AGENT_COORD_LOCAL" => nil,
+  "AGENT_COORD_MACHINE_ID" => nil,
+  "AGENT_COORD_POLICY" => nil,
+  "AGENT_COORD_REF" => nil,
+  "AGENT_COORD_SESSION_ID" => nil,
+  "AGENT_COORD_STATUS_STATE_ROOT" => nil
+}.freeze
 
 requested_root = ARGV.shift if ARGV.first == "--state-root"
 requested_root = ARGV.shift if requested_root
@@ -24,8 +39,17 @@ begin
     File.write(full_path, "#{JSON.pretty_generate(payload)}\n")
   end
 
+  def local_coordination_env(state_root)
+    LOCAL_COORDINATION_ENV.merge(
+      "AGENT_COORD_STATE_ROOT" => state_root,
+      # Never created by gc, and XDG_CONFIG_HOME must be absolute.
+      "XDG_CONFIG_HOME" => File.join(File.expand_path(state_root), "xdg-config")
+    )
+  end
+
   def run_gc(state_root, mode)
     stdout, stderr, status = Open3.capture3(
+      local_coordination_env(state_root),
       "ruby", CLI, "gc", mode, "--json", "--state-root", state_root
     )
     abort "graveyard gc failed: #{stderr}" unless status.success?
