@@ -2444,7 +2444,11 @@ module AgentCoord
           directory,
           leaf: dedicated_user_config_parent?
         )
-        directory_file.fsync
+        # The rename already committed, so an unsupported directory fsync must
+        # not be reported as a write failure. Reuse the shared errno tolerance
+        # rather than restating it, but sync the descriptor validated just above
+        # instead of the path the helper would reopen.
+        AgentCoord.fsync_parent_directory(destination) { directory_file.fsync }
       end
     rescue SystemCallError => e
       raise OperationalError, "cannot persist canonical user configuration: #{e.message}"

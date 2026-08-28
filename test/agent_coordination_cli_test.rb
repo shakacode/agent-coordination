@@ -2775,6 +2775,34 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     end
   end
 
+  # Directory fsync is unsupported on some filesystems, which is why every other
+  # atomic writer in the CLI routes it through AgentCoord.fsync_parent_directory.
+  # This path called fsync on the descriptor directly, so an unsupported sync
+  # failed the whole config set after its rename had already committed.
+  def test_config_set_tolerates_an_unsupported_directory_fsync
+    with_private_config_tmpdir("agent-coord-config-set-fsync-enotsup") do |root|
+      config_home = File.join(root, "config")
+      original_fsync = File.instance_method(:fsync)
+      File.define_method(:fsync) do
+        raise Errno::ENOTSUP, path if stat.directory?
+
+        original_fsync.bind_call(self)
+      end
+      patched = true
+
+      code = with_process_env("XDG_CONFIG_HOME" => config_home) do
+        AgentCoord::Runner.new(
+          %w[config set --policy required], stdout: StringIO.new, stderr: StringIO.new
+        ).run
+      end
+
+      assert_equal 0, code
+      assert_includes File.read(File.join(config_home, "agent-coord", "env")), "AGENT_COORD_POLICY=required"
+    ensure
+      File.remove_method(:fsync) if patched
+    end
+  end
+
   # Trusting the link must not trust its destination: the resolved chain is
   # still re-validated component by component.
   def test_user_owned_config_parent_symlink_into_an_unsafe_directory_is_rejected
