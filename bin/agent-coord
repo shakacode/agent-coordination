@@ -216,6 +216,13 @@ module AgentCoord
   # encoder escapes these already.
   LOG_CONTROL_CHARACTERS = /[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F\u0080-\u009F]/
   LOG_UNKNOWN = "?"
+  # Issues and pull requests share one number sequence per repository, so
+  # `319`, `issue:319`, and `pr:319` are the same item and the prefix is
+  # decoration. `adhoc` is not that space: its ids are operator-chosen slugs, so
+  # it is folded only where it cannot collide with a GitHub number.
+  WORK_ITEM_GITHUB_KINDS = %w[issue pr].freeze
+  WORK_ITEM_KINDS = (WORK_ITEM_GITHUB_KINDS + ["adhoc"]).freeze
+  WORK_ITEM_NUMBER = /\A\d+\z/
   LOG_SINCE_UNITS = { "m" => 60, "h" => 3600, "d" => 86_400, "w" => 604_800 }.freeze
   BATCH_AUDIT_TERMINAL_REQUIRED_FACT_FIELDS = %w[event_id repo target terminal workspace at].freeze
   BATCH_AUDIT_TERMINAL_OPTIONAL_FACT_FIELDS = %w[
@@ -326,6 +333,9 @@ module AgentCoord
       @stderr = stderr
       @clock = clock
       @backend_conflict_warnings = backend_conflict_warnings
+      # Set on the first degraded listing; read by both the --sync guard and the
+      # --json trail state, so it must exist before either runs.
+      @log_incomplete = nil
     end
 
     def run # rubocop:disable Metrics/CyclomaticComplexity
@@ -1025,6 +1035,8 @@ module AgentCoord
       opts.separator "    agent-coord log OWNER/REPO#TARGET   every event for one issue or PR"
       opts.separator "Columns: at, machine, host, work item, type, phase, agent, detail."
       opts.separator "Where it is now is the last line; a move is a change of machine, host, or agent."
+      opts.separator "TARGET names a work item, not a spelling: 319, issue:319, and pr:319 are one trail."
+      opts.separator "A trailing segment is a lane (issue:319:qa); the bare item covers its lanes."
       opts.separator "    --since VALUE        3d, 12h, 30m, or an ISO8601 timestamp"
       opts.separator "    --machine ID         only events from one machine, e.g. m1"
       opts.separator "    --host FAMILY        only events from codex or claude"
@@ -3271,7 +3283,8 @@ module AgentCoord
         return log_sync(log_options, rows)
       end
 
-      emit_log(rows, options, log_claim_for(store, options, rows))
+      claims = log_claim_for(store, options, rows)
+      emit_log(log_limited(rows, options), options, claims, matched: rows)
       0
     rescue JSON::ParserError, SystemCallError => e
       raise OperationalError, "state unreadable: #{e.message}"
@@ -3313,13 +3326,20 @@ module AgentCoord
       since = log_since_timestamp(options)
       rows = log_event_entries(store).map { |entry| log_row(entry.data) }
       rows = rows.reject { |row| row.fetch("synthetic") } unless options[:include_synthetic]
-      rows = log_filtered(rows, options, since).sort_by { |row| [row.fetch("at_key"), row.fetch("event_id")] }
+      log_filtered(rows, options, since).sort_by { |row| [row.fetch("at_key"), row.fetch("event_id")] }
+    end
+
+    # --limit trims the trail that is shown, never the evidence that decides
+    # whether a claim still stands: dropping a release because a newer event on
+    # another alias filled the window would report a stale lease as live custody.
+    def log_limited(rows, options)
       options[:limit] ? rows.last(options[:limit]) : rows
     end
 
     def log_filtered(rows, options, since)
+      wanted = options[:work_item].to_s.empty? ? nil : log_identity(*log_split_work_item(options[:work_item]))
       rows.select do |row|
-        log_matches?(row, "work_item", options[:work_item]) &&
+        (wanted.nil? || log_identity_match?(row.fetch("identity"), wanted)) &&
           log_matches?(row, "machine", options[:machine]) &&
           log_matches?(row, "host", options[:host]) &&
           log_matches?(row, "type", options[:type]) &&
@@ -3327,9 +3347,9 @@ module AgentCoord
       end
     end
 
-    # Repo names are case-insensitive on GitHub, and the event store has recorded
-    # the same repo under more than one casing. Matching case-sensitively would
-    # split one work item's history into two partial answers.
+    # The scalar column filters. The work item is not one of them: it is matched on
+    # parsed identity in log_filtered, because one item's records carry several
+    # spellings and a string compare would answer with only the queried one.
     def log_matches?(row, field, wanted)
       return true if wanted.nil? || wanted.to_s.empty?
 
@@ -3340,6 +3360,42 @@ module AgentCoord
       row.fetch(field).casecmp?(wanted.to_s)
     end
 
+    # Compare on work-item identity rather than the literal string: the store
+    # holds one item as `319`, `issue:319`, and `pr:319`, and matching literally
+    # answers with whichever third of its history shares the queried spelling.
+    # A query that names a lane keeps its narrower meaning; a query that does not
+    # covers the item and every lane under it.
+    #
+    # Both sides are parsed from raw repo/target rather than from the rendered
+    # work item, which substitutes a "?" placeholder for a missing value -- text
+    # meant for a reader, never for deciding identity.
+    #
+    # Both arguments are already-parsed [repo, base, lane] identities. Accepting a
+    # raw string here too would re-split the query once per row compared, which is
+    # the cost log_identity exists to pay exactly once.
+    def log_identity_match?(candidate, wanted, lane_exact: false)
+      return false unless candidate.fetch(0).casecmp?(wanted.fetch(0))
+      return false unless candidate.fetch(1) == wanted.fetch(1)
+      return wanted.fetch(2) == candidate.fetch(2) if lane_exact
+
+      wanted.fetch(2).nil? || wanted.fetch(2) == candidate.fetch(2)
+    end
+
+    # [repo, base, lane]. Parsed once per query and once per record, never per
+    # comparison: a long trail would otherwise re-split the same query string for
+    # every row it is matched against.
+    def log_identity(repo, target)
+      base, lane = AgentCoord.work_item_parts(target)
+      [repo.to_s, base, lane]
+    end
+
+    # Targets contain colons, repos do not contain "#", so the last "#" is the
+    # boundary.
+    def log_split_work_item(value)
+      repo, _, target = value.to_s.rpartition("#")
+      [repo, target]
+    end
+
     def log_row(data)
       {
         "at" => log_present(data["at"]),
@@ -3347,6 +3403,8 @@ module AgentCoord
         "machine" => log_present(data["machine_id"] || log_closed_by(data, "machine")),
         "host" => log_host_family(data["host"]),
         "work_item" => log_work_item(data),
+        "identity" => log_identity(data["repo"].to_s.strip, data["target"].to_s.strip),
+        "target" => data["target"].to_s.strip,
         "type" => log_present(data["type"]),
         "phase" => log_present(data["phase"] || data["new_phase"] || data["terminal"] || data["status"]),
         "agent_id" => log_present(data["agent_id"] || log_closed_by(data, "agent_id")),
@@ -3474,20 +3532,57 @@ module AgentCoord
       raise Error, "--json and --format are mutually exclusive"
     end
 
-    def emit_log(rows, options, claim = nil)
+    # `matched` is required rather than defaulting to `rows`: `rows` here is the
+    # --limit-trimmed display slice, and silently falling back to it would rebuild
+    # provenance from the limited set -- the exact bug log_limited exists to avoid.
+    def emit_log(rows, options, claims, matched:)
       format = options[:format].to_s
+      records = claims.map { |claim| claim.fetch("record") }
       if options[:json]
         events = rows.map { |row| log_scrub_values(row.slice(*LOG_TSV_FIELDS)) }
-        @stdout.puts JSON.pretty_generate({ "events" => events, "claim" => claim }.compact)
+        # Provenance describes the search, so it is built from every matched row.
+        # A display limit that shrank it would understate which spellings answered.
+        payload = { "work_item" => log_work_item_summary(options, matched, claims),
+                    "trail" => log_trail_state,
+                    "events" => events, "claim" => records.last }.compact
+        # Oldest first, like the trail above it, so the last thing printed or listed
+        # is the current one. `claim` stays the newest for consumers that read one;
+        # `claims` carries every holder so a concurrent alias claim is never
+        # dropped from the answer.
+        payload["claims"] = records unless records.empty?
+        @stdout.puts JSON.pretty_generate(payload)
       elsif format == "tsv"
         # tsv is a data stream, so notes go to stderr rather than inventing a row
         # a consumer would have to parse around.
         rows.each { |row| @stdout.puts log_tsv_line(row) }
-        log_report_trailer(options, claim, rows, @stderr)
+        log_report_trailer(options, claims, rows, @stderr)
       else
         log_report_rows(rows)
-        log_report_trailer(options, claim, rows, @stdout)
+        log_report_trailer(options, claims, rows, @stdout)
       end
+    end
+
+    # Which spellings actually answered the query. An operator auditing "was this
+    # ever worked" needs to see that `issue:319` and `pr:319` were folded in, and
+    # an empty list is the explicit "searched, matched nothing" that a bare empty
+    # events array cannot say on its own.
+    def log_work_item_summary(options, rows, claims = [])
+      wanted = options[:work_item].to_s
+      return nil if wanted.empty?
+
+      repo, target = log_split_work_item(wanted)
+      # A live claim with no events is a supported answer, so its target counts as
+      # a match; reporting the claim while reporting that nothing matched would
+      # contradict itself. Targets come from the raw records the rows already
+      # carry, not from re-splitting the rendered work item.
+      matched = (rows.map { |row| row.fetch("target") } + claims.map { |claim| claim.fetch("target") }).uniq.sort
+      { "repo" => repo, "target" => target, "matched_targets" => matched }
+    end
+
+    # stderr already warns, but a --json consumer never sees it: without this a
+    # trail cut short by a scoped token is byte-identical to a complete empty one.
+    def log_trail_state
+      @log_incomplete ? "incomplete" : "complete"
     end
 
     def log_report_rows(rows)
@@ -3500,9 +3595,12 @@ module AgentCoord
 
     # A claim reaches here only when it is the latest thing known about the work
     # item, so it always belongs last: it is the answer to "where is it now".
-    def log_report_trailer(options, claim, rows, stream)
+    def log_report_trailer(options, claims, rows, stream)
       stream.puts "no events for #{options[:work_item] || 'the current filters'}" if rows.empty?
-      stream.puts log_claim_note_line(claim) if claim
+      # One line per holder, oldest first: with two live alias claims, printing
+      # only the newest would read as sole custody, and printing them newest-first
+      # would contradict the trail's own last-line-is-current reading.
+      claims.each { |claim| stream.puts log_claim_note_line(claim.fetch("record")) }
     end
 
     # Columns are sized to the rows actually being rendered so a single-work-item
@@ -3530,33 +3628,80 @@ module AgentCoord
     # only on an empty trail would answer "where is it now" with the last thing
     # that happened to leave a trace, while a live claim sat unmentioned.
     def log_claim_for(store, options, rows)
-      claim = log_claim_lookup(store, options)
-      return nil unless claim
-      return claim if rows.empty?
+      claims = log_claim_lookup(store, options)
+      # Freshness is judged against the claim's own lane only. A lane holds a
+      # separate lease, so an event on `issue:319:qa` says nothing about whether
+      # the parent's custody still stands, and letting it decide would drop a live
+      # holder from the answer.
+      claims.reject { |claim| log_claim_superseded?(claim, rows) }
+    end
 
-      claim if log_at_key(claim.fetch("updated_at")) >= rows.last.fetch("at_key")
+    # Only the claim's own key can supersede it. Aliases are separate leases, so an
+    # event on `pr:1` says nothing about whether the lease on `1` still stands, and
+    # letting it decide would drop a live holder. This is also what the literal
+    # match did before identity folding: a claim was only ever weighed against
+    # events recorded under its own spelling.
+    def log_claim_superseded?(claim, rows)
+      key = claim.fetch("target").downcase
+      latest = rows.select { |row| row.fetch("target").downcase == key }.last
+      latest && log_at_key(claim.fetch("record").fetch("updated_at")) < latest.fetch("at_key")
     end
 
     def log_claim_lookup(store, options)
       wanted = options[:work_item].to_s
-      return nil if wanted.empty?
+      return [] if wanted.empty?
       # A filter emptying the trail is a different answer from having no trail;
       # the claim is not evaluated against those filters, so reporting it here
       # would answer a question the operator did not ask.
-      return nil if LOG_TRAIL_FILTERS.any? { |field| log_narrowing_option?(options, field) }
+      return [] if LOG_TRAIL_FILTERS.any? { |field| log_narrowing_option?(options, field) }
 
       claims = log_listing(store, "claims") do |reason|
         "warning: claims #{reason}; a claim for this work item would not be reported"
       end
+      wanted_identity = log_identity(*log_split_work_item(wanted))
       matches = claims.select do |candidate|
         next false if candidate.data["synthetic"] && !options[:include_synthetic]
 
-        log_claim_work_item(candidate).casecmp?(wanted)
+        log_identity_match?(log_claim_identity(candidate), wanted_identity, lane_exact: true)
       end
-      # Casing variants produce two claim paths for one work item; the newest is
-      # the one that describes where the work actually is.
-      newest = matches.max_by { |candidate| log_at_key(candidate.data["updated_at"]) }
-      newest && log_claim_record(newest.data, now_utc)
+      # Two records can mean two different things, and the difference is the exact
+      # claim key. One key written under two casings is a single lease recorded
+      # twice, so the newest describes where the work is and the older is stale
+      # noise. Two distinct keys are two leases: `claim` writes raw target paths,
+      # so `9832` and `pr:9832` are independently claimable and the fleet holds
+      # such pairs live under different agents -- collapsing those would conceal
+      # exactly the double-claim an operator most needs to see. Lanes are matched
+      # exactly rather than rolled up, because a lane holds its own lease too.
+      matches.group_by { |candidate| log_claim_key(candidate) }
+             .values
+             .map { |variants| variants.max_by { |candidate| log_at_key(candidate.data["updated_at"]) } }
+             .sort_by { |candidate| log_at_key(candidate.data["updated_at"]) }
+             .map do |candidate|
+               { "record" => log_claim_record(candidate.data, now_utc, log_claim_target(candidate)),
+                 "target" => log_claim_target(candidate),
+                 "identity" => log_claim_identity(candidate) }
+             end
+    end
+
+    # The exact lease key, case-folded. Not the work-item identity: that folds
+    # aliases, which are separate leases.
+    def log_claim_key(entry)
+      [log_claim_repo(entry).downcase, log_claim_target(entry).downcase]
+    end
+
+    def log_claim_identity(entry)
+      log_identity(log_claim_repo(entry), log_claim_target(entry))
+    end
+
+    # Claims written before repo/target became explicit payload fields carry them
+    # only in the path, which is why claim_status_hash falls back to it. Reading
+    # the payload alone would leave such a claim unmatchable.
+    def log_claim_repo(entry)
+      (entry.data["repo"] || AgentCoord.repo_from_claim_path(entry.path)).to_s.strip
+    end
+
+    def log_claim_target(entry)
+      (entry.data["target"] || AgentCoord.target_from_path(entry.path)).to_s.strip
     end
 
     # Built from claim fields directly rather than through log_row, whose "phase"
@@ -3567,24 +3712,15 @@ module AgentCoord
     def log_narrowing_option?(options, field)
       return options[field]&.zero? if field == :limit
 
-      # Matches log_matches?: an empty value is the absence of a filter, so the
-      # two halves of one query cannot disagree about whether it was narrowed.
+      # Matches the column filters and the work-item match in log_filtered: an
+      # empty value is the absence of a filter, so the two halves of one query
+      # cannot disagree about whether it was narrowed.
       !options[field].to_s.empty?
     end
 
     # Structured so a --json consumer reads the claim's fields instead of
     # re-parsing the sentence the text renderer builds from them.
-    # Claims written before repo/target became explicit payload fields carry them
-    # only in the path, which is why claim_status_hash falls back to it. Reading
-    # the payload alone would leave such a claim unmatchable.
-    def log_claim_work_item(entry)
-      data = entry.data
-      repo = data["repo"] || AgentCoord.repo_from_claim_path(entry.path)
-      target = data["target"] || AgentCoord.target_from_path(entry.path)
-      log_work_item("repo" => repo, "target" => target)
-    end
-
-    def log_claim_record(data, now)
+    def log_claim_record(data, now, target)
       {
         "status" => log_present(data["status"]),
         "machine" => log_present(data["machine_id"]),
@@ -3592,7 +3728,10 @@ module AgentCoord
         "agent_id" => log_present(data["agent_id"]),
         "phase" => log_phase_or_dash(data["phase"]),
         "updated_at" => log_present(data["updated_at"]),
-        "expires_at" => log_present(data["expires_at"])
+        "expires_at" => log_present(data["expires_at"]),
+        # Two holders are only actionable if each names the lease it holds: the
+        # exact target is what a release or handoff has to address.
+        "target" => log_present(target)
       }.transform_values { |value| log_scrub(value) }
        .merge(
          "lease_elapsed" => log_claim_lease_elapsed?(data, now),
@@ -3618,7 +3757,8 @@ module AgentCoord
       parts = ["claim", claim.fetch("status")]
       parts << "[synthetic]" if claim.fetch("synthetic")
       parts.push(claim.fetch("machine"), claim.fetch("host"), claim.fetch("agent_id"),
-                 "phase", claim.fetch("phase"), "updated", claim.fetch("updated_at"))
+                 claim.fetch("target"), "phase", claim.fetch("phase"),
+                 "updated", claim.fetch("updated_at"))
       parts.push("lease elapsed", claim.fetch("expires_at")) if claim.fetch("lease_elapsed")
       parts.join(" ")
     end
@@ -4193,10 +4333,12 @@ module AgentCoord
         heartbeat = read_status_heartbeat(store, holder)
         heartbeat_entries << heartbeat if valid_status_heartbeat?(heartbeat)
       end
-      section_notes = {
-        "batches" => "not checked in target scope",
-        "events" => "not checked in target scope"
-      }
+      # Claims and heartbeats are cleared on release and expiry, so this scope
+      # alone cannot distinguish "never worked" from "worked and finished". Name
+      # the command that can, rather than leaving the operator with two empty
+      # sections that read like an answer.
+      unchecked = "not checked in target scope; run `agent-coord log` for this target's history"
+      section_notes = { "batches" => unchecked, "events" => unchecked }
       if claim && heartbeat_entries.empty?
         section_notes["heartbeats"] = if heartbeat == :invalid
                                         "holder heartbeat unreadable"
@@ -4218,8 +4360,8 @@ module AgentCoord
         section_notes: section_notes,
         claim_entries: [claim].compact,
         heartbeat_entries: heartbeat_entries,
-        batch_entries: [],
-        event_entries: [],
+        batch_entries: nil,
+        event_entries: nil,
         heartbeats_by_agent: heartbeats_by_agent(heartbeat_entries),
         lane_states: {},
         now: now
@@ -4343,8 +4485,11 @@ module AgentCoord
         "section_notes" => section_notes,
         "claims" => claim_entries.map { |entry| claim_status_hash(entry) },
         "heartbeats" => heartbeat_entries.map { |entry| heartbeat_status_hash(entry, now) },
-        "batches" => batch_entries.map { |entry| batch_status_hash(entry, heartbeats_by_agent, lane_states, now) },
-        "events" => event_entries.map { |entry| event_status_hash(entry) }
+        # nil is "this section was not read"; [] is "read, and there is nothing".
+        # Collapsing the two lets an unchecked scope answer a question it never
+        # asked -- see the section note for which command can answer it.
+        "batches" => batch_entries&.map { |entry| batch_status_hash(entry, heartbeats_by_agent, lane_states, now) },
+        "events" => event_entries&.map { |entry| event_status_hash(entry) }
       }
     end
     # rubocop:enable Metrics/ParameterLists
@@ -4378,7 +4523,7 @@ module AgentCoord
       end
 
       @stdout.puts "batches"
-      if payload.fetch("batches").empty?
+      if payload.fetch("batches").to_a.empty?
         @stdout.puts "- #{status_section_note(payload, 'batches') || 'none'}"
       else
         payload.fetch("batches").each do |batch|
@@ -4536,7 +4681,7 @@ module AgentCoord
 
     def render_status_events(payload)
       @stdout.puts "events"
-      if payload.fetch("events").empty?
+      if payload.fetch("events").to_a.empty?
         @stdout.puts "- #{status_section_note(payload, 'events') || 'none'}"
       else
         payload.fetch("events").each do |event|
@@ -5901,6 +6046,48 @@ module AgentCoord
 
   def self.target_from_path(path)
     File.basename(path, ".json")
+  end
+
+  # Split a target into the work item it names and the sub-lane within it:
+  # `issue:319:qa` is the qa lane of item 319. Claims key those separately on
+  # purpose -- a lane holds its own lease -- so this is a read-path identity
+  # only. Folding the two together in a claim key would break lease exclusion.
+  #
+  # `adhoc:` is dropped only when what follows cannot be a GitHub number.
+  # Nothing stops an operator naming an ad hoc task `adhoc:319`, and stripping
+  # that would merge it into issue 319 -- the same wrong answer this identity
+  # exists to prevent, arrived at from the other direction.
+  def self.work_item_parts(target)
+    # -1 keeps a trailing empty field: `319:` is a legal claim segment and a
+    # different key from `319`, so dropping it would answer for both at once.
+    segments = work_item_segments(target.to_s.strip.split(":", -1))
+    base = segments.shift.to_s.downcase
+    [base, segments.empty? ? nil : segments.join(":").downcase]
+  end
+
+  # A kind prefix comes off only where it is decoration rather than identity.
+  # `issue:`/`pr:` decorate a GitHub number, so they come off ahead of one and
+  # stay ahead of a slug -- `issue:foo` is not the separately keyed `foo`.
+  # `adhoc:` is the mirror image: it decorates a slug, and ahead of a number it
+  # stays, so `adhoc:319` is neither issue 319 nor the `319` lane of a work item
+  # called "adhoc". A prefix that stays is part of the base, never a lane.
+  def self.work_item_segments(segments)
+    return segments unless segments.length > 1
+
+    kind = segments.first.downcase
+    return segments unless WORK_ITEM_KINDS.include?(kind)
+    return segments.drop(1) if decorative_work_item_kind?(kind, segments[1])
+
+    [segments.take(2).join(":"), *segments.drop(2)]
+  end
+
+  def self.decorative_work_item_kind?(kind, id)
+    # An absent id decorates nothing. Without this, `adhoc:` comes off an empty
+    # segment and `adhoc::qa` collapses onto the separately keyed `:qa`.
+    return false if id.to_s.empty?
+
+    numeric = id.to_s.match?(WORK_ITEM_NUMBER)
+    WORK_ITEM_GITHUB_KINDS.include?(kind) ? numeric : !numeric
   end
 
   def self.source_root

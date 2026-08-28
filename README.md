@@ -554,11 +554,41 @@ agent-coord log --sync && grep 9765 ~/.local/state/agent-coordination/log.tsv
 Because `--sync` only ever appends, that local trail keeps history after `gc`
 prunes the hot events behind it. Match on `#9765` rather than a bare `9765`:
 event ids are hex, so a bare number also matches incidental digits inside them.
+The mirror records each event's target as it was written, so `grep` does not get
+the work-item matching the command does — anchor on the spellings instead, or the
+same split this command fixes reappears offline:
+
+```bash
+grep -Ei $'#(issue:|pr:)?9765(:|\t)' ~/.local/state/agent-coordination/log.tsv
+```
+
+The `$'...'` quoting matters: GNU grep does not define `\t` inside an ERE, so the
+plain-quoted form matches a literal `t` rather than a tab — it finds none of the
+bare-number records this example exists to union, and matches unrelated targets
+ending in `t`. ANSI-C quoting puts a real tab in the pattern before grep sees it.
+
+`-i` matters for the same reason: grep is case-sensitive by default, while the
+command folds case (below). Without it the offline union silently drops a record
+written as `Issue:9765` or `PR:9765` — a partial trail, which is what anchoring on
+the spellings is here to prevent.
 
 Matching is case-insensitive for the work item, machine, host, and type. That
 matters for the work item in particular, because the event store has recorded the
 same repository under more than one casing, and an exact match would return only
 half of a work item's history.
+
+For the same reason, the target is matched on the work item it names rather than
+on its literal spelling. Issues and pull requests share one number sequence per
+repository, so `9765`, `issue:9765`, and `pr:9765` are one work item and one
+trail; the store holds all three spellings, and matching literally answers with
+whichever share of the history happens to use the queried one. A trailing segment
+is a lane within the item (`issue:9765:qa`): asking for the item covers its lanes,
+and asking for a lane stays narrow and does not widen to the parent. This is a
+read-path identity only — claims keep their exact key, because a lane holds its
+own lease and folding two keys together would break exclusion. `--json` reports
+the spellings that actually matched under `work_item.matched_targets`, and a
+`trail` of `complete` or `incomplete` alongside them, so an empty `events` array
+from a scoped token is never mistaken for a work item that was never touched.
 
 A work item can also hold a claim while having no event trail, since claims
 written before lifecycle auto-emit were overwritten in place rather than
@@ -572,15 +602,23 @@ not evaluated against `--since`, `--machine`, `--host`, or `--type`:
 
 ```text
 no events for ShakaCode/hichee#issue:10112
-claim active m5 codex codex-whimstay-queue-20260801 phase implementing updated 2026-08-01T01:13:03Z
+claim active m5 codex codex-whimstay-queue-20260801 issue:10112 phase implementing updated 2026-08-01T01:13:03Z
 ```
+
+Each claim line names the exact target it holds, because aliases such as `9832`
+and `pr:9832` are independently claimable and the fleet holds such pairs live
+under different agents. One line is printed per holder, oldest first, so the last
+one read is the current one. `--json` mirrors that as a `claims` array; the
+singular `claim` remains the newest holder for consumers that read one value.
+`claims` is omitted entirely when no claim matched, so read it with a default
+rather than assuming the key is present.
 
 A claim whose lease has run out is reported as such rather than presented as
 current custody — recency alone does not make a claim live, and the fleet holds
 many left active with a lease long past:
 
 ```text
-claim released m5 codex codex-whimstay-queue-20260801 phase implementation updated 2026-08-01T06:05:27Z lease elapsed 2026-08-01T06:05:27Z
+claim released m5 codex codex-whimstay-queue-20260801 issue:10112 phase implementation updated 2026-08-01T06:05:27Z lease elapsed 2026-08-01T06:05:27Z
 ```
 
 The elapsed lease is reported as a fact, not as a verdict that custody ended: a

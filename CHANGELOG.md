@@ -298,6 +298,64 @@ when releases begin.
 
 ### Fixed
 
+- `agent-coord log` now matches a target on the work item it names rather than on
+  its literal spelling, so one item's custody trail stops splitting into partial
+  answers. Issues and pull requests share one number sequence per repository, and
+  the store holds the same item as `319`, `issue:319`, and `pr:319`; every
+  spelling now returns the whole trail. Against the live fleet backend,
+  `--target 319` returned 7 events and `--target issue:319` returned 28 for the
+  same issue, with neither reporting that it was showing a share of the history;
+  all spellings now return the union of 35. A trailing segment stays a lane within
+  the item (`issue:319:qa`): asking for the item covers its lanes, asking for a
+  lane stays narrow. Claim keys are unchanged — this is a read-path identity only,
+  because a lane holds its own lease and merging keys would break exclusion. The
+  reported claim follows that same rule: it folds casing and kind prefixes, which
+  name one lease, but matches the lane exactly, so a parent and a lane that are
+  live at the same time are each reported under their own query instead of the
+  newer one hiding the other. `claim` writes raw target paths, so `9832` and
+  `pr:9832` are independently claimable and the fleet holds such pairs live under
+  different agents; `--json` therefore gained a `claims` array carrying every
+  holder, with the singular `claim` still the newest for existing consumers, and
+  text output prints one line per holder. One key recorded under two casings is
+  still a single lease written twice, so those collapse to the newest as before —
+  the grouping is on the exact claim key, not on the work-item identity. Whether a claim is still the latest
+  thing known is judged against events recorded under that claim's own key, since
+  a separate lease — whether a lane like `issue:319:qa` or an alias like `pr:319` —
+  says nothing about whether this one still stands. That is also what the literal
+  match did before identity folding. `--limit` trims the trail that is displayed
+  and no longer trims the evidence that decides this, so a release dropped by the
+  limit can still supersede a claim. Every reported claim now carries the exact
+  `target` it holds, in both JSON and text, since with two holders that key is
+  what a release or handoff has to address, and claim lines read oldest-first like
+  the trail above them so the last one printed is the current one (issue #141).
+- `adhoc:` targets are no longer folded into the GitHub number space when their id
+  is a bare number. Ad hoc ids are operator-chosen slugs, and nothing stops one
+  being named `adhoc:319`, which would otherwise have merged with issue 319 — the
+  same wrong answer this identity exists to prevent, reached from the other
+  direction. A kept prefix stays part of the base rather than making the number a
+  lane, so `adhoc:319` is also not swept up by a query for a work item called
+  `adhoc`. A slug id such as `adhoc:20260731-backend-policy` still folds with its
+  bare spelling, which is the case that made the prefix foldable. `issue:` and
+  `pr:` are the mirror image and now follow the same rule: they come off ahead of
+  a number, which is what they decorate, and stay ahead of a slug, so a bare `foo`
+  and a separately keyed `issue:foo` are no longer merged. A prefix with no id
+  after it decorates nothing and is kept for the same reason, so `adhoc::qa` stays
+  distinct from the separately keyed `:qa` rather than folding onto it. Every
+  `issue:`/`pr:` target in the fleet store is numeric, so this splits nothing that
+  folded before (issue #141).
+- `agent-coord log --json` now reports `work_item.matched_targets` and a `trail`
+  of `complete` or `incomplete`. The degraded-listing warning went only to stderr,
+  so a trail cut short by a scoped token was byte-identical to a complete empty
+  one for any JSON consumer, and "searched everything, found nothing" could not be
+  told apart from "could not search". `matched_targets` describes the search
+  rather than the rendered rows, so a `--limit` that trims the displayed trail
+  does not understate which spellings answered (issue #141).
+- `agent-coord status --repo R --target N` now reports the `batches` and `events`
+  sections it does not read as `null` rather than as empty arrays, and its section
+  note names `agent-coord log` as the command that can answer for that target.
+  Claims and heartbeats are cleared on release and expiry, so target scope alone
+  cannot tell "never worked" from "worked and finished" — and two empty arrays
+  read like an answer to exactly that question (issue #141).
 - The consumer env-file probe no longer reads a commented-out assignment such as
   `AGENT_COORD_API_URL= # remote disabled` as a configured fleet URL. Sourcing
   that file leaves the variable empty, so it selects no fleet backend; the value

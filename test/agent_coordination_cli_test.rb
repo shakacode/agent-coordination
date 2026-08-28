@@ -4333,11 +4333,59 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     assert_equal "target", payload.fetch("scope").fetch("kind")
     assert_equal "shakacode/react_on_rails", payload.fetch("scope").fetch("repo")
     assert_equal "4150", payload.fetch("scope").fetch("target")
-    assert_equal ["not checked in target scope"], payload.fetch("degraded")
-    assert_equal "not checked in target scope", payload.fetch("section_notes").fetch("batches")
-    assert_equal "not checked in target scope", payload.fetch("section_notes").fetch("events")
+    unchecked = "not checked in target scope; run `agent-coord log` for this target's history"
+    assert_equal [unchecked], payload.fetch("degraded")
+    assert_equal unchecked, payload.fetch("section_notes").fetch("batches")
+    assert_equal unchecked, payload.fetch("section_notes").fetch("events")
     assert_equal "jg-codex/4150-worker", payload.fetch("claims").first.fetch("branch")
     assert_equal "worker-4150", payload.fetch("heartbeats").first.fetch("agent_id")
+  end
+
+  # A section that was never read must not render as a section that was read and
+  # found empty: an operator asking "was this target ever worked" reads the empty
+  # array as the answer. null is unmistakably "no answer here".
+  def test_status_target_scope_reports_unchecked_sections_as_null_not_empty
+    now = Time.utc(2026, 6, 20, 12, 0, 0)
+    store = TargetScopedStore.new(now)
+    stdout = StringIO.new
+    runner = AgentCoord::Runner.new([], stdout: stdout, clock: FixedClock.new(now))
+    runner.define_singleton_method(:build_store) { |_options| store }
+
+    runner.send(:render_status, repo: "shakacode/react_on_rails", target: "4150", json: true)
+    payload = JSON.parse(stdout.string)
+
+    assert_nil payload.fetch("batches")
+    assert_nil payload.fetch("events")
+    refute_empty payload.fetch("claims"), "the sections that were read still carry their records"
+  end
+
+  # The note is the only place the operator learns the question is answerable
+  # elsewhere, so it names the command that answers it.
+  def test_status_target_scope_note_points_at_the_command_that_can_answer
+    now = Time.utc(2026, 6, 20, 12, 0, 0)
+    store = TargetScopedStore.new(now)
+    stdout = StringIO.new
+    runner = AgentCoord::Runner.new([], stdout: stdout, clock: FixedClock.new(now))
+    runner.define_singleton_method(:build_store) { |_options| store }
+
+    runner.send(:render_status, repo: "shakacode/react_on_rails", target: "4150", json: true)
+    note = JSON.parse(stdout.string).fetch("section_notes").fetch("events")
+
+    assert_includes note, "not checked in target scope"
+    assert_includes note, "agent-coord log"
+  end
+
+  def test_status_target_scope_text_renders_unchecked_sections_without_crashing
+    now = Time.utc(2026, 6, 20, 12, 0, 0)
+    store = TargetScopedStore.new(now)
+    stdout = StringIO.new
+    runner = AgentCoord::Runner.new([], stdout: stdout, clock: FixedClock.new(now))
+    runner.define_singleton_method(:build_store) { |_options| store }
+
+    result = runner.send(:render_status, repo: "shakacode/react_on_rails", target: "4150")
+
+    assert_equal 0, result
+    assert_includes stdout.string, "not checked in target scope"
   end
 
   def test_status_target_scope_reports_malformed_claim_as_unknown

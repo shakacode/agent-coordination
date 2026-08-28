@@ -1209,3 +1209,592 @@ class AgentCoordLogSyncTest < AgentCoordLogTestCase
     FileUtils.chmod(0o700, @state_root)
   end
 end
+
+# One GitHub number is one work item, however the target was spelled when it was
+# recorded. The store holds the same item as a bare number, as `issue:N`, and as
+# `pr:N`, so matching the literal string splits one custody trail into partial
+# answers -- the same hazard the repo-casing match already guards against.
+class AgentCoordLogWorkItemIdentityTest < AgentCoordLogTestCase
+  # A trail for one work item recorded under three spellings, plus a QA sub-lane
+  # and a lookalike slug that must stay a different work item.
+  def write_mixed_spellings
+    write_event("b1", "e1", "type" => "claim.acquired", "repo" => "shakacode/example", "target" => "319",
+                            "machine_id" => "m1", "host" => "codex", "at" => "2026-08-03T01:00:00Z")
+    write_event("b1", "e2", "type" => "phase.changed", "repo" => "shakacode/example", "target" => "issue:319",
+                            "machine_id" => "m1", "host" => "codex", "at" => "2026-08-03T02:00:00Z")
+    write_event("b1", "e3", "type" => "lane_closed", "repo" => "shakacode/example", "target" => "pr:319",
+                            "machine_id" => "m2", "host" => "claude-code", "at" => "2026-08-03T03:00:00Z")
+    write_event("b1", "e4", "type" => "claim.acquired", "repo" => "shakacode/example", "target" => "issue:319:qa",
+                            "machine_id" => "m3", "host" => "codex", "at" => "2026-08-03T04:00:00Z")
+    write_event("b1", "e5", "type" => "claim.acquired", "repo" => "shakacode/example", "target" => "319-fix",
+                            "machine_id" => "m9", "host" => "codex", "at" => "2026-08-03T05:00:00Z")
+  end
+
+  def json_targets(result)
+    JSON.parse(result.stdout).fetch("events").map { |event| event.fetch("work_item") }
+  end
+
+  def test_bare_number_query_matches_prefixed_spellings
+    write_mixed_spellings
+
+    result = run_log("shakacode/example#319", "--json")
+
+    assert_equal 0, result.status.exitstatus, result.stderr
+    assert_equal(
+      ["shakacode/example#319", "shakacode/example#issue:319", "shakacode/example#pr:319",
+       "shakacode/example#issue:319:qa"],
+      json_targets(result)
+    )
+  end
+
+  def test_prefixed_query_matches_the_bare_spelling
+    write_mixed_spellings
+
+    assert_equal 4, json_targets(run_log("shakacode/example#issue:319", "--json")).length
+  end
+
+  def test_issue_and_pr_prefixes_are_the_same_work_item
+    write_mixed_spellings
+
+    assert_equal(
+      json_targets(run_log("shakacode/example#issue:319", "--json")),
+      json_targets(run_log("shakacode/example#pr:319", "--json"))
+    )
+  end
+
+  # Asking for a lane is a narrower question than asking for the work item, so it
+  # must not answer with the parent's events.
+  def test_explicit_lane_query_matches_only_that_lane
+    write_mixed_spellings
+
+    assert_equal ["shakacode/example#issue:319:qa"], json_targets(run_log("shakacode/example#issue:319:qa", "--json"))
+  end
+
+  def test_lane_events_roll_up_under_the_bare_work_item
+    write_mixed_spellings
+
+    assert_includes json_targets(run_log("shakacode/example#319", "--json")), "shakacode/example#issue:319:qa"
+  end
+
+  # `319-fix` is a slug, not a lane of 319. Prefix-stripping must not widen into
+  # substring matching.
+  def test_lookalike_slug_is_a_different_work_item
+    write_mixed_spellings
+
+    refute_includes json_targets(run_log("shakacode/example#319", "--json")), "shakacode/example#319-fix"
+  end
+
+  def test_slug_target_still_matches_itself
+    write_mixed_spellings
+
+    assert_equal ["shakacode/example#319-fix"], json_targets(run_log("shakacode/example#319-fix", "--json"))
+  end
+
+  def test_claim_recorded_under_a_prefixed_target_is_found_by_the_bare_query
+    write_mixed_spellings
+    write_claim("shakacode/example", "issue:319", "status" => "active", "agent_id" => "acd-worker",
+                                                  "updated_at" => "2026-08-03T06:00:00Z")
+
+    claim = JSON.parse(run_log("shakacode/example#319", "--json").stdout).fetch("claim")
+
+    assert_equal "acd-worker", claim.fetch("agent_id")
+  end
+
+  # A JSON consumer sees only the payload, so "searched everything and found
+  # nothing" must not render identically to "could not search".
+  def test_json_reports_the_spellings_that_matched
+    write_mixed_spellings
+
+    payload = JSON.parse(run_log("shakacode/example#319", "--json").stdout)
+
+    assert_equal ["319", "issue:319", "issue:319:qa", "pr:319"], payload.dig("work_item", "matched_targets").sort
+  end
+
+  # Claims are cleared on release, so a finished work item has events and no live
+  # claim. That is the case target-scoped status cannot tell from "never worked",
+  # and the whole reason this trail has to be reachable by any spelling.
+  def test_finished_work_item_reports_its_events_with_no_live_claim
+    write_mixed_spellings
+
+    payload = JSON.parse(run_log("shakacode/example#319", "--json").stdout)
+
+    assert_nil payload["claim"]
+    refute_empty payload.fetch("events")
+    assert_equal "complete", payload.fetch("trail")
+  end
+
+  def test_json_reports_a_complete_trail_with_no_records_as_searched
+    write_mixed_spellings
+
+    payload = JSON.parse(run_log("shakacode/example#999", "--json").stdout)
+
+    assert_empty payload.fetch("events")
+    assert_equal "complete", payload.fetch("trail")
+    assert_empty payload.dig("work_item", "matched_targets")
+  end
+end
+
+# Rolling lanes into the item is right for history and wrong for custody: a lane
+# holds its own lease, so a parent and its lane can both be live at once. The
+# fleet does exactly this (`pr:32389` and `pr:32389:qa`, both active).
+class AgentCoordLogConcurrentLaneClaimTest < AgentCoordLogTestCase
+  def write_parent_and_lane_claims
+    write_event("b1", "e1", "type" => "claim.acquired", "repo" => "shakacode/example", "target" => "issue:319",
+                            "machine_id" => "m1", "host" => "codex", "at" => "2026-08-03T01:00:00Z")
+    write_claim("shakacode/example", "319", "status" => "active", "agent_id" => "parent-worker",
+                                            "updated_at" => "2026-08-03T02:00:00Z")
+    # Newer, so a max_by over both would prefer it and hide the parent.
+    write_claim("shakacode/example", "issue:319:qa", "status" => "active", "agent_id" => "qa-worker",
+                                                     "updated_at" => "2026-08-03T05:00:00Z")
+  end
+
+  def claim_for(target)
+    JSON.parse(run_log("shakacode/example##{target}", "--json").stdout)["claim"]
+  end
+
+  def test_item_query_reports_the_item_claim_not_a_newer_lane_claim
+    write_parent_and_lane_claims
+
+    assert_equal "parent-worker", claim_for("319").fetch("agent_id")
+  end
+
+  def test_prefixed_item_query_still_finds_the_bare_item_claim
+    write_parent_and_lane_claims
+
+    assert_equal "parent-worker", claim_for("issue:319").fetch("agent_id")
+  end
+
+  def test_lane_query_reports_the_lane_claim
+    write_parent_and_lane_claims
+
+    assert_equal "qa-worker", claim_for("issue:319:qa").fetch("agent_id")
+  end
+
+  # A live claim with no events is an explicitly supported fallback. Reporting the
+  # claim while also reporting that nothing matched contradicts itself.
+  def test_claim_only_work_item_reports_the_claim_target_as_matched
+    write_claim("shakacode/example", "issue:404", "status" => "active", "agent_id" => "solo-worker",
+                                                  "updated_at" => "2026-08-03T02:00:00Z")
+
+    payload = JSON.parse(run_log("shakacode/example#404", "--json").stdout)
+
+    assert_equal "solo-worker", payload.fetch("claim").fetch("agent_id")
+    assert_empty payload.fetch("events")
+    assert_equal ["issue:404"], payload.dig("work_item", "matched_targets")
+  end
+
+  # `319:` is a legal claim segment. split(":") drops the trailing empty field, so
+  # without an explicit limit it would collapse into the bare item and two distinct
+  # claim keys would answer as one.
+  def test_trailing_colon_target_is_not_the_bare_work_item
+    write_claim("shakacode/example", "319", "status" => "active", "agent_id" => "parent-worker",
+                                            "updated_at" => "2026-08-03T02:00:00Z")
+    write_claim("shakacode/example", "319:", "status" => "active", "agent_id" => "colon-worker",
+                                             "updated_at" => "2026-08-03T05:00:00Z")
+
+    assert_equal "parent-worker", claim_for("319").fetch("agent_id")
+  end
+end
+
+# Folding aliases finds more claims, and must not therefore report fewer holders.
+# `claim` writes raw target paths, so `9832` and `pr:9832` are independently
+# claimable and the fleet does hold both live under different agents.
+class AgentCoordLogAliasClaimTest < AgentCoordLogTestCase
+  def write_alias_claims
+    write_claim("shakacode/example", "9832", "status" => "active", "agent_id" => "bare-holder",
+                                             "updated_at" => "2026-08-03T02:00:00Z")
+    write_claim("shakacode/example", "pr:9832", "status" => "active", "agent_id" => "prefixed-holder",
+                                                "updated_at" => "2026-08-03T05:00:00Z")
+  end
+
+  def payload_for(target)
+    JSON.parse(run_log("shakacode/example##{target}", "--json").stdout)
+  end
+
+  def test_every_alias_holder_is_reported_not_just_the_newest
+    write_alias_claims
+
+    holders = payload_for("9832").fetch("claims").map { |claim| claim.fetch("agent_id") }
+
+    assert_equal %w[bare-holder prefixed-holder], holders.sort
+  end
+
+  def test_singular_claim_stays_the_newest_for_existing_consumers
+    write_alias_claims
+
+    assert_equal "prefixed-holder", payload_for("9832").fetch("claim").fetch("agent_id")
+  end
+
+  def test_text_output_shows_every_alias_holder
+    write_alias_claims
+
+    stdout = run_log("shakacode/example#9832").stdout
+
+    assert_includes stdout, "bare-holder"
+    assert_includes stdout, "prefixed-holder"
+  end
+
+  def test_a_single_holder_still_reports_one_claim
+    write_claim("shakacode/example", "issue:9832", "status" => "active", "agent_id" => "only-holder",
+                                                   "updated_at" => "2026-08-03T02:00:00Z")
+
+    payload = payload_for("9832")
+
+    assert_equal "only-holder", payload.fetch("claim").fetch("agent_id")
+    assert_equal(["only-holder"], payload.fetch("claims").map { |claim| claim.fetch("agent_id") })
+  end
+
+  # A lane event cannot supersede the parent's separately leased custody, so it
+  # must not decide whether the parent claim is still the latest thing known.
+  def test_a_newer_lane_event_does_not_suppress_the_parent_claim
+    write_claim("shakacode/example", "319", "status" => "active", "agent_id" => "parent-holder",
+                                            "updated_at" => "2026-08-03T02:00:00Z")
+    write_event("b1", "e1", "type" => "phase.changed", "repo" => "shakacode/example",
+                            "target" => "issue:319:qa", "machine_id" => "m1", "host" => "codex",
+                            "at" => "2026-08-03T09:00:00Z")
+
+    assert_equal "parent-holder", payload_for("319").fetch("claim").fetch("agent_id")
+  end
+
+  # adhoc ids are operator-chosen slugs, not GitHub numbers, so a numeric one is
+  # its own work item and must not merge with the issue of the same number.
+  def test_numeric_adhoc_target_is_not_the_github_item
+    write_event("b1", "e1", "type" => "claim.acquired", "repo" => "shakacode/example", "target" => "issue:319",
+                            "machine_id" => "m1", "host" => "codex", "at" => "2026-08-03T01:00:00Z")
+    write_event("b1", "e2", "type" => "claim.acquired", "repo" => "shakacode/example", "target" => "adhoc:319",
+                            "machine_id" => "m2", "host" => "codex", "at" => "2026-08-03T02:00:00Z")
+
+    assert_equal ["issue:319"], payload_for("319").dig("work_item", "matched_targets")
+    assert_equal ["adhoc:319"], payload_for("adhoc:319").dig("work_item", "matched_targets")
+  end
+
+  # The slug case that made adhoc foldable in the first place still folds.
+  def test_slug_adhoc_target_still_folds_with_its_bare_spelling
+    write_event("b1", "e1", "type" => "claim.acquired", "repo" => "shakacode/example",
+                            "target" => "20260731-backend-policy", "machine_id" => "m1", "host" => "codex",
+                            "at" => "2026-08-03T01:00:00Z")
+    write_event("b1", "e2", "type" => "phase.changed", "repo" => "shakacode/example",
+                            "target" => "adhoc:20260731-backend-policy", "machine_id" => "m1", "host" => "codex",
+                            "at" => "2026-08-03T02:00:00Z")
+
+    assert_equal 2, payload_for("20260731-backend-policy").fetch("events").length
+  end
+end
+
+# The difference between "two records" and "two holders" is the exact claim key.
+class AgentCoordLogClaimKeyTest < AgentCoordLogTestCase
+  def test_one_key_recorded_under_two_casings_reports_only_the_newest
+    write_claim("shakacode/example", "9832", "status" => "released", "agent_id" => "old-worker",
+                                             "updated_at" => "2026-07-01T00:00:00Z")
+    # Same lease, repo casing differs, so this is the same key recorded twice.
+    write_claim("ShakaCode/example", "9832", "status" => "active", "agent_id" => "current-worker",
+                                             "updated_at" => "2026-08-01T00:00:00Z")
+
+    holders = JSON.parse(run_log("shakacode/example#9832", "--json").stdout)
+                  .fetch("claims").map { |claim| claim.fetch("agent_id") }
+
+    assert_equal ["current-worker"], holders
+  end
+
+  def test_two_distinct_keys_report_both_holders
+    write_claim("shakacode/example", "9832", "status" => "active", "agent_id" => "bare-holder",
+                                             "updated_at" => "2026-07-01T00:00:00Z")
+    write_claim("shakacode/example", "pr:9832", "status" => "active", "agent_id" => "prefixed-holder",
+                                                "updated_at" => "2026-08-01T00:00:00Z")
+
+    holders = JSON.parse(run_log("shakacode/example#9832", "--json").stdout)
+                  .fetch("claims").map { |claim| claim.fetch("agent_id") }
+
+    assert_equal %w[bare-holder prefixed-holder], holders.sort
+  end
+end
+
+# Aliases are separate leases, so neither the trail nor another alias may decide
+# whether one of them is still current.
+class AgentCoordLogAliasFreshnessTest < AgentCoordLogTestCase
+  def test_an_event_on_one_alias_does_not_suppress_the_other_alias_claim
+    write_claim("shakacode/example", "1", "status" => "active", "agent_id" => "bare-holder",
+                                          "updated_at" => "2026-08-01T00:00:00Z")
+    write_claim("shakacode/example", "pr:1", "status" => "active", "agent_id" => "prefixed-holder",
+                                             "updated_at" => "2026-08-10T00:00:00Z")
+    # Newer than the bare lease, so a lane-only comparison would suppress it, but
+    # it belongs to the prefixed alias and is older than that alias's own lease.
+    write_event("b1", "e1", "type" => "claim.acquired", "repo" => "shakacode/example", "target" => "pr:1",
+                            "machine_id" => "m1", "host" => "codex", "at" => "2026-08-09T00:00:00Z")
+
+    holders = JSON.parse(run_log("shakacode/example#1", "--json").stdout)
+                  .fetch("claims").map { |claim| claim.fetch("agent_id") }
+
+    assert_equal %w[bare-holder prefixed-holder], holders.sort
+  end
+
+  def test_an_alias_claim_older_than_its_own_event_is_still_superseded
+    write_claim("shakacode/example", "1", "status" => "active", "agent_id" => "bare-holder",
+                                          "updated_at" => "2026-08-01T00:00:00Z")
+    write_claim("shakacode/example", "pr:1", "status" => "active", "agent_id" => "prefixed-holder",
+                                             "updated_at" => "2026-08-02T00:00:00Z")
+    write_event("b1", "e1", "type" => "claim.acquired", "repo" => "shakacode/example", "target" => "pr:1",
+                            "machine_id" => "m1", "host" => "codex", "at" => "2026-08-09T00:00:00Z")
+
+    holders = JSON.parse(run_log("shakacode/example#1", "--json").stdout)
+                  .fetch("claims").map { |claim| claim.fetch("agent_id") }
+
+    assert_equal ["bare-holder"], holders, "the prefixed lease is older than its own event"
+  end
+
+  def test_an_event_on_the_claims_own_key_still_supersedes_it
+    write_claim("shakacode/example", "1", "status" => "active", "agent_id" => "bare-holder",
+                                          "updated_at" => "2026-08-01T00:00:00Z")
+    write_event("b1", "e1", "type" => "claim.released", "repo" => "shakacode/example", "target" => "1",
+                            "machine_id" => "m1", "host" => "codex", "at" => "2026-08-09T00:00:00Z")
+
+    assert_nil JSON.parse(run_log("shakacode/example#1", "--json").stdout)["claim"]
+  end
+end
+
+# Declining to strip a numeric `adhoc:` prefix must keep it in the base, not turn
+# the number into a lane of a work item called "adhoc".
+class AgentCoordLogNumericAdhocTest < AgentCoordLogTestCase
+  def write_adhoc_events
+    write_event("b1", "e1", "type" => "claim.acquired", "repo" => "shakacode/example", "target" => "adhoc:319",
+                            "machine_id" => "m1", "host" => "codex", "at" => "2026-08-03T01:00:00Z")
+    write_event("b1", "e2", "type" => "claim.acquired", "repo" => "shakacode/example", "target" => "adhoc",
+                            "machine_id" => "m2", "host" => "codex", "at" => "2026-08-03T02:00:00Z")
+    write_event("b1", "e3", "type" => "claim.acquired", "repo" => "shakacode/example", "target" => "adhoc:319:qa",
+                            "machine_id" => "m3", "host" => "codex", "at" => "2026-08-03T03:00:00Z")
+  end
+
+  def matched(target)
+    JSON.parse(run_log("shakacode/example##{target}", "--json").stdout).dig("work_item", "matched_targets")
+  end
+
+  def test_bare_adhoc_query_does_not_sweep_in_numeric_adhoc_items
+    write_adhoc_events
+
+    assert_equal ["adhoc"], matched("adhoc")
+  end
+
+  def test_numeric_adhoc_item_covers_its_own_lane
+    write_adhoc_events
+
+    assert_equal ["adhoc:319", "adhoc:319:qa"], matched("adhoc:319")
+  end
+
+  def test_numeric_adhoc_lane_query_stays_narrow
+    write_adhoc_events
+
+    assert_equal ["adhoc:319:qa"], matched("adhoc:319:qa")
+  end
+
+  def test_numeric_adhoc_item_is_still_not_the_github_item
+    write_adhoc_events
+    write_event("b1", "e4", "type" => "claim.acquired", "repo" => "shakacode/example", "target" => "issue:319",
+                            "machine_id" => "m4", "host" => "codex", "at" => "2026-08-03T04:00:00Z")
+
+    assert_equal ["issue:319"], matched("319")
+  end
+end
+
+# A kind prefix decorates an identifier. With no identifier to decorate there is
+# nothing to strip, so `adhoc::qa` must stay distinct from the separately keyed
+# `:qa` rather than folding onto it.
+class AgentCoordLogEmptyKindIdentifierTest < AgentCoordLogTestCase
+  def write_empty_identifier_events
+    write_event("b1", "e1", "type" => "claim.acquired", "repo" => "shakacode/example", "target" => "adhoc::qa",
+                            "machine_id" => "m1", "host" => "codex", "at" => "2026-08-04T01:00:00Z")
+    write_event("b1", "e2", "type" => "claim.acquired", "repo" => "shakacode/example", "target" => ":qa",
+                            "machine_id" => "m2", "host" => "codex", "at" => "2026-08-04T02:00:00Z")
+  end
+
+  def matched(target)
+    JSON.parse(run_log("shakacode/example##{target}", "--json").stdout).dig("work_item", "matched_targets")
+  end
+
+  def test_empty_adhoc_identifier_is_not_the_bare_lane_item
+    write_empty_identifier_events
+
+    assert_equal ["adhoc::qa"], matched("adhoc::qa")
+  end
+
+  def test_bare_lane_item_does_not_absorb_the_empty_adhoc_identifier
+    write_empty_identifier_events
+
+    assert_equal [":qa"], matched(":qa")
+  end
+
+  # The guard is on the id, not on the lane that follows it, so a bare `adhoc:`
+  # is kept whole for the same reason and does not answer for the empty base.
+  def test_bare_adhoc_prefix_with_no_id_stays_whole
+    write_event("b1", "e1", "type" => "claim.acquired", "repo" => "shakacode/example", "target" => "adhoc:",
+                            "machine_id" => "m1", "host" => "codex", "at" => "2026-08-04T01:00:00Z")
+    write_event("b1", "e2", "type" => "claim.acquired", "repo" => "shakacode/example", "target" => "",
+                            "machine_id" => "m2", "host" => "codex", "at" => "2026-08-04T02:00:00Z")
+
+    assert_equal ["adhoc:"], matched("adhoc:")
+  end
+end
+
+# --limit trims what is displayed. It must not trim the evidence that decides
+# whether a claim is still current, or a stale lease reads as live custody.
+class AgentCoordLogLimitFreshnessTest < AgentCoordLogTestCase
+  def write_superseded_alias_claim
+    write_claim("shakacode/example", "pr:1", "status" => "active", "agent_id" => "stale-holder",
+                                             "updated_at" => "2026-08-01T00:00:00Z")
+    write_event("b1", "e2", "type" => "claim.released", "repo" => "shakacode/example", "target" => "pr:1",
+                            "machine_id" => "m1", "host" => "codex", "at" => "2026-08-02T00:00:00Z")
+    # Newer still, and on a different alias, so --limit 1 keeps only this one.
+    write_event("b1", "e3", "type" => "phase.changed", "repo" => "shakacode/example", "target" => "1",
+                            "machine_id" => "m1", "host" => "codex", "at" => "2026-08-03T00:00:00Z")
+  end
+
+  def claims_for(*)
+    payload = JSON.parse(run_log("shakacode/example#1", "--json", *).stdout)
+    (payload["claims"] || []).map { |claim| claim.fetch("agent_id") }
+  end
+
+  def test_a_release_dropped_by_the_limit_still_supersedes_the_claim
+    write_superseded_alias_claim
+
+    assert_empty claims_for("--limit", "1")
+  end
+
+  def test_the_unlimited_answer_is_unchanged
+    write_superseded_alias_claim
+
+    assert_empty claims_for
+  end
+
+  def test_the_limit_still_trims_the_displayed_trail
+    write_superseded_alias_claim
+
+    events = JSON.parse(run_log("shakacode/example#1", "--json", "--limit", "1").stdout).fetch("events")
+
+    assert_equal 1, events.length
+  end
+end
+
+# Two holders are only actionable if you can tell which lease each one holds.
+class AgentCoordLogClaimTargetTest < AgentCoordLogTestCase
+  def write_two_holders
+    write_claim("shakacode/example", "1", "status" => "active", "agent_id" => "bare-holder",
+                                          "updated_at" => "2026-08-01T00:00:00Z")
+    write_claim("shakacode/example", "pr:1", "status" => "active", "agent_id" => "prefixed-holder",
+                                             "updated_at" => "2026-08-02T00:00:00Z")
+  end
+
+  def test_each_emitted_claim_names_its_own_lease_key
+    write_two_holders
+
+    claims = JSON.parse(run_log("shakacode/example#1", "--json").stdout).fetch("claims")
+
+    assert_equal({ "bare-holder" => "1", "prefixed-holder" => "pr:1" },
+                 claims.to_h { |claim| [claim.fetch("agent_id"), claim.fetch("target")] })
+  end
+
+  def test_text_output_names_the_lease_key_on_each_claim_line
+    write_two_holders
+
+    lines = run_log("shakacode/example#1").stdout.lines.select { |line| line.start_with?("claim ") }
+
+    assert_equal 2, lines.length
+    assert(lines.any? { |line| line.include?("bare-holder") && line.include?(" 1 ") })
+    assert(lines.any? { |line| line.include?("prefixed-holder") && line.include?(" pr:1 ") })
+  end
+end
+
+# The trail reads oldest-first and the last line is the current state. Claim
+# trailer lines are part of that reading, so they follow the same direction.
+class AgentCoordLogClaimOrderTest < AgentCoordLogTestCase
+  def write_two_live_holders
+    write_claim("shakacode/example", "1", "status" => "active", "agent_id" => "older-holder",
+                                          "updated_at" => "2026-08-01T00:00:00Z")
+    write_claim("shakacode/example", "pr:1", "status" => "active", "agent_id" => "newer-holder",
+                                             "updated_at" => "2026-08-02T00:00:00Z")
+  end
+
+  def test_text_claim_lines_read_oldest_first
+    write_two_live_holders
+
+    holders = run_log("shakacode/example#1").stdout.lines
+                                            .select { |line| line.start_with?("claim ") }
+                                            .map { |line| line[/\b\w+-holder\b/] }
+
+    assert_equal %w[older-holder newer-holder], holders
+  end
+
+  def test_singular_json_claim_is_still_the_newest
+    write_two_live_holders
+
+    payload = JSON.parse(run_log("shakacode/example#1", "--json").stdout)
+
+    assert_equal "newer-holder", payload.fetch("claim").fetch("agent_id")
+    assert_equal(%w[older-holder newer-holder],
+                 payload.fetch("claims").map { |claim| claim.fetch("agent_id") })
+  end
+end
+
+# `issue:`/`pr:` are decoration on a GitHub number. Ahead of a slug they are not
+# decoration, and stripping them would merge two separately keyed records.
+class AgentCoordLogNonNumericKindTest < AgentCoordLogTestCase
+  def write_slug_events
+    write_event("b1", "e1", "type" => "claim.acquired", "repo" => "shakacode/example", "target" => "foo",
+                            "machine_id" => "m1", "host" => "codex", "at" => "2026-08-03T01:00:00Z")
+    write_event("b1", "e2", "type" => "claim.acquired", "repo" => "shakacode/example", "target" => "issue:foo",
+                            "machine_id" => "m2", "host" => "codex", "at" => "2026-08-03T02:00:00Z")
+  end
+
+  def matched(target)
+    JSON.parse(run_log("shakacode/example##{target}", "--json").stdout).dig("work_item", "matched_targets")
+  end
+
+  def test_a_slug_and_its_prefixed_spelling_are_different_work_items
+    write_slug_events
+
+    assert_equal ["foo"], matched("foo")
+    assert_equal ["issue:foo"], matched("issue:foo")
+  end
+
+  def test_numeric_ids_still_fold_across_prefixes
+    write_event("b1", "e1", "type" => "claim.acquired", "repo" => "shakacode/example", "target" => "319",
+                            "machine_id" => "m1", "host" => "codex", "at" => "2026-08-03T01:00:00Z")
+    write_event("b1", "e2", "type" => "claim.acquired", "repo" => "shakacode/example", "target" => "issue:319",
+                            "machine_id" => "m2", "host" => "codex", "at" => "2026-08-03T02:00:00Z")
+
+    assert_equal ["319", "issue:319"], matched("pr:319")
+  end
+
+  def test_a_lane_under_a_numeric_id_still_folds
+    write_event("b1", "e1", "type" => "claim.acquired", "repo" => "shakacode/example", "target" => "issue:319:qa",
+                            "machine_id" => "m1", "host" => "codex", "at" => "2026-08-03T01:00:00Z")
+
+    assert_equal ["issue:319:qa"], matched("319")
+  end
+end
+
+# matched_targets is provenance for the search, not a description of the rendered
+# rows, so a display limit must not shrink it.
+class AgentCoordLogLimitProvenanceTest < AgentCoordLogTestCase
+  def write_two_spellings
+    write_event("b1", "e1", "type" => "claim.acquired", "repo" => "shakacode/example", "target" => "issue:1",
+                            "machine_id" => "m1", "host" => "codex", "at" => "2026-08-01T00:00:00Z")
+    write_event("b1", "e2", "type" => "phase.changed", "repo" => "shakacode/example", "target" => "pr:1",
+                            "machine_id" => "m1", "host" => "codex", "at" => "2026-08-02T00:00:00Z")
+  end
+
+  def test_the_limit_does_not_drop_spellings_from_the_provenance
+    write_two_spellings
+
+    payload = JSON.parse(run_log("shakacode/example#1", "--json", "--limit", "1").stdout)
+
+    assert_equal ["issue:1", "pr:1"], payload.dig("work_item", "matched_targets")
+    assert_equal 1, payload.fetch("events").length, "the displayed trail is still limited"
+  end
+
+  def test_the_unlimited_provenance_is_the_same
+    write_two_spellings
+
+    payload = JSON.parse(run_log("shakacode/example#1", "--json").stdout)
+
+    assert_equal ["issue:1", "pr:1"], payload.dig("work_item", "matched_targets")
+  end
+end
