@@ -356,6 +356,40 @@ when releases begin.
   Claims and heartbeats are cleared on release and expiry, so target scope alone
   cannot tell "never worked" from "worked and finished" — and two empty arrays
   read like an answer to exactly that question (issue #141).
+- `agent-coord log` now reads the events `gc` compacted into `archive/events`
+  instead of reporting `no events` for the work item they belong to (issue #139).
+  Compaction moves a completed lane's events into an immutable
+  `record_family: compacted_events` envelope and deletes the hot copies, while
+  `log` listed only the `events` prefix -- so the trail disappeared for exactly
+  the completed work most likely to be audited after the fact, and it said so in
+  the same words the command uses for work that never happened. The archived
+  records are the same event payloads `log` already renders, so they are folded
+  into the trail by default rather than behind a flag: a continuous custody trail
+  is the property the command promises, and the silence was the defect more than
+  the omission. Archived and live events for one work item interleave through the
+  existing timestamp ordering, and an event readable from both prefixes -- a
+  compaction interrupted between writing its envelope and deleting its sources --
+  is reported once. Only the archived events prefix is read and only
+  event-bearing record families are folded in, so an archived claim or heartbeat
+  is never reported as an event it never was, and an unrecognized record family
+  is reported rather than silently skipped. Rows are unchanged, so text,
+  `--format tsv`, `--json`, and the `--sync` mirror hold exactly what they held
+  before `gc` ran, and the mirror's line-level deduplication still recognizes an
+  event it already has. Provenance is reported on stderr instead: how many of the
+  reported events came from the archive, how many source events compaction did
+  not retain, and the `delete_after` date on which the rest is deleted. Reading
+  the archive is additive by construction -- it can add rows or a warning, never
+  turn a trail that reads today into a failure -- so an older backend, an
+  unreadable directory, or an archive record that will not parse degrades to a
+  warning that also marks the trail incomplete. One consequence is worth knowing
+  before upgrading: a scoped HTTP token that can read `events` but not `archive`
+  now prints a warning on every `log` invocation, and `log --sync` refuses to
+  write a mirror for it, because a mirror written from a read that could not see
+  the archive would later be indistinguishable from a complete one. The README
+  now documents `log --sync` as a precondition for running `gc` rather than a
+  convenience: compaction drops the source events an envelope does not retain the
+  moment it runs, and `delete_after` removes the envelope holding the rest, so
+  the mirror is the only copy that survives both.
 - The consumer env-file probe no longer reads a commented-out assignment such as
   `AGENT_COORD_API_URL= # remote disabled` as a configured fleet URL. Sourcing
   that file leaves the variable empty, so it selects no fleet backend; the value
