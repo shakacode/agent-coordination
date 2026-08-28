@@ -3284,7 +3284,7 @@ module AgentCoord
       log_options = options.dup
       store = build_store(log_options)
       rows = log_rows(store, options)
-      log_note_archived(rows, options)
+      log_note_archived(options)
       if options[:sync]
         # A partial listing would write a partial mirror that later reads as
         # complete -- the same hazard the narrowing options are rejected for.
@@ -3336,7 +3336,24 @@ module AgentCoord
       since = log_since_timestamp(options)
       rows = log_event_rows(store)
       rows = rows.reject { |row| row.fetch("synthetic") } unless options[:include_synthetic]
+      # The trail the query is about, before the options that narrow the view of
+      # it. This is the rule log_limited states for the claim, applied to the
+      # archive note: --limit and --since trim what is shown, never the evidence
+      # that decides a question. The note is evidence -- this work item's history
+      # is compacted and expiring however few of its rows the caller asked to see.
+      @log_scoped_rows = log_work_item_rows(rows, options)
       log_filtered(rows, options, since).sort_by { |row| [row.fetch("at_key"), row.fetch("event_id")] }
+    end
+
+    # Scoped by the work item and nothing else: --since, --machine, --host,
+    # --type and --limit describe the view of a subject rather than the subject
+    # itself. Matched through the same identity folding log_filtered uses, so a
+    # bare repo#123 query still covers the repo#123:qa lane.
+    def log_work_item_rows(rows, options)
+      wanted = log_wanted_identity(options)
+      return rows unless wanted
+
+      rows.select { |row| log_identity_match?(row.fetch("identity"), wanted) }
     end
 
     # --limit trims the trail that is shown, never the evidence that decides
@@ -3347,7 +3364,7 @@ module AgentCoord
     end
 
     def log_filtered(rows, options, since)
-      wanted = options[:work_item].to_s.empty? ? nil : log_identity(*log_split_work_item(options[:work_item]))
+      wanted = log_wanted_identity(options)
       rows.select do |row|
         (wanted.nil? || log_identity_match?(row.fetch("identity"), wanted)) &&
           log_matches?(row, "machine", options[:machine]) &&
@@ -3383,6 +3400,16 @@ module AgentCoord
     # Both arguments are already-parsed [repo, base, lane] identities. Accepting a
     # raw string here too would re-split the query once per row compared, which is
     # the cost log_identity exists to pay exactly once.
+    # The identity the query names, or nil when it named none. Read once and
+    # shared, so the rows a filter keeps and the envelopes the archive note
+    # scopes to cannot disagree about what was asked for.
+    def log_wanted_identity(options)
+      value = options[:work_item].to_s
+      return nil if value.empty?
+
+      log_identity(*log_split_work_item(value))
+    end
+
     def log_identity_match?(candidate, wanted, lane_exact: false)
       return false unless candidate.fetch(0).casecmp?(wanted.fetch(0))
       return false unless candidate.fetch(1) == wanted.fetch(1)
@@ -3463,19 +3490,19 @@ module AgentCoord
     def log_archived_event_rows(store, seen)
       log_archived_event_entries(store).flat_map do |entry|
         # Records first. log_archived_event_data is what rejects a record this
-        # version cannot read, and log_archive_provenance reaches into the same
-        # envelope, so asking for provenance ahead of that check let a record
-        # that is not an object end the command with a raw TypeError.
+        # version cannot read, and the ledger entry reaches into the same
+        # envelope, so building it ahead of that check let a record that is not
+        # an object end the command with a raw TypeError.
         records = log_archived_event_data(entry)
         next [] if records.empty?
 
-        provenance = log_archive_provenance(entry, records)
+        log_archive_record_envelope(entry, records)
         records.filter_map do |data|
           identity = log_event_identity(data)
           twin = seen[identity]
-          next log_archive_twin(twin, provenance) if twin
+          next log_archive_twin(twin) if twin
 
-          row = log_row(data).merge(provenance)
+          row = log_row(data).merge("archived" => true, "archive_held" => true)
           seen[identity] = row
           row
         end
@@ -3491,8 +3518,13 @@ module AgentCoord
     # wins, which keeps a row that was itself read from the archive pointing at
     # the envelope it actually came from. Returns nil so filter_map drops the
     # duplicate row.
-    def log_archive_twin(row, provenance)
-      row.merge!(provenance.except("archived")) unless row["archive_path"]
+    # The live copy wins the row, but the event is in the archive all the same
+    # and on the same clock, so the row records that it is held there. Only a
+    # flag: everything the note needs about the envelope is in the ledger, which
+    # is what stopped this from having to carry -- and guard against overwriting
+    # -- a whole provenance blob. Returns nil so filter_map drops the duplicate.
+    def log_archive_twin(row)
+      row["archive_held"] = true
       nil
     end
 
@@ -3620,28 +3652,58 @@ module AgentCoord
     # once per row it contributed: a compacted envelope lists every source path
     # it consumed but retains only the first, last, terminal, and phase-changing
     # events, so a restored trail can be shorter than the one gc swallowed.
-    # What the envelope consumed and what it kept, rather than the difference
-    # between the two. gc_compact_events writes its envelope before deleting the
-    # sources, so a run interrupted part way leaves the next one compacting the
-    # remainder into a second envelope, and both can name the same omitted source
-    # event. Differencing per envelope and summing then reported one lost event
-    # as two, with the total depending on which envelope the listing yielded
-    # first. The note aggregates these instead, so an overlap counts once.
+    # Every envelope the read consulted, recorded as it is read rather than
+    # reconstructed afterwards from whichever rows survived. Rows are the wrong
+    # carrier for an envelope-level fact: deduplication, the synthetic filter,
+    # --since, --machine and --limit each remove rows, and each removal used to
+    # take an envelope's delete_after and dropped-source count out of the note
+    # with it. A ledger entry outlives all of them, so the note is a function of
+    # what was read and what was asked, not of what happened to be displayed.
     #
-    # Only an array-valued source_paths is carried. Array() would turn a hash
+    # records is kept so the note can scope itself to the queried work item --
+    # the note must describe the item asked about, never another lane's clock --
+    # and synthetic is the envelope's own flag, which gc sets only when every
+    # entry it consumed was synthetic. A mixed generation therefore stays
+    # reportable even when the default filter removes all of its rows, because
+    # its source count still proves a real event was consumed.
+    #
+    # Only an array-valued source_paths is recorded. Array() would turn a hash
     # into an arbitrary number of pairs and nil into zero, either of which
     # reports a confident count for an envelope whose source metadata
     # log_compaction_defect has just warned is unreadable.
-    def log_archive_provenance(entry, records)
+    def log_archive_record_envelope(entry, records)
       data = entry.data
       sources = data["source_paths"]
-      {
-        "archived" => true,
-        "archive_path" => entry.path,
-        "archive_delete_after" => data["delete_after"].to_s,
-        "archive_sources" => sources.is_a?(Array) ? sources : [],
-        "archive_retained" => records.map { |record| log_event_identity(record) }
+      (@log_archive_ledger ||= []) << {
+        "path" => entry.path,
+        "delete_after" => data["delete_after"].to_s,
+        "sources" => sources.is_a?(Array) ? sources : [],
+        "identities" => records.map { |record| log_event_identity(record) },
+        "records" => records,
+        "synthetic" => data["synthetic"] == true
       }
+    end
+
+    # Scoped by the work item the query names, not by which rows survived
+    # display. A wholly synthetic generation is excluded under the default
+    # policy the same way its rows are.
+    def log_archive_ledger(options)
+      wanted = log_wanted_identity(options)
+      Array(@log_archive_ledger).select do |envelope|
+        next false if envelope.fetch("synthetic") && !options[:include_synthetic]
+
+        envelope.fetch("records").any? { |record| log_archive_record_scoped?(record, wanted) }
+      end
+    end
+
+    # Matched on identity rather than on the recorded spelling: the same folding
+    # log_filtered applies to rows, so an envelope holding issue:123 events is in
+    # scope for a bare #123 query, and a #123 query covers its :qa lane.
+    def log_archive_record_scoped?(record, wanted)
+      return true if wanted.nil?
+
+      identity = log_identity(record["repo"].to_s.strip, record["target"].to_s.strip)
+      log_identity_match?(identity, wanted)
     end
 
     # Additive by construction: reading the archive can add rows or a warning,
@@ -3701,15 +3763,13 @@ module AgentCoord
     # the file already holds. What the rows cannot show is that part of this
     # history now sits on a delete_after clock, and that compaction did not
     # retain every source event it consumed.
-    def log_note_archived(rows, options)
-      # Keyed on the envelope, not on whether the row came from it: a row whose
-      # archived duplicate was skipped still names the envelope that holds it.
-      envelopes = rows.select { |row| row["archive_path"] }.uniq { |row| row.fetch("archive_path") }
+    def log_note_archived(options)
+      envelopes = log_archive_ledger(options)
       return if envelopes.empty?
 
       dropped = log_archive_dropped(envelopes)
       expires = log_archive_soonest_expiry(envelopes)
-      parts = [log_archive_note_lead(rows)]
+      parts = log_archive_coverage(Array(@log_scoped_rows))
       if dropped.positive?
         parts << "#{dropped} source #{dropped == 1 ? 'event was' : 'events were'} dropped by compaction"
       end
@@ -3724,22 +3784,29 @@ module AgentCoord
     # twice; taking both sides as sets counts it once and makes the total
     # independent of listing order.
     def log_archive_dropped(envelopes)
-      consumed = envelopes.flat_map { |row| row.fetch("archive_sources") }.uniq
-      retained = envelopes.flat_map { |row| row.fetch("archive_retained") }.uniq
+      consumed = envelopes.flat_map { |envelope| envelope.fetch("sources") }.uniq
+      retained = envelopes.flat_map { |envelope| envelope.fetch("identities") }.uniq
       [consumed.length - retained.length, 0].max
     end
 
-    # An envelope whose records were every one of them duplicates of live events
-    # contributes no archived rows, so the count that leads the note would read
-    # zero. It still deserves a sentence -- those events are in the archive and
-    # on its delete_after clock -- but a different one, because nothing in this
-    # answer was actually read from the archive.
-    def log_archive_note_lead(rows)
+    # Counted over the trail the query is about, so --limit and --since cannot
+    # decide whether the clock gets reported. Three cases, because they are three
+    # different facts: nothing of this trail survives but the archive still holds
+    # a compacted record of it; every archived event was also readable live, so
+    # nothing here came from the archive; or some rows were read from the archive
+    # and others merely duplicate what it holds. That last distinction is worth
+    # keeping -- a row read from the archive disappears when delete_after passes,
+    # while a live duplicate outlives it until gc finishes deleting its source --
+    # but counting only the first hid the rest of what is on the clock.
+    def log_archive_coverage(rows)
       archived = rows.count { |row| row["archived"] }
-      return "note: #{archived} of #{rows.length} events read from the archive" if archived.positive?
+      held = rows.count { |row| row["archive_held"] }
+      return ["note: the archive holds a compacted record for this trail"] if held.zero?
+      return ["note: #{held} of #{rows.length} events are also held in the archive"] if archived.zero?
 
-      held = rows.count { |row| row["archive_path"] }
-      "note: #{held} of #{rows.length} events are also held in the archive"
+      clauses = ["note: #{archived} of #{rows.length} events read from the archive"]
+      clauses << "#{held - archived} more held there too" if held > archived
+      clauses
     end
 
     # The soonest clock, ordered on the parsed instant like every other
@@ -3749,8 +3816,8 @@ module AgentCoord
     # one unreadable delete_after sort first and hide the real date the rest of
     # the archive is deleted on.
     def log_archive_soonest_expiry(envelopes)
-      dated = envelopes.filter_map do |row|
-        value = row.fetch("archive_delete_after")
+      dated = envelopes.filter_map do |envelope|
+        value = envelope.fetch("delete_after")
         key = log_at_key(value)
         [value, key] unless key == -Float::INFINITY
       end

@@ -2303,6 +2303,93 @@ class AgentCoordLogArchiveTest < AgentCoordLogTestCase
     refute_includes result.stderr, "2 source events were dropped by compaction"
   end
 
+  # The envelope's own synthetic flag is false, so gc consumed a real event, and
+  # its source count proves one was not retained. The default filter removes the
+  # only surviving row, but the loss it records is still real -- and the note was
+  # computed from surviving rows, so it vanished along with them.
+  def test_log_reports_a_mixed_envelope_whose_surviving_rows_are_all_synthetic
+    write_archive_json("archive/events/b9/compact-mixed-synthetic.json",
+                       "schema_version" => 1, "record_family" => "compacted_events", "synthetic" => false,
+                       "source_paths" => ["events/b9/s1.json", "events/b9/e2.json"],
+                       "archived_at" => "2026-08-05T00:00:00Z", "delete_after" => "2026-09-04T00:00:00Z",
+                       "records" => [overlap_event("s1", "2026-08-01T00:00:00Z").merge("synthetic" => true)])
+
+    result = run_log("shakacode/example#104")
+
+    assert_equal 0, result.status.exitstatus, result.stderr
+    assert_includes result.stdout, "no events for shakacode/example#104"
+    assert_includes result.stderr, "note: the archive holds a compacted record for this trail"
+    assert_includes result.stderr, "1 source event was dropped by compaction"
+    assert_includes result.stderr, "archive deleted after 2026-09-04T00:00:00Z"
+  end
+
+  # An interrupted compaction can leave a second envelope whose every identity
+  # the first already claimed. It contributes no row, and the note used to read
+  # its facts off rows, so its clock and its consumed sources disappeared.
+  def test_log_reports_an_overlapping_envelope_that_contributed_no_row
+    write_archive_json("archive/events/b9/compact-a.json",
+                       "schema_version" => 1, "record_family" => "compacted_events",
+                       "source_paths" => ["events/b9/e1.json"],
+                       "archived_at" => "2026-08-05T00:00:00Z", "delete_after" => "2026-09-30T00:00:00Z",
+                       "records" => [overlap_event("e1", "2026-08-01T00:00:00Z")])
+    write_archive_json("archive/events/b9/compact-b.json",
+                       "schema_version" => 1, "record_family" => "compacted_events",
+                       "source_paths" => ["events/b9/e1.json", "events/b9/e2.json"],
+                       "archived_at" => "2026-08-06T00:00:00Z", "delete_after" => "2026-09-04T00:00:00Z",
+                       "records" => [overlap_event("e1", "2026-08-01T00:00:00Z")])
+
+    result = run_log("shakacode/example#104")
+
+    assert_equal 0, result.status.exitstatus, result.stderr
+    assert_equal %w[e1], tsv_event_ids("shakacode/example#104")
+    # The second envelope's earlier clock, and the source only it names.
+    assert_includes result.stderr, "archive deleted after 2026-09-04T00:00:00Z"
+    assert_includes result.stderr, "1 source event was dropped by compaction"
+  end
+
+  # A live event whose archived duplicate was skipped is on the same clock as one
+  # read from the archive. Counting only what was read directly said "1 of 3"
+  # while two more were expiring unmentioned.
+  def test_log_counts_live_events_that_are_also_held_in_the_archive
+    write_event("b1", "e1", "type" => "claim.acquired", "repo" => "shakacode/example", "target" => "104",
+                            "machine_id" => "m5", "host" => "codex", "at" => "2026-08-01T00:00:00Z")
+    write_event("b1", "e2", "type" => "phase.changed", "repo" => "shakacode/example", "target" => "104",
+                            "machine_id" => "m5", "host" => "codex", "at" => "2026-08-02T00:00:00Z")
+    write_archive_json("archive/events/b1/compact-held.json",
+                       "schema_version" => 1, "record_family" => "compacted_events",
+                       "source_paths" => ["events/b1/e1.json", "events/b1/e2.json", "events/b1/e3.json"],
+                       "archived_at" => "2026-08-05T00:00:00Z", "delete_after" => "2026-09-04T00:00:00Z",
+                       "records" => [overlap_event("e1", "2026-08-01T00:00:00Z").merge("batch_id" => "b1"),
+                                     overlap_event("e2", "2026-08-02T00:00:00Z").merge("batch_id" => "b1"),
+                                     overlap_event("e3", "2026-08-03T00:00:00Z").merge("batch_id" => "b1")])
+
+    result = run_log("shakacode/example#104")
+
+    assert_equal 0, result.status.exitstatus, result.stderr
+    assert_equal %w[e1 e2 e3], tsv_event_ids("shakacode/example#104")
+    assert_includes result.stderr, "note: 1 of 3 events read from the archive"
+    assert_includes result.stderr, "2 more held there too"
+  end
+
+  # --limit trims what is shown, never the evidence that decides a question. The
+  # note is evidence: this item's history is compacted and expiring however few
+  # of its rows the caller asked to see.
+  def test_log_reports_the_archive_clock_under_limit_and_since
+    write_closed_lane_trace
+    compact_events!
+    write_live_event("e9", "type" => "merged", "machine_id" => "m2", "host" => "codex",
+                           "at" => "2026-08-09T00:00:00Z")
+    envelope = archive_envelopes.fetch(0)
+
+    limited = run_log("shakacode/example#104", "--limit", "1")
+    since = run_log("shakacode/example#104", "--since", "2026-08-05T00:00:00Z")
+
+    assert_equal 1, limited.stdout.lines.length, "only the newest row is displayed"
+    assert_includes limited.stderr, "archive deleted after #{envelope.fetch('delete_after')}"
+    assert_includes limited.stderr, "1 source event was dropped by compaction"
+    assert_includes since.stderr, "archive deleted after #{envelope.fetch('delete_after')}"
+  end
+
   private
 
   def overlap_event(event_id, at)
