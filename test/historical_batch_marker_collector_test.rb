@@ -169,9 +169,7 @@ class HistoricalBatchMarkerCollectorTest < Minitest::Test
   end
 
   def test_all_shared_receipt_sources_and_lens_rules_match
-    sources = %w[
-      autoreview adversarial-pr-review continuous-evaluation-loop post-merge-audit address-review
-    ]
+    sources = contract_surface(REVIEW_VALIDATOR).fetch("RECEIPT_SOURCES")
     sources.each do |source|
       lenses = source == "autoreview" ? [risk_lens("correctness"), risk_lens("security")] : [risk_lens("release")]
       document = receipt_document(source: source, lenses: lenses)
@@ -181,6 +179,13 @@ class HistoricalBatchMarkerCollectorTest < Minitest::Test
 
     invalid_autoreview = receipt_document(source: "autoreview", lenses: [risk_lens("correctness")])
     assert_collector_and_shared(invalid_autoreview, expected: false)
+  end
+
+  def test_severity_and_disposition_vocabulary_matches_shared_validator
+    archived = contract_surface(REVIEW_VALIDATOR)
+    document = severity_and_disposition_document(archived.fetch("SEVERITIES"), archived.fetch("DISPOSITIONS"))
+
+    assert_collector_and_shared(document, expected: true)
   end
 
   def test_negative_or_incomplete_usage_matches_shared_validator
@@ -229,6 +234,10 @@ class HistoricalBatchMarkerCollectorTest < Minitest::Test
     assert_collector_and_shared(lowercase_unknown, expected: false)
   end
 
+  # Compares the declared contract surface (vocabularies, required-field lists) only, not
+  # full behaviour: assert_collector_and_shared covers behavioural agreement separately.
+  # Full behavioural equivalence is deliberately not asserted, since legitimate hardening
+  # (e.g. UNKNOWN sentinel normalization) can narrow acceptance without drifting this surface.
   def test_installed_shared_validator_still_accepts_archived_contract_surface
     external = installed_shared_validator
     skip "agent-workflows shared validator is not installed" unless external
@@ -359,6 +368,19 @@ class HistoricalBatchMarkerCollectorTest < Minitest::Test
       "status" => "applied",
       "reason" => "Synthetic differential contract coverage."
     }
+  end
+
+  def severity_and_disposition_document(severities, dispositions)
+    document = fixture_review_document(JSON.parse(File.read(FIXTURE)))
+    template = document.fetch("review_findings").first
+    findings = dispositions.each_with_index.map do |disposition, index|
+      template.merge(
+        "id" => "fixture-vocabulary-#{index}",
+        "severity" => severities[index % severities.length],
+        "disposition" => disposition
+      )
+    end
+    document.merge("review_findings" => findings)
   end
 
   def run_schema_validator(document, validator)
