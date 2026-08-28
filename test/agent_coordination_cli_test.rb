@@ -4675,6 +4675,69 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     end
   end
 
+  # State JSON is UTF-8 by definition, but the store used to read it through
+  # Encoding.default_external, which is US-ASCII under a non-UTF-8 locale. One
+  # record holding a non-ASCII byte then crashed JSON.parse with
+  # Encoding::InvalidByteSequenceError, taking down every command that walks the
+  # store. These pin the list scan and the batch manifest read under LC_ALL=C.
+  def test_status_reads_non_ascii_state_records_under_an_ascii_locale
+    write_state_record(
+      "events/batch-non-ascii/e1.json",
+      "schema_version" => 1, "event_id" => "e1", "batch_id" => "batch-non-ascii", "type" => "lane",
+      "repo" => "shakacode/example", "target" => "4711",
+      "message" => "PR 4711 merged — verified", "at" => "2026-07-17T22:52:29Z"
+    )
+
+    result = run_agent_coord("status", env: { "LC_ALL" => "C", "LANG" => "C" })
+
+    assert_equal 0, result.status.exitstatus, result.stderr
+    refute_includes result.stderr, "Encoding::InvalidByteSequenceError"
+    assert_includes result.stdout, "PR 4711 merged — verified"
+  end
+
+  def test_register_batch_reads_non_ascii_manifests_under_an_ascii_locale
+    manifest_path = File.join(@state_root, "batch-manifest-non-ascii.json")
+    File.write(
+      manifest_path,
+      JSON.pretty_generate(
+        "batch_id" => "batch-manifest-non-ascii",
+        "goal" => "land the fix — today",
+        "lanes" => [{ "name" => "docs", "owner" => "worker-docs", "targets" => ["3972"] }]
+      )
+    )
+
+    result = run_agent_coord(
+      "register-batch", "--file", manifest_path, env: { "LC_ALL" => "C", "LANG" => "C" }
+    )
+
+    assert_equal 0, result.status.exitstatus, result.stderr
+    refute_includes result.stderr, "Encoding::InvalidByteSequenceError"
+    stored_path = File.join(@state_root, "batches", "batch-manifest-non-ascii.json")
+    assert_equal "land the fix — today", JSON.parse(File.read(stored_path, encoding: "UTF-8")).fetch("goal")
+  end
+
+  # Scoped status is the single-record read (LocalStore#read_json), which the two
+  # tests above do not reach: they exercise the list scan and the manifest read.
+  # stdout is compared UTF-8-tagged so this pins the CLI's behavior rather than
+  # the locale the test runner itself happens to be started under.
+  def test_scoped_status_reads_a_non_ascii_claim_record_under_an_ascii_locale
+    write_state_record(
+      "claims/shakacode/example/4711.json",
+      "schema_version" => 1, "repo" => "shakacode/example", "target" => "4711",
+      "agent_id" => "worker-café", "status" => "active",
+      "message" => "holding — do not steal"
+    )
+
+    result = run_agent_coord(
+      "status", "--repo", "shakacode/example", "--target", "4711",
+      env: { "LC_ALL" => "C", "LANG" => "C" }
+    )
+
+    assert_equal 0, result.status.exitstatus, result.stderr
+    refute_includes result.stderr, "Encoding::InvalidByteSequenceError"
+    assert_includes result.stdout.dup.force_encoding(Encoding::UTF_8), "worker-café"
+  end
+
   def test_record_event_writes_append_only_event_and_status_metadata
     write_batch(
       "batch-b",
