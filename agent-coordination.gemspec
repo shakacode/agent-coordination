@@ -153,6 +153,7 @@ Gem::Specification.new do |spec|
     schema/telemetry-ledger/0001_initial.sql
     schema/telemetry-ledger/0002_host_usage.sql
     schema/telemetry-ledger/0003_pricing_scorecards.sql
+    schema/telemetry-ledger/0004_event_type_retention.sql
   ]
   spec.bindir = "bin"
   spec.executables = %w[agent-coord agent-coord-harvest]

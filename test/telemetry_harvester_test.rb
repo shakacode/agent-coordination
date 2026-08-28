@@ -14,7 +14,30 @@ require_relative "../lib/agent_coordination/harvester"
 class TelemetryHarvesterTest < Minitest::Test # rubocop:disable Metrics/ClassLength
   ROOT = File.expand_path("..", __dir__)
   CLI = File.join(ROOT, "bin", "agent-coord-harvest")
+  COORD_CLI = File.join(ROOT, "bin", "agent-coord")
   FIXTURES = File.join(ROOT, "test", "fixtures", "telemetry")
+  HARVESTER = AgentCoord::Telemetry::Harvester
+  CORPUS_BATCH = "event-corpus-batch"
+  CORPUS_REPO = "shakacode/agent-coordination"
+  CORPUS_TARGET = "112"
+  # Variables that could point the CLI at a backend other than the temp
+  # `--state-root` the corpus passes. All are cleared: a developer (or CI) with
+  # a live `AGENT_COORD_API_URL` and token exported must not have the corpus
+  # silently talk to the real coordination backend over the network.
+  CORPUS_BACKEND_ENV = %w[
+    AGENT_COORD_API_TOKEN AGENT_COORD_API_URL AGENT_COORD_BACKEND AGENT_COORD_ENV_FILE
+    AGENT_COORD_LOCAL AGENT_COORD_REF AGENT_COORD_STATE_ROOT AGENT_COORD_STATUS_STATE_ROOT
+  ].freeze
+  # Keeps the corpus off the developer's real coordination state and config, and
+  # off any backend: the corpus must exercise the local state root only.
+  CORPUS_ENV = CORPUS_BACKEND_ENV.to_h { |name| [name, nil] }.merge(
+    "AGENT_COORD_MACHINE_ID" => "corpus-machine",
+    "AGENT_COORD_SESSION_ID" => nil,
+    # Not read by bin/agent-coord today, but exported in some agent shells and
+    # cleared here so an ambient policy cannot reach the corpus either.
+    "AGENT_COORD_POLICY" => nil,
+    "CODEX_THREAD_ID" => nil
+  ).freeze
 
   def test_named_batch_harvest_initializes_queryable_sqlite_ledger
     Dir.mktmpdir("agent-coordination-ledger") do |dir|
@@ -938,7 +961,772 @@ class TelemetryHarvesterTest < Minitest::Test # rubocop:disable Metrics/ClassLen
     end
   end
 
+  # --- issue #112: event retention -------------------------------------------
+
+  # The real deliverable of #112 is the drift guard, not the current list. The
+  # CLI's emitted event-type set is derived from bin/agent-coord itself, so a
+  # new emitted type fails here until the harvester either ingests it or names
+  # it in EXCLUDED_CLI_EVENT_TYPES. The write-time enum mirrors are pinned in
+  # the same test because they drift for the same reason and from the same file.
+  def test_harvester_ingest_contract_tracks_bin_agent_coord
+    emitted = cli_emitted_event_types
+    unclassified = emitted - HARVESTER::CLI_EVENT_TYPES - HARVESTER::EXCLUDED_CLI_EVENT_TYPES
+    assert_empty unclassified,
+                 "bin/agent-coord emits event types the harvester does not classify: " \
+                 "#{unclassified.inspect}. Add them to CLI_LIFECYCLE_EVENT_TYPES / " \
+                 "CLI_TERMINAL_EVENT_TYPES / CLI_TYPED_EVENT_TYPES, or name them in " \
+                 "EXCLUDED_CLI_EVENT_TYPES with a reason."
+    assert_empty HARVESTER::CLI_EVENT_TYPES - emitted,
+                 "harvester claims CLI event types bin/agent-coord no longer emits"
+    assert_empty HARVESTER::EXCLUDED_CLI_EVENT_TYPES - emitted,
+                 "EXCLUDED_CLI_EVENT_TYPES names a type the CLI does not emit"
+
+    # The exclusion list must not be able to switch this guard off. Naming every
+    # emitted type would collapse EVENT_TYPES back to the historical-only list --
+    # reproducing #112 exactly -- while every assertion above still passed.
+    refute_empty emitted - HARVESTER::EXCLUDED_CLI_EVENT_TYPES,
+                 "EXCLUDED_CLI_EVENT_TYPES excludes every emitted type, which disables ingest entirely"
+    # The self-emitted types are the backbone of the lifecycle and can never be
+    # excluded; only an operator-supplied signal could ever earn an exclusion.
+    always_ingested = HARVESTER::CLI_LIFECYCLE_EVENT_TYPES + HARVESTER::CLI_TERMINAL_EVENT_TYPES
+    assert_empty always_ingested & HARVESTER::EXCLUDED_CLI_EVENT_TYPES,
+                 "the CLI's own lifecycle/terminal emissions must never be excluded from ingest"
+
+    not_ingested = emitted - HARVESTER::EXCLUDED_CLI_EVENT_TYPES - HARVESTER::EVENT_TYPES
+    assert_empty not_ingested, "EVENT_TYPES would clamp these CLI event types to NULL: #{not_ingested.inspect}"
+
+    # Floor, not an exact count: the CLI legitimately growing a type must fail
+    # the drift assertions above with their specific message, not here. This
+    # only catches a derivation that silently stopped finding types at all.
+    assert_operator emitted.length, :>=, 8, "derived CLI event-type set looks truncated: #{emitted.inspect}"
+    assert_includes emitted, "lane_closed"
+
+    load_agent_coord_cli
+    assert_equal AgentCoord::ERROR_SEVERITIES, HARVESTER::EVENT_SEVERITIES,
+                 "EVENT_SEVERITIES no longer mirrors AgentCoord::ERROR_SEVERITIES"
+    assert_equal AgentCoord::HUMAN_INTERVENTION_KINDS, HARVESTER::EVENT_KINDS,
+                 "EVENT_KINDS no longer mirrors AgentCoord::HUMAN_INTERVENTION_KINDS"
+    assert_equal AgentCoord::HELP_REQUESTED_REASONS, HARVESTER::EVENT_REASONS,
+                 "EVENT_REASONS no longer mirrors AgentCoord::HELP_REQUESTED_REASONS"
+  end
+
+  # End-to-end corpus: drive the real CLI so it writes one event of every type it
+  # emits -- including the lifecycle events nothing records explicitly -- then
+  # harvest that state and prove nothing is clamped to NULL on the way in. This
+  # doubles as the batch's QA evidence, so it prints the retained rows.
+  def test_cli_event_corpus_survives_harvest_with_event_type_and_signal_fields
+    Dir.mktmpdir("agent-coordination-ledger-event-corpus") do |dir| # rubocop:disable Metrics/BlockLength
+      emitted, source_path = record_cli_event_corpus(dir)
+      assert_equal cli_emitted_event_types.sort, emitted,
+                   "the corpus did not exercise every event type the CLI emits"
+      # The corpus ran against its temp --state-root, not an ambient backend:
+      # a network backend would leave nothing on local disk here.
+      on_disk = Dir.glob(File.join(dir, "state", "events", CORPUS_BATCH, "*.json"))
+      refute_empty on_disk, "the corpus wrote no events under its temp --state-root"
+      assert_equal emitted, on_disk.map { |path| JSON.parse(File.read(path)).fetch("type") }.sort
+
+      ledger_path = File.join(dir, "telemetry.sqlite3")
+      stdout, stderr, status = Open3.capture3(
+        CLI, "harvest", "--ledger", ledger_path,
+        "--coordination-json", source_path, "--batch-id", CORPUS_BATCH
+      )
+      assert status.success?, "harvest failed:\n#{stdout}\n#{stderr}"
+
+      retained = sqlite_query(
+        ledger_path,
+        "SELECT COALESCE(event_type, 'NULL'), COALESCE(event_type_raw, 'NULL'), " \
+        "COALESCE(severity, '-'), COALESCE(category, '-'), COALESCE(kind, '-'), COALESCE(reason, '-') " \
+        "FROM events ORDER BY event_type_raw"
+      )
+      puts "\nissue #112 corpus -- events(event_type|event_type_raw|severity|category|kind|reason):"
+      retained.each { |row| puts "  #{row}" }
+
+      assert_equal emitted, sqlite_query(ledger_path, "SELECT event_type FROM events ORDER BY event_type"),
+                   "harvest clamped a CLI-emitted event type to NULL"
+      assert_equal ["0"], sqlite_query(ledger_path, "SELECT COUNT(*) FROM events WHERE event_type IS NULL")
+      assert_empty sqlite_query(ledger_path, "SELECT * FROM event_type_drift")
+
+      assert_equal ["error|P1|harvest-corpus"], sqlite_query(
+        ledger_path, "SELECT event_type, severity, category FROM events WHERE severity IS NOT NULL"
+      )
+      assert_equal ["human_intervention|takeover"], sqlite_query(
+        ledger_path, "SELECT event_type, kind FROM events WHERE kind IS NOT NULL"
+      )
+      assert_equal ["help_requested|question"], sqlite_query(
+        ledger_path, "SELECT event_type, reason FROM events WHERE reason IS NOT NULL"
+      )
+      # escalation_requested's from_route/to_route/evidence are deliberately not
+      # retained: evidence is free prose, and the routes are unbounded free text
+      # duplicating the dimension host_sessions already carries. #143 needs only
+      # the count, which event_type provides.
+      columns = sqlite_query(ledger_path, "SELECT name FROM pragma_table_info('events')")
+      assert_equal ["escalation_requested"], sqlite_query(
+        ledger_path, "SELECT event_type FROM events WHERE event_type = 'escalation_requested'"
+      )
+      assert_empty columns & %w[from_route to_route evidence]
+    end
+  end
+
+  # The corpus drives the real CLI, so it must be provably pinned to its temp
+  # `--state-root` and never to an ambient backend. The scrub list is derived
+  # from bin/agent-coord rather than restated, so a newly read AGENT_COORD_*
+  # variable fails here instead of silently letting a live `AGENT_COORD_API_URL`
+  # and token redirect the corpus onto the real coordination backend.
+  def test_event_corpus_is_isolated_from_ambient_backend_configuration
+    read_by_cli = File.read(COORD_CLI).scan(/AGENT_COORD_[A-Z_]+/).uniq
+    unscrubbed = read_by_cli - CORPUS_ENV.keys
+    assert_empty unscrubbed,
+                 "bin/agent-coord reads #{unscrubbed.inspect}, which the corpus does not neutralize. " \
+                 "Add each to CORPUS_BACKEND_ENV (if it can select a backend or state root) or to CORPUS_ENV."
+    CORPUS_BACKEND_ENV.each do |name|
+      assert_nil CORPUS_ENV.fetch(name), "#{name} must be cleared for the corpus, not given a value"
+    end
+    # The corpus also passes --state-root explicitly rather than relying on the
+    # cleared environment alone. That the state actually lands there is asserted
+    # by the corpus test itself, which already pays for the CLI run.
+    assert_includes corpus_commands("/tmp/state-root-probe").first, "--state-root"
+  end
+
+  # 0001-0003 are already applied in existing ledgers and are hash-pinned, so
+  # 0004 has to be purely additive. Open a ledger that only knows 0001-0003,
+  # populate it, then reopen against the full migration set: the older hashes
+  # must still verify and the pre-existing rows must simply gain NULL columns.
+  def test_event_retention_migration_applies_additively_to_an_existing_ledger
+    Dir.mktmpdir("agent-coordination-ledger-migration") do |dir|
+      ledger_path = File.join(dir, "telemetry.sqlite3")
+      seed_ledger_without_event_retention(dir, ledger_path)
+      before = sqlite_query(ledger_path, "SELECT version FROM schema_migrations ORDER BY version")
+      assert_equal %w[0001_initial 0002_host_usage 0003_pricing_scorecards], before
+
+      AgentCoord::Telemetry::Ledger.new(ledger_path)
+
+      assert_equal before + ["0004_event_type_retention"],
+                   sqlite_query(ledger_path, "SELECT version FROM schema_migrations ORDER BY version")
+      assert_equal ["pre-existing|lane_closed|NULL|NULL|NULL|NULL|NULL"], sqlite_query(
+        ledger_path,
+        "SELECT event_ref, event_type, COALESCE(event_type_raw, 'NULL'), COALESCE(severity, 'NULL'), " \
+        "COALESCE(category, 'NULL'), COALESCE(kind, 'NULL'), COALESCE(reason, 'NULL') FROM events"
+      )
+    end
+  end
+
+  # Regression for the review finding on PR #155. `event_type_raw` originally
+  # reused `known()`, which rejects an oversized string, one carrying control
+  # characters, and the literal "UNKNOWN". Such a row landed with BOTH columns
+  # NULL and disappeared from `event_type_drift` -- the same silent loss #112 is
+  # about. The column must sanitize, never reject.
+  def test_event_type_raw_is_null_only_when_the_source_carried_no_type
+    Dir.mktmpdir("agent-coordination-ledger-raw-type") do |dir| # rubocop:disable Metrics/BlockLength
+      source_path = File.join(dir, "coordination.json")
+      ledger_path = File.join(dir, "telemetry.sqlite3")
+      source = coordination_fixture
+      unsanitizable_event_types.each_with_index do |(label, type), index|
+        event = {
+          "id" => "event-raw-#{label}", "batch_id" => "batch-fixture",
+          "repo" => "shakacode/agent-coordination", "target" => "78",
+          "at" => "2026-07-18T01:3#{index}:00Z"
+        }
+        event["type"] = type unless type == :absent
+        source["events"] << event
+      end
+      File.write(source_path, JSON.generate(source))
+
+      _stdout, stderr, status = Open3.capture3(
+        CLI, "harvest", "--ledger", ledger_path,
+        "--coordination-json", source_path, "--batch-id", "batch-fixture"
+      )
+      assert status.success?, stderr
+
+      # The invariant as a query: a NULL raw type exactly when the source event
+      # carried no usable type.
+      typeless = unsanitizable_event_types.count { |_, type| type == :absent || type.to_s.strip.empty? }
+      assert_equal [typeless.to_s],
+                   sqlite_query(ledger_path, "SELECT COUNT(*) FROM events WHERE event_type_raw IS NULL"),
+                   "an event that carried a type was stored with a NULL event_type_raw"
+      assert_equal ["0"], sqlite_query(ledger_path, "SELECT COUNT(*) FROM events WHERE event_type_raw = ''")
+
+      # Every type-bearing unrecognized event stays visible in the drift view.
+      drift = sqlite_query(ledger_path, "SELECT event_type_raw FROM event_type_drift ORDER BY event_type_raw")
+      type_bearing = unsanitizable_event_types.count { |_, type| type != :absent && !type.to_s.strip.empty? }
+      assert_equal type_bearing, drift.length, "a type-bearing event escaped event_type_drift: #{drift.inspect}"
+      assert_includes drift, "UNKNOWN", "the literal UNKNOWN type must be stored verbatim"
+
+      # Two distinct oversized types must not collapse into one drift row.
+      long_rows = drift.select { |row| row.start_with?("x" * 32) }
+      assert_equal 2, long_rows.length, "distinct oversized types collapsed: #{long_rows.inspect}"
+      assert_equal 2, long_rows.uniq.length
+      long_rows.each do |row|
+        assert_operator row.bytesize, :<=, HARVESTER::SIGNAL_MAX_BYTES
+        assert_match(/~[0-9a-f]{12}\z/, row, "a modified raw type must carry its origin digest")
+      end
+      # Control characters never reach the stored column.
+      assert_empty sqlite_query(
+        ledger_path,
+        "SELECT event_type_raw FROM events WHERE event_type_raw GLOB '*' || char(27) || '*' " \
+        "OR event_type_raw GLOB '*' || char(1) || '*'"
+      )
+    end
+  end
+
+  # The typed vocabulary exists in three copies: the CLI constants, the Ruby
+  # mirrors, and the SQL CHECK literals in 0004. The drift test pins CLI-vs-Ruby;
+  # this pins Ruby-vs-SQL, so a value added to one copy and not the other is
+  # caught rather than silently rejected at write time by the database.
+  def test_migration_check_constraints_match_the_ruby_enum_mirrors
+    sql = File.read(File.join(ROOT, "schema", "telemetry-ledger", "0004_event_type_retention.sql"))
+    {
+      "severity" => HARVESTER::EVENT_SEVERITIES,
+      "kind" => HARVESTER::EVENT_KINDS,
+      "reason" => HARVESTER::EVENT_REASONS
+    }.each do |column, expected|
+      clause = sql[/CHECK \(#{column} IN \(([^)]*)\)/m, 1]
+      refute_nil clause, "0004 has no CHECK constraint for #{column}"
+      assert_equal expected, clause.scan(/'([^']*)'/).flatten,
+                   "0004's CHECK for #{column} disagrees with the harvester's Ruby mirror"
+    end
+    # category is deliberately unconstrained: it is free-form at write time.
+    assert_nil sql[/CHECK \(category IN/], "category must stay free-form, not enum-checked"
+  end
+
+  # The harvester's control-character range and the CLI's terminal sanitizer are
+  # a cross-file pair, and the comment on SIGNAL_CONTROL_CHARACTERS says to keep
+  # them in agreement -- but "in agreement" means containment, not equality, and
+  # until this test nothing enforced it. An earlier round of this change happened
+  # precisely because the two had drifted apart on the C1 range.
+  #
+  # Compared by codepoint, not by regex source: either pattern may be respelled
+  # harmlessly, and only the set of characters it matches is the contract.
+  def test_signal_control_characters_cover_the_cli_terminal_sanitizer
+    load_agent_coord_cli
+    signal = HARVESTER::SIGNAL_CONTROL_CHARACTERS
+    log = AgentCoord::LOG_CONTROL_CHARACTERS
+
+    # 0x00..0x9F spans C0, DEL, and C1 -- every range either pattern targets.
+    classified = (0x00..0x9F).map do |codepoint|
+      character = [codepoint].pack("U")
+      [codepoint, character.match?(signal), character.match?(log)]
+    end
+    hex = ->(codepoints) { codepoints.map { |codepoint| format("0x%02X", codepoint) } }
+
+    # Containment: anything the CLI considers terminal-unsafe, the ledger must
+    # strip too. This is the direction that matters -- the ledger is downstream.
+    missing = classified.select { |_, in_signal, in_log| in_log && !in_signal }.map(&:first)
+    assert_empty hex.call(missing),
+                 "SIGNAL_CONTROL_CHARACTERS no longer covers every codepoint " \
+                 "AgentCoord::LOG_CONTROL_CHARACTERS treats as control. Missing: " \
+                 "#{hex.call(missing).join(', ')}. Widen the harvester pattern to match."
+
+    # The intentional difference, pinned so a move in either direction reads as a
+    # decision rather than an accident.
+    signal_only = classified.select { |_, in_signal, in_log| in_signal && !in_log }.map(&:first)
+    assert_equal %w[0x09 0x0A 0x0D], hex.call(signal_only),
+                 "the harvester strips exactly tab/LF/CR beyond the CLI's set, because a signal " \
+                 "value is a single-line classifier while the CLI's log renderer handles those " \
+                 "three separately. Changing this in either direction needs a deliberate call. " \
+                 "Now: #{hex.call(signal_only).join(', ')}"
+  end
+
+  # The structural pin that ends the laundering bug class. Three rounds of this
+  # change found the same defect wearing different characters -- `strip` on NUL,
+  # `[[:space:]]` on NEL -- because the trim runs before control detection, so
+  # anything both trimmable and terminal-unsafe is silently removed.
+  #
+  # The fix is not another excluded character, it is a derived trim class: it is
+  # exactly {space} plus the characters the CLI's own control definition
+  # deliberately omits. Asserting that here means a future overlapping character
+  # cannot reintroduce this bug without failing the suite.
+  def test_trimmable_characters_never_overlap_the_cli_control_definition
+    load_agent_coord_cli
+    log = AgentCoord::LOG_CONTROL_CHARACTERS
+    signal = HARVESTER::SIGNAL_CONTROL_CHARACTERS
+    hex = ->(codepoints) { codepoints.map { |codepoint| format("0x%02X", codepoint) } }
+
+    # Behavioural probe: a codepoint is trimmable if it is removed at the ends.
+    trimmable = (0x00..0x9F).select do |codepoint|
+      character = [codepoint].pack("U")
+      "x#{character}".gsub(HARVESTER::SIGNAL_SURROUNDING_WHITESPACE, "") == "x"
+    end
+
+    # THE invariant: nothing the CLI considers terminal-unsafe may be trimmed.
+    # NUL, NEL, VT, FF and the whole C1 range are all in LOG, so this single
+    # assertion covers every past instance and any future one.
+    laundered = trimmable.select { |codepoint| [codepoint].pack("U").match?(log) }
+    assert_empty hex.call(laundered),
+                 "these codepoints are both trimmable and treated as control by " \
+                 "AgentCoord::LOG_CONTROL_CHARACTERS, so they are silently removed before control " \
+                 "detection and store identically to a value that never carried them: " \
+                 "#{hex.call(laundered).join(', ')}. Remove them from SIGNAL_SURROUNDING_WHITESPACE."
+
+    # And the trim class is derived, not chosen: space plus exactly the
+    # characters SIGNAL treats as control but the CLI does not (tab, LF, CR).
+    formatting_only = (0x00..0x9F).select do |codepoint|
+      character = [codepoint].pack("U")
+      character.match?(signal) && !character.match?(log)
+    end
+    assert_equal hex.call(([0x20] + formatting_only).sort), hex.call(trimmable),
+                 "the trim class must be exactly {space} + (SIGNAL_CONTROL_CHARACTERS - " \
+                 "LOG_CONTROL_CHARACTERS). Deriving it from the CLI is what keeps it disjoint " \
+                 "from the terminal-unsafe set. Now: #{hex.call(trimmable).join(', ')}"
+  end
+
+  # `category` is required for `error` events but bounded nowhere at write time,
+  # so ingest must retain it rather than reject it. It previously went through
+  # `known()`, which dropped an oversized or control-character category and took
+  # the friction classifier with it.
+  def test_oversized_and_dirty_category_is_retained_bounded_rather_than_dropped
+    Dir.mktmpdir("agent-coordination-ledger-category") do |dir| # rubocop:disable Metrics/BlockLength
+      source_path = File.join(dir, "coordination.json")
+      ledger_path = File.join(dir, "telemetry.sqlite3")
+      source = coordination_fixture
+      [["long", "c" * 300], ["escape", "\u001Bbad-category"],
+       ["unknown", "UNKNOWN"], ["ordinary", "test-failure"]].each_with_index do |(label, category), index|
+        source["events"] << {
+          "id" => "event-category-#{label}", "batch_id" => "batch-fixture",
+          "repo" => "shakacode/agent-coordination", "target" => "78",
+          "type" => "error", "severity" => "P1", "category" => category,
+          "at" => "2026-07-18T02:0#{index}:00Z"
+        }
+      end
+      File.write(source_path, JSON.generate(source))
+
+      _stdout, stderr, status = Open3.capture3(
+        CLI, "harvest", "--ledger", ledger_path,
+        "--coordination-json", source_path, "--batch-id", "batch-fixture"
+      )
+      assert status.success?, stderr
+
+      stored = sqlite_query(
+        ledger_path,
+        "SELECT COALESCE(category, 'NULL') FROM events WHERE event_type = 'error' ORDER BY event_ref"
+      )
+      # Exactly one NULL: the literal UNKNOWN. The other three are all retained.
+      assert_equal 1, stored.count("NULL"),
+                   "an error event lost its category at ingest: #{stored.inspect}"
+      # The oversized category is retained, bounded, and marked as truncated.
+      long = stored.find { |row| row.start_with?("c" * 32) }
+      refute_nil long, "the oversized category was dropped instead of bounded"
+      assert_operator long.bytesize, :<=, HARVESTER::SIGNAL_MAX_BYTES
+      assert_match(/~[0-9a-f]{12}\z/, long)
+      # Control characters never reach the column.
+      assert_empty sqlite_query(
+        ledger_path,
+        "SELECT category FROM events WHERE category GLOB '*' || char(27) || '*'"
+      )
+      assert_includes stored, "test-failure"
+      # The control character is stripped in place; the rest of the value stays.
+      # (Unlike event_type_raw, a literal UNKNOWN category is "no value" -- that
+      # is the single NULL asserted above.)
+      assert(stored.any? { |row| row.start_with?("bad-category~") },
+             "the control character was not stripped in place: #{stored.inspect}")
+    end
+  end
+
+  # A clean value can be constructed to equal some other value's sanitized form,
+  # and without reserving the marker shape both would store identically --
+  # collapsing two distinct friction clusters into one. The sanitized shape is
+  # therefore reserved: an input already wearing it is never returned unchanged.
+  def test_a_clean_value_cannot_impersonate_another_values_sanitized_form
+    harvester = HARVESTER.allocate
+    dirty = "ci#{[0x001B].pack('U')}-timeout"
+    sanitized = harvester.send(:bounded_signal, dirty, unknown_is_value: false)
+
+    assert_equal "ci-timeout", sanitized.sub(HARVESTER::SIGNAL_SANITIZED_SHAPE, "")
+    assert_match HARVESTER::SIGNAL_SANITIZED_SHAPE, sanitized
+
+    # An operator supplying that exact literal must not land on the same row.
+    impersonation = harvester.send(:bounded_signal, sanitized.dup, unknown_is_value: false)
+    refute_equal sanitized, impersonation,
+                 "a clean value impersonated another value's sanitized form: #{sanitized.inspect}"
+    assert impersonation.start_with?("#{sanitized}~"),
+           "the reserved shape must route through the sanitizer: #{impersonation.inspect}"
+
+    # Any value wearing the shape is marked, even with nothing else wrong.
+    shaped = "release~0123456789ab"
+    refute_equal shaped, harvester.send(:bounded_signal, shaped, unknown_is_value: true)
+    # ...while a near-miss (wrong length, non-hex, marker not at the end) is not.
+    ["release~0123456789a", "release~0123456789az", "release~0123456789ab-x"].each do |near_miss|
+      assert_equal near_miss, harvester.send(:bounded_signal, near_miss, unknown_is_value: true),
+                   "a value that only resembles the shape must be left alone: #{near_miss.inspect}"
+    end
+  end
+
+  # The reserved shape is derived from the marker and digest-length constants, so
+  # it must keep matching what the sanitizer actually emits if either changes.
+  def test_sanitized_shape_matches_what_the_sanitizer_emits
+    harvester = HARVESTER.allocate
+    emitted = harvester.send(:bounded_signal, "x" * (HARVESTER::SIGNAL_MAX_BYTES + 1), unknown_is_value: true)
+
+    assert_match HARVESTER::SIGNAL_SANITIZED_SHAPE, emitted,
+                 "SIGNAL_SANITIZED_SHAPE no longer matches sanitizer output: #{emitted.inspect}"
+    suffix = emitted[HARVESTER::SIGNAL_SANITIZED_SHAPE]
+    assert_equal HARVESTER::SIGNAL_TRUNCATION_MARKER, suffix[0]
+    assert_equal HARVESTER::SIGNAL_DIGEST_LENGTH, suffix.length - 1
+    # Reserving the shape is what makes the two paths' outputs disjoint.
+    refute_match HARVESTER::SIGNAL_SANITIZED_SHAPE,
+                 harvester.send(:bounded_signal, "ordinary-value", unknown_is_value: true)
+  end
+
+  # The laundering class, not one instance of it. The trim runs before control
+  # detection, so any character that is both trimmable and control is silently
+  # removed and the value stores identically to one that never carried it --
+  # no digest, no drift row. `String#strip` overlapped on NUL; `[[:space:]]`
+  # overlapped on NEL. Each of these must take the control path instead.
+  def test_control_characters_are_never_laundered_by_the_trim
+    harvester = HARVESTER.allocate
+    clean = harvester.send(:bounded_signal, "operator-type", unknown_is_value: true)
+    assert_equal "operator-type", clean
+
+    {
+      "NUL" => 0x0000, "VT" => 0x000B, "FF" => 0x000C,
+      "NEL" => 0x0085, "CSI" => 0x009B
+    }.each do |name, codepoint|
+      character = [codepoint].pack("U")
+      assert_match HARVESTER::SIGNAL_CONTROL_CHARACTERS, character, "#{name} must count as control"
+
+      suffixed = harvester.send(:bounded_signal, "operator-type#{character}", unknown_is_value: true)
+      refute_equal clean, suffixed, "a #{name}-suffixed type was laundered into its clean twin"
+      assert suffixed.start_with?("operator-type~"),
+             "#{name} must be stripped in place and digest-marked: #{suffixed.inspect}"
+
+      category = harvester.send(:bounded_signal, "cat#{character}", unknown_is_value: false)
+      refute_equal "cat", category, "a #{name}-suffixed category was silently cleaned"
+      assert category.start_with?("cat~"), "#{name} category: #{category.inspect}"
+
+      # A value that is nothing but control characters carried something, so it
+      # stores as a bare digest rather than NULL.
+      only = harvester.send(:bounded_signal, character, unknown_is_value: true)
+      assert_match(/\A~[0-9a-f]{12}\z/, only, "a #{name}-only value must not vanish")
+    end
+
+    # Genuine trimmable whitespace still normalizes away entirely...
+    assert_nil harvester.send(:bounded_signal, "   ", unknown_is_value: true)
+    assert_nil harvester.send(:bounded_signal, "\t\r\n ", unknown_is_value: true)
+    # ...and the T3 decision is unchanged: surrounding tab/LF/CR/space collapse.
+    assert_equal clean, harvester.send(:bounded_signal, "  operator-type\n", unknown_is_value: true)
+    assert_equal clean, harvester.send(:bounded_signal, "\toperator-type\r\n", unknown_is_value: true)
+    # But the same characters in the interior are corruption, not layout, so
+    # they are stripped and marked rather than kept.
+    interior = harvester.send(:bounded_signal, "operator\ttype", unknown_is_value: true)
+    assert_equal "operatortype~#{interior[/~(.+)\z/, 1]}", interior
+    refute_equal "operator\ttype", interior
+  end
+
+  # End to end: a control-bearing type must not be stored identically to its
+  # clean twin, which would merge distinct raw types into one drift row. Covers
+  # both characters that previously laundered -- NUL via `strip`, NEL via
+  # `[[:space:]]` -- so the ingest path is pinned, not just the sanitizer.
+  def test_control_bearing_values_do_not_collide_with_their_clean_twins_at_ingest
+    Dir.mktmpdir("agent-coordination-ledger-control") do |dir| # rubocop:disable Metrics/BlockLength
+      source_path = File.join(dir, "coordination.json")
+      ledger_path = File.join(dir, "telemetry.sqlite3")
+      nul = [0x0000].pack("U")
+      nel = [0x0085].pack("U")
+      source = coordination_fixture
+      pairs = { "clean" => "operator-type", "nul" => "operator-type#{nul}",
+                "nel" => "operator-type#{nel}" }
+      pairs.each_with_index do |(label, type), index|
+        source["events"] << {
+          "id" => "event-nul-#{label}", "batch_id" => "batch-fixture",
+          "repo" => "shakacode/agent-coordination", "target" => "78",
+          "type" => type, "at" => "2026-07-18T04:0#{index}:00Z"
+        }
+      end
+      File.write(source_path, JSON.generate(source))
+
+      _stdout, stderr, status = Open3.capture3(
+        CLI, "harvest", "--ledger", ledger_path,
+        "--coordination-json", source_path, "--batch-id", "batch-fixture"
+      )
+      assert status.success?, stderr
+
+      raws = sqlite_query(ledger_path, "SELECT event_type_raw FROM events ORDER BY event_type_raw")
+      assert_equal raws.uniq.length, raws.length, "a NUL-bearing type collided with its clean twin: #{raws}"
+      assert_includes raws, "operator-type"
+      assert(raws.any? { |row| row.start_with?("operator-type~") },
+             "the NUL-suffixed type was not digest-marked: #{raws.inspect}")
+      raws.each do |row|
+        refute_includes row.codepoints, 0x0000, "a NUL survived ingest"
+        refute_includes row.codepoints, 0x0085, "a NEL survived ingest"
+      end
+      assert_equal 3, raws.length, "expected one row per distinct type: #{raws.inspect}"
+    end
+  end
+
+  # C1 controls (U+0080-U+009F) are as dangerous in a terminal as C0: U+009B is
+  # CSI, which opens an escape sequence on its own. The sanitizer originally
+  # covered only C0 and DEL, so a C1 character passed through into the ledger and
+  # defeated the terminal-safety guarantee the sanitizer exists to provide. The
+  # codepoint is written explicitly so this file stays readable and greppable.
+  def test_c1_control_characters_are_stripped_like_c0
+    csi = [0x009B].pack("U")
+    harvester = HARVESTER.allocate
+
+    assert_match HARVESTER::SIGNAL_CONTROL_CHARACTERS, csi,
+                 "C1 controls must be recognized as control characters"
+    # Detection and stripping must agree: a value that is nothing but a C1 char
+    # takes the sanitized path rather than being returned verbatim.
+    c1_only = harvester.send(:bounded_signal, csi, unknown_is_value: true)
+    refute_equal csi, c1_only, "a C1-only value was returned verbatim"
+    assert_match(/\A~[0-9a-f]{12}\z/, c1_only)
+
+    stored = harvester.send(:bounded_signal, "bad#{csi}cat", unknown_is_value: false)
+    refute_includes stored.codepoints, 0x009B, "a C1 control survived sanitizing"
+    assert stored.start_with?("badcat~"), "the C1 char must be stripped in place: #{stored.inspect}"
+    # The digest is taken over the original, so two values differing only in
+    # their stripped controls stay distinct.
+    other = harvester.send(:bounded_signal, "badcat#{csi}", unknown_is_value: false)
+    refute_equal stored, other, "stripping collapsed two distinct originals"
+  end
+
+  # End to end: a C1 control in a category must not reach the ledger.
+  def test_c1_control_does_not_survive_ingest
+    Dir.mktmpdir("agent-coordination-ledger-c1") do |dir|
+      source_path = File.join(dir, "coordination.json")
+      ledger_path = File.join(dir, "telemetry.sqlite3")
+      source = coordination_fixture
+      source["events"] << {
+        "id" => "event-c1", "batch_id" => "batch-fixture",
+        "repo" => "shakacode/agent-coordination", "target" => "78",
+        "type" => "error", "severity" => "P1",
+        "category" => "bad#{[0x009B].pack('U')}cat", "at" => "2026-07-18T03:00:00Z"
+      }
+      File.write(source_path, JSON.generate(source))
+
+      _stdout, stderr, status = Open3.capture3(
+        CLI, "harvest", "--ledger", ledger_path,
+        "--coordination-json", source_path, "--batch-id", "batch-fixture"
+      )
+      assert status.success?, stderr
+
+      stored = sqlite_query(ledger_path, "SELECT category FROM events WHERE category IS NOT NULL")
+      refute_empty stored, "the category was dropped instead of sanitized"
+      stored.each do |row|
+        refute_includes row.codepoints, 0x009B, "a C1 control survived ingest"
+        refute_match HARVESTER::SIGNAL_CONTROL_CHARACTERS, row
+      end
+    end
+  end
+
+  # The closed enums need no sanitizing: `enum` nils anything outside the set
+  # whatever its length, and no member of any set is a value `known()` drops.
+  # Pinned so a future member that would be dropped is caught.
+  def test_closed_enum_members_are_never_dropped_by_known
+    harvester = HARVESTER.allocate
+    {
+      "EVENT_SEVERITIES" => HARVESTER::EVENT_SEVERITIES,
+      "EVENT_KINDS" => HARVESTER::EVENT_KINDS,
+      "EVENT_REASONS" => HARVESTER::EVENT_REASONS
+    }.each do |name, values|
+      dropped = values.reject { |value| harvester.send(:known, value) == value }
+      assert_empty dropped, "#{name} contains values that ingest would drop: #{dropped.inspect}"
+    end
+  end
+
+  # Surrounding whitespace is normalized away before storage, deliberately: two
+  # values differing only there are the same value, and emitting two drift rows
+  # for them would be worse output. Pinned so it reads as intended rather than
+  # accidental. A CLI-written type cannot contain whitespace anyway --
+  # `validate_segment!` restricts `--type` to `[A-Za-z0-9_:-]` and dots.
+  def test_surrounding_whitespace_is_normalized_not_treated_as_a_distinct_value
+    harvester = HARVESTER.allocate
+    plain = harvester.send(:bounded_signal, "operator-adhoc-type", unknown_is_value: true)
+    padded = harvester.send(:bounded_signal, "  operator-adhoc-type\n", unknown_is_value: true)
+
+    assert_equal "operator-adhoc-type", plain
+    assert_equal plain, padded, "surrounding whitespace must normalize, not fork into a second value"
+    refute_match(/~/, padded, "normalization alone must not mark the value as truncated")
+    # The CLI cannot produce such a type in the first place.
+    refute_match(/\A[A-Za-z0-9_:-]+(?:\.[A-Za-z0-9_:-]+)*\z/, "  operator-adhoc-type\n")
+  end
+
+  # The clamped column and the raw column cannot disagree: sanitizing can never
+  # hide an event the allowlist would have classified, because every allowlisted
+  # type is short and clean. Checked, not assumed.
+  def test_no_allowlisted_event_type_ever_requires_sanitizing
+    harvester = HARVESTER.allocate
+    needing = HARVESTER::EVENT_TYPES.reject do |type|
+      harvester.send(:bounded_signal, type, unknown_is_value: true) == type
+    end
+    assert_empty needing,
+                 "these allowlisted types would be altered by event_type_raw sanitizing: #{needing.inspect}"
+    HARVESTER::EVENT_TYPES.each do |type|
+      assert_operator type.bytesize, :<=, HARVESTER::SIGNAL_MAX_BYTES
+      refute_match HARVESTER::SIGNAL_CONTROL_CHARACTERS, type
+    end
+  end
+
+  # An event type outside the allowlist must stay countable rather than becoming
+  # an invisible NULL, which is the failure mode #112 was reported for.
+  def test_unrecognized_event_type_is_visible_as_drift_rather_than_a_silent_null
+    Dir.mktmpdir("agent-coordination-ledger-event-drift") do |dir|
+      source_path = File.join(dir, "coordination.json")
+      ledger_path = File.join(dir, "telemetry.sqlite3")
+      source = coordination_fixture
+      source["events"] << {
+        "id" => "event-drift-fixture", "batch_id" => "batch-fixture",
+        "repo" => "shakacode/agent-coordination", "target" => "78",
+        "type" => "not-a-known-event-type", "at" => "2026-07-18T01:30:00Z"
+      }
+      File.write(source_path, JSON.generate(source))
+
+      _stdout, stderr, status = Open3.capture3(
+        CLI, "harvest", "--ledger", ledger_path,
+        "--coordination-json", source_path, "--batch-id", "batch-fixture"
+      )
+      assert status.success?, stderr
+
+      assert_equal ["NULL|not-a-known-event-type"], sqlite_query(
+        ledger_path, "SELECT COALESCE(event_type, 'NULL'), event_type_raw FROM events"
+      )
+      assert_equal ["batch-fixture|not-a-known-event-type|1"],
+                   sqlite_query(ledger_path, "SELECT * FROM event_type_drift")
+    end
+  end
+
   private
+
+  # bin/agent-coord guards execution with a $PROGRAM_NAME check and keeps the
+  # event vocabulary in module-level constants, so loading it here is side-effect
+  # free and gives the test the CLI's own definitions rather than a copy.
+  def load_agent_coord_cli
+    load COORD_CLI unless defined?(AgentCoord::TYPED_EVENT_ALLOWED_FIELDS)
+  end
+
+  # Every event type bin/agent-coord writes, derived from the CLI two
+  # independent ways because neither alone is sufficient:
+  #
+  #   1. Constants -- TYPED_EVENT_ALLOWED_FIELDS declares the operator-supplied
+  #      typed signals, and that is authoritative for them.
+  #   2. Literal `type:` emission sites -- the four types the CLI emits itself
+  #      are bare string literals at their call sites. Their appearance in
+  #      BATCH_AUDIT_ORDINARY_LIFECYCLE_TYPES is incidental bookkeeping for the
+  #      unrelated batch-audit feature, NOT a declaration of what is emitted, so
+  #      a new hardcoded emission would touch no constant and a constants-only
+  #      derivation would never see it. Scanning the source closes that hole.
+  #
+  # Keep both. Dropping either one silently narrows what this guard can catch.
+  def cli_emitted_event_types
+    load_agent_coord_cli
+    (AgentCoord::BATCH_AUDIT_ORDINARY_LIFECYCLE_TYPES +
+      AgentCoord::TYPED_EVENT_ALLOWED_FIELDS.keys +
+      cli_literal_emission_types +
+      [cli_terminal_event_type]).uniq.sort
+  end
+
+  # The `type:` literals the CLI passes to its own event writers. Matches the
+  # four self-emitted types today; a fifth added the same way is caught here.
+  def cli_literal_emission_types
+    types = File.read(COORD_CLI).scan(/^\s+type: "([^"]+)"/).flatten.uniq
+    refute_empty types,
+                 "no literal `type:` emission sites found in bin/agent-coord -- the scan pattern has " \
+                 "gone stale and this guard is no longer checking hardcoded emissions"
+    types
+  end
+
+  # The terminal closeout type has no CLI constant -- it is the literal that
+  # `terminal_event?` compares against -- so read it from the source instead of
+  # restating it. Renaming it there fails this derivation loudly rather than
+  # silently shrinking the set this contract is checked against.
+  def cli_terminal_event_type
+    source = File.read(COORD_CLI)
+    type = source[/def terminal_event\?\(options\)\s*\n\s*options\[:type\] == "([^"]+)"/, 1]
+    refute_nil type, "could not derive the terminal event type from bin/agent-coord"
+    type
+  end
+
+  # Drives the real CLI against a temp state root so it writes one event of every
+  # type it emits, then captures `status --json` as the harvester's coordination
+  # source. claim.acquired, claim.released, and phase.changed are never recorded
+  # directly: they are emitted as side effects of claim, release, and a heartbeat
+  # that moves an already-set phase, so the corpus has to drive those commands.
+  def record_cli_event_corpus(dir)
+    state = File.join(dir, "state")
+    env = CORPUS_ENV.merge("XDG_CONFIG_HOME" => File.join(dir, "config"))
+    FileUtils.mkdir_p(env.fetch("XDG_CONFIG_HOME"))
+    manifest = File.join(dir, "manifest.json")
+    File.write(manifest, JSON.generate(
+                           "batch_id" => CORPUS_BATCH, "repo" => CORPUS_REPO,
+                           "lanes" => [{ "name" => "maker", "owner" => "corpus-worker",
+                                         "targets" => [CORPUS_TARGET] }]
+                         ))
+    run_coord(env, "register-batch", "--state-root", state, "--file", manifest)
+    corpus_commands(state).each { |args| run_coord(env, *args) }
+
+    source_path = File.join(dir, "coordination.json")
+    status_json = run_coord(env, "status", "--state-root", state, "--json")
+    File.write(source_path, status_json)
+    [JSON.parse(status_json).fetch("events").map { |event| event.fetch("type") }.sort, source_path]
+  end
+
+  def corpus_commands(state)
+    common = ["--state-root", state, "--batch-id", CORPUS_BATCH,
+              "--repo", CORPUS_REPO, "--target", CORPUS_TARGET, "--agent-id", "corpus-worker"]
+    lane = ["--lane", "maker"]
+    [
+      # claim.acquired
+      ["claim", *common, *lane, "--host", "claude-code"],
+      # the first phase is captured by claim.acquired; the second one transitions
+      # and is what emits phase.changed
+      ["heartbeat", *common, "--phase", "implementing", "--host", "claude-code"],
+      ["heartbeat", *common, "--phase", "verifying", "--host", "claude-code"],
+      ["record-event", *common, *lane, "--type", "help_requested", "--reason", "question"],
+      ["record-event", *common, *lane, "--type", "escalation_requested",
+       "--from-route", "sonnet/medium", "--to-route", "opus/high", "--evidence", "two failed attempts"],
+      ["record-event", *common, *lane, "--type", "error",
+       "--severity", "P1", "--category", "harvest-corpus", "--message", "corpus error signal"],
+      ["record-event", *common, *lane, "--type", "human_intervention", "--kind", "takeover"],
+      # claim.released
+      ["release", *common, *lane],
+      ["record-event", *common, *lane, "--type", "lane_closed", "--terminal", "done",
+       "--branch", "claude/event-corpus", "--pr-state", "merged", "--host", "claude-code",
+       "--pr-url", "https://github.com/shakacode/agent-coordination/pull/1",
+       "--evidence-url", "https://github.com/shakacode/agent-coordination/pull/1"]
+    ]
+  end
+
+  # A ledger built from every migration except the last one, holding an event
+  # row written before the event-retention columns existed.
+  def seed_ledger_without_event_retention(dir, ledger_path)
+    older = File.join(dir, "migrations")
+    FileUtils.mkdir_p(older)
+    migrations = Dir.glob(File.join(ROOT, "schema", "telemetry-ledger", "*.sql"))
+    assert_equal "0004_event_type_retention.sql", File.basename(migrations.last)
+    migrations[0..-2].each { |path| FileUtils.cp(path, older) }
+
+    ledger = AgentCoord::Telemetry::Ledger.new(ledger_path, migrations_path: older)
+    ledger.execute(
+      "INSERT INTO source_artifacts (source_key, source_kind, source_ref, source_sha256) VALUES (?, ?, ?, ?)",
+      ["coordination:pre", "coordination", "coordination:pre", "a" * 64]
+    )
+    ledger.execute(
+      "INSERT INTO events (event_ref, event_type, join_status, source_artifact_id, source_record_sha256) " \
+      "VALUES (?, ?, ?, ?, ?)",
+      ["pre-existing", "lane_closed", "exact", 1, "b" * 64]
+    )
+  end
+
+  # Every input `known()` rejects outright, plus the genuinely-absent cases, as
+  # [label, type] pairs. `:absent` means the event carries no "type" key at all.
+  # The control characters are written as escapes so this file holds no raw
+  # control bytes.
+  def unsanitizable_event_types
+    [
+      ["long", "x" * 300],
+      ["long-sibling", "#{'x' * 299}y"],
+      ["unknown-literal", "UNKNOWN"],
+      ["escape", "\u001B[31mred"],
+      ["control-only", "\u0001\u0002"],
+      ["ordinary", "operator-adhoc-type"],
+      ["blank", "   "],
+      ["absent", :absent]
+    ]
+  end
+
+  def run_coord(env, *args)
+    stdout, stderr, status = Open3.capture3(env, RbConfig.ruby, COORD_CLI, *args)
+    assert status.success?, "agent-coord #{args.first} failed:\n#{stdout}\n#{stderr}"
+    stdout
+  end
 
   def sqlite_query(ledger_path, sql)
     stdout, stderr, status = Open3.capture3(
