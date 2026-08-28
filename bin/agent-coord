@@ -221,7 +221,7 @@ module AgentCoord
   # decoration. `adhoc` is not that space: its ids are operator-chosen slugs, so
   # it is folded only where it cannot collide with a GitHub number.
   WORK_ITEM_GITHUB_KINDS = %w[issue pr].freeze
-  WORK_ITEM_ADHOC_KIND = "adhoc"
+  WORK_ITEM_KINDS = (WORK_ITEM_GITHUB_KINDS + ["adhoc"]).freeze
   WORK_ITEM_NUMBER = /\A\d+\z/
   LOG_SINCE_UNITS = { "m" => 60, "h" => 3600, "d" => 86_400, "w" => 604_800 }.freeze
   BATCH_AUDIT_TERMINAL_REQUIRED_FACT_FIELDS = %w[event_id repo target terminal workspace at].freeze
@@ -3536,9 +3536,11 @@ module AgentCoord
       if options[:json]
         events = rows.map { |row| log_scrub_values(row.slice(*LOG_TSV_FIELDS)) }
         payload = { "work_item" => log_work_item_summary(options, rows, claims), "trail" => log_trail_state,
-                    "events" => events, "claim" => records.first }.compact
-        # `claim` stays the newest for consumers that read one; `claims` carries
-        # every holder so a concurrent alias claim is never dropped from the answer.
+                    "events" => events, "claim" => records.last }.compact
+        # Oldest first, like the trail above it, so the last thing printed or listed
+        # is the current one. `claim` stays the newest for consumers that read one;
+        # `claims` carries every holder so a concurrent alias claim is never
+        # dropped from the answer.
         payload["claims"] = records unless records.empty?
         @stdout.puts JSON.pretty_generate(payload)
       elsif format == "tsv"
@@ -3587,8 +3589,9 @@ module AgentCoord
     # item, so it always belongs last: it is the answer to "where is it now".
     def log_report_trailer(options, claims, rows, stream)
       stream.puts "no events for #{options[:work_item] || 'the current filters'}" if rows.empty?
-      # One line per holder: with two live alias claims, printing only the newest
-      # would read as sole custody.
+      # One line per holder, oldest first: with two live alias claims, printing
+      # only the newest would read as sole custody, and printing them newest-first
+      # would contradict the trail's own last-line-is-current reading.
       claims.each { |claim| stream.puts log_claim_note_line(claim.fetch("record")) }
     end
 
@@ -3665,7 +3668,6 @@ module AgentCoord
              .values
              .map { |variants| variants.max_by { |candidate| log_at_key(candidate.data["updated_at"]) } }
              .sort_by { |candidate| log_at_key(candidate.data["updated_at"]) }
-             .reverse
              .map do |candidate|
                { "record" => log_claim_record(candidate.data, now_utc, log_claim_target(candidate)),
                  "target" => log_claim_target(candidate),
@@ -6048,19 +6050,25 @@ module AgentCoord
     [base, segments.empty? ? nil : segments.join(":").downcase]
   end
 
-  # `issue:`/`pr:` are decoration on a GitHub number and come off. `adhoc:` comes
-  # off only ahead of a slug; ahead of a number it stays part of the base, so
-  # `adhoc:319` is neither issue 319 nor the `319` lane of a work item called
-  # "adhoc" -- both of which would answer for records that are not it.
+  # A kind prefix comes off only where it is decoration rather than identity.
+  # `issue:`/`pr:` decorate a GitHub number, so they come off ahead of one and
+  # stay ahead of a slug -- `issue:foo` is not the separately keyed `foo`.
+  # `adhoc:` is the mirror image: it decorates a slug, and ahead of a number it
+  # stays, so `adhoc:319` is neither issue 319 nor the `319` lane of a work item
+  # called "adhoc". A prefix that stays is part of the base, never a lane.
   def self.work_item_segments(segments)
     return segments unless segments.length > 1
 
     kind = segments.first.downcase
-    return segments.drop(1) if WORK_ITEM_GITHUB_KINDS.include?(kind)
-    return segments unless kind == WORK_ITEM_ADHOC_KIND
-    return segments.drop(1) unless segments[1].to_s.match?(WORK_ITEM_NUMBER)
+    return segments unless WORK_ITEM_KINDS.include?(kind)
+    return segments.drop(1) if decorative_work_item_kind?(kind, segments[1])
 
     [segments.take(2).join(":"), *segments.drop(2)]
+  end
+
+  def self.decorative_work_item_kind?(kind, id)
+    numeric = id.to_s.match?(WORK_ITEM_NUMBER)
+    WORK_ITEM_GITHUB_KINDS.include?(kind) ? numeric : !numeric
   end
 
   def self.source_root

@@ -1662,3 +1662,72 @@ class AgentCoordLogClaimTargetTest < AgentCoordLogTestCase
     assert(lines.any? { |line| line.include?("prefixed-holder") && line.include?(" pr:1 ") })
   end
 end
+
+# The trail reads oldest-first and the last line is the current state. Claim
+# trailer lines are part of that reading, so they follow the same direction.
+class AgentCoordLogClaimOrderTest < AgentCoordLogTestCase
+  def write_two_live_holders
+    write_claim("shakacode/example", "1", "status" => "active", "agent_id" => "older-holder",
+                                          "updated_at" => "2026-08-01T00:00:00Z")
+    write_claim("shakacode/example", "pr:1", "status" => "active", "agent_id" => "newer-holder",
+                                             "updated_at" => "2026-08-02T00:00:00Z")
+  end
+
+  def test_text_claim_lines_read_oldest_first
+    write_two_live_holders
+
+    holders = run_log("shakacode/example#1").stdout.lines
+                                            .select { |line| line.start_with?("claim ") }
+                                            .map { |line| line[/\b\w+-holder\b/] }
+
+    assert_equal %w[older-holder newer-holder], holders
+  end
+
+  def test_singular_json_claim_is_still_the_newest
+    write_two_live_holders
+
+    payload = JSON.parse(run_log("shakacode/example#1", "--json").stdout)
+
+    assert_equal "newer-holder", payload.fetch("claim").fetch("agent_id")
+    assert_equal(%w[older-holder newer-holder],
+                 payload.fetch("claims").map { |claim| claim.fetch("agent_id") })
+  end
+end
+
+# `issue:`/`pr:` are decoration on a GitHub number. Ahead of a slug they are not
+# decoration, and stripping them would merge two separately keyed records.
+class AgentCoordLogNonNumericKindTest < AgentCoordLogTestCase
+  def write_slug_events
+    write_event("b1", "e1", "type" => "claim.acquired", "repo" => "shakacode/example", "target" => "foo",
+                            "machine_id" => "m1", "host" => "codex", "at" => "2026-08-03T01:00:00Z")
+    write_event("b1", "e2", "type" => "claim.acquired", "repo" => "shakacode/example", "target" => "issue:foo",
+                            "machine_id" => "m2", "host" => "codex", "at" => "2026-08-03T02:00:00Z")
+  end
+
+  def matched(target)
+    JSON.parse(run_log("shakacode/example##{target}", "--json").stdout).dig("work_item", "matched_targets")
+  end
+
+  def test_a_slug_and_its_prefixed_spelling_are_different_work_items
+    write_slug_events
+
+    assert_equal ["foo"], matched("foo")
+    assert_equal ["issue:foo"], matched("issue:foo")
+  end
+
+  def test_numeric_ids_still_fold_across_prefixes
+    write_event("b1", "e1", "type" => "claim.acquired", "repo" => "shakacode/example", "target" => "319",
+                            "machine_id" => "m1", "host" => "codex", "at" => "2026-08-03T01:00:00Z")
+    write_event("b1", "e2", "type" => "claim.acquired", "repo" => "shakacode/example", "target" => "issue:319",
+                            "machine_id" => "m2", "host" => "codex", "at" => "2026-08-03T02:00:00Z")
+
+    assert_equal ["319", "issue:319"], matched("pr:319")
+  end
+
+  def test_a_lane_under_a_numeric_id_still_folds
+    write_event("b1", "e1", "type" => "claim.acquired", "repo" => "shakacode/example", "target" => "issue:319:qa",
+                            "machine_id" => "m1", "host" => "codex", "at" => "2026-08-03T01:00:00Z")
+
+    assert_equal ["issue:319:qa"], matched("319")
+  end
+end
