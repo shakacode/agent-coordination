@@ -1665,13 +1665,16 @@ class LogHttpBackendTest < HttpEnvTestCase
   # a whole custody trail would let `log` report the wrong current state with no
   # sign anything was withheld (PR #131 review).
   def test_log_warns_when_the_event_trail_is_filtered_by_a_scoped_token
-    stub = HttpStoreStub.new([[200, { "entries" => [], "filtered" => true }]])
+    stub = HttpStoreStub.new([[200, { "entries" => [], "filtered" => true }], [200, { "entries" => [] }]])
     with_env("AGENT_COORD_API_URL" => stub.base_url, "AGENT_COORD_API_TOKEN" => "tok") do
       code, _out, err = run_cli(["log"], {})
 
       assert_equal 0, code
-      assert_includes err, "filtered by scoped token"
+      assert_includes err, "events filtered by scoped token"
       assert_includes err, "may be incomplete"
+      # The archive listing answered cleanly, so nothing here is being satisfied
+      # by a degradation this test is not about.
+      refute_includes err, "archived events"
     end
   ensure
     stub.shutdown
@@ -1680,13 +1683,14 @@ class LogHttpBackendTest < HttpEnvTestCase
   # A read-only query must degrade the way status does rather than crashing when a
   # scoped token cannot list events, and it must say the trail is short (PR #131).
   def test_log_degrades_when_the_event_listing_is_forbidden_to_a_scoped_token
-    stub = HttpStoreStub.new([[403, { "error" => "forbidden" }]])
+    stub = HttpStoreStub.new([[403, { "error" => "forbidden" }], [200, { "entries" => [] }]])
     with_env("AGENT_COORD_API_URL" => stub.base_url, "AGENT_COORD_API_TOKEN" => "tok") do
       code, _out, err = run_cli(["log"], {})
 
       assert_equal 0, code
-      assert_includes err, "not readable by scoped token"
+      assert_includes err, "events not readable by scoped token"
       assert_includes err, "may be incomplete"
+      refute_includes err, "archived events"
     end
   ensure
     stub.shutdown
@@ -1725,12 +1729,16 @@ class LogHttpBackendTest < HttpEnvTestCase
   # A partial listing would write a partial mirror that later reads as complete --
   # the same hazard the narrowing options are rejected for.
   def test_log_sync_refuses_to_write_a_mirror_from_a_filtered_listing
-    stub = HttpStoreStub.new([[200, { "entries" => [], "filtered" => true }]])
+    stub = HttpStoreStub.new([[200, { "entries" => [], "filtered" => true }], [200, { "entries" => [] }]])
     with_env("AGENT_COORD_API_URL" => stub.base_url, "AGENT_COORD_API_TOKEN" => "tok") do
       code, _out, err = run_cli(["log", "--sync"], {})
 
       assert_equal 2, code
-      assert_includes err, "incomplete"
+      # Named, so the filtered events listing is demonstrably what refused the
+      # mirror. A bare "incomplete" was also satisfied by the archive listing
+      # falling through to the stub's 500, which is a different failure.
+      assert_includes err, "refusing to sync an incomplete trail: events"
+      refute_includes err, "archived events"
     end
   ensure
     stub.shutdown

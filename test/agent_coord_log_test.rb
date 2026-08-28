@@ -2277,7 +2277,38 @@ class AgentCoordLogArchiveTest < AgentCoordLogTestCase
     assert_includes result.stderr, "archive deleted after #{envelope.fetch('delete_after')}"
   end
 
+  # gc writes an envelope before deleting its sources, so a run interrupted part
+  # way leaves the next one compacting the remainder into a second envelope, and
+  # both can name the same omitted source event. Differencing each envelope and
+  # summing reported that one lost event as two, and which number you got
+  # depended on the order the listing yielded the envelopes in.
+  def test_log_counts_a_source_dropped_by_two_overlapping_envelopes_once
+    write_archive_json("archive/events/b9/compact-first.json",
+                       "schema_version" => 1, "record_family" => "compacted_events",
+                       "source_paths" => ["events/b9/e1.json", "events/b9/e2.json", "events/b9/e3.json"],
+                       "archived_at" => "2026-08-05T00:00:00Z", "delete_after" => "2026-09-04T00:00:00Z",
+                       "records" => [overlap_event("e1", "2026-08-01T00:00:00Z"),
+                                     overlap_event("e3", "2026-08-03T00:00:00Z")])
+    write_archive_json("archive/events/b9/compact-second.json",
+                       "schema_version" => 1, "record_family" => "compacted_events",
+                       "source_paths" => ["events/b9/e2.json", "events/b9/e4.json"],
+                       "archived_at" => "2026-08-06T00:00:00Z", "delete_after" => "2026-09-05T00:00:00Z",
+                       "records" => [overlap_event("e4", "2026-08-04T00:00:00Z")])
+
+    result = run_log("shakacode/example#104")
+
+    assert_equal 0, result.status.exitstatus, result.stderr
+    assert_equal %w[e1 e3 e4], tsv_event_ids("shakacode/example#104")
+    assert_includes result.stderr, "1 source event was dropped by compaction"
+    refute_includes result.stderr, "2 source events were dropped by compaction"
+  end
+
   private
+
+  def overlap_event(event_id, at)
+    { "schema_version" => 2, "event_id" => event_id, "batch_id" => "b9", "type" => "merged",
+      "repo" => "shakacode/example", "target" => "104", "machine_id" => "m9", "host" => "codex", "at" => at }
+  end
 
   # Written verbatim, because write_event always stamps a batch_id and these
   # fixtures exist to exercise a record that carries none.

@@ -3469,7 +3469,7 @@ module AgentCoord
         records = log_archived_event_data(entry)
         next [] if records.empty?
 
-        provenance = log_archive_provenance(entry)
+        provenance = log_archive_provenance(entry, records)
         records.filter_map do |data|
           identity = log_event_identity(data)
           twin = seen[identity]
@@ -3620,20 +3620,27 @@ module AgentCoord
     # once per row it contributed: a compacted envelope lists every source path
     # it consumed but retains only the first, last, terminal, and phase-changing
     # events, so a restored trail can be shorter than the one gc swallowed.
-    # Only an array-valued source_paths is counted. Array() would turn a hash
+    # What the envelope consumed and what it kept, rather than the difference
+    # between the two. gc_compact_events writes its envelope before deleting the
+    # sources, so a run interrupted part way leaves the next one compacting the
+    # remainder into a second envelope, and both can name the same omitted source
+    # event. Differencing per envelope and summing then reported one lost event
+    # as two, with the total depending on which envelope the listing yielded
+    # first. The note aggregates these instead, so an overlap counts once.
+    #
+    # Only an array-valued source_paths is carried. Array() would turn a hash
     # into an arbitrary number of pairs and nil into zero, either of which
-    # reports a confident dropped count for an envelope whose source metadata
+    # reports a confident count for an envelope whose source metadata
     # log_compaction_defect has just warned is unreadable.
-    def log_archive_provenance(entry)
+    def log_archive_provenance(entry, records)
       data = entry.data
       sources = data["source_paths"]
-      consumed = sources.is_a?(Array) ? sources.length : 0
-      retained = Array(data["records"]).length
       {
         "archived" => true,
         "archive_path" => entry.path,
         "archive_delete_after" => data["delete_after"].to_s,
-        "archive_dropped" => [consumed - retained, 0].max
+        "archive_sources" => sources.is_a?(Array) ? sources : [],
+        "archive_retained" => records.map { |record| log_event_identity(record) }
       }
     end
 
@@ -3675,7 +3682,7 @@ module AgentCoord
     # made --sync refuse forever on older backends, and this command's own
     # documentation asks operators to run it before every gc.
     def log_archived_event_entries(store)
-      log_listing(store, LOG_ARCHIVED_EVENTS_PREFIX, unsupported_is_empty: true) do |reason|
+      log_listing(store, LOG_ARCHIVED_EVENTS_PREFIX) do |reason|
         next "warning: archived events #{reason}; nothing can have been archived there" if
           reason == LOG_UNSUPPORTED_REASON
 
@@ -3700,7 +3707,7 @@ module AgentCoord
       envelopes = rows.select { |row| row["archive_path"] }.uniq { |row| row.fetch("archive_path") }
       return if envelopes.empty?
 
-      dropped = envelopes.sum { |row| row.fetch("archive_dropped") }
+      dropped = log_archive_dropped(envelopes)
       expires = log_archive_soonest_expiry(envelopes)
       parts = [log_archive_note_lead(rows)]
       if dropped.positive?
@@ -3709,6 +3716,17 @@ module AgentCoord
       parts << "archive deleted after #{expires}" if expires
       parts << "mirror it with log --sync" unless options[:sync]
       @stderr.puts log_scrub(parts.join("; "))
+    end
+
+    # Unique source paths against unique retained identities. Two envelopes left
+    # overlapping by an interrupted compaction can name the same consumed source
+    # and each omit it, so differencing them separately counted one lost event
+    # twice; taking both sides as sets counts it once and makes the total
+    # independent of listing order.
+    def log_archive_dropped(envelopes)
+      consumed = envelopes.flat_map { |row| row.fetch("archive_sources") }.uniq
+      retained = envelopes.flat_map { |row| row.fetch("archive_retained") }.uniq
+      [consumed.length - retained.length, 0].max
     end
 
     # An envelope whose records were every one of them duplicates of live events
@@ -3742,13 +3760,12 @@ module AgentCoord
     # One listing path for both families: warn on a partial or degraded read,
     # remember that it happened, and hand back whatever was legible.
     #
-    # unsupported_is_empty separates two degradations that are not the same fact.
-    # A forbidden prefix may hold records this token cannot see, so the answer is
-    # short and must be reported as such. A prefix the backend does not implement
-    # holds nothing, so nothing is missing -- and treating that as an incomplete
-    # trail is what stopped --sync writing a mirror at all on such a backend. Only
-    # a caller that can show the prefix cannot hold anything may opt in.
-    def log_listing(store, prefix, unsupported_is_empty: false)
+    # Two degradations that are not the same fact. A forbidden prefix may hold
+    # records this token cannot see, so the answer is short and must be reported
+    # as such. A prefix the backend does not implement holds nothing, so nothing
+    # is missing -- and treating that as an incomplete trail is what stopped
+    # --sync writing a mirror at all on such a backend.
+    def log_listing(store, prefix)
       entries = store.list_json(prefix)
       log_note_incomplete(prefix, yield("filtered by scoped token")) if filtered_status_list?(store, prefix)
       entries
@@ -3758,9 +3775,31 @@ module AgentCoord
 
       reason = degradation == :forbidden ? "not readable by scoped token" : LOG_UNSUPPORTED_REASON
       message = yield(reason)
-      empty = unsupported_is_empty && degradation == :unsupported
-      empty ? @stderr.puts(message) : log_note_incomplete(prefix, message)
+      if degradation == :unsupported && unsupported_prefix_is_empty?(prefix)
+        @stderr.puts(message)
+      else
+        log_note_incomplete(prefix, message)
+      end
       []
+    end
+
+    # Read off the prefix rather than asked of the caller, so the rule holds for
+    # every archive prefix by construction and a later reader of archive/claims
+    # or archive/heartbeats cannot reintroduce the bug by forgetting to opt in.
+    #
+    # An archive prefix the backend does not implement cannot be hiding anything,
+    # because it cannot have been written either: the worker change that made
+    # archive listable is the same one that made it writable. STATE_PATH gained
+    # its archive arm and STATE_PREFIX gained ARCHIVE_PREFIX in one commit, both
+    # built from the same RECORD_PATH and ACTIVE_PREFIX constants, and validPath
+    # gates PUT and DELETE as well as GET, so a backend that rejects the listing
+    # rejected gc's writes too.
+    #
+    # The live prefixes are deliberately excluded. For events and claims an
+    # unimplemented prefix is a missing answer rather than an empty one, because
+    # that is where the answer comes from in the first place.
+    def unsupported_prefix_is_empty?(prefix)
+      prefix == "archive" || prefix.start_with?("archive/")
     end
 
     # Every prefix that degraded, not the last one to degrade. The trail is read
