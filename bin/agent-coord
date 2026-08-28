@@ -3476,7 +3476,7 @@ module AgentCoord
         # The row itself, not a marker: an archived duplicate of this event needs
         # somewhere to record the envelope it came from, and the row that is
         # reported is the only thing the note can still see.
-        seen[log_event_identity(entry.data)] = row
+        seen[log_event_dedup_key(entry.data)] = row
         row
       end
       rows + log_archived_event_rows(store, seen)
@@ -3498,7 +3498,7 @@ module AgentCoord
 
         log_archive_record_envelope(entry, records)
         records.filter_map do |data|
-          identity = log_event_identity(data)
+          identity = log_event_dedup_key(data)
           twin = seen[identity]
           next log_archive_twin(twin) if twin
 
@@ -3510,15 +3510,6 @@ module AgentCoord
     end
 
     # The live copy wins the row, but the event is in the archive all the same
-    # and on the same delete_after clock, so the envelope is recorded on the row
-    # that is reported. Without this an envelope whose records are all duplicates
-    # -- a compaction interrupted between writing it and deleting its sources --
-    # contributed no rows, and so vanished from the note entirely even though it
-    # had been read and is genuinely expiring. First envelope to claim a row
-    # wins, which keeps a row that was itself read from the archive pointing at
-    # the envelope it actually came from. Returns nil so filter_map drops the
-    # duplicate row.
-    # The live copy wins the row, but the event is in the archive all the same
     # and on the same clock, so the row records that it is held there. Only a
     # flag: everything the note needs about the envelope is in the ledger, which
     # is what stopped this from having to carry -- and guard against overwriting
@@ -3528,6 +3519,10 @@ module AgentCoord
       nil
     end
 
+    # The key two records are the same event under -- not to be confused with
+    # log_identity, which folds the spellings of one work item. This one answers
+    # "have I already reported this event", nothing about work items.
+    #
     # The batch and the event id together, because event_id is not unique across
     # the store: a terminal event takes its id from the lane name alone (see
     # stable_terminal_event_id), so two batches that each register a lane named
@@ -3553,7 +3548,7 @@ module AgentCoord
     # recorded field -- same batch, instant, type, work item, machine, and agent,
     # or none of them stamped at all. Those two render as the same line, so the
     # trail loses a repeat rather than a fact.
-    def log_event_identity(data)
+    def log_event_dedup_key(data)
       event_id = data["event_id"]
       batch_id = data["batch_id"]
       return data unless log_identity_part?(event_id) && log_identity_part?(batch_id)
@@ -3578,7 +3573,7 @@ module AgentCoord
       data = entry.data
       case data.is_a?(Hash) ? data["record_family"] : nil
       when "compacted_events" then log_compacted_records(entry, data)
-      when "archived_record" then log_archived_record(entry, data["data"])
+      when "archived_record" then log_archived_record(entry, data)
       else
         log_archive_incomplete(entry, "unknown archived record family")
         []
@@ -3608,6 +3603,10 @@ module AgentCoord
     def log_compaction_defect(records, sources)
       return "malformed archived record body" unless records.is_a?(Array)
       return "malformed archived source paths" unless sources.is_a?(Array)
+      return "malformed archived source paths" unless sources.all? { |path| log_archive_path?(path) }
+      return "duplicate archived source paths" unless sources.uniq.length == sources.length
+      # Past this point log_archive_source_list? holds, so the ledger records
+      # exactly the paths counted here.
       # gc retains at least the first and last event of every generation it
       # compacts (see gc_compacted_entries), so retaining nothing while naming
       # consumed sources is corruption rather than an empty generation. Both
@@ -3629,22 +3628,48 @@ module AgentCoord
       "no retained records for #{log_archive_count(sources.length, 'source path')}"
     end
 
-    # One archived event rather than a generation, so there is no source_paths to
-    # agree with and nothing that could have been dropped.
-    def log_archived_record(entry, record)
-      return [record] if record.is_a?(Hash)
+    # One archived event rather than a generation, so there is one source_path
+    # rather than a list -- but it is still the path this entry consumed, and the
+    # note counts it, so an absent or unusable one leaves the arithmetic short
+    # rather than merely uninformative. Laddered like the compacted case so a
+    # doubly corrupt entry still prints one sentence.
+    def log_archived_record(entry, data)
+      defect = log_archived_record_defect(data)
+      if defect
+        log_archive_incomplete(entry, defect)
+        return []
+      end
 
-      log_archive_incomplete(entry, log_archive_count(1, "unreadable archived record"))
-      []
+      [data["data"]]
+    end
+
+    def log_archived_record_defect(data)
+      return log_archive_count(1, "unreadable archived record") unless data["data"].is_a?(Hash)
+      return "malformed archived source paths" unless log_archive_path?(data["source_path"])
+
+      nil
+    end
+
+    # A path is only a path if it is a non-empty string. nil, an empty string, a
+    # number, or a nested object are all values the dropped-source arithmetic
+    # cannot count, and counting them anyway is what let a retained record cancel
+    # a source that really was omitted.
+    def log_archive_path?(value)
+      value.is_a?(String) && !value.strip.empty?
     end
 
     def log_archive_count(count, noun)
       "#{count} #{noun}#{'s' unless count == 1}"
     end
 
+    # The path and the error text both come from the backend -- over HTTP the
+    # path is whatever the server put in its listing response -- so they are
+    # scrubbed before reaching a terminal, the same way the note scrubs the
+    # delete_after it prints. An archive record is not a trusted source of
+    # escape sequences.
     def log_archive_incomplete(entry, reason)
       log_note_incomplete(LOG_ARCHIVED_EVENTS_PREFIX,
-                          "warning: #{reason} at #{entry.path}; this trail may be incomplete")
+                          log_scrub("warning: #{reason} at #{entry.path}; this trail may be incomplete"))
     end
 
     # Provenance for the note, not for the rendered row. It is keyed by archive
@@ -3677,7 +3702,7 @@ module AgentCoord
         "path" => entry.path,
         "delete_after" => data["delete_after"].to_s,
         "sources" => log_archive_sources(data),
-        "identities" => records.map { |record| log_event_identity(record) },
+        "identities" => records.map { |record| log_event_dedup_key(record) },
         "records" => records,
         "synthetic" => data["synthetic"] == true
       }
@@ -3690,10 +3715,20 @@ module AgentCoord
     # archived_record sat beside it in the same scope.
     def log_archive_sources(data)
       sources = data["source_paths"]
-      return sources if sources.is_a?(Array)
+      # Only a validated list reaches the ledger. log_compaction_defect and
+      # log_archived_record_defect have already reported anything rejected here,
+      # so leaving it out understates the loss rather than inventing a count,
+      # and the trail is marked incomplete either way.
+      return log_archive_source_list?(sources) ? sources : [] if sources.is_a?(Array)
 
       source = data["source_path"]
-      source.is_a?(String) && !source.empty? ? [source] : []
+      log_archive_path?(source) ? [source] : []
+    end
+
+    # A usable list of consumed paths: every entry a real path, and no entry
+    # twice, since one path names one consumed event.
+    def log_archive_source_list?(sources)
+      sources.uniq.length == sources.length && sources.all? { |path| log_archive_path?(path) }
     end
 
     # Scoped by the work item the query names, not by which rows survived
@@ -3763,8 +3798,10 @@ module AgentCoord
         "warning: archived events #{reason}; this trail may be incomplete"
       end
     rescue OperationalError, JSON::ParserError, SystemCallError => e
-      log_note_incomplete(LOG_ARCHIVED_EVENTS_PREFIX,
-                          "warning: archived events unreadable (#{e.message}); this trail may be incomplete")
+      log_note_incomplete(
+        LOG_ARCHIVED_EVENTS_PREFIX,
+        log_scrub("warning: archived events unreadable (#{e.message}); this trail may be incomplete")
+      )
       []
     end
 
@@ -3783,7 +3820,8 @@ module AgentCoord
       expires = log_archive_soonest_expiry(envelopes)
       parts = log_archive_coverage(Array(@log_scoped_rows))
       if dropped.positive?
-        parts << "#{dropped} source #{dropped == 1 ? 'event was' : 'events were'} dropped by compaction"
+        verb = dropped == 1 ? "was" : "were"
+        parts << "#{log_archive_count(dropped, 'source event')} #{verb} dropped by compaction"
       end
       parts << "archive deleted after #{expires}" if expires
       parts << "mirror it with log --sync" unless options[:sync]

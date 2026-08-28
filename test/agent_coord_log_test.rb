@@ -2414,6 +2414,130 @@ class AgentCoordLogArchiveTest < AgentCoordLogTestCase
     assert_includes result.stderr, "1 source event was dropped by compaction"
   end
 
+  # The archive read and the work-item identity folding (PR #145) meet here: an
+  # envelope recorded under issue:104 belongs to the same work item as a bare
+  # #104 query, so the note must scope it in. Matching the recorded spelling
+  # instead would have hidden the clock on exactly the trails #145 unified.
+  def test_log_scopes_archived_envelopes_through_work_item_identity
+    write_archive_json("archive/events/b9/compact-spelled.json",
+                       "schema_version" => 1, "record_family" => "compacted_events",
+                       "source_paths" => ["events/b9/e1.json", "events/b9/e2.json"],
+                       "archived_at" => "2026-08-05T00:00:00Z", "delete_after" => "2026-09-04T00:00:00Z",
+                       "records" => [overlap_event("e1", "2026-08-01T00:00:00Z").merge("target" => "issue:104")])
+
+    bare = run_log("shakacode/example#104")
+    lane = run_log("shakacode/example#issue:104")
+
+    assert_equal 0, bare.status.exitstatus, bare.stderr
+    assert_includes bare.stdout, "issue:104", "the bare query covers the spelled target"
+    assert_includes bare.stderr, "archive deleted after 2026-09-04T00:00:00Z"
+    assert_includes bare.stderr, "1 source event was dropped by compaction"
+    assert_includes lane.stderr, "archive deleted after 2026-09-04T00:00:00Z"
+  end
+
+  # A different work item's envelope must stay out of the note, however the
+  # queried item was spelled.
+  def test_log_keeps_another_work_items_envelope_out_of_the_note
+    write_archive_json("archive/events/b9/compact-other.json",
+                       "schema_version" => 1, "record_family" => "compacted_events",
+                       "source_paths" => ["events/b9/x1.json", "events/b9/x2.json"],
+                       "archived_at" => "2026-08-05T00:00:00Z", "delete_after" => "2026-09-04T00:00:00Z",
+                       "records" => [overlap_event("x1", "2026-08-01T00:00:00Z").merge("target" => "999")])
+
+    result = run_log("shakacode/example#104")
+
+    assert_equal 0, result.status.exitstatus, result.stderr
+    refute_includes result.stderr, "archive deleted after"
+    refute_includes result.stderr, "dropped by compaction"
+  end
+
+  # A source list is what the dropped-source arithmetic counts, so an entry that
+  # is not a path, or the same path twice, cannot be counted. Left unvalidated,
+  # a retained record cancelled a source that really was omitted.
+  def test_log_reports_a_compacted_envelope_whose_source_paths_are_not_paths
+    write_trace
+    write_archive_json("archive/events/b9/compact-nilsource.json",
+                       "schema_version" => 1, "record_family" => "compacted_events",
+                       "source_paths" => ["events/b9/e1.json", nil, ""],
+                       "archived_at" => "2026-08-05T00:00:00Z", "delete_after" => "2026-09-04T00:00:00Z",
+                       "records" => [overlap_event("e1", "2026-08-01T00:00:00Z")])
+
+    result = run_log("shakacode/example#104")
+
+    assert_equal 0, result.status.exitstatus, result.stderr
+    assert_includes result.stderr,
+                    "malformed archived source paths at archive/events/b9/compact-nilsource.json"
+    refute_includes result.stderr, "dropped by compaction"
+    assert_equal 2, run_log("--sync").status.exitstatus, "a mirror must not be written over it"
+  end
+
+  def test_log_reports_a_compacted_envelope_with_duplicate_source_paths
+    write_trace
+    write_archive_json("archive/events/b9/compact-dupsource.json",
+                       "schema_version" => 1, "record_family" => "compacted_events",
+                       "source_paths" => ["events/b9/e1.json", "events/b9/e1.json"],
+                       "archived_at" => "2026-08-05T00:00:00Z", "delete_after" => "2026-09-04T00:00:00Z",
+                       "records" => [overlap_event("e1", "2026-08-01T00:00:00Z")])
+
+    result = run_log("shakacode/example#104")
+
+    assert_equal 0, result.status.exitstatus, result.stderr
+    assert_includes result.stderr,
+                    "duplicate archived source paths at archive/events/b9/compact-dupsource.json"
+    refute_includes result.stderr, "dropped by compaction"
+  end
+
+  # archived_record names one consumed path. Without one the note cannot say what
+  # the entry consumed, and silently treating that as zero let its retained
+  # identity cancel a genuine loss elsewhere in scope.
+  def test_log_reports_an_archived_record_without_a_source_path
+    write_trace
+    write_archive_json("archive/events/b9/archived-sourceless.json",
+                       "schema_version" => 1, "record_family" => "archived_record",
+                       "archived_at" => "2026-08-05T00:00:00Z", "delete_after" => "2026-09-04T00:00:00Z",
+                       "data" => overlap_event("e9", "2026-08-09T00:00:00Z"))
+
+    result = run_log("shakacode/example#104", "--format", "tsv")
+
+    assert_equal 0, result.status.exitstatus, result.stderr
+    assert_includes result.stderr,
+                    "malformed archived source paths at archive/events/b9/archived-sourceless.json"
+    refute_includes tsv_rows_event_ids(result), "e9", "an entry that cannot be counted is not folded in"
+  end
+
+  # Over HTTP the record path is whatever the backend put in its listing, so it
+  # reaches the terminal only after scrubbing -- an archive record is not a
+  # trusted source of escape sequences.
+  def test_log_scrubs_control_characters_out_of_an_archive_warning
+    write_trace
+    write_archive_json("archive/events/b9/compact-\e[31mred.json",
+                       "schema_version" => 1, "record_family" => "future_family",
+                       "archived_at" => "2026-08-05T00:00:00Z", "delete_after" => "2026-09-04T00:00:00Z")
+
+    result = run_log("shakacode/example#104", "--format", "tsv")
+
+    assert_equal 0, result.status.exitstatus, result.stderr
+    assert_includes result.stderr, "unknown archived record family"
+    refute_includes result.stderr, "\e", "an escape sequence must not reach the terminal"
+    assert_equal %w[e1 e2 e3 e4 e5], tsv_rows_event_ids(result)
+  end
+
+  def test_log_scrubs_control_characters_out_of_an_unreadable_archive_warning
+    write_trace
+    path = "archive/events/b9/compact-\e[31mred.json"
+    write_archive_json(path, "schema_version" => 1, "record_family" => "compacted_events", "records" => [])
+    FileUtils.chmod(0o000, File.join(@state_root, path))
+
+    result = run_log("shakacode/example#104", "--format", "tsv")
+
+    assert_equal 0, result.status.exitstatus, result.stderr
+    assert_includes result.stderr, "archived events unreadable"
+    refute_includes result.stderr, "\e", "an escape sequence must not reach the terminal"
+    assert_equal %w[e1 e2 e3 e4 e5], tsv_rows_event_ids(result)
+  ensure
+    archive_record_paths.each { |file| FileUtils.chmod(0o600, file) }
+  end
+
   private
 
   def overlap_event(event_id, at)
