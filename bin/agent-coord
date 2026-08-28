@@ -1044,7 +1044,8 @@ module AgentCoord
       env_root = nil if env_root == ""
       env_backend = nil if env_backend == ""
 
-      return if resolve_cli_backend?(options, cli_api, env_api, env_root)
+      configured = { api_url: env_api, state_root: env_root, backend: env_backend }
+      return if resolve_cli_backend?(options, cli_api, configured)
 
       resolve_configured_backend(options, env_api, env_root, env_backend)
     end
@@ -1056,57 +1057,74 @@ module AgentCoord
       options[:ref] = configured_ref.to_s.empty? ? DEFAULT_REF : configured_ref
     end
 
-    def resolve_cli_backend?(options, cli_api, env_api, env_root)
+    # `configured` carries all three configured selectors, AGENT_COORD_BACKEND
+    # included. These branches return before resolve_configured_backend ever
+    # runs, so a CLI flag that displaces a configured backend can only be
+    # announced here; reading AGENT_COORD_BACKEND in the caller and not passing
+    # it in is what made GitHub-to-local and GitHub-to-HTTP overrides silent.
+    def resolve_cli_backend?(options, cli_api, configured)
       if options[:state_root_cli]
-        if cli_api
-          emit_backend_conflict_warning(
-            "warning: --api-url and --state-root are both set; using the local backend.", options:
-          )
-        elsif env_api && !env_api.empty?
-          emit_backend_conflict_warning(
-            "warning: AGENT_COORD_API_URL and --state-root are both set; using the local backend.", options:
-          )
-        end
+        warn_cli_state_root_override(options, cli_api, configured)
         options[:backend_source] = "cli"
         return true
       end
 
       if cli_api
-        unless env_root.to_s.empty?
-          emit_backend_conflict_warning(
-            "warning: --api-url and AGENT_COORD_STATE_ROOT are both set; " \
-            "using the HTTP backend. Pass --state-root to force local.", options:
-          )
-        end
+        warn_cli_api_url_override(options, configured)
         options[:backend_source] = "cli"
         return true
       end
 
       return false unless options[:backend_cli]
 
-      warn_cli_backend_override(options, env_api, env_root)
+      warn_cli_backend_override(options, configured)
       options[:backend_source] = "cli"
       true
+    end
+
+    def warn_cli_state_root_override(options, cli_api, configured)
+      message =
+        if cli_api
+          "warning: --api-url and --state-root are both set; using the local backend."
+        elsif configured_selector?(configured, :api_url)
+          "warning: AGENT_COORD_API_URL and --state-root are both set; using the local backend."
+        elsif configured_selector?(configured, :backend)
+          "warning: AGENT_COORD_BACKEND and --state-root are both set; using the local backend."
+        end
+      emit_backend_conflict_warning(message, options:) if message
+    end
+
+    def warn_cli_api_url_override(options, configured)
+      message =
+        if configured_selector?(configured, :state_root)
+          "warning: --api-url and AGENT_COORD_STATE_ROOT are both set; " \
+            "using the HTTP backend. Pass --state-root to force local."
+        elsif configured_selector?(configured, :backend)
+          "warning: AGENT_COORD_BACKEND and --api-url are both set; using the HTTP backend."
+        end
+      emit_backend_conflict_warning(message, options:) if message
     end
 
     # --backend silently outranks a configured fleet backend exactly the way
     # --state-root and --api-url do, so it has to announce the same conflict. An
     # empty --backend value is not an override: resolution falls through to the
     # implicit local default, so claiming the GitHub backend won would be a lie.
-    def warn_cli_backend_override(options, env_api, env_root)
+    def warn_cli_backend_override(options, configured)
       return if options[:backend].to_s.empty?
 
-      if env_api && !env_api.empty?
-        emit_backend_conflict_warning(
+      message =
+        if configured_selector?(configured, :api_url)
           "warning: AGENT_COORD_API_URL and --backend are both set; " \
-          "using the legacy GitHub backend.", options:
-        )
-      elsif env_root && !env_root.empty?
-        emit_backend_conflict_warning(
+            "using the legacy GitHub backend."
+        elsif configured_selector?(configured, :state_root)
           "warning: AGENT_COORD_STATE_ROOT and --backend are both set; " \
-          "using the legacy GitHub backend.", options:
-        )
-      end
+            "using the legacy GitHub backend."
+        end
+      emit_backend_conflict_warning(message, options:) if message
+    end
+
+    def configured_selector?(configured, key)
+      !configured.fetch(key).to_s.empty?
     end
 
     def resolve_configured_backend(options, env_api, env_root, env_backend)

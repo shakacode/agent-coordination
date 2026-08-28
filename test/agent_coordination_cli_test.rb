@@ -1432,6 +1432,60 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     end
   end
 
+  # AGENT_COORD_BACKEND is a configured selector like the other two, but the
+  # --state-root and --api-url branches returned before resolve_configured_backend
+  # ever saw it, so a GitHub-to-local or GitHub-to-HTTP override was silent while
+  # the README promised a warning.
+  def test_cli_state_root_warns_when_it_overrides_a_configured_backend
+    with_private_config_tmpdir("agent-coord-state-root-over-configured-backend") do |root|
+      state_root = File.join(root, "state")
+      FileUtils.mkdir_p(state_root)
+      result = run_command(
+        { "AGENT_COORD_BACKEND" => "acme/legacy-repo" },
+        RbConfig.ruby, BIN, "status", "--state-root", state_root, "--json"
+      )
+
+      assert_equal 0, result.status.exitstatus, result.stderr
+      assert_includes result.stderr,
+                      "warning: AGENT_COORD_BACKEND and --state-root are both set; using the local backend."
+    end
+  end
+
+  def test_cli_api_url_warns_when_it_overrides_a_configured_backend
+    with_private_config_tmpdir("agent-coord-api-url-over-configured-backend") do |root|
+      config_home = File.join(root, "config")
+      result = run_command(
+        {
+          "XDG_CONFIG_HOME" => config_home,
+          "AGENT_COORD_BACKEND" => "acme/legacy-repo",
+          "AGENT_COORD_API_TOKEN" => "fleet-token"
+        },
+        RbConfig.ruby, BIN, "status", "--api-url", "http://127.0.0.1:9"
+      )
+
+      assert_includes result.stderr,
+                      "warning: AGENT_COORD_BACKEND and --api-url are both set; using the HTTP backend."
+      refute_includes result.stderr, "fleet-token"
+    end
+  end
+
+  # Replacing a configured selector with the same kind of backend is not a
+  # backend override, so it must stay quiet.
+  def test_cli_state_root_does_not_warn_about_a_configured_state_root
+    with_private_config_tmpdir("agent-coord-state-root-over-state-root") do |root|
+      configured = File.join(root, "configured")
+      selected = File.join(root, "selected")
+      [configured, selected].each { |path| FileUtils.mkdir_p(path) }
+      result = run_command(
+        { "AGENT_COORD_STATE_ROOT" => configured },
+        RbConfig.ruby, BIN, "status", "--state-root", selected, "--json"
+      )
+
+      assert_equal 0, result.status.exitstatus, result.stderr
+      refute_includes result.stderr, "are both set"
+    end
+  end
+
   # An empty --backend is not an override, so it must not claim the GitHub
   # backend won.
   def test_empty_cli_backend_does_not_warn_about_overriding_a_configured_state_root
