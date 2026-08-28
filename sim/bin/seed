@@ -53,6 +53,21 @@ if [ "$RESET" = "--reset" ]; then
     --jq '.[].number' | while read -r n; do
     gh issue close "$n" --repo "$REPO" --comment "Reseeded." || true
   done
+  # `gh issue list` is served by GitHub's search index, which lags behind the
+  # closes above. Without this wait a just-closed issue can still be reported
+  # open, its title is then treated as already seeded, and the repo is left
+  # short an issue while the summary still claims a full seed.
+  remaining=""
+  for _ in $(seq 1 20); do
+    remaining="$(gh issue list --repo "$REPO" --label sim-batch --state open \
+      --limit 1000 --json number --jq 'length')"
+    [ "$remaining" = "0" ] && break
+    sleep 2
+  done
+  if [ "$remaining" != "0" ]; then
+    echo "warning: $remaining sim-batch issue(s) still reported open after reset;" \
+      "the search index is lagging and seeding may skip titles" >&2
+  fi
   gh api --paginate "repos/$REPO/branches" --jq '.[].name' | { grep -v '^main$' || true; } | while read -r b; do
     gh api -X DELETE "repos/$REPO/git/refs/heads/$b" || true
   done
@@ -69,8 +84,12 @@ count=0
 created=0
 skipped=0
 
+expected_titles="$WORK/expected_titles"
+: > "$expected_titles"
+
 while IFS= read -r -d '' TITLE && IFS= read -r -d '' BODY; do
   count=$((count + 1))
+  printf '%s\n' "$TITLE" >> "$expected_titles"
   if grep -Fxq -- "$TITLE" "$existing_titles"; then
     skipped=$((skipped + 1))
     continue
@@ -78,4 +97,28 @@ while IFS= read -r -d '' TITLE && IFS= read -r -d '' BODY; do
   gh issue create --repo "$REPO" --title "$TITLE" --body "$BODY" --label sim-batch
   created=$((created + 1))
 done < "$ISSUE_PAIRS"
+
+# Verify against live state rather than trusting the counters above: a skip
+# caused by index lag is otherwise indistinguishable from a legitimate one.
+final_titles="$WORK/final_titles"
+missing=0
+for _ in $(seq 1 20); do
+  gh issue list --repo "$REPO" --label sim-batch --state open --limit 1000 --json title \
+    --jq '.[].title' > "$final_titles"
+  missing=0
+  while IFS= read -r TITLE; do
+    grep -Fxq -- "$TITLE" "$final_titles" || missing=$((missing + 1))
+  done < "$expected_titles"
+  [ "$missing" -eq 0 ] && break
+  sleep 2
+done
+
 echo "SEEDED $REPO with $count issues ($created created, $skipped skipped)"
+
+if [ "$missing" -ne 0 ]; then
+  echo "error: $missing of $count seeded issue(s) are not open in $REPO" >&2
+  while IFS= read -r TITLE; do
+    grep -Fxq -- "$TITLE" "$final_titles" || echo "  missing: $TITLE" >&2
+  done < "$expected_titles"
+  exit 1
+fi
