@@ -3602,9 +3602,28 @@ module AgentCoord
     # dropping them would be the silent loss this read exists to remove.
     def log_compacted_records(entry, data)
       records = data["records"]
+      legible = records.is_a?(Array) ? records.grep(Hash) : []
       defect = log_compaction_defect(records, data["source_paths"])
-      log_archive_incomplete(entry, defect) if defect
-      [records.is_a?(Array) ? records.grep(Hash) : [], !defect.nil?]
+      if defect
+        log_archive_incomplete(entry, defect)
+        return [legible, true]
+      end
+
+      log_archive_report_expiry(entry, data)
+      [legible, false]
+    end
+
+    # The retention clock is the one warning that says this history is going to
+    # disappear, so filtering an unreadable one out of the comparison and saying
+    # nothing left the trail reading complete while it expired. It is reported
+    # instead, and marks the trail incomplete so --sync refuses -- but it is not
+    # treated as making the envelope unreadable, because a bad clock says nothing
+    # about the records or the source paths beside it. Reached only when nothing
+    # else was wrong, so an envelope still gets one sentence.
+    def log_archive_report_expiry(entry, data)
+      return if log_archive_expiry?(data["delete_after"].to_s)
+
+      log_archive_incomplete(entry, "unreadable archive expiry")
     end
 
     def log_compaction_defect(records, sources)
@@ -3653,6 +3672,7 @@ module AgentCoord
         return [[], true]
       end
 
+      log_archive_report_expiry(entry, data)
       [[data["data"]], false]
     end
 
@@ -3750,16 +3770,50 @@ module AgentCoord
     # policy the same way its rows are.
     def log_archive_ledger(options)
       wanted = log_wanted_identity(options)
-      Array(@log_archive_ledger).select do |envelope|
-        next false if envelope.fetch("synthetic") && !options[:include_synthetic]
-        # An unscoped query asks about everything, so every envelope answers it.
-        # Reaching the record match here would drop an envelope none of whose
-        # records parsed, since any? is false over an empty set -- and that
-        # envelope is exactly the one whose clock nothing else can report.
-        next true if wanted.nil?
+      Array(@log_archive_ledger).select { |envelope| log_archive_envelope_scoped?(envelope, options, wanted) }
+    end
 
-        envelope.fetch("records").any? { |record| log_archive_record_scoped?(record, wanted) }
-      end
+    # Scoped on the records themselves, the same way rows are. gc sets an
+    # envelope's own synthetic flag only when every entry it consumed was
+    # synthetic, but a foreign or corrupted envelope can carry that flag over a
+    # record whose own flag is false -- and that record's row survives the
+    # default filter, because rows read each record's flag. Scoping the ledger
+    # by the envelope instead dropped the provenance of a row that was still
+    # being reported, so the event printed with no retention or expiry note and
+    # --sync accepted the trail as complete.
+    #
+    # The envelope's flag is the fallback only where there is no record to ask:
+    # nothing legible came out of it, so there is also no work item to match,
+    # and only an unscoped query can claim it.
+    def log_archive_envelope_scoped?(envelope, options, wanted)
+      return false unless log_archive_envelope_visible?(envelope, options)
+
+      records = envelope.fetch("records")
+      # Nothing legible came out of it, so there is no work item to match and
+      # only an unscoped query can claim it.
+      return wanted.nil? if records.empty?
+
+      records.any? { |record| log_archive_record_scoped?(record, wanted) }
+    end
+
+    # Hidden only when the envelope is synthetic by both measures: gc's own
+    # judgement, which it records only when every entry it consumed was
+    # synthetic, and every record it retained saying so as well. Either one alone
+    # still leaves real information here, and the two cases are mirror images.
+    #
+    # An envelope flag of false means a real event was consumed even if none was
+    # retained, so its source count still proves a real loss. A record whose own
+    # flag is false has its row reported -- rows read each record's flag, not the
+    # envelope's -- so its provenance has to be reported beside it, or the event
+    # prints with no retention or expiry note and --sync takes the trail as
+    # complete. gc produces neither combination; foreign or corrupted state does,
+    # and having decided to read such envelopes, reading them inconsistently with
+    # the rows is worse than not reading them at all.
+    def log_archive_envelope_visible?(envelope, options)
+      return true if options[:include_synthetic]
+      return true unless envelope.fetch("synthetic")
+
+      envelope.fetch("records").any? { |record| !record["synthetic"] }
     end
 
     # Matched on identity rather than on the recorded spelling: the same folding
@@ -3901,10 +3955,13 @@ module AgentCoord
     def log_archive_soonest_expiry(envelopes)
       dated = envelopes.filter_map do |envelope|
         value = envelope.fetch("delete_after")
-        key = log_at_key(value)
-        [value, key] unless key == -Float::INFINITY
+        [value, log_at_key(value)] if log_archive_expiry?(value)
       end
       dated.min_by { |_value, key| key }&.first
+    end
+
+    def log_archive_expiry?(value)
+      log_at_key(value) != -Float::INFINITY
     end
 
     # One listing path for both families: warn on a partial or degraded read,

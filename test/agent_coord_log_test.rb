@@ -2585,6 +2585,65 @@ class AgentCoordLogArchiveTest < AgentCoordLogTestCase
     assert_equal %w[e1 e2 e3 e4 e5 x1], tsv_rows_event_ids(result), "the legible record is still reported"
   end
 
+  # Rows read each record's own synthetic flag, so a real record inside an
+  # envelope gc marked synthetic is reported. Scoping the ledger by the envelope
+  # flag instead dropped that row's provenance, so it printed with no retention
+  # or expiry note and --sync took the trail as complete. The mirror image of
+  # test_log_reports_a_mixed_envelope_whose_surviving_rows_are_all_synthetic:
+  # either flag alone still leaves real information in the envelope.
+  def test_log_reports_a_real_record_inside_a_synthetic_envelope
+    write_archive_json("archive/events/b9/compact-synthetic-envelope.json",
+                       "schema_version" => 1, "record_family" => "compacted_events", "synthetic" => true,
+                       "source_paths" => ["events/b9/e1.json", "events/b9/e2.json"],
+                       "archived_at" => "2026-08-05T00:00:00Z", "delete_after" => "2026-09-04T00:00:00Z",
+                       "records" => [overlap_event("e1", "2026-08-01T00:00:00Z")])
+
+    result = run_log("shakacode/example#104")
+
+    assert_equal 0, result.status.exitstatus, result.stderr
+    assert_equal %w[e1], tsv_event_ids("shakacode/example#104"), "the real record is reported"
+    assert_includes result.stderr, "1 source event was dropped by compaction"
+    assert_includes result.stderr, "archive deleted after 2026-09-04T00:00:00Z"
+  end
+
+  # A wholly synthetic envelope is still hidden: both measures agree on it.
+  def test_log_hides_an_envelope_synthetic_by_both_measures
+    write_archive_json("archive/events/b9/compact-all-synthetic.json",
+                       "schema_version" => 1, "record_family" => "compacted_events", "synthetic" => true,
+                       "source_paths" => ["events/b9/s1.json", "events/b9/s2.json"],
+                       "archived_at" => "2026-08-05T00:00:00Z", "delete_after" => "2026-09-04T00:00:00Z",
+                       "records" => [overlap_event("s1", "2026-08-01T00:00:00Z").merge("synthetic" => true)])
+
+    result = run_log("shakacode/example#104")
+
+    assert_equal 0, result.status.exitstatus, result.stderr
+    refute_includes result.stderr, "archive deleted after"
+    refute_includes result.stderr, "dropped by compaction"
+  end
+
+  # The retention clock is the one warning that says this history is going to
+  # disappear. Filtering an unreadable one out of the comparison and saying
+  # nothing left the trail reading complete while it expired, and --sync
+  # accepted it. The records beside it are still reported: a bad clock says
+  # nothing about whether they can be read.
+  def test_log_reports_an_envelope_whose_expiry_cannot_be_read
+    write_archive_json("archive/events/b9/compact-undated.json",
+                       "schema_version" => 1, "record_family" => "compacted_events",
+                       "source_paths" => ["events/b9/e1.json", "events/b9/e2.json"],
+                       "archived_at" => "2026-08-05T00:00:00Z", "delete_after" => "whenever",
+                       "records" => [overlap_event("e1", "2026-08-01T00:00:00Z")])
+
+    result = run_log("shakacode/example#104")
+    sync = run_log("--sync")
+
+    assert_equal 0, result.status.exitstatus, result.stderr
+    assert_includes result.stderr, "unreadable archive expiry at archive/events/b9/compact-undated.json"
+    assert_equal %w[e1], tsv_event_ids("shakacode/example#104"), "its records are still reported"
+    assert_includes result.stderr, "1 source event was dropped by compaction"
+    refute_includes result.stderr, "archive deleted after"
+    assert_equal 2, sync.status.exitstatus, "a mirror must not be written over an unreadable clock"
+  end
+
   private
 
   def overlap_event(event_id, at)
