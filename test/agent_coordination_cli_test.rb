@@ -1149,6 +1149,45 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     end
   end
 
+  # "isolated local store — no remote writes" has to cover the config the demo
+  # reads, not just the state root it writes. Each nested run loads the canonical
+  # user configuration itself, so an ambient file the operator happens to have
+  # installed used to fail the entire walkthrough.
+  def test_demo_ignores_an_unreadable_ambient_user_configuration
+    with_private_user_config("AGENT_COORD_POLICY=required\n") do |config_home|
+      File.chmod(0o644, File.join(config_home, "agent-coord", "env"))
+      clean = run_command({}, RbConfig.ruby, BIN, "demo")
+
+      [
+        { "XDG_CONFIG_HOME" => config_home },
+        { "AGENT_COORD_ENV_FILE" => File.join(config_home, "agent-coord", "env") },
+        { "AGENT_COORD_ENV_FILE" => File.join(config_home, "agent-coord", "absent") }
+      ].each do |env|
+        result = run_command(env, RbConfig.ruby, BIN, "demo")
+
+        assert_equal 0, result.status.exitstatus, "#{env.keys.first}: #{result.stderr}"
+        assert_empty result.stderr, env.keys.first
+        assert_equal clean.stdout, result.stdout, env.keys.first
+      end
+    end
+  end
+
+  # The nested runs are in-process, so isolation swaps process ENV rather than
+  # handing Open3 an env hash. Anything it swaps has to come back.
+  def test_demo_restores_the_process_environment_it_isolates
+    with_process_env(
+      "XDG_CONFIG_HOME" => "/nonexistent-demo-config-home",
+      "AGENT_COORD_ENV_FILE" => "/nonexistent-demo-env-file",
+      "AGENT_COORD_STATE_ROOT" => @state_root
+    ) do
+      AgentCoord::Runner.new(["demo"], stdout: StringIO.new, stderr: StringIO.new).run
+
+      assert_equal "/nonexistent-demo-config-home", ENV.fetch("XDG_CONFIG_HOME")
+      assert_equal "/nonexistent-demo-env-file", ENV.fetch("AGENT_COORD_ENV_FILE")
+      assert_equal @state_root, ENV.fetch("AGENT_COORD_STATE_ROOT")
+    end
+  end
+
   def test_global_help_omits_doctor_only_deep_option
     result = run_agent_coord("--help", state_root: nil)
     doctor = run_agent_coord("doctor", "--help", state_root: nil)

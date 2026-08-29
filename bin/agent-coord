@@ -367,12 +367,17 @@ module AgentCoord
     # selector, and both are the commands an operator reaches for while a broken
     # config is exactly what they are trying to repair.
     #
+    # `demo` qualifies for the same reason once with_demo_isolated_env is in
+    # place: its own dispatch reads nothing, and its nested runs deliberately
+    # read a config home inside the demo's temporary root rather than the
+    # operator's.
+    #
     # This is an explicit allowlist, not an inferred or negative rule, so a new
     # command defaults to loading. Skipping the load for a command that does read
     # configuration would silently ignore the operator's configured backend,
     # which is far worse than failing on a config that cannot be read. Do not add
     # an entry without tracing the command's whole dispatch path.
-    CONFIG_INDEPENDENT_COMMANDS = %w[version bootstrap].freeze
+    CONFIG_INDEPENDENT_COMMANDS = %w[version bootstrap demo].freeze
 
     def run # rubocop:disable Metrics/CyclomaticComplexity
       return print_help if @argv.empty? || help_request?(@argv.first)
@@ -3048,15 +3053,42 @@ module AgentCoord
       @stdout.puts "agent-coord demo"
       @stdout.puts "mode: isolated local store — no remote writes; temporary state is removed on exit"
       Dir.mktmpdir("agent-coord-demo") do |state_root|
-        run_demo_claim_and_heartbeat(state_root, repo, target, started_at)
-        run_demo_refusal(state_root, repo, target, started_at + 30)
-        run_demo_liveness_step(state_root, repo, target, started_at + 120, "stale")
-        run_demo_liveness_step(state_root, repo, target, started_at + 300, "dead")
-        run_demo_takeover(state_root, repo, target, started_at + 300)
+        with_demo_isolated_env(state_root) do
+          run_demo_claim_and_heartbeat(state_root, repo, target, started_at)
+          run_demo_refusal(state_root, repo, target, started_at + 30)
+          run_demo_liveness_step(state_root, repo, target, started_at + 120, "stale")
+          run_demo_liveness_step(state_root, repo, target, started_at + 300, "dead")
+          run_demo_takeover(state_root, repo, target, started_at + 300)
+        end
       end
       @stdout.puts
       @stdout.puts "demo complete; temporary state removed"
       0
+    end
+
+    # "isolated local store — no remote writes" has to be true of the config the
+    # nested runs read, not just of the state root they write. Each nested run
+    # calls load_user_configuration! itself, so passing --state-root alone left
+    # them reading the ambient AGENT_COORD_ENV_FILE / XDG_CONFIG_HOME config: an
+    # insecure or malformed one failed the whole walkthrough.
+    #
+    # sim/bin/graveyard and the sim tests isolate by handing Open3 an env hash
+    # that nils every AGENT_COORD_* key and points XDG_CONFIG_HOME at a
+    # never-created directory under the run's own temporary root. These runs are
+    # in-process, so there is no env hash to hand anyone; the equivalent is to
+    # swap the same keys into ENV for the duration and restore them after, which
+    # is the mechanism load_user_configuration! already uses for injection.
+    # `demo` itself is in CONFIG_INDEPENDENT_COMMANDS, so nothing reads the
+    # ambient config before this swap takes effect either.
+    def with_demo_isolated_env(state_root)
+      values = (USER_CONFIG_ENV_KEYS + ["AGENT_COORD_ENV_FILE"]).to_h { |key| [key, nil] }
+      # Never created, and XDG_CONFIG_HOME must be absolute.
+      values["XDG_CONFIG_HOME"] = File.join(File.expand_path(state_root), "xdg-config")
+      saved = values.to_h { |key, _value| [key, ENV.fetch(key, nil)] }
+      values.each { |key, value| value.nil? ? ENV.delete(key) : ENV[key] = value }
+      yield
+    ensure
+      saved&.each { |key, value| value.nil? ? ENV.delete(key) : ENV[key] = value }
     end
 
     def run_demo_claim_and_heartbeat(state_root, repo, target, now)

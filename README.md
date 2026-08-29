@@ -109,7 +109,11 @@ agent-coord demo
 The demo uses an isolated temporary local store, shows a live-holder claim
 refusal followed by stale and dead heartbeat states and a successful takeover,
 then removes its temporary state. It ignores configured HTTP and legacy GitHub
-backends, so it never writes demo data remotely.
+backends, so it never writes demo data remotely. It also ignores the canonical
+user configuration file entirely — including one that is missing, insecure, or
+malformed — by reading a config home inside its own temporary root, so the
+walkthrough works before any configuration exists and while a broken one is
+being repaired.
 
 ## HTTP backend
 
@@ -308,13 +312,13 @@ into existence: it tolerates an `AGENT_COORD_ENV_FILE` that does not exist yet
 and creates exactly the named path. A file that *does* exist but is insecure,
 unreadable, or malformed still fails closed, for `config set` as for everything
 else, so the command can never discard one.
-Every command loads this file except `version` and `bootstrap`, which read no
-configuration at all: they render compiled-in constants and install the command
-respectively, so neither resolves a backend, ref, policy, or machine identity.
-Those two therefore keep working while a broken canonical file is exactly what
-you are trying to repair. `config show` does load it, because reporting the
-coordination configuration is its job; if the file cannot be read safely,
-`config show` fails with the reason.
+Every command loads this file except `version`, `bootstrap`, and `demo`, which
+read no configuration at all: they render compiled-in constants, install the
+command, and replay a walkthrough inside a temporary root, so none of them
+resolves a backend, ref, policy, or machine identity. Those three therefore keep
+working while a broken canonical file is exactly what you are trying to repair.
+`config show` does load it, because reporting the coordination configuration is
+its job; if the file cannot be read safely, `config show` fails with the reason.
 This hardened config path requires a POSIX-compatible Ruby/filesystem with
 no-follow opens, ownership/mode checks, and `flock`; native Windows Ruby is not
 a supported runtime for this CLI.
@@ -457,7 +461,8 @@ bin/agent-coord demo
 ```
 
 `demo` is a deterministic, isolated local walkthrough. It does not use backend
-environment variables, make remote requests, or preserve its temporary state.
+environment variables, read the canonical user configuration file, make remote
+requests, or preserve its temporary state.
 
 `claim` acquires or renews a lease. If an active claim exists for another agent,
 the holder's heartbeat is the normal liveness source: `live` or `stale`
