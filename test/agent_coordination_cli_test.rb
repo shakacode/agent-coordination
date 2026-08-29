@@ -1395,31 +1395,62 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     end
   end
 
-  # The parser sets backend_cli for an empty flag value, and empty-value
-  # rejection only runs under --stack-json. config show therefore claimed a
-  # configured GitHub backend while runtime resolution fell through to the
-  # implicit local default.
-  def test_config_show_does_not_report_an_empty_backend_flag_as_a_selection
+  # `agent-coord claim --state-root "$STATE_ROOT"` with STATE_ROOT unset passed
+  # an empty value that build_store accepted on a plain truthy check, so
+  # File.expand_path("") resolved to Dir.pwd and coordination state was read and
+  # written into whatever directory the script happened to run from.
+  def test_empty_state_root_is_refused_instead_of_using_the_working_directory
+    with_private_config_tmpdir("agent-coord-empty-state-root") do |root|
+      workdir = File.join(root, "workdir")
+      FileUtils.mkdir_p(workdir)
+      stdout, stderr, status = Open3.capture3(
+        COMMAND_ENV.merge("AGENT_COORD_STATE_ROOT" => nil),
+        RbConfig.ruby, BIN,
+        "claim", "--agent-id", "a", "--repo", "o/r", "--target", "1", "--state-root", "",
+        chdir: workdir
+      )
+
+      assert_equal 1, status.exitstatus
+      assert_equal "--state-root requires a non-empty value\n", stderr
+      assert_empty stdout
+      assert_empty Dir.children(workdir)
+    end
+  end
+
+  # A whitespace-only value is the same broken invocation with a quoted space in
+  # it, and File.expand_path would turn it into a directory next to Dir.pwd.
+  def test_whitespace_only_selector_values_are_refused
+    {
+      "--state-root" => "   ",
+      "--api-url" => " ",
+      "--backend" => "\t"
+    }.each do |flag, value|
+      result = run_command(
+        { "AGENT_COORD_STATE_ROOT" => nil },
+        RbConfig.ruby, BIN, "status", flag, value
+      )
+
+      assert_equal 1, result.status.exitstatus, flag
+      assert_equal "#{flag} requires a non-empty value\n", result.stderr, flag
+    end
+  end
+
+  # An empty backend selector used to be a selection of nothing that config show
+  # and runtime resolution then had to agree about. Both now refuse it, so they
+  # still agree, and neither has to model the fallthrough.
+  def test_empty_backend_selector_flags_are_rejected_consistently
     Dir.mktmpdir("agent-coord-empty-backend-flag") do |state_home|
-      show_result = run_command(
-        { "XDG_STATE_HOME" => state_home },
-        RbConfig.ruby, BIN, "config", "show", "--backend", "", "--json"
-      )
-      status_result = run_command(
-        { "XDG_STATE_HOME" => state_home },
-        RbConfig.ruby, BIN, "status", "--backend", "", "--json"
-      )
+      %w[--backend --state-root --api-url].each do |flag|
+        results = [%w[config show], %w[status]].map do |command|
+          run_command({ "XDG_STATE_HOME" => state_home }, RbConfig.ruby, BIN, *command, flag, "", "--json")
+        end
 
-      assert_equal 0, show_result.status.exitstatus, show_result.stderr
-      coordination = JSON.parse(show_result.stdout).fetch("coordination")
-      assert_equal "local", coordination.fetch("backend")
-      assert_equal false, coordination.fetch("configured")
-      assert_equal "default", coordination.dig("source", "backend")
-
-      # Runtime agreement: the same flag resolves to the implicit local store.
-      assert_equal 0, status_result.status.exitstatus, status_result.stderr
-      assert_includes status_result.stderr, "local mode — single-machine only"
-      assert_includes status_result.stderr, File.join(state_home, "agent-coordination")
+        results.each do |result|
+          assert_equal 1, result.status.exitstatus, "#{flag}: #{result.stderr}"
+          assert_equal "#{flag} requires a non-empty value\n", result.stderr, flag
+        end
+        refute_includes results.last.stderr, "local mode — single-machine only", flag
+      end
     end
   end
 
@@ -1525,9 +1556,10 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     end
   end
 
-  # An empty --backend is not an override, so it must not claim the GitHub
-  # backend won.
-  def test_empty_cli_backend_does_not_warn_about_overriding_a_configured_state_root
+  # An empty --backend is not an override. It is also no longer a run: the
+  # invocation is refused before any configured selector is consulted, so it
+  # neither warns about a takeover nor quietly uses the configured state root.
+  def test_empty_cli_backend_is_refused_instead_of_overriding_a_configured_state_root
     with_private_config_tmpdir("agent-coord-empty-backend-no-warning") do |root|
       state_root = File.join(root, "state")
       FileUtils.mkdir_p(state_root)
@@ -1536,8 +1568,9 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
         RbConfig.ruby, BIN, "status", "--backend", "", "--json"
       )
 
-      assert_equal 0, result.status.exitstatus, result.stderr
-      refute_includes result.stderr, "using the legacy GitHub backend"
+      assert_equal 1, result.status.exitstatus
+      assert_equal "--backend requires a non-empty value\n", result.stderr
+      assert_empty result.stdout
     end
   end
 

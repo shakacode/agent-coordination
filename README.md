@@ -330,6 +330,15 @@ Backend selection follows this precedence:
 3. backend selectors in the canonical user file
 4. otherwise, the labeled local store at the zero-config path above
 
+Passing one of those flags is an explicit selection, so an empty or
+whitespace-only value is refused with exit `1` and
+`--state-root requires a non-empty value` rather than treated as a selection of
+nothing. This matters for wrappers: `agent-coord claim --state-root
+"$STATE_ROOT"` with `STATE_ROOT` unset used to resolve to the working directory
+and silently read and write coordination state there. An *environment* selector
+that is empty is still simply unset, which is what an exported-but-empty
+variable means.
+
 Within an environment tier, `AGENT_COORD_API_URL` selects `HttpStore`,
 `AGENT_COORD_STATE_ROOT` selects `LocalStore`, and `AGENT_COORD_BACKEND`
 selects the legacy `GitHubStore`. Existing process values also override

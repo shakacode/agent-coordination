@@ -677,7 +677,7 @@ module AgentCoord
 
     def run_doctor_command(command)
       doctor_argv = @argv.dup
-      parse_state = { stack_json: false, backend_selector_count: 0, empty_backend_selector: false }
+      parse_state = { stack_json: false, backend_selector_count: 0 }
       doctor(parse_options(command, @argv, parse_state: parse_state))
     rescue OptionParser::ParseError => e
       stack_json = parse_state[:stack_json] || stack_json_option_token?(doctor_argv)
@@ -729,7 +729,7 @@ module AgentCoord
 
     def parse_options(command, argv, parse_state: nil, positional: nil)
       options = default_options
-      parse_state ||= { stack_json: false, backend_selector_count: 0, empty_backend_selector: false }
+      parse_state ||= { stack_json: false, backend_selector_count: 0 }
       parser, = build_option_parser(command, options, parse_state)
       raise Error, "--deep is only valid for doctor" if command != "doctor" && deep_option_token?(argv, command:)
 
@@ -769,38 +769,50 @@ module AgentCoord
 
     def add_backend_options(opts, options, parse_state)
       opts.on("--backend OWNER/REPO", "backend repository") do |value|
-        options[:backend] = value
+        options[:backend] = explicit_selector_value!(value, "--backend")
         options[:explicit_backend] = true
         options[:backend_cli] = true
         parse_state[:backend_selector_count] += 1
-        parse_state[:empty_backend_selector] = true if value.empty?
       end
       opts.on("--ref REF", "backend branch/ref") do |value|
         options[:ref] = value
         options[:ref_cli] = true
       end
       opts.on("--state-root PATH", "use local files instead of GitHub API") do |value|
-        options[:state_root] = value
+        options[:state_root] = explicit_selector_value!(value, "--state-root")
         options[:state_root_cli] = true
         parse_state[:backend_selector_count] += 1
-        parse_state[:empty_backend_selector] = true if value.empty?
       end
       opts.on("--api-url URL", "use the HTTP backend at URL") do |value|
-        options[:api_url] = value
+        options[:api_url] = explicit_selector_value!(value, "--api-url")
         options[:api_url_cli] = true
         parse_state[:backend_selector_count] += 1
-        parse_state[:empty_backend_selector] = true if value.empty?
       end
       opts.on("--json", "emit JSON for supported commands") { options[:json] = true }
+    end
+
+    # Passing a backend selector is an explicit selection, so an empty or
+    # whitespace-only value is a broken invocation, not a selection of nothing.
+    # `agent-coord claim --state-root "$STATE_ROOT"` with STATE_ROOT unset used
+    # to reach File.expand_path("") and silently read and write coordination
+    # state into the working directory; `--api-url ""` selected the HTTP backend
+    # with no endpoint; `--backend ""` fell through to the implicit local store
+    # while config show had to be taught to report that fallthrough. Rejecting
+    # at parse time is the same fail-closed posture --token-stdin, the machine
+    # identity, and out-of-range ports already take, and it removes the need for
+    # any downstream branch to model an empty explicit selector.
+    def explicit_selector_value!(value, flag)
+      return value unless value.to_s.strip.empty?
+
+      raise Error, "#{flag} requires a non-empty value"
     end
 
     def validate_stack_json_backend_selector_count!(options, parse_state)
       return unless options[:stack_json]
 
       if parse_state[:backend_selector_count] == 1
-        raise Error, "doctor --stack-json backend selector requires a non-empty value" \
-          if parse_state[:empty_backend_selector]
-
+        # Empty selector values are rejected during parsing now, for every
+        # command rather than only under --stack-json.
         AgentCoord.validate_repo!(options[:backend], "backend") if options[:explicit_backend]
 
         return
@@ -1149,12 +1161,10 @@ module AgentCoord
     end
 
     # --backend silently outranks a configured fleet backend exactly the way
-    # --state-root and --api-url do, so it has to announce the same conflict. An
-    # empty --backend value is not an override: resolution falls through to the
-    # implicit local default, so claiming the GitHub backend won would be a lie.
+    # --state-root and --api-url do, so it has to announce the same conflict.
+    # The value is guaranteed non-empty: explicit_selector_value! rejected the
+    # empty case during parsing, so this is always a real override.
     def warn_cli_backend_override(options, configured)
-      return if options[:backend].to_s.empty?
-
       message =
         if configured_selector?(configured, :api_url)
           "warning: AGENT_COORD_API_URL and --backend are both set; " \
@@ -2038,7 +2048,7 @@ module AgentCoord
       _, registry = build_option_parser(
         command,
         default_options,
-        { stack_json: false, backend_selector_count: 0, empty_backend_selector: false }
+        { stack_json: false, backend_selector_count: 0 }
       )
       registry
     end
@@ -5894,25 +5904,19 @@ module AgentCoord
       }
     end
 
+    # config show reports what resolution would actually do. Each explicit CLI
+    # selector now carries a non-empty value or the command never got this far,
+    # so every one of them is a real selection and none of them can fall through
+    # to the implicit local default the way an empty --backend used to.
     def selected_coordination_backend(options)
       return ["local", true, "cli"] if options[:state_root_cli]
       return ["http", true, "cli"] if options[:api_url_cli]
-      return cli_backend_selection(options) if options[:backend_cli]
+      return ["github", true, "cli"] if options[:backend_cli]
 
       selectors = effective_backend_selector_set
       return ["http", true, selectors.fetch(:source)] unless selectors.fetch(:api_url).to_s.empty?
       return ["local", true, selectors.fetch(:source)] unless selectors.fetch(:state_root).to_s.empty?
       return ["github", true, selectors.fetch(:source)] unless selectors.fetch(:backend).to_s.empty?
-
-      ["local", false, "default"]
-    end
-
-    # An empty --backend value still short-circuits the configured selectors at
-    # runtime, but resolution then falls through to the implicit local default
-    # rather than the legacy GitHub backend. Report what the run would actually
-    # do instead of reporting a GitHub selection that never happens.
-    def cli_backend_selection(options)
-      return ["github", true, "cli"] unless options[:backend].to_s.empty?
 
       ["local", false, "default"]
     end
