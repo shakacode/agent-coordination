@@ -387,6 +387,37 @@ when releases begin.
   Claims and heartbeats are cleared on release and expiry, so target scope alone
   cannot tell "never worked" from "worked and finished" — and two empty arrays
   read like an answer to exactly that question (issue #141).
+- `agent-coord status --repo R --target N` now resolves custody by the work item
+  the target names rather than through one literal claim path, so it can no longer
+  contradict `agent-coord log` about the same item in the same second. `claim`
+  writes the raw target, so one item is independently claimable as `319`,
+  `issue:319`, or `pr:319`, and once `log` began folding those spellings onto one
+  identity the two commands were answering different questions from the same
+  state. Reproduced against a real state root before the fix: with a claim held
+  under `issue:319`, `status --target 319` reported no custody at all — its
+  `claims` section read `- none` — while `log --target 319` reported that same
+  live claim; and with `9832` and `pr:9832` held at the same time by two different
+  agents, `status --target 9832` reported only the first holder while `log`
+  reported both. Target scope now reads a closed candidate set of point reads —
+  the queried spelling first, then the item's other spellings drawn from `<n>`,
+  `issue:<n>`, and `pr:<n>` — which is at most three claim reads plus one
+  heartbeat per distinct holder, independent of how many claims the fleet holds.
+  It is deliberately not a claims listing: `plan-pr-batch` probes this scope
+  through `agent-coord-bounded --timeout 20` before assigning work, so a listing
+  would make every planning probe scan the whole fleet. Every claim found is
+  reported, matching what `log` already did, so two agents holding `9832` and
+  `pr:9832` both appear rather than one hiding the other, and each holder's
+  heartbeat is read once however many of its leases answer. A lane holds its own
+  lease, so lane suffixes stay distinct and ride along on each spelling instead of
+  being folded away: `--target 319` still does not report a claim on `319:qa`,
+  while `--target 319:qa` now also resolves `issue:319:qa` and `pr:319:qa`.
+  `adhoc:319` is not a candidate for `319`, following the same decorative-prefix
+  rule — `issue:`/`pr:` come off ahead of a number, `adhoc:` does not. Casing is
+  deliberately not folded, because claim paths are literal and covering casings
+  would cost a read per casing rather than a closed set: a generated spelling
+  carries the casing the query used and lowercases only a prefix the query did not
+  itself spell, so a claim written `ISSUE:319` is found by that spelling and by no
+  other (issue #147).
 - `agent-coord log` now reads the events `gc` compacted into `archive/events`
   instead of reporting `no events` for the work item they belong to (issue #139).
   Compaction moves a completed lane's events into an immutable
