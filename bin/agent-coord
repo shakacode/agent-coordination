@@ -4979,10 +4979,14 @@ module AgentCoord
     rescue JSON::ParserError
       notes << target_alias_note(path, "unreadable")
       nil
+    rescue Errno::EACCES
+      notes << target_alias_note(path, "not readable")
+      nil
     rescue OperationalError => e
-      raise unless scoped_http_forbidden_read?(e, path)
+      reason = unreachable_alias_reason(e, path)
+      raise unless reason
 
-      notes << target_alias_note(path, "not readable by scoped token")
+      notes << target_alias_note(path, reason)
       nil
     end
 
@@ -4990,26 +4994,51 @@ module AgentCoord
       "#{path} #{reason}; a claim there would not be reported"
     end
 
-    # Exact record-path read scopes are part of the authorization contract
-    # (docs/backend-design.md), so a token may legitimately reach the queried claim
-    # and none of its siblings.
-    def scoped_http_forbidden_read?(error, path)
-      error.message.match?(/\Ahttp backend read #{Regexp.escape(path)} failed: 403 forbidden\z/)
+    # Every way a single candidate path can be unable to answer, across backends:
+    # a scoped token's 403 from the HTTP backend, and the local store refusing a
+    # record it will not open or that is not a record at all. Exact record-path
+    # read scopes are part of the authorization contract (docs/backend-design.md),
+    # so a token can legitimately reach the queried claim and none of its siblings;
+    # a wrong-mode or symlinked file in a state directory is the same condition
+    # arrived at by accident.
+    #
+    # Enumerated by the exact message each raise site produces, never by a
+    # substring or a class. A 500, a 401, a `route_not_found`, a truncated body, a
+    # dead backend -- none of those are one candidate's problem, and reporting any
+    # of them as an absent claim would be the silent wrong answer this scope
+    # exists to prevent.
+    def unreachable_alias_reason(error, path)
+      forbidden = /\Ahttp backend read #{Regexp.escape(path)} failed: 403 forbidden\z/
+      case error.message
+      when forbidden then "not readable by scoped token"
+      when "state record is not readable: #{path}" then "not readable"
+      when "state layout invalid: #{path} is a symlink" then "is a symlink"
+      when "state layout invalid: #{path} is not a regular file" then "is not a regular file"
+      end
     end
 
-    # Two candidate paths can name one lease: a case-insensitive checkout resolves
-    # `ISSUE:319.json` and `issue:319.json` to the same file, and one key written
-    # under two casings is a single lease recorded twice. Collapse on the same key
-    # `log` groups on -- the case-folded exact claim key, newest by `updated_at`
-    # winning -- so the two commands agree by construction rather than by
-    # coincidence. Distinct keys such as `9832` and `pr:9832` are two leases and
-    # stay separate; concealing that pair is the failure mode this scope exists to
-    # fix. Group order follows candidate order, and a tie inside a group keeps the
-    # earlier candidate, which is the operator's own spelling.
+    # Two candidate paths can name one *file*: a case-insensitive checkout resolves
+    # `ISSUE:319.json` and `issue:319.json` to the same record, and reporting that
+    # one lease once per spelling that reached it would invent a second holder.
+    #
+    # The test is payload identity, not a case-folded key. Two reads of one file
+    # return the same payload; two files are two independently claimable leases and
+    # their payloads differ, because `claim` writes the target into the record.
+    # Folding on the case-insensitive key instead would discard a live second
+    # holder on a case-sensitive store -- exactly the concurrent double custody
+    # this scope exists to surface, thrown away by the code meant to tidy the
+    # output. It also decides the question without needing to know whether this
+    # filesystem folds case, which nothing here can observe.
+    #
+    # `log` still folds casing across its listing, so for two live leases under two
+    # casings it reports one holder where this reports both. A lease is a file, so
+    # `status` is the correct answer there and the divergence is deliberate; do not
+    # restore the collapse to hide it.
+    #
+    # `uniq` keeps the first of an identical pair -- the operator's own spelling --
+    # and leaves every distinct record in candidate order.
     def target_collapsed_claims(entries)
-      entries.group_by { |entry| log_claim_key(entry) }
-             .values
-             .map { |group| group.max_by { |entry| log_at_key(entry.data["updated_at"]) } }
+      entries.uniq(&:data)
     end
 
     # This stays a closed set of point reads rather than a claims listing:
@@ -5043,13 +5072,24 @@ module AgentCoord
     # target's (base, lane) identity, so `status` resolves what `log` matches by
     # construction rather than by a second enumeration that can drift from it.
     #
-    # Which kinds decorate is the #145 rule, asked of that rule's own predicate
-    # rather than restated here: `issue:`/`pr:` decorate a number, `adhoc:`
-    # decorates a slug. So a number folds with `issue:<n>`/`pr:<n>`, a slug folds
-    # with `adhoc:<slug>` -- 90 of the fleet's claims are `adhoc:` targets and
-    # missing that family was the same divergence in a different spelling -- and a
-    # prefix that was kept is part of the base, so `adhoc:319` and `issue:foo` each
-    # name only themselves.
+    # Generated, then verified against that identity, because generating alone is
+    # not safe: the bare spelling is rebuilt as base + ":" + lane, and when folding
+    # leaves a base that is itself a kind word the rebuilt string parses as a
+    # *different* item. `adhoc:issue:319` is the `319` lane of an item called
+    # `issue`, but "issue:319" reads back as issue 319 -- so without the check this
+    # scope would report a holder of issue 319 as holding a work item they have
+    # never touched, the inverse of the divergence it exists to fix. The check is
+    # general on purpose: an enumeration of the shapes that misbehave would miss
+    # the next one. Any target-identity shape list, here or in a test, needs a
+    # target whose folded base is a kind word, because that is the family where
+    # reconstruction re-parses.
+    #
+    # The round trip also subsumes which kinds may decorate: a prefix that does not
+    # decorate this base stays part of the base when re-read -- `adhoc:319` reads
+    # back as the item `adhoc:319`, not as the `319` this target names -- and fails
+    # the check. So `issue:`/`pr:` attach to a number, `adhoc:` to a slug, and a
+    # prefix that was already kept (`issue:foo`, `adhoc:319`) names only itself,
+    # all from one rule rather than a restatement of #145's.
     #
     # Casing is identity to `log`, which matches through work_item_parts and
     # downcases, but a claim path is literal, so the canonical spelling of what was
@@ -5058,23 +5098,18 @@ module AgentCoord
     # The other half is not: a claim *written* under an arbitrary casing cannot be
     # found by a closed point-read set, because the casings are unbounded --
     # `--target 319` will not find a claim stored as `Issue:319`. README states
-    # that limit. This is strictly more answers than the single literal read, never
-    # fewer, so no query that resolved before stops resolving.
+    # that limit.
     #
     # A lane suffix rides along on every spelling rather than being folded off. A
     # lane holds its own lease, so `319:qa` is not `319` -- but `issue:319:qa` and
     # `319:qa` are the same lane of the same item, and missing that would hide a
     # live lane holder exactly the way the bare item's aliases hid one.
     def target_alias_spellings(target)
-      base, lane = AgentCoord.work_item_parts(target)
+      identity = AgentCoord.work_item_parts(target)
+      base, lane = identity
       suffix = lane.nil? ? "" : ":#{lane}"
-      # A kept prefix leaves its colon in the base, and prefixing a kind ahead of
-      # that splits differently: `adhoc:adhoc:319` is the `319` lane of an item
-      # called `adhoc`, not the item `adhoc:319`. Such a target names only itself.
-      return ["#{base}#{suffix}"] if base.include?(":")
-
-      kinds = WORK_ITEM_KINDS.select { |kind| AgentCoord.decorative_work_item_kind?(kind, base) }
-      ["#{base}#{suffix}", *kinds.map { |kind| "#{kind}:#{base}#{suffix}" }]
+      spellings = ["#{base}#{suffix}", *WORK_ITEM_KINDS.map { |kind| "#{kind}:#{base}#{suffix}" }]
+      spellings.select { |spelling| AgentCoord.work_item_parts(spelling) == identity }
     end
 
     # One heartbeat read per distinct holder, not per claim: two spellings held by

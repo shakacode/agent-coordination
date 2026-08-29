@@ -4781,10 +4781,15 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
   # folding rule cannot silently widen the candidate set past it.
   def test_status_target_scope_candidates_all_fold_onto_the_queried_identity
     runner = AgentCoord::Runner.new([])
+    # The last row is the family that breaks reconstruction: folding leaves a base
+    # that is itself a kind word, so the rebuilt bare spelling re-parses as a
+    # different work item. Any shape list for this property needs one, or the
+    # invariant passes while the code violates it.
     targets = %w[
       4150 issue:4150 pr:4150 ISSUE:4150 4150:qa 4150:QA issue:4150:qa
       backfill-docs adhoc:backfill-docs Backfill-Docs backfill-docs:qa adhoc:backfill-docs:qa
-      adhoc:4150 issue:backfill-docs
+      adhoc:4150 issue:backfill-docs issue:pr:4150 pr:adhoc:4150
+      adhoc:issue:4150 adhoc:pr:4150 adhoc:adhoc:4150 adhoc:issue:backfill-docs
     ]
 
     targets.each do |target|
@@ -4967,17 +4972,18 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
       "claims/shakacode/react_on_rails/4150.json",
       "claims/shakacode/react_on_rails/issue:4150.json",
       "claims/shakacode/react_on_rails/pr:4150.json",
-      "heartbeats/worker-new.json",
+      "heartbeats/worker-issue.json",
       "heartbeats/worker-pr.json"
     ]
+    # One file reached through two candidate paths returns the *same* payload,
+    # which is what a case-insensitive checkout actually does.
+    one_lease = target_claim_fixture(now, "issue:4150", "worker-issue")
     records = {
-      "claims/shakacode/react_on_rails/ISSUE:4150.json" =>
-        target_claim_fixture(now, "issue:4150", "worker-old", updated_at: now - 600),
-      "claims/shakacode/react_on_rails/issue:4150.json" =>
-        target_claim_fixture(now, "issue:4150", "worker-new", updated_at: now - 60),
+      "claims/shakacode/react_on_rails/ISSUE:4150.json" => one_lease,
+      "claims/shakacode/react_on_rails/issue:4150.json" => one_lease,
       "claims/shakacode/react_on_rails/pr:4150.json" =>
         target_claim_fixture(now, "pr:4150", "worker-pr", updated_at: now - 30),
-      "heartbeats/worker-new.json" => target_heartbeat_fixture(now, "worker-new"),
+      "heartbeats/worker-issue.json" => target_heartbeat_fixture(now, "worker-issue"),
       "heartbeats/worker-pr.json" => target_heartbeat_fixture(now, "worker-pr")
     }
     store = CandidatePathStore.new(expected, records)
@@ -4992,7 +4998,147 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
 
     assert_equal expected, store.reads
     assert_equal ["issue:4150", "pr:4150"], claimed
-    assert_equal %w[worker-new worker-pr], holders
+    assert_equal %w[worker-issue worker-pr], holders
+  end
+
+  # Two case-differing keys on a case-sensitive store are two files, so they are
+  # two independently claimable leases, and concealing a second live holder is the
+  # failure this scope exists to surface. Their payloads differ, which is what
+  # tells them apart from one file read twice.
+  def test_status_target_scope_reports_both_holders_of_two_case_differing_keys
+    now = Time.utc(2026, 6, 20, 12, 0, 0)
+    expected = [
+      "claims/shakacode/react_on_rails/ISSUE:4150.json",
+      "claims/shakacode/react_on_rails/4150.json",
+      "claims/shakacode/react_on_rails/issue:4150.json",
+      "claims/shakacode/react_on_rails/pr:4150.json",
+      "heartbeats/worker-upper.json",
+      "heartbeats/worker-lower.json"
+    ]
+    records = {
+      "claims/shakacode/react_on_rails/ISSUE:4150.json" =>
+        target_claim_fixture(now, "ISSUE:4150", "worker-upper"),
+      "claims/shakacode/react_on_rails/issue:4150.json" =>
+        target_claim_fixture(now, "issue:4150", "worker-lower", updated_at: now - 30),
+      "heartbeats/worker-upper.json" => target_heartbeat_fixture(now, "worker-upper"),
+      "heartbeats/worker-lower.json" => target_heartbeat_fixture(now, "worker-lower")
+    }
+    store = CandidatePathStore.new(expected, records)
+    stdout = StringIO.new
+    runner = AgentCoord::Runner.new([], stdout: stdout, clock: FixedClock.new(now))
+    runner.define_singleton_method(:build_store) { |_options| store }
+
+    runner.send(:render_status, repo: "shakacode/react_on_rails", target: "ISSUE:4150", json: true)
+    payload = JSON.parse(stdout.string)
+    claimed = payload.fetch("claims").map { |claim| claim.fetch("target") }
+    holders = payload.fetch("heartbeats").map { |entry| entry.fetch("agent_id") }
+
+    assert_equal expected, store.reads
+    assert_equal ["ISSUE:4150", "issue:4150"], claimed
+    assert_equal %w[worker-upper worker-lower], holders
+  end
+
+  # `adhoc:issue:319` is the `319` lane of an item called `issue`, not issue 319.
+  # Rebuilding its bare spelling as base + ":" + lane produces "issue:319", which
+  # re-parses as a different work item -- so before the round-trip guard this
+  # reported a holder of issue 319 as holding a work item they had never touched,
+  # the inverse of the divergence #147 fixes.
+  def test_status_target_scope_does_not_report_a_different_item_whose_key_the_base_rebuilds
+    now = Time.now.utc
+    write_claim("issue:4150", agent_id: "worker-issue", updated_at: now - 60, expires_at: now + 3600)
+    write_claim("adhoc:4150", agent_id: "worker-adhoc", updated_at: now - 60, expires_at: now + 3600)
+
+    assert_empty status_target_claim_targets("adhoc:issue:4150")
+    assert_empty status_target_claim_targets("adhoc:adhoc:4150")
+    assert_equal ["issue:4150"], status_target_claim_targets("issue:4150")
+  end
+
+  # A record the local store will not open is the same "this candidate cannot
+  # answer" as a scoped token's 403, and must not take down a query the queried
+  # record answers.
+  def test_status_target_scope_degrades_when_an_alias_is_unreadable_on_disk
+    now = Time.now.utc
+    write_claim("4150", agent_id: "worker-a", updated_at: now - 60, expires_at: now + 3600)
+    write_claim("pr:4150", agent_id: "worker-b", updated_at: now - 60, expires_at: now + 3600)
+    unreadable = File.join(@state_root, "claims", "shakacode", "react_on_rails", "pr:4150.json")
+    FileUtils.chmod(0o000, unreadable)
+    skip "filesystem permissions are not enforced for this user" if File.readable?(unreadable)
+
+    status = run_agent_coord("status", "--repo", "shakacode/react_on_rails", "--target", "4150", "--json")
+
+    assert_equal 0, status.status.exitstatus, status.stderr
+    payload = JSON.parse(status.stdout)
+    claimed = payload.fetch("claims").map { |claim| claim.fetch("target") }
+    note = "claims/shakacode/react_on_rails/pr:4150.json not readable; a claim there would not be reported"
+
+    assert_equal ["4150"], claimed
+    assert_equal note, payload.fetch("section_notes").fetch("claims")
+  ensure
+    FileUtils.chmod(0o644, unreadable) if unreadable && File.exist?(unreadable)
+  end
+
+  # A symlink at a claim path is a layout violation the store refuses to follow.
+  # Same treatment: the candidate cannot answer, the query still can.
+  def test_status_target_scope_degrades_when_an_alias_is_a_symlink
+    now = Time.now.utc
+    write_claim("4150", agent_id: "worker-a", updated_at: now - 60, expires_at: now + 3600)
+    claim_dir = File.join(@state_root, "claims", "shakacode", "react_on_rails")
+    File.symlink(File.join(claim_dir, "4150.json"), File.join(claim_dir, "pr:4150.json"))
+
+    status = run_agent_coord("status", "--repo", "shakacode/react_on_rails", "--target", "4150", "--json")
+
+    assert_equal 0, status.status.exitstatus, status.stderr
+    payload = JSON.parse(status.stdout)
+    claimed = payload.fetch("claims").map { |claim| claim.fetch("target") }
+    note = "claims/shakacode/react_on_rails/pr:4150.json is a symlink; a claim there would not be reported"
+
+    assert_equal ["4150"], claimed
+    assert_equal note, payload.fetch("section_notes").fetch("claims")
+  end
+
+  # The store checks readability before opening, so a raw EACCES only escapes in a
+  # race; it means the same thing and is degraded the same way.
+  def test_status_target_scope_degrades_when_an_alias_read_raises_permission_denied
+    now = Time.utc(2026, 6, 20, 12, 0, 0)
+    path = "claims/shakacode/react_on_rails/pr:4150.json"
+    store = FailingAliasTargetScopedStore.new(now, Errno::EACCES.new(path))
+    stdout = StringIO.new
+    runner = AgentCoord::Runner.new([], stdout: stdout, clock: FixedClock.new(now))
+    runner.define_singleton_method(:build_store) { |_options| store }
+
+    result = runner.send(:render_status, repo: "shakacode/react_on_rails", target: "4150", json: true)
+    payload = JSON.parse(stdout.string)
+
+    assert_equal 0, result
+    assert_equal "#{path} not readable; a claim there would not be reported",
+                 payload.fetch("section_notes").fetch("claims")
+  end
+
+  # Two candidates can fail at once, for different reasons. The note is the only
+  # place the operator learns which paths went unchecked, so it carries both, in
+  # candidate order, and `degraded` carries the joined note once.
+  def test_status_target_scope_joins_a_note_for_every_alias_that_could_not_answer
+    now = Time.now.utc
+    write_claim("4150", agent_id: "worker-a", updated_at: now - 60, expires_at: now + 3600)
+    write_heartbeat("worker-a", updated_at: now - 60, expires_at: now + 600)
+    claim_dir = File.join(@state_root, "claims", "shakacode", "react_on_rails")
+    write_state_file("claims/shakacode/react_on_rails/issue:4150.json", "{")
+    File.symlink(File.join(claim_dir, "4150.json"), File.join(claim_dir, "pr:4150.json"))
+
+    status = run_agent_coord("status", "--repo", "shakacode/react_on_rails", "--target", "4150", "--json")
+
+    assert_equal 0, status.status.exitstatus, status.stderr
+    payload = JSON.parse(status.stdout)
+    note = "claims/shakacode/react_on_rails/issue:4150.json unreadable; " \
+           "a claim there would not be reported; " \
+           "claims/shakacode/react_on_rails/pr:4150.json is a symlink; " \
+           "a claim there would not be reported"
+
+    claimed = payload.fetch("claims").map { |claim| claim.fetch("target") }
+
+    assert_equal ["4150"], claimed
+    assert_equal note, payload.fetch("section_notes").fetch("claims")
+    assert_equal 1, payload.fetch("degraded").count(note)
   end
 
   # A stale or half-written sibling is not an answer to the question that was
@@ -5068,7 +5214,8 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
   def test_status_target_scope_degrades_when_an_alias_is_forbidden_by_a_scoped_token
     now = Time.utc(2026, 6, 20, 12, 0, 0)
     path = "claims/shakacode/react_on_rails/pr:4150.json"
-    store = FailingAliasTargetScopedStore.new(now, "http backend read #{path} failed: 403 forbidden")
+    error = AgentCoord::OperationalError.new("http backend read #{path} failed: 403 forbidden")
+    store = FailingAliasTargetScopedStore.new(now, error)
     stdout = StringIO.new
     runner = AgentCoord::Runner.new([], stdout: stdout, clock: FixedClock.new(now))
     runner.define_singleton_method(:build_store) { |_options| store }
@@ -5089,7 +5236,8 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
   # prevent.
   def test_status_target_scope_does_not_degrade_past_an_unexpected_alias_failure
     now = Time.utc(2026, 6, 20, 12, 0, 0)
-    store = FailingAliasTargetScopedStore.new(now, "http backend read claims failed: 500 internal error")
+    error = AgentCoord::OperationalError.new("http backend read claims failed: 500 internal error")
+    store = FailingAliasTargetScopedStore.new(now, error)
     runner = AgentCoord::Runner.new([], stdout: StringIO.new, clock: FixedClock.new(now))
     runner.define_singleton_method(:build_store) { |_options| store }
 
@@ -7603,18 +7751,19 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
   end
 
   # One alias candidate fails at the store layer; everything else answers as
-  # usual. The message decides whether that is a candidate this scope may degrade
-  # past or a failure of the whole query.
+  # usual. The failure itself -- its class and its exact message -- decides
+  # whether that is a candidate this scope may degrade past or a failure of the
+  # whole query.
   class FailingAliasTargetScopedStore < TargetScopedStore
     FAILING_PATH = "claims/shakacode/react_on_rails/pr:4150.json"
 
-    def initialize(now, message)
+    def initialize(now, error)
       super(now)
-      @message = message
+      @error = error
     end
 
     def read_json(path)
-      raise AgentCoord::OperationalError, @message if path == FAILING_PATH
+      raise @error if path == FAILING_PATH
 
       super
     end

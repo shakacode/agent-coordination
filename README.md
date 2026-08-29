@@ -719,26 +719,31 @@ Scoped status is the preferred batch-workflow path:
   canonically spelled number, two for a slug, one where the prefix is part of the
   base — plus one heartbeat per distinct holder, independent of fleet size: point
   reads only, never a listing or a prefix scan. Every claim found is reported, so
-  two agents holding `9832` and `pr:9832` both appear; one lease recorded under
-  two casings collapses to its newest record, the same grouping `log` uses. Lane
-  suffixes are never folded away, because a lane holds its own lease: `--target
-  319` does not report a claim on `319:qa`, and `--target 319:qa` resolves
-  `issue:319:qa` and `pr:319:qa`, not `319`.
+  two agents holding `9832` and `pr:9832` both appear; two candidate paths that
+  resolve to one file on a case-insensitive checkout return the same record and
+  are reported once. Lane suffixes are never folded away, because a lane holds its
+  own lease: `--target 319` does not report a claim on `319:qa`, and `--target
+  319:qa` resolves `issue:319:qa` and `pr:319:qa`, not `319`.
   - The queried spelling and the alias spellings fail differently on purpose. A
     corrupt or unreadable record at the *queried* path is still a hard error with
-    exit 2, unchanged. An *alias* candidate that cannot be read — malformed, not a
-    claim object, or outside a scoped token's read prefixes — does not abort the
-    query: the healthy records still answer, the exit stays 0, and a `claims`
-    section note names the path and says a claim there would not be reported. That
-    note also appears in `degraded`. Read it: `claims: none` with such a note is
-    "could not check everything", which is not the same answer as a bare
-    `claims: none`.
+    exit 2, unchanged. An *alias* candidate that cannot answer does not abort the
+    query: malformed JSON, a payload that is not a claim object, a path outside a
+    scoped token's read prefixes, an unreadable file, and a symlink where a record
+    belongs are each reported instead of raised. The healthy records still answer,
+    the exit stays 0, and a `claims` section note names each such path and says a
+    claim there would not be reported; the notes also appear in `degraded`. Read
+    them: `claims: none` with such a note is "could not check everything", which is
+    not the same answer as a bare `claims: none`. Anything broader — a 500, a
+    `route_not_found`, an unreachable backend — is still a failed query, not an
+    absent claim.
   - Casing is folded on the query side only. Claim paths are literal, so covering
     every casing a claim could have been *written* under would cost a read per
     casing rather than a closed set. `--target Issue:319` finds a claim stored
     canonically as `issue:319`, but a claim stored as `Issue:319` is found only by
     that same spelling — `--target 319` will not find it. `log`, which lists and
-    folds, still will.
+    folds, still will. Where two case-differing keys are both live, they are two
+    files and therefore two leases: `status` reports both holders, while `log`
+    folds them and reports one.
 - `status --batch-id ID` reads only `batches/<id>.json`, `events/<id>/`,
   lane-owner heartbeats, and dependency batch files plus referenced lane-owner
   heartbeats needed to compute `blocked_on`.

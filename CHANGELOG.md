@@ -416,18 +416,25 @@ when releases begin.
   extra point reads measured at roughly 130ms of added median latency against the
   live backend, under 5% of that budget. Every claim found is reported, matching
   what `log` already did, so two agents holding `9832` and `pr:9832` both appear
-  rather than one hiding the other, while one lease recorded under two casings
-  collapses to its newest record through the same grouping `log` uses. Each
-  holder's heartbeat is read once however many of its leases answer. A lane holds
+  rather than one hiding the other. Two candidate paths that resolve to one file
+  on a case-insensitive checkout return the same record and are reported once,
+  decided on payload identity rather than on a case-folded key: two case-differing
+  keys that are both live are two files and therefore two leases, and `status`
+  reports both holders where `log`, which folds casing across its listing, reports
+  one. Each holder's heartbeat is read once however many of its leases answer. A lane holds
   its own lease, so lane suffixes stay distinct and ride along on each spelling
   instead of being folded away: `--target 319` still does not report a claim on
   `319:qa`, while `--target 319:qa` now also resolves `issue:319:qa` and
   `pr:319:qa`. The queried spelling and the alias spellings fail differently on
   purpose. A corrupt or unreadable record at the queried path is still a hard
-  error with exit 2, exactly as before; an alias candidate that cannot be read —
-  malformed, not a claim object, or outside a scoped token's read prefixes — no
-  longer aborts a query the healthy records answer perfectly, which had turned a
-  good answer into the `UNKNOWN` exit code a `plan-pr-batch` probe stops on.
+  error with exit 2, exactly as before; an alias candidate that cannot answer —
+  malformed JSON, a payload that is not a claim object, a path outside a scoped
+  token's read prefixes, a file the local store will not open, or a symlink where
+  a record belongs — no longer aborts a query the healthy records answer
+  perfectly, which had turned a good answer into the `UNKNOWN` exit code a
+  `plan-pr-batch` probe stops on. Broader failures — a 500, a `route_not_found`,
+  an unreachable backend — still raise, because they are not one candidate's
+  problem.
   Instead the exit stays 0 and a `claims` section note names the path and says a
   claim there would not be reported, because `claims: none` with a note is "could
   not check everything" and must not be read as "definitely unclaimed". Casing is
