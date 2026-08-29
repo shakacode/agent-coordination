@@ -330,6 +330,37 @@ when releases begin.
 
 ### Fixed
 
+- The GitHub backend no longer crashes on non-ASCII `gh` output under a non-UTF-8
+  locale (issue #159). `Open3.capture3` tags what it captures with
+  `Encoding.default_external`, which is `US-ASCII` under `LC_ALL=C` or `LANG=C`,
+  so every byte `gh` wrote came back mislabeled: a repository description holding
+  an em dash — routine on real repos — took down `verify_not_archived!` with an
+  uncaught `Encoding::InvalidByteSequenceError`, and one non-ASCII filename
+  anywhere in the backend tree did the same to `list_json` and `verify_readable!`.
+  This is the issue #130 defect reaching the GitHub backend by a second route,
+  which #156 left open because it was scoped to the local one. Captures now go
+  through `AgentCoord.capture3_utf8`, which re-tags at the seam rather than at
+  each parse, so stderr is covered as well as stdout — an error path that raises
+  while formatting its own message replaces a diagnosable failure with a
+  backtrace, and that is the worse outcome of the two. Two message paths did
+  exactly that: `check_command!`'s `OperationalError`, which `doctor --stack-json`
+  then serialized into an uncaught `JSON::GeneratorError`, and
+  `GhResult#error_message`, which `not_found?` and `conflict?` `match?` against to
+  classify a `gh` failure and which raised `ArgumentError` before the classifier
+  could answer — so the CLI could not tell an absent record from an unreadable
+  one. Re-tagging corrects a wrong label but cannot repair malformed bytes, and
+  `match?` raises on invalid UTF-8 as readily as on invalid US-ASCII, so message
+  paths substitute U+FFFD for undecodable bytes while payload paths deliberately
+  do not: a readable approximation beats a second crash in a diagnostic, and
+  silently rewriting a state record is worse than failing to read it. The
+  `sim/bin/verify-batch` harness carried the same capture defect against
+  `agent-coord` and `gh` output and is fixed the same way; independent QA
+  reproduced crashes at all four of its capture sites. `sim/bin/graveyard` is
+  fixed identically but defensively: `STATE_PATH_PATTERN` confines every state
+  path to `[A-Za-z0-9_.:-]`, so no non-ASCII byte can reach `gc --json` output
+  today and the change is unreachable rather than load-bearing. Note that the
+  `JSON.parse(File.read(path))` sites in `sim/bin` are the issue #130 read-path
+  class rather than this one and are not covered here (issue #210).
 - Telemetry ingest no longer accepts a control-bearing value into the identity
   and enum columns fed by the coordination and GitHub documents, and no longer
   promotes one past a closed allowlist there (issue #171, the residual deferred from

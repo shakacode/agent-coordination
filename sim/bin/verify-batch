@@ -28,18 +28,29 @@ unless repo_slug && (!telemetry_ledger.nil? == !telemetry_batch_id.nil?)
         "[--telemetry-ledger PATH --batch-id ID]"
 end
 
+# Open3 tags captured output with Encoding.default_external, which is US-ASCII
+# under LC_ALL=C or LANG=C. agent-coord and gh both emit UTF-8, so that tag is
+# wrong and JSON.parse then raises Encoding::InvalidByteSequenceError on output
+# that is perfectly valid. Re-tag stdout so the parses below see the bytes as
+# they were written, and scrub stderr, which only ever becomes report text, so a
+# failing subprocess cannot crash this script while it describes the failure.
+def capture3_utf8(*)
+  stdout, stderr, status = Open3.capture3(*)
+  [stdout.dup.force_encoding(Encoding::UTF_8), stderr.dup.force_encoding(Encoding::UTF_8).scrub, status]
+end
+
 sim_root = File.expand_path("..", __dir__)
 cli = File.join(sim_root, "..", "bin", "agent-coord")
 manifest = JSON.parse(File.read(File.join(sim_root, "issues.json"))).fetch("issues")
 
-stdout, stderr, status = Open3.capture3("ruby", cli, "status", "--json")
+stdout, stderr, status = capture3_utf8("ruby", cli, "status", "--json")
 abort "agent-coord status failed: #{stderr}" unless status.success?
 
 claims = JSON.parse(stdout).fetch("claims")
 
 if telemetry_ledger
   telemetry_cli = File.join(sim_root, "..", "bin", "agent-coord-harvest")
-  telemetry_out, _telemetry_err, telemetry_status = Open3.capture3(
+  telemetry_out, _telemetry_err, telemetry_status = capture3_utf8(
     telemetry_cli, "scorecard", "--ledger", telemetry_ledger,
     "--batch-id", telemetry_batch_id
   )
@@ -99,7 +110,7 @@ class BatchVerifier
 
     branch_col = pr.fetch("headRefName", branch_col)
     pr_col = pr.fetch("url")
-    checks_out, checks_err, checks_status = Open3.capture3(
+    checks_out, checks_err, checks_status = capture3_utf8(
       "gh", "pr", "checks", pr.fetch("number").to_s, "--repo", @repo_slug,
       "--json", "bucket"
     )
@@ -132,7 +143,7 @@ class BatchVerifier
   end
 
   def fetch_prs(key, branch, state)
-    branch_out, branch_err, branch_status = Open3.capture3(
+    branch_out, branch_err, branch_status = capture3_utf8(
       "gh", "pr", "list", "--repo", @repo_slug, "--state", state,
       "--head", branch, "--json", "url,headRefName,number,state"
     )

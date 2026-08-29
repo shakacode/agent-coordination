@@ -4888,6 +4888,109 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     assert_includes result.stdout.dup.force_encoding(Encoding::UTF_8), "worker-café"
   end
 
+  # The same locale defect reaches the GitHub backend by a different route:
+  # Open3.capture3 tags a subprocess capture with Encoding.default_external, so
+  # under LC_ALL=C every byte gh writes comes back labelled US-ASCII. A GitHub
+  # repository description carrying an em dash — routine on real repos — then
+  # crashed verify_not_archived!'s JSON.parse with
+  # Encoding::InvalidByteSequenceError before it could report the archived state
+  # it was called to check.
+  def test_doctor_parses_non_ascii_github_backend_metadata_under_an_ascii_locale
+    fake_bin = Dir.mktmpdir("agent-coord-gh-non-ascii")
+    write_non_ascii_fake_gh(fake_bin, mode: :metadata)
+
+    with_agent_coord_without_source_state do |bin|
+      result = run_command(
+        non_ascii_gh_env(fake_bin), RbConfig.ruby, bin,
+        "doctor", "--backend", "shakacode/agent-coordination-state"
+      )
+
+      assert_equal 2, result.status.exitstatus, result.stderr
+      refute_includes result.stderr, "Encoding::InvalidByteSequenceError"
+      assert_includes result.stderr, "is archived and read-only"
+    end
+  ensure
+    FileUtils.remove_entry(fake_bin) if fake_bin && Dir.exist?(fake_bin)
+  end
+
+  # stderr matters more than stdout here: an error path that raises while
+  # formatting its own message replaces a diagnosable failure with a backtrace.
+  # check_command! interpolates a failed command's stderr into its
+  # OperationalError, and --stack-json then serializes that message, so a gh
+  # auth failure mentioning an em dash used to die in JSON.pretty_generate with
+  # JSON::GeneratorError instead of reporting that gh was not logged in.
+  def test_stack_doctor_reports_non_ascii_gh_failure_output_under_an_ascii_locale
+    fake_bin = Dir.mktmpdir("agent-coord-gh-non-ascii-auth")
+    write_non_ascii_fake_gh(fake_bin, mode: :auth_failure)
+
+    with_agent_coord_without_source_state do |bin|
+      result = run_command(
+        non_ascii_gh_env(fake_bin), RbConfig.ruby, bin,
+        "doctor", "--stack-json", "--backend", "shakacode/agent-coordination-state"
+      )
+
+      assert_equal 2, result.status.exitstatus, result.stderr
+      refute_includes result.stderr, "JSON::GeneratorError"
+      report = JSON.parse(result.stdout.dup.force_encoding(Encoding::UTF_8))
+      backend_check = report.fetch("checks").find { |check| check.fetch("id") == "backend.readability" }
+      assert_includes backend_check.dig("details", "error"), "gh: not logged in — run gh auth login"
+    end
+  ensure
+    FileUtils.remove_entry(fake_bin) if fake_bin && Dir.exist?(fake_bin)
+  end
+
+  # GhResult#error_message feeds not_found? and conflict?, which match? against
+  # it to classify a gh failure. A mislabeled string raises ArgumentError from
+  # match? rather than Encoding::InvalidByteSequenceError, so the failure was a
+  # crash in the classifier, before read_json could decide whether the record was
+  # merely absent.
+  def test_scoped_status_classifies_a_non_ascii_gh_failure_under_an_ascii_locale
+    fake_bin = Dir.mktmpdir("agent-coord-gh-non-ascii-contents")
+    write_non_ascii_fake_gh(fake_bin, mode: :contents_failure)
+
+    with_agent_coord_without_source_state do |bin|
+      result = run_command(
+        non_ascii_gh_env(fake_bin), RbConfig.ruby, bin,
+        "status", "--repo", "shakacode/example", "--target", "4711",
+        "--backend", "shakacode/agent-coordination-state"
+      )
+
+      assert_equal 2, result.status.exitstatus, result.stderr
+      refute_includes result.stderr, "invalid byte sequence"
+      assert_includes result.stderr.dup.force_encoding(Encoding::UTF_8),
+                      "gh: forbidden — token lacks the repo scope"
+    end
+  ensure
+    FileUtils.remove_entry(fake_bin) if fake_bin && Dir.exist?(fake_bin)
+  end
+
+  # Re-tagging alone would still leave an invalid string, and match? raises on
+  # invalid UTF-8 just as readily as on invalid US-ASCII. gh output is not
+  # guaranteed well-formed — a truncated write splits a multi-byte character —
+  # so the message path substitutes rather than trusting the re-tag. The
+  # undecodable bytes become U+FFFD and the surrounding diagnosis survives.
+  def test_scoped_status_reports_malformed_gh_failure_bytes_under_an_ascii_locale
+    fake_bin = Dir.mktmpdir("agent-coord-gh-malformed")
+    write_non_ascii_fake_gh(fake_bin, mode: :malformed_failure)
+
+    with_agent_coord_without_source_state do |bin|
+      result = run_command(
+        non_ascii_gh_env(fake_bin), RbConfig.ruby, bin,
+        "status", "--repo", "shakacode/example", "--target", "4711",
+        "--backend", "shakacode/agent-coordination-state"
+      )
+
+      assert_equal 2, result.status.exitstatus, result.stderr
+      refute_includes result.stderr, "invalid byte sequence"
+      stderr = result.stderr.dup.force_encoding(Encoding::UTF_8)
+      assert_predicate stderr, :valid_encoding?
+      assert_includes stderr, "gh: forbidden"
+      assert_includes stderr, "token lacks the repo scope"
+    end
+  ensure
+    FileUtils.remove_entry(fake_bin) if fake_bin && Dir.exist?(fake_bin)
+  end
+
   def test_record_event_writes_append_only_event_and_status_metadata
     write_batch(
       "batch-b",
@@ -6928,6 +7031,45 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     "XDG_CONFIG_HOME" => ISOLATED_CONFIG_HOME
   }.freeze
 
+  # Guard clauses spliced into the gh stub write_non_ascii_fake_gh builds. Each
+  # runs ahead of that stub's blanket success clause, so a mode may fail a command
+  # that otherwise succeeds. :metadata puts an em dash in the repo `description`
+  # to reach the stdout parse; :auth_failure and :contents_failure put one on
+  # stderr to reach the two message paths; :malformed_failure emits bytes that are
+  # not valid UTF-8 under any tagging, written in binary mode so Ruby cannot
+  # transcode them away on the way out.
+  NON_ASCII_GH_MODES = {
+    metadata: <<~RUBY,
+      if command.match?(%r{^api repos/[^/]+/[^/]+$})
+        puts JSON.generate(
+          "full_name" => "shakacode/agent-coordination-state",
+          "description" => "coordination state — canonical",
+          "archived" => true
+        )
+        exit 0
+      end
+    RUBY
+    auth_failure: <<~RUBY,
+      if command == "auth status"
+        warn "gh: not logged in — run gh auth login"
+        exit 1
+      end
+    RUBY
+    contents_failure: <<~RUBY,
+      if command.match?(%r{^api repos/[^/]+/[^/]+/contents/})
+        warn "gh: forbidden — token lacks the repo scope"
+        exit 1
+      end
+    RUBY
+    malformed_failure: <<~RUBY
+      if command.match?(%r{^api repos/[^/]+/[^/]+/contents/})
+        $stderr.binmode
+        $stderr.write("gh: forbidden \\xFF\\xFE token lacks the repo scope\\n")
+        exit 1
+      end
+    RUBY
+  }.freeze
+
   FixedClock = Struct.new(:time) do
     def now
       time
@@ -8546,6 +8688,37 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
           warn "unexpected gh command: \#{command}"
           exit 1
         end
+      RUBY
+    )
+    FileUtils.chmod(0o755, File.join(fake_bin, "gh"))
+  end
+
+  # LC_ALL/LANG are what these cases turn on, and the fake gh has to be found
+  # ahead of any real one, so PATH carries the stub first.
+  def non_ascii_gh_env(fake_bin)
+    {
+      "AGENT_COORD_STATE_ROOT" => nil,
+      "AGENT_COORD_STATUS_STATE_ROOT" => nil,
+      "LC_ALL" => "C",
+      "LANG" => "C",
+      "PATH" => [fake_bin, File.dirname(RbConfig.ruby)].join(File::PATH_SEPARATOR)
+    }
+  end
+
+  # A gh stub whose output is non-ASCII, to pin the subprocess-capture encoding
+  # rather than the state-file read path write_fake_gh covers. See
+  # NON_ASCII_GH_MODES for the modes.
+  def write_non_ascii_fake_gh(fake_bin, mode:)
+    File.write(
+      File.join(fake_bin, "gh"),
+      <<~RUBY
+        #!/usr/bin/env ruby
+        require "json"
+        command = ARGV.join(" ")
+        #{NON_ASCII_GH_MODES.fetch(mode)}
+        exit 0 if command == "auth status" || command.start_with?("repo view ")
+        warn "unexpected gh command: \#{command}"
+        exit 1
       RUBY
     )
     FileUtils.chmod(0o755, File.join(fake_bin, "gh"))
