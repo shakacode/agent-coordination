@@ -378,7 +378,8 @@ module AgentCoord
       return print_help if @argv.empty? || help_request?(@argv.first)
 
       command = @argv.shift
-      load_user_configuration! unless CONFIG_INDEPENDENT_COMMANDS.include?(command)
+      config_action = command == "config" && %w[show set].include?(@argv.first) ? @argv.shift : nil
+      load_user_configuration_unless_exempt!(command, config_action)
       case command
       when "claim"
         claim(parse_options(command, @argv))
@@ -401,7 +402,6 @@ module AgentCoord
       when "version"
         render_version(parse_options(command, @argv))
       when "config"
-        config_action = %w[show set].include?(@argv.first) ? @argv.shift : "show"
         if config_action == "set"
           persist_config(parse_options("config-set", @argv))
         else
@@ -424,10 +424,22 @@ module AgentCoord
 
     private
 
+    # `config`'s subcommand has to be resolved before the load, because whether
+    # it is `set` decides whether a missing explicit config file is tolerated.
+    def load_user_configuration_unless_exempt!(command, config_action)
+      return if CONFIG_INDEPENDENT_COMMANDS.include?(command)
+
+      load_user_configuration!(creating_user_config: config_action == "set")
+    end
+
     # Runner#run temporarily injects canonical user settings into process-wide
     # ENV. In-process callers must serialize run invocations; normal CLI use is
     # one process per invocation.
-    def load_user_configuration!
+    #
+    # `creating_user_config` is set only by `config set`, the one command whose
+    # job is to bring the file into existence. See read_selected_user_configuration.
+    def load_user_configuration!(creating_user_config: false)
+      @creating_user_config = creating_user_config
       @process_config = USER_CONFIG_ENV_KEYS.to_h { |key| [key, ENV.fetch(key, nil)] }
       process_policy = @process_config.fetch(POLICY_ENV, nil)
       validate_policy!(process_policy, "process environment:#{POLICY_ENV}") unless process_policy.to_s.empty?
@@ -478,10 +490,17 @@ module AgentCoord
       File.join(File.dirname(@user_config_path), "policy")
     end
 
+    # An explicit AGENT_COORD_ENV_FILE that does not exist is normally a loud
+    # failure: silently falling back to a different config would use a backend
+    # the operator did not select. `config set` is the exception, because the
+    # documented first-time setup points AGENT_COORD_ENV_FILE at a path and then
+    # runs `config set` to create it. Only *missing* is relaxed, and only here;
+    # a file that exists but is insecure, unreadable, or malformed still fails
+    # closed for `config set` too, so the command can never discard one.
     def read_selected_user_configuration
       return {} unless @user_config_path
 
-      read_user_env_file(@user_config_path, required: @user_config_path_explicit)
+      read_user_env_file(@user_config_path, required: @user_config_path_explicit && !@creating_user_config)
     end
 
     def restore_injected_user_configuration!

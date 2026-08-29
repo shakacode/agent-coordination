@@ -3017,6 +3017,79 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     # rubocop:enable Metrics/BlockLength
   end
 
+  # The documented first-time setup points AGENT_COORD_ENV_FILE at a path and
+  # then runs `config set` to create it. The explicit-path flag made the initial
+  # read required, so the command failed before persist_config could ever write
+  # the very file the variable named.
+  def test_config_set_creates_a_missing_explicit_env_file
+    with_private_config_tmpdir("agent-coord-explicit-create") do |root|
+      parent = File.join(root, "parent")
+      env_file = File.join(parent, "coord.env")
+      FileUtils.mkdir_p(parent)
+      File.chmod(0o700, parent)
+
+      result = run_command(
+        { "AGENT_COORD_ENV_FILE" => env_file },
+        RbConfig.ruby, BIN, "config", "set", "--machine-id", "m1", "--policy", "required"
+      )
+
+      assert_equal 0, result.status.exitstatus, result.stderr
+      assert_path_exists env_file
+      assert_equal 0o600, File.stat(env_file).mode & 0o777
+      contents = File.read(env_file)
+      assert_includes contents, "AGENT_COORD_MACHINE_ID=m1"
+      assert_includes contents, "AGENT_COORD_POLICY=required"
+    end
+  end
+
+  # Only `config set` may tolerate a missing explicit file. For anything else a
+  # silent fallback to a different config would pick a backend the operator
+  # never selected, so a missing AGENT_COORD_ENV_FILE stays a loud failure.
+  def test_missing_explicit_env_file_still_fails_every_other_command
+    with_private_config_tmpdir("agent-coord-explicit-missing") do |root|
+      parent = File.join(root, "parent")
+      env_file = File.join(parent, "coord.env")
+      FileUtils.mkdir_p(parent)
+      File.chmod(0o700, parent)
+      env = { "AGENT_COORD_ENV_FILE" => env_file }
+
+      [%w[config show], ["status", "--state-root", @state_root], %w[doctor]].each do |command|
+        result = run_command(env, RbConfig.ruby, BIN, *command)
+
+        assert_equal 2, result.status.exitstatus, "#{command.join(' ')}: #{result.stderr}"
+        assert_includes result.stderr, "configured user env file does not exist", command.join(" ")
+      end
+      refute_path_exists env_file
+    end
+  end
+
+  # Relaxing "missing" must not relax "unusable": config set still refuses to
+  # overwrite a file it cannot read and validate, in either failure mode.
+  def test_config_set_still_fails_closed_on_an_unusable_explicit_env_file
+    {
+      "insecure" => ["AGENT_COORD_MACHINE_ID=saved\n", 0o644, "permissions are insecure"],
+      "malformed" => ["not an assignment\n", 0o600, "unsafe user config syntax"]
+    }.each do |label, (contents, mode, message)|
+      with_private_config_tmpdir("agent-coord-explicit-unusable") do |root|
+        parent = File.join(root, "parent")
+        env_file = File.join(parent, "coord.env")
+        FileUtils.mkdir_p(parent)
+        File.chmod(0o700, parent)
+        File.write(env_file, contents)
+        File.chmod(mode, env_file)
+
+        result = run_command(
+          { "AGENT_COORD_ENV_FILE" => env_file },
+          RbConfig.ruby, BIN, "config", "set", "--machine-id", "m1"
+        )
+
+        assert_equal 2, result.status.exitstatus, label
+        assert_includes result.stderr, message, label
+        assert_equal contents, File.read(env_file), label
+      end
+    end
+  end
+
   def test_process_policy_overrides_persisted_policy
     with_private_config_tmpdir("agent-coord-process-policy") do |root|
       config_home = File.join(root, "config")

@@ -303,7 +303,11 @@ conventional leaf that is not group/world-writable is automatically hardened to
 `0700` when read. State-root values saved in this file must be absolute paths.
 An explicitly selected missing file, an insecure file, duplicate keys, or
 ambiguous syntax is an operational failure rather than a fallback to another
-backend.
+backend. The single exception is `config set`, whose job is to bring that file
+into existence: it tolerates an `AGENT_COORD_ENV_FILE` that does not exist yet
+and creates exactly the named path. A file that *does* exist but is insecure,
+unreadable, or malformed still fails closed, for `config set` as for everything
+else, so the command can never discard one.
 Every command loads this file except `version` and `bootstrap`, which read no
 configuration at all: they render compiled-in constants and install the command
 respectively, so neither resolves a backend, ref, policy, or machine identity.
@@ -980,7 +984,10 @@ printf '%s\n' "$AGENT_COORD_API_TOKEN" |
 
 `config set` validates or securely creates the full parent chain, stages one
 canonical mode-`0600` file, syncs it, atomically renames it under an exclusive
-config lock, and syncs the containing directory. Endpoint, token, identity, and
+config lock, and syncs the containing directory. This is also how you create the
+file for the first time: point `AGENT_COORD_ENV_FILE` at the path you want and
+run `config set`, and the command writes exactly that path. Until it exists,
+every other command still fails with `configured user env file does not exist`. Endpoint, token, identity, and
 policy therefore become visible together through one rename. Each setter
 re-reads under the lock, so concurrent updates preserve unspecified supported
 keys; readers use a shared lock once the lock file exists. The adjacent lock is
