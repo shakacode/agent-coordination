@@ -630,6 +630,56 @@ class ExplicitBackendPrecedenceStackDoctorTest < Minitest::Test
   end
 end
 
+class InvalidArgumentStackDoctorTest < Minitest::Test
+  include StackDoctorCliTestHarness
+
+  # Argument normalization has to run before anything reads argv, which is
+  # earlier than the EXIT_USAGE -> STACK_EXIT_USAGE mapping in
+  # run_doctor_command, so a rejected argument returned 1 where every other
+  # malformed-value case here returns 64. A stack aggregator reads 1 as degraded
+  # and then finds no report to parse. Both locales are covered because they
+  # tag argv differently -- BINARY under LC_ALL=C, the locale's own encoding
+  # otherwise -- and the detection that resolves this exit code has to survive
+  # both.
+  def test_stack_report_uses_exit_64_for_invalid_utf8_arguments
+    Dir.mktmpdir("agent-coord-stack-doctor") do |state_root|
+      locales = { "ascii locale" => { "LC_ALL" => "C", "LANG" => "C" }, "inherited locale" => {} }
+      cases = {
+        "option value" => ["--stack-json", "--state-root", state_root, "--doctor-prefix", "claims/\xFF"],
+        "backend selector" => ["--stack-json", "--backend", "own\xFF/repo"],
+        "abbreviated flag" => ["--stack-j", "--state-root", state_root, "--doctor-prefix", "claims/\xFF"],
+        "flag after the bad value" => ["--doctor-prefix", "claims/\xFF", "--state-root", state_root,
+                                       "--stack-json"],
+        "equals form" => ["--stack-json", "--state-root", state_root, "--doctor-prefix=claims/\xFF"],
+        "bare positional" => ["--stack-json", "--state-root", state_root, "claims/\xFF"]
+      }
+
+      locales.each do |locale_label, env|
+        cases.each do |case_label, args|
+          label = "#{locale_label} / #{case_label}"
+          result = run_doctor(*args, env: env)
+
+          assert_equal 64, result.fetch(:status).exitstatus, label
+          assert_empty result.fetch(:stdout), label
+          assert_includes result.fetch(:stderr), "command-line argument must be valid UTF-8", label
+        end
+      end
+    end
+  end
+
+  # The mapping is scoped to the stack contract: plain doctor keeps the ordinary
+  # usage exit code, so resolving this early did not widen 64 to every caller.
+  def test_invalid_utf8_argument_without_stack_json_uses_the_ordinary_usage_exit
+    Dir.mktmpdir("agent-coord-stack-doctor") do |state_root|
+      result = run_doctor("--state-root", state_root, "--doctor-prefix", "claims/\xFF")
+
+      assert_equal 1, result.fetch(:status).exitstatus
+      assert_empty result.fetch(:stdout)
+      assert_includes result.fetch(:stderr), "command-line argument must be valid UTF-8"
+    end
+  end
+end
+
 class StackDoctorOutputModeCliTest < Minitest::Test
   include StackDoctorCliTestHarness
 

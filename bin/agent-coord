@@ -337,7 +337,6 @@ module AgentCoord
 
   class Runner # rubocop:disable Metrics/ClassLength
     def initialize(argv, stdout: $stdout, stderr: $stderr, clock: Time, backend_conflict_warnings: true)
-      @argv = AgentCoord.normalize_argv(argv)
       @stdout = stdout
       @stderr = stderr
       @clock = clock
@@ -345,6 +344,9 @@ module AgentCoord
       # Set on the first degraded listing; read by both the --sync guard and the
       # --json trail state, so it must exist before either runs.
       @log_incomplete = nil
+      # Last: rejecting an argument builds an option registry to resolve its
+      # exit code, and nothing above depends on argv.
+      @argv = normalized_argv(argv)
     end
 
     def run # rubocop:disable Metrics/CyclomaticComplexity
@@ -402,6 +404,31 @@ module AgentCoord
       raise unless stack_json && e.exit_code == EXIT_USAGE
 
       raise Error.new(e.message, exit_code: STACK_EXIT_USAGE)
+    end
+
+    # Argument normalization has to run before anything reads argv, which is
+    # earlier than run_doctor_command's EXIT_USAGE -> STACK_EXIT_USAGE mapping
+    # above, so a rejected argument would otherwise exit 1 where
+    # `doctor --stack-json` promises 64 for every usage error -- and a stack
+    # aggregator reads 1 as degraded and then finds no report to parse. The
+    # exit code is therefore resolved here instead.
+    def normalized_argv(argv)
+      AgentCoord.normalize_argv(argv)
+    rescue Error => e
+      raise unless e.exit_code == EXIT_USAGE && stack_json_argv?(argv)
+
+      raise Error.new(e.message, exit_code: STACK_EXIT_USAGE)
+    end
+
+    # Detection runs on a BINARY copy of the raw argv, because
+    # standalone_option_token_count splits each argument on "=" and String#split
+    # raises on a UTF-8-tagged string holding invalid bytes -- exactly the input
+    # that got us here. Option names are ASCII, and an ASCII-only string
+    # compares equal to its BINARY copy, so the match is unaffected. The command
+    # token is dropped to match what run_doctor_command inspects.
+    def stack_json_argv?(argv)
+      raw = argv.map { |argument| argument.to_s.b }
+      raw.first == "doctor" && stack_json_option_token?(raw.drop(1))
     end
 
     def print_help
@@ -6583,26 +6610,55 @@ module AgentCoord
     path.to_s.match?(STATE_DIRECTORY_PREFIX_PATTERN)
   end
 
-  # Ruby tags ARGV with the locale encoding, so under LANG=C/LC_ALL=C every
-  # CLI-sourced string arrives as BINARY. That leaks two ways. JSON.generate
-  # warns on a BINARY string today and raises in json 3.0, which would take the
-  # whole write path down under exactly the launchd/cron conditions this matters
-  # for; and a BINARY argument never compares equal to the same bytes read back
-  # from state as UTF-8, so release decided a non-ASCII holder was somebody else
-  # and then crashed interpolating the mismatch into its refusal message.
-  # Normalizing the whole argv once at the Runner boundary covers the command
-  # token, every option value, the `log` positional, and demo's passthrough argv
-  # in one place, so no future option can forget it. Invalid bytes are rejected
-  # rather than scrubbed, matching load_launch_prompt: a scrubbed agent-id or
-  # repo would be written into coordination state as a different identity. The
-  # echoed value is scrubbed so this error cannot itself emit an invalid byte.
+  # Ruby tags ARGV with the locale encoding, and everything downstream assumes
+  # UTF-8: JSON.generate warns on a non-UTF-8 string today and raises under json
+  # 3.0, and a differently tagged argument does not compare equal to the same
+  # text read back from state, which is why under LC_ALL=C a non-ASCII agent
+  # could neither renew nor release its own claim. Doing this once at the Runner
+  # boundary covers the command token, every option value, the `log` positional,
+  # and demo's passthrough argv together, so an option added later cannot forget
+  # it. Returns a new array rather than normalizing in place: Runner#run and
+  # parse_options consume the array they are given, and that must not reach back
+  # into an ARGV or a caller's array they do not own.
   def self.normalize_argv(argv)
-    argv.map do |argument|
-      normalized = argument.to_s.dup.force_encoding(Encoding::UTF_8)
-      next normalized if normalized.valid_encoding?
+    argv.map { |argument| normalize_argument(argument.to_s) }
+  end
 
-      raise Error, "command-line argument must be valid UTF-8: #{normalized.scrub('?')}"
-    end
+  # How Ruby tagged the argument decides what normalizing it means. BINARY is
+  # the absence of a tag -- it is what LANG=C/LC_ALL=C produces for an argument
+  # holding a non-ASCII byte -- so there is no source encoding to convert from
+  # and the bytes are retagged as the UTF-8 they are meant to be. Any other tag
+  # is a real claim about what those bytes mean, so the argument is transcoded:
+  # force_encoding on an ISO-8859-1 terminal's `café` would either reject valid
+  # input or, when the latin-1 bytes happen to form UTF-8, silently store
+  # different text than the operator typed.
+  #
+  # Invalid bytes are rejected rather than scrubbed, matching load_launch_prompt:
+  # these values are state keys, so a scrubbed agent-id or repo would be written
+  # into coordination state as a silently different identity.
+  def self.normalize_argument(argument)
+    normalized =
+      if argument.encoding == Encoding::ASCII_8BIT
+        argument.dup.force_encoding(Encoding::UTF_8)
+      else
+        argument.encode(Encoding::UTF_8)
+      end
+    # UTF-8 to UTF-8 is a no-op that does not validate, so a UTF-8-tagged
+    # argument holding invalid bytes is still only caught here.
+    return normalized if normalized.valid_encoding?
+
+    raise Error, invalid_argument_message(argument)
+  rescue EncodingError
+    # Every transcoding failure: undefined conversion, invalid byte sequence in
+    # the declared encoding, or an encoding with no converter to UTF-8.
+    raise Error, invalid_argument_message(argument)
+  end
+
+  # Rebuilt from the raw bytes and scrubbed rather than echoed as tagged, so
+  # reporting a rejected argument cannot itself raise on the value it reports.
+  def self.invalid_argument_message(argument)
+    display = argument.b.force_encoding(Encoding::UTF_8).scrub("?")
+    "command-line argument must be valid UTF-8: #{display}"
   end
 
   def self.validate_repo!(repo, field)
