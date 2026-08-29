@@ -1578,6 +1578,28 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
   # announces which side won. AGENT_COORD_STATE_ROOT silently shadowed a
   # configured AGENT_COORD_BACKEND, so an operator whose fleet backend stopped
   # being used had no diagnostic at all.
+  def test_whitespace_only_process_selector_does_not_shadow_a_configured_backend
+    with_private_config_tmpdir("agent-coord-whitespace-selector") do |root|
+      config_home = File.join(root, "config")
+      env_file = File.join(config_home, "agent-coord", "env")
+      FileUtils.mkdir_p(File.dirname(env_file))
+      File.chmod(0o700, File.dirname(env_file))
+      File.write(env_file, "AGENT_COORD_BACKEND=acme/legacy-repo\n")
+      File.chmod(0o600, env_file)
+
+      shown = run_command(
+        { "XDG_CONFIG_HOME" => config_home, "AGENT_COORD_STATE_ROOT" => "   " },
+        RbConfig.ruby, BIN, "config", "show", "--json"
+      )
+
+      assert_equal 0, shown.status.exitstatus, shown.stderr
+      coordination = JSON.parse(shown.stdout).fetch("coordination")
+      assert_equal "github", coordination.fetch("backend"),
+                   "a whitespace-only process selector must not shadow the configured backend"
+      assert_equal "user_config", coordination.fetch("source").fetch("backend")
+    end
+  end
+
   def test_configured_state_root_warns_when_it_shadows_a_configured_backend
     with_private_config_tmpdir("agent-coord-state-root-over-backend") do |root|
       config_home = File.join(root, "config")

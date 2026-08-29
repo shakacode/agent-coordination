@@ -649,9 +649,13 @@ module AgentCoord
       @user_config&.fetch(key, nil)
     end
 
+    # A whitespace-only selector is not a selection. The CLI flags reject such a
+    # value outright, so treating an exported AGENT_COORD_STATE_ROOT='   ' as a
+    # process-tier selection would let the environment shadow a configured
+    # backend in a way the equivalent flag cannot.
     def process_selects_backend?
       BACKEND_SELECTOR_ENV_KEYS.any? do |key|
-        !@process_config&.fetch(key, nil).to_s.empty?
+        !@process_config&.fetch(key, nil).to_s.strip.empty?
       end
     end
 
@@ -1095,9 +1099,9 @@ module AgentCoord
       env_api = effective_backend_env_value("AGENT_COORD_API_URL")
       env_root = effective_backend_env_value("AGENT_COORD_STATE_ROOT")
       env_backend = effective_backend_env_value("AGENT_COORD_BACKEND")
-      env_api = nil if env_api == ""
-      env_root = nil if env_root == ""
-      env_backend = nil if env_backend == ""
+      env_api = nil if env_api.to_s.strip.empty?
+      env_root = nil if env_root.to_s.strip.empty?
+      env_backend = nil if env_backend.to_s.strip.empty?
 
       configured = { api_url: env_api, state_root: env_root, backend: env_backend }
       return if resolve_cli_backend?(options, cli_api, configured)
