@@ -3493,10 +3493,17 @@ module AgentCoord
         # version cannot read, and the ledger entry reaches into the same
         # envelope, so building it ahead of that check let a record that is not
         # an object end the command with a raw TypeError.
-        records = log_archived_event_data(entry)
+        read = log_archived_event_data(entry)
+        # nil is an entry nothing can be trusted about, not even its clock.
+        # Anything else is registered even when it yielded no legible record:
+        # the envelope exists and is expiring, and dropping it from the ledger
+        # took its delete_after out of the note along with its rows.
+        next [] unless read
+
+        records, malformed = read
+        log_archive_record_envelope(entry, records, malformed)
         next [] if records.empty?
 
-        log_archive_record_envelope(entry, records)
         records.filter_map do |data|
           identity = log_event_dedup_key(data)
           twin = seen[identity]
@@ -3576,7 +3583,7 @@ module AgentCoord
       when "archived_record" then log_archived_record(entry, data)
       else
         log_archive_incomplete(entry, "unknown archived record family")
-        []
+        nil
       end
     end
 
@@ -3597,7 +3604,7 @@ module AgentCoord
       records = data["records"]
       defect = log_compaction_defect(records, data["source_paths"])
       log_archive_incomplete(entry, defect) if defect
-      records.is_a?(Array) ? records.grep(Hash) : []
+      [records.is_a?(Array) ? records.grep(Hash) : [], !defect.nil?]
     end
 
     def log_compaction_defect(records, sources)
@@ -3612,11 +3619,17 @@ module AgentCoord
       # consumed sources is corruption rather than an empty generation. Both
       # empty is degenerate but not self-contradictory and is left alone.
       return log_archive_empty_defect(sources) if records.empty?
-      if records.length > sources.length
-        return "#{records.length} retained records exceed #{log_archive_count(sources.length, 'source path')}"
+
+      # Compared on the records that can actually be read. Counting the raw array
+      # called a mixed envelope impossible -- "3 retained records exceed 2 source
+      # paths" -- when what happened was that two of its three were unreadable,
+      # which is the next rung and the one the operator needs.
+      legible = records.grep(Hash)
+      if legible.length > sources.length
+        return "#{legible.length} retained records exceed #{log_archive_count(sources.length, 'source path')}"
       end
 
-      dropped = records.length - records.grep(Hash).length
+      dropped = records.length - legible.length
       log_archive_count(dropped, "unreadable archived record") if dropped.positive?
     end
 
@@ -3637,10 +3650,10 @@ module AgentCoord
       defect = log_archived_record_defect(data)
       if defect
         log_archive_incomplete(entry, defect)
-        return []
+        return [[], true]
       end
 
-      [data["data"]]
+      [[data["data"]], false]
     end
 
     def log_archived_record_defect(data)
@@ -3696,9 +3709,10 @@ module AgentCoord
     # into an arbitrary number of pairs and nil into zero, either of which
     # reports a confident count for an envelope whose source metadata
     # log_compaction_defect has just warned is unreadable.
-    def log_archive_record_envelope(entry, records)
+    def log_archive_record_envelope(entry, records, malformed)
       data = entry.data
       (@log_archive_ledger ||= []) << {
+        "malformed" => malformed,
         "path" => entry.path,
         "delete_after" => data["delete_after"].to_s,
         "sources" => log_archive_sources(data),
@@ -3738,6 +3752,11 @@ module AgentCoord
       wanted = log_wanted_identity(options)
       Array(@log_archive_ledger).select do |envelope|
         next false if envelope.fetch("synthetic") && !options[:include_synthetic]
+        # An unscoped query asks about everything, so every envelope answers it.
+        # Reaching the record match here would drop an envelope none of whose
+        # records parsed, since any? is false over an empty set -- and that
+        # envelope is exactly the one whose clock nothing else can report.
+        next true if wanted.nil?
 
         envelope.fetch("records").any? { |record| log_archive_record_scoped?(record, wanted) }
       end
@@ -3823,6 +3842,13 @@ module AgentCoord
         verb = dropped == 1 ? "was" : "were"
         parts << "#{log_archive_count(dropped, 'source event')} #{verb} dropped by compaction"
       end
+      # Silence here would be the defect this read exists to remove: a confident
+      # loss count computed from the legible remainder, with no sign that some of
+      # the evidence could not be read at all.
+      unreadable = envelopes.count { |envelope| envelope.fetch("malformed") }
+      if unreadable.positive?
+        parts << "compaction loss unknown for #{log_archive_count(unreadable, 'unreadable envelope')}"
+      end
       parts << "archive deleted after #{expires}" if expires
       parts << "mirror it with log --sync" unless options[:sync]
       @stderr.puts log_scrub(parts.join("; "))
@@ -3833,9 +3859,16 @@ module AgentCoord
     # and each omit it, so differencing them separately counted one lost event
     # twice; taking both sides as sets counts it once and makes the total
     # independent of listing order.
+    # Only envelopes we could read. An envelope already reported as malformed
+    # cannot also yield a trustworthy loss count: its retained identities come
+    # from the records that parsed, while its source paths count every event it
+    # consumed, so differencing the two claims a loss for records that are merely
+    # unreadable. A count computed from data we have just told the operator we
+    # could not read is worse than no count, so it is left out and said so.
     def log_archive_dropped(envelopes)
-      consumed = envelopes.flat_map { |envelope| envelope.fetch("sources") }.uniq
-      retained = envelopes.flat_map { |envelope| envelope.fetch("identities") }.uniq
+      countable = envelopes.reject { |envelope| envelope.fetch("malformed") }
+      consumed = countable.flat_map { |envelope| envelope.fetch("sources") }.uniq
+      retained = countable.flat_map { |envelope| envelope.fetch("identities") }.uniq
       [consumed.length - retained.length, 0].max
     end
 

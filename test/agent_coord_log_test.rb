@@ -2134,6 +2134,11 @@ class AgentCoordLogArchiveTest < AgentCoordLogTestCase
     assert_equal 0, result.status.exitstatus, result.stderr
     assert_includes result.stderr, "2 unreadable archived records at archive/events/b9/compact-mixed.json"
     assert_equal %w[e1 e2 e3 e4 e5 x1], tsv_rows_event_ids(result), "the legible sibling is still reported"
+    # The envelope retained all three of its sources; two are merely unreadable.
+    # Differencing its source count against the records that parsed claimed a
+    # loss that had not happened, computed from data just reported as unreadable.
+    refute_includes result.stderr, "dropped by compaction"
+    assert_includes result.stderr, "compaction loss unknown for 1 unreadable envelope"
   end
 
   def test_log_reports_an_archived_record_whose_payload_is_not_an_object
@@ -2536,6 +2541,48 @@ class AgentCoordLogArchiveTest < AgentCoordLogTestCase
     assert_equal %w[e1 e2 e3 e4 e5], tsv_rows_event_ids(result)
   ensure
     archive_record_paths.each { |file| FileUtils.chmod(0o600, file) }
+  end
+
+  # An envelope none of whose records parse still exists and is still expiring.
+  # Skipping ledger registration when nothing legible came out of it took its
+  # delete_after out of the note with its rows. The query is unscoped here
+  # deliberately: with no legible record there is no work item to scope by, so a
+  # scoped query cannot claim it -- that is a limit of the data, not of the note.
+  def test_log_reports_the_clock_of_an_envelope_whose_records_are_all_unreadable
+    write_trace
+    write_archive_json("archive/events/b9/compact-illegible.json",
+                       "schema_version" => 1, "record_family" => "compacted_events",
+                       "source_paths" => ["events/b9/x1.json", "events/b9/x2.json"],
+                       "archived_at" => "2026-08-05T00:00:00Z", "delete_after" => "2026-09-04T00:00:00Z",
+                       "records" => [5, "not-an-event"])
+
+    result = run_log
+
+    assert_equal 0, result.status.exitstatus, result.stderr
+    assert_includes result.stderr, "2 unreadable archived records at archive/events/b9/compact-illegible.json"
+    assert_includes result.stderr, "note: the archive holds a compacted record for this trail"
+    assert_includes result.stderr, "archive deleted after 2026-09-04T00:00:00Z"
+    assert_includes result.stderr, "compaction loss unknown for 1 unreadable envelope"
+    refute_includes result.stderr, "dropped by compaction"
+  end
+
+  # Comparing the raw array called a mixed envelope impossible when what actually
+  # happened was that two of its three records were unreadable. The operator
+  # debugging a corrupt archive needs the second diagnosis, not the first.
+  def test_log_diagnoses_unreadable_records_rather_than_an_impossible_count
+    write_trace
+    write_archive_json("archive/events/b9/compact-miscounted.json",
+                       "schema_version" => 1, "record_family" => "compacted_events",
+                       "source_paths" => ["events/b9/x1.json", "events/b9/x2.json"],
+                       "archived_at" => "2026-08-05T00:00:00Z", "delete_after" => "2026-09-04T00:00:00Z",
+                       "records" => [overlap_event("x1", "2026-08-06T00:00:00Z"), 5, "not-an-event"])
+
+    result = run_log("shakacode/example#104", "--format", "tsv")
+
+    assert_equal 0, result.status.exitstatus, result.stderr
+    assert_includes result.stderr, "2 unreadable archived records at archive/events/b9/compact-miscounted.json"
+    refute_includes result.stderr, "retained records exceed"
+    assert_equal %w[e1 e2 e3 e4 e5 x1], tsv_rows_event_ids(result), "the legible record is still reported"
   end
 
   private
