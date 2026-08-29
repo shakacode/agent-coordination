@@ -45,6 +45,32 @@ class VerifyBatchTest < Minitest::Test
     end
   end
 
+  # Open3 tags a capture with Encoding.default_external, so under LC_ALL=C the
+  # UTF-8 JSON agent-coord writes came back labelled US-ASCII. One non-ASCII byte
+  # anywhere in the batch -- an accented agent id, an em dash in a branch name --
+  # then crashed this verifier's JSON.parse with
+  # Encoding::InvalidByteSequenceError before it could score a single row, so a
+  # green batch was indistinguishable from a broken one.
+  def test_non_ascii_claim_fields_score_under_an_ascii_locale
+    Dir.mktmpdir do |state|
+      %w[task_one task_two task_three].each do |target|
+        write(state, "claims/sim/verify/#{target}.json", released_claim(target))
+      end
+      write(
+        state, "claims/sim/verify/task_two.json",
+        released_claim("task_two").merge("agent_id" => "w-café", "branch" => "sim/task_two—w")
+      )
+      stdout, stderr, status = Open3.capture3(
+        { "AGENT_COORD_STATE_ROOT" => state, "LC_ALL" => "C", "LANG" => "C" },
+        VERIFY, "--repo-slug", "sim/verify"
+      )
+      assert_equal 0, status.exitstatus, stderr
+      refute_includes stderr, "Encoding::InvalidByteSequenceError"
+      assert_includes stdout, "SCORE 3/3"
+      assert_includes stdout.dup.force_encoding(Encoding::UTF_8), "branch=sim/task_two—w"
+    end
+  end
+
   def test_missing_claim_fails_that_row
     Dir.mktmpdir do |state|
       write(state, "claims/sim/verify/task_one.json", released_claim("task_one"))

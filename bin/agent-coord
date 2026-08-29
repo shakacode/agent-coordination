@@ -5738,10 +5738,10 @@ module AgentCoord
     end
 
     def check_command!(*args)
-      stdout, stderr, status = Open3.capture3(*args)
+      stdout, stderr, status = AgentCoord.capture3_utf8(*args)
       return if status.success?
 
-      message = [stderr, stdout].reject(&:empty?).join("\n")
+      message = [stderr, stdout].reject(&:empty?).map { |stream| AgentCoord.utf8_diagnostic(stream) }.join("\n")
       raise OperationalError, "#{args.join(' ')} failed: #{message}"
     rescue SystemCallError => e
       raise OperationalError, "#{args.join(' ')} failed: #{e.message}"
@@ -6213,7 +6213,7 @@ module AgentCoord
     end
 
     def gh_api(*args)
-      stdout, stderr, status = Open3.capture3("gh", "api", *args)
+      stdout, stderr, status = AgentCoord.capture3_utf8("gh", "api", *args)
       GhResult.new(stdout: stdout, stderr: stderr, status: status)
     rescue SystemCallError => e
       raise OperationalError, "gh api #{args.join(' ')} failed: #{e.message}"
@@ -6494,9 +6494,45 @@ module AgentCoord
       !success? && error_message.match?(/409|422|sha|already exists|conflict/i)
     end
 
+    # Diagnostic text, not payload: scrubbed per stream so that neither the
+    # predicates below nor a --json reporter can raise while describing a
+    # failure. See AgentCoord.utf8_diagnostic.
     def error_message
-      [stderr, stdout].reject(&:empty?).join("\n")
+      [stderr, stdout].reject(&:empty?).map { |stream| AgentCoord.utf8_diagnostic(stream) }.join("\n")
     end
+  end
+
+  # Open3 tags captured output with Encoding.default_external, which is US-ASCII
+  # under LC_ALL=C or LANG=C. Every subprocess captured here emits UTF-8, so that
+  # tag is simply wrong, and correctly formed bytes then raise
+  # Encoding::InvalidByteSequenceError from JSON.parse and ArgumentError from
+  # Regexp#match?. Re-tagging both streams at the capture seam stops the locale
+  # deciding how captured bytes are read; it covers stderr as well as stdout
+  # because an error path that crashes while formatting its own message is worse
+  # than the failure it was reporting.
+  #
+  # Caller contract: this re-tags but deliberately does not scrub, so the payload
+  # stream reaches JSON.parse as the subprocess wrote it. Genuinely malformed
+  # bytes therefore survive here and still raise from Regexp#match? and
+  # JSON.generate. Anything that interpolates either stream into a message must
+  # route it through utf8_diagnostic rather than using it raw.
+  def self.capture3_utf8(*)
+    stdout, stderr, status = Open3.capture3(*)
+    [force_utf8(stdout), force_utf8(stderr), status]
+  end
+
+  def self.force_utf8(text)
+    text.dup.force_encoding(Encoding::UTF_8)
+  end
+
+  # Re-tagging fixes a wrong label but cannot repair genuinely malformed bytes,
+  # and an invalid UTF-8 string still raises from Regexp#match? and from
+  # JSON.generate in the --json reporters. Message paths therefore substitute
+  # U+FFFD for undecodable bytes, because diagnostics are prose and a readable
+  # approximation beats a second crash; payload paths deliberately do not,
+  # because silently rewriting a state record is worse than failing to read it.
+  def self.utf8_diagnostic(text)
+    force_utf8(text).scrub
   end
 
   def self.safe_path!(path)
