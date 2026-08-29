@@ -301,8 +301,15 @@ module AgentCoord
         target << option_name
         # A PATH placeholder is the declaration saying this value addresses the
         # filesystem. Those values are handed to syscalls rather than serialized,
-        # so argv normalization has to leave their bytes alone, and deriving the
-        # set from the declarations keeps it from drifting out of step with them.
+        # so argv normalization has to leave their bytes alone.
+        #
+        # DECLARING A NEW PATH-VALUED OPTION: its placeholder must start with
+        # PATH (`--archive-dir PATH`), because this match is on the placeholder
+        # spelling, not on a type. `--archive-dir DIR`, `FILE`, `ROOT`, or
+        # `[PATH]` is silently NOT exempted and its value is transcoded, which
+        # changes which file it names; `--archive-dir=PATH` is not even seen as
+        # a value option by the grammar above. Nothing fails loudly if you get
+        # this wrong, so match the spelling.
         @path_options << option_name if argument.to_s.start_with?("PATH")
       end
       @parser

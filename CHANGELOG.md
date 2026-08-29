@@ -360,12 +360,12 @@ when releases begin.
   agent id to go wrong either: renewing a claim whose `--branch` carried one was
   recorded as a second `claim.acquired` rather than a renewal, and the claim lost
   the `host`, `operator`, and `thread_handle` attribution it was not asked to
-  change -- both invocations exiting `0`. `batch-audit` then reported the
-  finished lane as `incomplete`. The same comparison made `release` treat
-  that holder as a stranger to its own claim and then crash with
-  `Encoding::CompatibilityError` while interpolating the value into its refusal
-  message, so a terminal closeout could not complete either. Both now behave as
-  they do under a UTF-8 locale. How an argument is tagged decides what
+  change and had its `claimed_at` reset -- both invocations exiting `0`. The same
+  comparison made `release` treat a non-ASCII holder as a stranger to its own
+  claim and then crash with `Encoding::CompatibilityError` while interpolating
+  the value into its refusal message; because the lane could then never close,
+  `batch-audit` reported it as `incomplete`. All of these now behave as they do
+  under a UTF-8 locale. How an argument is tagged decides what
   normalizing it means: `ASCII-8BIT` is the absence of a tag, so those bytes are
   retagged as the UTF-8 they were meant to be, while a declared encoding is a
   claim about what the bytes mean and is transcoded, so a latin-1 terminal's
@@ -398,21 +398,49 @@ when releases begin.
   transcoding one silently addresses a different file -- on a filesystem that
   permits non-UTF-8 names, `status --state-root` against a transcoded root
   reports empty coordination state and exits `0`, which reads as "nothing is
-  claimed". That set is derived from the option declarations themselves rather
-  than kept as a separate list, so it cannot drift away from them. One thing that
-  used to exit `0` now exits `1`: a read-only filter carrying a non-ASCII byte
-  sequence that is not UTF-8, such as `log --machine`, `log --type`, or the `log`
-  work item under `LC_ALL=C`. Such a filter could never match anything, because
-  state is UTF-8 and the argument was not, so the old `0` reported "no events"
-  for a question that could not be asked. Otherwise nothing that already worked
-  changes: arguments that were accepted before are still accepted and still
-  stored byte-for-byte as before, and the remaining exit codes that move are the
-  failures above. Environment-sourced strings are not covered by
+  claimed". That set is derived from the option declarations rather than kept as
+  a separate list, so it cannot drift away from them -- but it is matched on the
+  `PATH` placeholder spelling rather than on a type, so a path option declared
+  `DIR` or `FILE` would not be exempted and nothing would fail loudly; the
+  declaration site carries that warning.
+
+  Some arguments a non-UTF-8 locale used to accept are now refused, and the
+  bounded guarantee is this: every argument written into state or used to address
+  the filesystem is unchanged. What does change is arguments that could not have
+  meant anything. Under `LC_ALL=C`, a byte sequence that is not UTF-8 is
+  undecodable rather than merely foreign, and where one of those was a read-only
+  filter -- `log --machine`, `log --type`, or the `log` work item -- the old exit
+  `0` reported "no events" for a question that could not be asked, since state is
+  UTF-8 and the argument was not. It is now exit `1`. Two smaller cases move the
+  same way: `agent-coord --help` with an undecodable argument printed help and
+  exited `0`, and an undecodable value passed to an option the command ignores
+  (`doctor --stack-json --state-root R --ref ...`, where `--ref` is unused once
+  `--state-root` is given) also exited `0`. Both are now usage errors, because
+  argv is validated before it is known which values a command will read. One
+  output change is worth expecting: a non-ASCII value echoed back by a write
+  command now prints as UTF-8 rather than in the terminal's encoding, so on a
+  latin-1 terminal `worker-café` renders as `worker-cafÃ©`. That is the
+  inconsistency being removed rather than added -- the same value already printed
+  as UTF-8 from `status` and `log`, which read it back from state, so one
+  terminal in one session disagreed with itself about a single record.
+  Environment-sourced strings are not covered by
   this change: under the same locale Ruby tags an ASCII-only environment value
   `US-ASCII`, but one carrying non-ASCII bytes `ASCII-8BIT`, so a non-ASCII
   `AGENT_COORD_MACHINE_ID` or sibling identity variable still reaches
   `JSON.generate` as BINARY and still warns on write. That residual is tracked
-  in issue #216.
+  in issue #216. The path exemption leaves a second one, in `doctor` rather than
+  on any write path: `doctor` serializes the `--state-root` it was given into its
+  JSON report, and because that value is now deliberately not normalized, a
+  non-UTF-8 root still reaches `JSON.generate` as BINARY. `doctor --json`,
+  `doctor --json --deep`, and `doctor --stack-json --deep` still warn, and
+  `doctor --stack-json` still fails outright with `JSON::GeneratorError`. This is
+  unchanged from before -- a sweep under `LC_ALL=C` with a non-ASCII state-root
+  path emits the warning nine times before this change and three after, with
+  every state-writing command going to zero -- but the trigger is ordinary
+  (`--state-root /Users/José/...`) and the command is one aggregators run
+  unattended. Fixing it means deciding how an unencodable path should be
+  displayed inside a JSON payload, which is a third encoding policy rather than a
+  reapplication of these two, so it is tracked in issue #225.
 - The GitHub backend no longer crashes on non-ASCII `gh` output under a non-UTF-8
   locale (issue #159). `Open3.capture3` tags what it captures with
   `Encoding.default_external`, which is `US-ASCII` under `LC_ALL=C` or `LANG=C`,

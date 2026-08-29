@@ -5116,7 +5116,14 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
       "bare positional" => [stack + [invalid], AgentCoord::STACK_EXIT_USAGE],
       "option-shaped token" => [stack + [option_shaped], AgentCoord::STACK_EXIT_USAGE],
       "no stack-json" => [["doctor", "--state-root", @state_root, invalid], AgentCoord::EXIT_USAGE],
-      "another command" => [["status", "--state-root", @state_root, invalid], AgentCoord::EXIT_USAGE]
+      "another command" => [["status", "--state-root", @state_root, invalid], AgentCoord::EXIT_USAGE],
+      # --stack-json is a doctor-only flag, so on any other command it is just an
+      # unknown option and the exit code stays the ordinary usage one. Without
+      # the command gate every command would inherit doctor's 64.
+      "stack-json on another command" =>
+        [["status", "--stack-json", "--state-root", @state_root, invalid], AgentCoord::EXIT_USAGE],
+      "stack-json on a write command" =>
+        [["record-event", "--stack-json", "--state-root", @state_root, invalid], AgentCoord::EXIT_USAGE]
     }.each do |label, (argv, expected)|
       error = assert_raises(AgentCoord::Error, label) do
         AgentCoord::Runner.new(argv, stdout: StringIO.new, stderr: StringIO.new)
