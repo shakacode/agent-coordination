@@ -330,6 +330,46 @@ when releases begin.
 
 ### Fixed
 
+- CLI-sourced strings are now normalized to UTF-8 at the argument boundary, so
+  writing coordination state no longer depends on the ambient locale (issue
+  #169). Ruby tags `ARGV` with the locale encoding, so under `LANG=C`/`LC_ALL=C`
+  every value an operator typed arrived as `BINARY` and reached `JSON.generate`
+  that way. `json` warns on that today -- `JSON.generate: UTF-8 string passed as
+  BINARY, this will raise an encoding error in json 3.0` -- and raises under json
+  3.0; because `json` is a Ruby default gem, a future Ruby ships that change and
+  turns `claim`, `release`, `heartbeat`, `register-batch`, and `record-event`
+  into uncaught write-path crashes under exactly the launchd and cron conditions
+  that leave `LANG` unset, which is the same environment the read-path fix in
+  issue #130 was about. Exercising the whole command surface under `LC_ALL=C`,
+  with non-ASCII text in every free-form option, emitted 23 of these warnings
+  before the change and none after, with no change to any command's exit code or
+  to any other output. The same tagging also broke identity comparison, which is
+  the part that was already failing rather than merely warning: a `BINARY` string
+  is never equal to the same bytes read back from state as UTF-8 once either
+  holds a non-ASCII byte, so `release --agent-id worker-café` compared the
+  supplied agent against the stored `agent_id`, concluded the claim belonged to
+  somebody else, and then crashed with `Encoding::CompatibilityError` while
+  interpolating the value into its refusal message. A holder with a non-ASCII
+  agent id could not release its own claim under such a locale; the crash is what
+  kept that from being a silent wrong answer. Normalization happens once at the
+  `Runner` argument boundary rather than in each option handler, so the command
+  token, every option value, the `log` positional work item, and `demo`'s
+  passthrough arguments are covered together and an option added later cannot
+  forget it. One behavior changes: an argument carrying a genuinely invalid byte
+  sequence is now rejected before any state is written, with the ordinary usage
+  error `command-line argument must be valid UTF-8:` on stderr and exit `1`,
+  where the same input previously produced an unhandled `JSON::GeneratorError`
+  backtrace from the store's write path. Invalid bytes are rejected rather than
+  scrubbed because these values are state keys and identities -- a scrubbed
+  `--agent-id` or `--repo` would be written into coordination state as a
+  silently different identity -- which is how `--launch-prompt` already treats
+  invalid UTF-8; the value echoed back is scrubbed so the error cannot itself
+  emit an invalid byte sequence. Environment-sourced strings are not covered by
+  this change: under the same locale Ruby tags an ASCII-only environment value
+  `US-ASCII`, but one carrying non-ASCII bytes `ASCII-8BIT`, so a non-ASCII
+  `AGENT_COORD_MACHINE_ID` or sibling identity variable still reaches
+  `JSON.generate` as BINARY and still warns on write. That residual is tracked
+  in issue #216.
 - The GitHub backend no longer crashes on non-ASCII `gh` output under a non-UTF-8
   locale (issue #159). `Open3.capture3` tags what it captures with
   `Encoding.default_external`, which is `US-ASCII` under `LC_ALL=C` or `LANG=C`,

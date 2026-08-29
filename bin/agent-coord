@@ -337,7 +337,7 @@ module AgentCoord
 
   class Runner # rubocop:disable Metrics/ClassLength
     def initialize(argv, stdout: $stdout, stderr: $stderr, clock: Time, backend_conflict_warnings: true)
-      @argv = argv
+      @argv = AgentCoord.normalize_argv(argv)
       @stdout = stdout
       @stderr = stderr
       @clock = clock
@@ -6581,6 +6581,28 @@ module AgentCoord
 
   def self.state_directory_prefix?(path)
     path.to_s.match?(STATE_DIRECTORY_PREFIX_PATTERN)
+  end
+
+  # Ruby tags ARGV with the locale encoding, so under LANG=C/LC_ALL=C every
+  # CLI-sourced string arrives as BINARY. That leaks two ways. JSON.generate
+  # warns on a BINARY string today and raises in json 3.0, which would take the
+  # whole write path down under exactly the launchd/cron conditions this matters
+  # for; and a BINARY argument never compares equal to the same bytes read back
+  # from state as UTF-8, so release decided a non-ASCII holder was somebody else
+  # and then crashed interpolating the mismatch into its refusal message.
+  # Normalizing the whole argv once at the Runner boundary covers the command
+  # token, every option value, the `log` positional, and demo's passthrough argv
+  # in one place, so no future option can forget it. Invalid bytes are rejected
+  # rather than scrubbed, matching load_launch_prompt: a scrubbed agent-id or
+  # repo would be written into coordination state as a different identity. The
+  # echoed value is scrubbed so this error cannot itself emit an invalid byte.
+  def self.normalize_argv(argv)
+    argv.map do |argument|
+      normalized = argument.to_s.dup.force_encoding(Encoding::UTF_8)
+      next normalized if normalized.valid_encoding?
+
+      raise Error, "command-line argument must be valid UTF-8: #{normalized.scrub('?')}"
+    end
   end
 
   def self.validate_repo!(repo, field)

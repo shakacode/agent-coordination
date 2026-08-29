@@ -4991,6 +4991,83 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     FileUtils.remove_entry(fake_bin) if fake_bin && Dir.exist?(fake_bin)
   end
 
+  # The write half of the same locale contract. Ruby tags ARGV with the locale
+  # encoding, so under LC_ALL=C every CLI-sourced string used to reach
+  # JSON.generate as BINARY; json warns today and raises in 3.0, which would
+  # turn every launchd/cron write into a crash. Assert the warning is gone and
+  # that the bytes still round-trip, so a fix that dropped them would not pass.
+  def test_record_event_writes_non_ascii_cli_values_under_an_ascii_locale
+    result = run_agent_coord(
+      "record-event", "--batch-id", "batch-locale-write", "--type", "lane",
+      "--agent-id", "worker-café", "--repo", "shakacode/example", "--target", "4711",
+      "--message", "PR 4711 merged — verified",
+      env: { "LC_ALL" => "C", "LANG" => "C" }
+    )
+
+    assert_equal 0, result.status.exitstatus, result.stderr
+    refute_includes result.stderr, "passed as BINARY"
+    refute_includes result.stderr, "JSON::GeneratorError"
+    stored = Dir.glob(File.join(@state_root, "events", "batch-locale-write", "*.json")).fetch(0)
+    event = JSON.parse(File.read(stored, encoding: "UTF-8"))
+    assert_equal "worker-café", event.fetch("agent_id")
+    assert_equal "PR 4711 merged — verified", event.fetch("message")
+  end
+
+  # Genuinely invalid bytes are rejected rather than scrubbed, matching
+  # load_launch_prompt: a scrubbed --agent-id or --repo would be written into
+  # coordination state as a silently different identity. Normalization runs at
+  # the Runner boundary, so it covers option values, the positional, and the
+  # command token alike, and the echoed value is scrubbed so the usage error
+  # itself cannot emit an invalid byte sequence onto stderr.
+  def test_cli_rejects_invalid_utf8_arguments_before_writing_state
+    {
+      "option value" => [
+        "record-event", "--batch-id", "batch-invalid-argv", "--type", "lane",
+        "--agent-id", "worker-a", "--repo", "shakacode/example", "--target", "4711",
+        "--message", "merged \xFF verified"
+      ],
+      "positional" => ["log", "shakacode/example#\xFF"],
+      "command token" => ["\xFFstatus"]
+    }.each do |source, args|
+      result = run_agent_coord(*args, env: { "LC_ALL" => "C", "LANG" => "C" })
+
+      assert_equal 1, result.status.exitstatus, source
+      assert_includes result.stderr, "command-line argument must be valid UTF-8", source
+      refute_includes result.stderr, "JSON::GeneratorError", source
+    end
+
+    refute_path_exists File.join(@state_root, "events", "batch-invalid-argv")
+  end
+
+  # A BINARY string and a UTF-8 string with identical bytes are not `==` once
+  # either holds a non-ASCII byte, so under LC_ALL=C the holder check compared
+  # the stored UTF-8 agent_id against the BINARY --agent-id, concluded the claim
+  # belonged to someone else, and then crashed with Encoding::CompatibilityError
+  # while interpolating the BINARY value into the refusal message. The holder
+  # could not release its own claim. Normalizing argv restores the identity match.
+  def test_release_matches_a_non_ascii_holder_under_an_ascii_locale
+    ascii_locale = { "LC_ALL" => "C", "LANG" => "C" }
+    claim = run_agent_coord(
+      "claim", "--agent-id", "worker-café", "--repo", "shakacode/example",
+      "--target", "4711", "--batch-id", "batch-locale-release", "--ttl", "3600",
+      env: ascii_locale
+    )
+    assert_equal 0, claim.status.exitstatus, claim.stderr
+
+    result = run_agent_coord(
+      "release", "--agent-id", "worker-café", "--repo", "shakacode/example",
+      "--target", "4711", "--message", "merged — verified", env: ascii_locale
+    )
+
+    assert_equal 0, result.status.exitstatus, result.stderr
+    refute_includes result.stderr, "Encoding::CompatibilityError"
+    refute_includes result.stderr, "cannot release it"
+    claim_path = File.join(@state_root, "claims", "shakacode", "example", "4711.json")
+    stored = JSON.parse(File.read(claim_path, encoding: "UTF-8"))
+    assert_equal "released", stored.fetch("status")
+    assert_equal "worker-café", stored.fetch("released_by")
+  end
+
   def test_record_event_writes_append_only_event_and_status_metadata
     write_batch(
       "batch-b",
