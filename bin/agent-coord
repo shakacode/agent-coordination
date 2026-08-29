@@ -661,9 +661,18 @@ module AgentCoord
             "invalid coordination policy in #{source}: expected #{COORDINATION_POLICIES.join(', ')}"
     end
 
+    # The process tier wins only when it actually carries a value. This is the
+    # same rule load_user_configuration! already applies when deciding whether
+    # to inject a saved setting into ENV, and the two must not disagree: with a
+    # saved AGENT_COORD_REF=configured-ref and an exported AGENT_COORD_REF='   ',
+    # injection treated the process value as unset and published the saved ref,
+    # while this reader spelled emptiness without stripping, returned the blank,
+    # and GitHub-backed commands then requested `git/trees/   ` -- doctor probed
+    # a ref no repository has. A blank is not a value at all; which tier a real
+    # ref should follow is a separate question (issue #189).
     def effective_config_value(key)
       process_value = @process_config&.fetch(key, nil)
-      return process_value unless process_value.to_s.empty?
+      return process_value if AgentCoord.config_value_set?(process_value)
 
       @user_config&.fetch(key, nil)
     end
@@ -800,7 +809,7 @@ module AgentCoord
         parse_state[:backend_selector_count] += 1
       end
       opts.on("--ref REF", "backend branch/ref") do |value|
-        options[:ref] = value
+        options[:ref] = explicit_selector_value!(value, "--ref")
         options[:ref_cli] = true
       end
       opts.on("--state-root PATH", "use local files instead of GitHub API") do |value|
@@ -816,16 +825,19 @@ module AgentCoord
       opts.on("--json", "emit JSON for supported commands") { options[:json] = true }
     end
 
-    # Passing a backend selector is an explicit selection, so an empty or
-    # whitespace-only value is a broken invocation, not a selection of nothing.
+    # Passing a backend selector or a ref is an explicit selection, so an empty
+    # or whitespace-only value is a broken invocation, not a selection of nothing.
     # `agent-coord claim --state-root "$STATE_ROOT"` with STATE_ROOT unset used
     # to reach File.expand_path("") and silently read and write coordination
     # state into the working directory; `--api-url ""` selected the HTTP backend
     # with no endpoint; `--backend ""` fell through to the implicit local store
-    # while config show had to be taught to report that fallthrough. Rejecting
-    # at parse time is the same fail-closed posture --token-stdin, the machine
-    # identity, and out-of-range ports already take, and it removes the need for
-    # any downstream branch to model an empty explicit selector.
+    # while config show had to be taught to report that fallthrough; and
+    # `--ref ""` short-circuited ref resolution and sent the blank to the GitHub
+    # API as a real ref, the CLI door into the same defect a blank exported
+    # AGENT_COORD_REF opened. Rejecting at parse time is the same fail-closed
+    # posture --token-stdin, the machine identity, and out-of-range ports
+    # already take, and it removes the need for any downstream branch to model
+    # an empty explicit selector.
     def explicit_selector_value!(value, flag)
       return value if AgentCoord.config_value_set?(value)
 
@@ -1130,11 +1142,14 @@ module AgentCoord
       resolve_configured_backend(options, env_api, env_root, env_backend)
     end
 
+    # Both tiers can be blank -- an exported AGENT_COORD_REF='   ' over a saved
+    # AGENT_COORD_REF='' -- so the fallback to DEFAULT_REF asks the same
+    # question effective_config_value just asked, not a looser one.
     def resolve_effective_ref!(options)
       return if options[:ref_cli]
 
       configured_ref = effective_config_value("AGENT_COORD_REF")
-      options[:ref] = configured_ref.to_s.empty? ? DEFAULT_REF : configured_ref
+      options[:ref] = AgentCoord.config_value_set?(configured_ref) ? configured_ref : DEFAULT_REF
     end
 
     # `configured` carries all three configured selectors, AGENT_COORD_BACKEND

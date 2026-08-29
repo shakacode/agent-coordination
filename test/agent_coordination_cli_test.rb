@@ -2577,6 +2577,46 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     assert_equal AgentCoord::DEFAULT_REF, options.fetch(:ref)
   end
 
+  # Config injection already treats a whitespace-only process value as unset and
+  # publishes the saved one, but the ref's own precedence check spelled
+  # emptiness without stripping. An exported AGENT_COORD_REF='   ' therefore
+  # displaced a saved `configured-ref` and was handed to the GitHub store as a
+  # real ref, so doctor probed `git/trees/   `. A blank is not a value; both
+  # tiers being blank must still land on the default rather than on whitespace.
+  def test_a_whitespace_only_process_ref_does_not_displace_the_saved_ref
+    {
+      "configured-ref" => "configured-ref",
+      "" => AgentCoord::DEFAULT_REF,
+      "  " => AgentCoord::DEFAULT_REF
+    }.each do |saved_ref, expected_ref|
+      runner = AgentCoord::Runner.new([])
+      runner.instance_variable_set(
+        :@process_config,
+        AgentCoord::USER_CONFIG_ENV_KEYS.to_h { |key| [key, nil] }.merge("AGENT_COORD_REF" => "   ")
+      )
+      runner.instance_variable_set(:@user_config, { "AGENT_COORD_REF" => saved_ref })
+      options = runner.send(:default_options)
+
+      runner.send(:resolve_backend_env, options)
+
+      assert_equal expected_ref, options.fetch(:ref),
+                   "a whitespace-only process ref must be unset, not a ref"
+    end
+  end
+
+  # The CLI door into the same defect: --ref never went through the non-empty
+  # check its sibling selector flags do, so `--ref ""` short-circuited ref
+  # resolution and sent the blank to the backend.
+  def test_whitespace_only_ref_flag_is_refused
+    ["", "   "].each do |value|
+      result = run_agent_coord("status", "--json", "--ref", value)
+
+      assert_equal 1, result.status.exitstatus, result.stderr
+      assert_includes result.stderr, "--ref requires a non-empty value"
+      assert_empty result.stdout
+    end
+  end
+
   def test_backend_resolution_normalizes_a_blank_backend
     runner = AgentCoord::Runner.new([])
     runner.instance_variable_set(
