@@ -1442,6 +1442,90 @@ Workers with unmet dependencies should set their own heartbeat to `blocked`,
 switch to another independent lane, and check `agent-coord status` again before
 resuming, rebasing, or pushing dependency-sensitive work.
 
+### Issue-targeted lanes and external publication preflights
+
+A lane `targets` entry names a **work item**, not the pull request that resolved
+it. Issues and pull requests share one number sequence per repository, so `130`,
+`issue:130`, and `pr:130` fold to the same work item when a trail is read
+(see [Reading the trail](#reading-the-trail-where-is-the-work-on-an-issue-or-pr)).
+That folding is read-side only. A claim is keyed by the exact target string, so
+`130`, `issue:130`, and `pr:130` are three separate leases and each stays
+independently claimable — a prefixed spelling does not take the bare number's
+lease. Write the bare number in `targets`.
+A lane that is assigned an issue therefore records the issue in `targets` and
+the pull request that resolved it separately in `pr_url` — two different facts,
+not a disagreement.
+
+External closeout tooling does not necessarily share that model. The
+`completed-batch-publication-preflight` helper in
+[shakacode/agent-workflows](https://github.com/shakacode/agent-workflows)'
+`post-merge-audit` skill resolves a lane by parsing each `targets` entry as a
+bare integer and by requiring a lane's `targets` and `pr_url` to name the *same*
+target when both are present. It also derives one expected terminal state per
+target type — `merged` for a pull request, `closed` for an issue — and compares
+all of them against the lane's single `pr_state` scalar. Those two assumptions
+make some correct lane shapes unpublishable there. Measured against that helper
+for a lane that resolved issue 130 with pull request 156:
+
+| Lane shape | Helper's `expected_targets` | Preflight verdict |
+| --- | --- | --- |
+| `targets: ["156"]`, `pr_url` set, `pr_state: merged` | `[pr 156]` | eligible |
+| `targets: ["130"]`, no `pr_url`, `pr_state: closed` | `[issue 130]` | eligible, with the no-PR evidence below |
+| `targets: ["130"]`, `pr_url` set, `pr_state: merged` | any of the three | blocked: lane target absent or ambiguous |
+| `targets: ["130", "156"]`, no `pr_url`, `pr_state: merged` | `[issue 130, pr 156]` | blocked: issue target state is not `closed` |
+| `targets: ["130", "156"]`, no `pr_url`, `pr_state: closed` | `[issue 130, pr 156]` | blocked: PR target state is not `merged` |
+
+The last two rows are the same `terminal: done` lane with the only two values
+`pr_state` can hold: one scalar cannot satisfy two per-type expectations at once,
+so no `targets` spelling reaches them. Each of those rows actually emits two
+blockers — the state mismatch above plus `coordination and target state
+disagree`.
+
+A typed spelling does not help. `validate_segment!` already permits `:`, so
+`targets: ["issue:130"]` round-trips through `register-batch`, `claim`,
+`release`, and `status` today with no schema change — which makes it easy to
+reach for and worth warning about. The helper parses each entry as an integer,
+gets `nil`, and resolves nothing, so a typed spelling leaves every blocked row
+blocked and turns **both** eligible rows into blocked ones: `issue:130` breaks
+the second row and `pr:156` breaks the first. That is why `targets` stays a bare
+work-item id.
+
+The table lists the shapes worth knowing about, not every shape the helper will
+accept. A few others do reach eligible — recording the *issue* URL rather than a
+PR URL in `pr_url`, splitting the work across a separate issue lane and PR lane,
+or closing out `terminal: abandoned` with later authenticated completion — but
+each one either asserts that no implementation PR exists or that the lane was
+abandoned, and neither is true of a lane whose PR merged. The constraint that
+actually matters is that the lane records no PR-pointing url target.
+
+Both eligible shapes in the table carry a cost. Re-registering a lane onto the
+pull-request number mid-flight needs a second claim on that number, and the
+operator must remember to `release` the issue claim first. A plain non-terminal
+release is always available — it only checks that the caller still holds the
+claim — but nothing prompts for it, and by then a *terminal* release of the
+issue fails, because the re-registered manifest no longer has a lane matching
+that target. Skip the release and the batch completes while still holding a live
+lease on the issue. Either way the lane stops recording which issue it worked,
+and `batch-audit` reports `complete` while dropping the pre-PR custody events.
+
+The no-`pr_url` shape needs more than a `closed` target: the helper also requires
+`head_sha: not_applicable`, a `no_pr_evidence` record naming the canonical issue
+target with its exact issue URL and a rationale, and QA evidence replaying to
+`NOT_APPLICABLE` with `required: no`, `status: not_applicable`, and
+`release_blocking: not_applicable`. Together those assert that no implementation
+PR was created, so the shape is only honest for an issue that genuinely closed
+without one.
+
+Until this is resolved upstream, an issue-targeted lane that records its
+`pr_url` cannot publish autonomously. Its closeout has to go through the
+accepted-deferral path in `agent-workflows`' `pr-batch` skill, which needs a
+current write-authorized non-bot maintainer to publish a decision comment
+accepting the exact batch, blocker, owner, predecessor, and preflight digest. An
+agent coordinator cannot self-authorize it, so an operator hitting this needs a
+human in the loop. Tracked here in
+[#172](https://github.com/shakacode/agent-coordination/issues/172) and upstream
+in [shakacode/agent-workflows#522](https://github.com/shakacode/agent-workflows/issues/522).
+
 ## Lifecycle
 
 1. Coordinator registers a batch manifest describing lanes and dependencies.
