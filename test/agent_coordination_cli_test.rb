@@ -5064,7 +5064,10 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
 
   # String#encode from UTF-8 to UTF-8 is a no-op that does not validate, so the
   # valid_encoding? check still has to run after transcoding or a UTF-8 locale
-  # would pass invalid bytes straight through to the store.
+  # would pass invalid bytes straight through to the store. The rejected value is
+  # echoed through AgentCoord.utf8_diagnostic, the same message-path treatment
+  # the subprocess capture seam uses, so the undecodable byte reads as U+FFFD and
+  # the error itself is valid UTF-8 whatever the argument claimed to be.
   def test_argv_normalization_rejects_invalid_bytes_in_every_declared_encoding
     {
       "utf-8 tagged" => "caf\xFF".b.force_encoding(Encoding::UTF_8),
@@ -5073,7 +5076,7 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     }.each do |label, argument|
       error = assert_raises(AgentCoord::Error, label) { AgentCoord.normalize_argv([argument]) }
 
-      assert_equal "command-line argument must be valid UTF-8: caf?", error.message, label
+      assert_equal "command-line argument must be valid UTF-8: caf\uFFFD", error.message, label
       assert_equal AgentCoord::EXIT_USAGE, error.exit_code, label
       assert_predicate error.message, :valid_encoding?, label
     end

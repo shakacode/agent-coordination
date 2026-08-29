@@ -382,9 +382,15 @@ when releases begin.
   previously produced an unhandled `JSON::GeneratorError` or `optparse`
   backtrace. Invalid bytes are rejected rather than scrubbed because these values
   are state keys and identities -- a scrubbed `--agent-id` or `--repo` would be
-  written into coordination state as a silently different identity -- which is
-  how `--launch-prompt` already treats invalid UTF-8; the value echoed back is
-  scrubbed so the error cannot itself emit an invalid byte sequence. Filesystem
+  written into coordination state as a silently different identity. That is the
+  same split the subprocess capture seam draws for issue #159 below, and it is
+  now one policy rather than two: a payload path refuses, because rewriting a
+  state record is worse than failing to write it, while a message path
+  substitutes, because a diagnostic that crashes while describing a failure is
+  worse than an approximate one. `--launch-prompt` has refused invalid UTF-8 on
+  the same grounds since it was added. The rejected value is echoed through the
+  shared `utf8_diagnostic` helper, so reporting a bad argument cannot itself
+  raise on the bytes it is reporting. Filesystem
   paths are exempt from all of this: the values of `--state-root`, `--file`,
   `--launch-prompt`, `--install-dir`, `--status-state-root`, and `--profile`
   reach the operating system with exactly the bytes the operator typed, because a

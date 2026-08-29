@@ -6665,22 +6665,25 @@ module AgentCoord
     end
   end
 
-  # How Ruby tagged the argument decides what normalizing it means. BINARY is
-  # the absence of a tag -- it is what LANG=C/LC_ALL=C produces for an argument
-  # holding a non-ASCII byte -- so there is no source encoding to convert from
-  # and the bytes are retagged as the UTF-8 they are meant to be. Any other tag
-  # is a real claim about what those bytes mean, so the argument is transcoded:
-  # force_encoding on an ISO-8859-1 terminal's `café` would either reject valid
-  # input or, when the latin-1 bytes happen to form UTF-8, silently store
-  # different text than the operator typed.
+  # How Ruby tagged the argument decides what normalizing it means, and argv is
+  # the one boundary where both cases occur. BINARY is the absence of a tag --
+  # what LANG=C/LC_ALL=C produces for an argument holding a non-ASCII byte -- so
+  # there is no source encoding to convert from and force_utf8 retags it as the
+  # UTF-8 it was meant to be, which is the same correction capture3_utf8 applies
+  # to a mislabeled subprocess stream. Any other tag is a real claim about what
+  # those bytes mean, so the argument is transcoded instead: retagging an
+  # ISO-8859-1 terminal's `café` would either reject valid input or, when the
+  # latin-1 bytes happen to form UTF-8, silently store different text than the
+  # operator typed.
   #
-  # Invalid bytes are rejected rather than scrubbed, matching load_launch_prompt:
-  # these values are state keys, so a scrubbed agent-id or repo would be written
-  # into coordination state as a silently different identity.
+  # This is a payload path, so it does not scrub, for the reason utf8_diagnostic
+  # documents: rewriting a state record is worse than refusing to write it, and
+  # these values are state keys, so a scrubbed agent-id or repo would be stored
+  # as a silently different identity. load_launch_prompt refuses the same way.
   def self.normalize_argument(argument)
     normalized =
       if argument.encoding == Encoding::ASCII_8BIT
-        argument.dup.force_encoding(Encoding::UTF_8)
+        force_utf8(argument)
       else
         argument.encode(Encoding::UTF_8)
       end
@@ -6695,11 +6698,12 @@ module AgentCoord
     raise Error, invalid_argument_message(argument)
   end
 
-  # Rebuilt from the raw bytes and scrubbed rather than echoed as tagged, so
-  # reporting a rejected argument cannot itself raise on the value it reports.
+  # The message half of the same policy: the rejected value is echoed through
+  # utf8_diagnostic, so reporting an argument cannot itself raise on the bytes it
+  # is reporting. force_encoding overrides whatever tag was there, so this
+  # re-derives the value from its bytes whatever encoding it arrived claiming.
   def self.invalid_argument_message(argument)
-    display = argument.b.force_encoding(Encoding::UTF_8).scrub("?")
-    "command-line argument must be valid UTF-8: #{display}"
+    "command-line argument must be valid UTF-8: #{utf8_diagnostic(argument)}"
   end
 
   def self.validate_repo!(repo, field)
