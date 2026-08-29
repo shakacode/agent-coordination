@@ -21,6 +21,37 @@ case "$REPO" in
     ;;
 esac
 
+# Bounded retry around a `gh` read that can be transiently wrong or transiently
+# fail: GitHub's search index lags, and a rate limit or network blip should be
+# retried rather than aborting the run under `set -e`. Retries until the command
+# prints an acceptable value, then echoes it; the last stderr is kept in
+# "$WORK/retry_err" so an auth failure is not later reported as index lag.
+#
+# Usage: retry_gh_read <attempts> <accept-fn> <gh args...>
+retry_gh_read() {
+  attempts="$1"
+  accept="$2"
+  shift 2
+  value=""
+  attempt=0
+  while [ "$attempt" -lt "$attempts" ]; do
+    attempt=$((attempt + 1))
+    value="$("$@" 2>"$WORK/retry_err" || true)"
+    if "$accept" "$value"; then
+      printf '%s' "$value"
+      return 0
+    fi
+    sleep 2
+  done
+  printf '%s' "$value"
+  return 1
+}
+
+accept_zero() { [ "$1" = "0" ]; }
+accept_nonempty() { [ -n "$1" ]; }
+
+RETRY_ATTEMPTS=30
+
 python3 - "$HERE/issues.json" <<'PY'
 import json
 import sys
@@ -81,19 +112,10 @@ if [ "$RESET" = "--reset" ]; then
   # closes above. Without this wait a just-closed issue can still be reported
   # open, its title is then treated as already seeded, and the repo is left
   # short an issue while the summary still claims a full seed.
-  remaining=""
-  attempt=0
-  while [ "$attempt" -lt 20 ]; do
-    attempt=$((attempt + 1))
-    # Tolerate a transient gh failure here: this loop exists to wait out
-    # eventual consistency, so a rate limit or network blip should be retried
-    # rather than aborting the run under `set -e`. Keep the last error, though,
-    # so an auth or rate-limit failure is not reported as index lag.
-    remaining="$(gh issue list --repo "$REPO" --label sim-batch --state open \
-      --limit 1000 --json number --jq 'length' 2>"$WORK/reset_poll_err" || true)"
-    [ "$remaining" = "0" ] && break
-    sleep 2
-  done
+  remaining="$(retry_gh_read "$RETRY_ATTEMPTS" accept_zero \
+    gh issue list --repo "$REPO" --label sim-batch --state open \
+    --limit 1000 --json number --jq 'length' || true)"
+  cp "$WORK/retry_err" "$WORK/reset_poll_err" 2>/dev/null || : > "$WORK/reset_poll_err"
   if [ "$remaining" != "0" ]; then
     echo "error: sim-batch issues are still reported open after reset" \
       "(last count: ${remaining:-unreadable}). Seeding against a stale or" \
@@ -158,7 +180,14 @@ while IFS= read -r -d '' number && IFS= read -r -d '' TITLE && IFS= read -r -d '
   else
     url="$(gh issue create --repo "$REPO" --title "$TITLE" --body "$BODY" --label sim-batch)"
     printf '%s\n' "$url"
-    number="${url##*/}"
+    # Match the issue-URL shape rather than taking the last stdout token, so an
+    # extra notice line from `gh` cannot be mistaken for the issue number.
+    number="$(printf '%s\n' "$url" | sed -n 's#^https://[^[:space:]]*/issues/\([0-9][0-9]*\)$#\1#p' | tail -1)"
+    if [ -z "$number" ]; then
+      echo "error: could not read the created issue number from gh output:" >&2
+      printf '%s\n' "$url" | sed 's/^/    /' >&2
+      exit 1
+    fi
     created=$((created + 1))
   fi
   printf '%s\n' "$number" >> "$expected_numbers"
@@ -169,15 +198,9 @@ done < "$ISSUE_PLAN"
 # `gh issue list` search index that can still report a closed issue as open.
 missing=0
 while IFS= read -r number; do
-  state=""
-  attempt=0
-  while [ "$attempt" -lt 20 ]; do
-    attempt=$((attempt + 1))
-    state="$(gh issue view "$number" --repo "$REPO" --json state --jq '.state' \
-      2>"$WORK/verify_err" || true)"
-    [ -n "$state" ] && break
-    sleep 2
-  done
+  state="$(retry_gh_read "$RETRY_ATTEMPTS" accept_nonempty \
+    gh issue view "$number" --repo "$REPO" --json state --jq '.state' || true)"
+  cp "$WORK/retry_err" "$WORK/verify_err" 2>/dev/null || : > "$WORK/verify_err"
   if [ "$state" != "OPEN" ]; then
     echo "  not open: $REPO#$number (state: ${state:-unreadable})" >&2
     if [ -z "$state" ] && [ -s "$WORK/verify_err" ]; then
@@ -190,6 +213,38 @@ done < "$expected_numbers"
 if [ "$missing" -ne 0 ]; then
   echo "error: $missing of $count seeded issue(s) are not open in $REPO" >&2
   exit 1
+fi
+
+# Over-seeding is the mirror of the under-seeding this script guards above: the
+# pre-create dedupe reads the same lagging listing, so a run started before the
+# index caught up with a previous run's creations can add a duplicate title.
+# There is no strongly consistent way to list issues by label -- both
+# `gh issue list` and `GET /repos/:owner/:repo/issues` were observed lagging
+# identically -- so this cannot be prevented here, only reported instead of
+# silently leaving a repository that disagrees with the manifest.
+open_titles="$WORK/open_titles.json"
+gh issue list --repo "$REPO" --label sim-batch --state open --limit 1000 --json title \
+  > "$open_titles" 2>/dev/null || : > "$open_titles"
+if [ -s "$open_titles" ]; then
+  python3 - "$HERE/issues.json" "$open_titles" <<'PY'
+import json
+import sys
+from collections import Counter
+
+with open(sys.argv[1], encoding="utf-8") as handle:
+    expected = [issue["title"] for issue in json.load(handle)["issues"]]
+with open(sys.argv[2], encoding="utf-8") as handle:
+    counts = Counter(row["title"] for row in json.load(handle))
+
+duplicated = [(title, counts[title]) for title in expected if counts[title] > 1]
+if duplicated:
+    sys.stderr.write(
+        "error: duplicate open issue(s) for seeded title(s):\n"
+        + "".join(f"    {count}x {title!r}\n" for title, count in duplicated)
+        + "    Close the extras, or re-run with --reset.\n"
+    )
+    raise SystemExit(1)
+PY
 fi
 
 # Printed only after verification passes, so stdout never carries a success
