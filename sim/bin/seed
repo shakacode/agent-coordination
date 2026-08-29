@@ -87,16 +87,23 @@ if [ "$RESET" = "--reset" ]; then
     attempt=$((attempt + 1))
     # Tolerate a transient gh failure here: this loop exists to wait out
     # eventual consistency, so a rate limit or network blip should be retried
-    # rather than aborting the run under `set -e`.
+    # rather than aborting the run under `set -e`. Keep the last error, though,
+    # so an auth or rate-limit failure is not reported as index lag.
     remaining="$(gh issue list --repo "$REPO" --label sim-batch --state open \
-      --limit 1000 --json number --jq 'length' 2>/dev/null || true)"
+      --limit 1000 --json number --jq 'length' 2>"$WORK/reset_poll_err" || true)"
     [ "$remaining" = "0" ] && break
     sleep 2
   done
   if [ "$remaining" != "0" ]; then
     echo "error: sim-batch issues are still reported open after reset" \
-      "(last count: ${remaining:-unknown}). The search index is lagging, so seeding" \
-      "would skip those titles and under-seed the repository. Re-run in a moment." >&2
+      "(last count: ${remaining:-unreadable}). Seeding against a stale or" \
+      "unreadable listing would skip those titles and under-seed the repository." >&2
+    if [ -s "$WORK/reset_poll_err" ]; then
+      echo "  last gh error:" >&2
+      sed 's/^/    /' "$WORK/reset_poll_err" >&2
+    else
+      echo "  no gh error reported; the search index is lagging. Re-run in a moment." >&2
+    fi
     exit 1
   fi
   gh api --paginate "repos/$REPO/branches" --jq '.[].name' | { grep -v '^main$' || true; } | while read -r b; do
@@ -157,8 +164,6 @@ while IFS= read -r -d '' number && IFS= read -r -d '' TITLE && IFS= read -r -d '
   printf '%s\n' "$number" >> "$expected_numbers"
 done < "$ISSUE_PLAN"
 
-echo "SEEDED $REPO with $count issues ($created created, $skipped skipped)"
-
 # Verify each expected issue with a direct object read. `gh issue view` hits
 # `repos/:owner/:repo/issues/:number`, which is strongly consistent, unlike the
 # `gh issue list` search index that can still report a closed issue as open.
@@ -168,12 +173,16 @@ while IFS= read -r number; do
   attempt=0
   while [ "$attempt" -lt 20 ]; do
     attempt=$((attempt + 1))
-    state="$(gh issue view "$number" --repo "$REPO" --json state --jq '.state' 2>/dev/null || true)"
+    state="$(gh issue view "$number" --repo "$REPO" --json state --jq '.state' \
+      2>"$WORK/verify_err" || true)"
     [ -n "$state" ] && break
     sleep 2
   done
   if [ "$state" != "OPEN" ]; then
     echo "  not open: $REPO#$number (state: ${state:-unreadable})" >&2
+    if [ -z "$state" ] && [ -s "$WORK/verify_err" ]; then
+      sed 's/^/    /' "$WORK/verify_err" >&2
+    fi
     missing=$((missing + 1))
   fi
 done < "$expected_numbers"
@@ -182,3 +191,7 @@ if [ "$missing" -ne 0 ]; then
   echo "error: $missing of $count seeded issue(s) are not open in $REPO" >&2
   exit 1
 fi
+
+# Printed only after verification passes, so stdout never carries a success
+# summary for a run that then exits nonzero.
+echo "SEEDED $REPO with $count issues ($created created, $skipped skipped)"
