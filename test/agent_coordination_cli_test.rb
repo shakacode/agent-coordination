@@ -2652,6 +2652,63 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     end
   end
 
+  # version and bootstrap consult no configuration, so an unreadable canonical
+  # file must not break them: they are the two commands an operator reaches for
+  # while repairing exactly that file.
+  def test_insecure_user_config_does_not_break_config_independent_commands
+    with_private_user_config("AGENT_COORD_POLICY=optional\n") do |config_home|
+      File.chmod(0o644, File.join(config_home, "agent-coord", "env"))
+      env = { "XDG_CONFIG_HOME" => config_home }
+
+      version = run_command(env, RbConfig.ruby, BIN, "version")
+
+      assert_equal 0, version.status.exitstatus, version.stderr
+      assert_includes version.stdout, "agent-coord "
+
+      with_private_config_tmpdir("agent-coord-independent-bootstrap") do |install_root|
+        bootstrap = run_command(
+          env, RbConfig.ruby, BIN, "bootstrap", "--install-dir", File.join(install_root, "bin"), "--no-profile"
+        )
+
+        assert_equal 0, bootstrap.status.exitstatus, bootstrap.stderr
+        assert_path_exists File.join(install_root, "bin", "agent-coord")
+      end
+    end
+  end
+
+  def test_malformed_user_config_does_not_break_config_independent_commands
+    with_private_user_config("not a valid assignment\n") do |config_home|
+      env = { "XDG_CONFIG_HOME" => config_home }
+
+      version = run_command(env, RbConfig.ruby, BIN, "version", "--json")
+
+      assert_equal 0, version.status.exitstatus, version.stderr
+      assert_equal AgentCoord::VERSION, JSON.parse(version.stdout).fetch("version")
+    end
+  end
+
+  # The exemption is an allowlist, not a general relaxation: every command that
+  # actually resolves a backend, and config show which reports one, must still
+  # fail closed on a config it cannot read.
+  def test_insecure_user_config_still_fails_config_dependent_commands
+    with_private_user_config("AGENT_COORD_POLICY=optional\n") do |config_home|
+      File.chmod(0o644, File.join(config_home, "agent-coord", "env"))
+      env = { "XDG_CONFIG_HOME" => config_home }
+
+      %w[status doctor claim gc].each do |command|
+        result = run_command(env, RbConfig.ruby, BIN, command, "--state-root", @state_root)
+
+        assert_equal 2, result.status.exitstatus, "#{command}: #{result.stderr}"
+        assert_includes result.stderr, "permissions are insecure", command
+      end
+
+      show = run_command(env, RbConfig.ruby, BIN, "config", "show")
+
+      assert_equal 2, show.status.exitstatus, show.stderr
+      assert_includes show.stderr, "permissions are insecure"
+    end
+  end
+
   # rubocop:disable Metrics/MethodLength
   def test_user_config_swap_after_open_reads_and_validates_the_opened_descriptor
     # rubocop:disable Metrics/BlockLength

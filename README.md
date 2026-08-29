@@ -304,6 +304,13 @@ conventional leaf that is not group/world-writable is automatically hardened to
 An explicitly selected missing file, an insecure file, duplicate keys, or
 ambiguous syntax is an operational failure rather than a fallback to another
 backend.
+Every command loads this file except `version` and `bootstrap`, which read no
+configuration at all: they render compiled-in constants and install the command
+respectively, so neither resolves a backend, ref, policy, or machine identity.
+Those two therefore keep working while a broken canonical file is exactly what
+you are trying to repair. `config show` does load it, because reporting the
+coordination configuration is its job; if the file cannot be read safely,
+`config show` fails with the reason.
 This hardened config path requires a POSIX-compatible Ruby/filesystem with
 no-follow opens, ownership/mode checks, and `flock`; native Windows Ruby is not
 a supported runtime for this CLI.
