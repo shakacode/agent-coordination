@@ -408,6 +408,11 @@ when releases begin.
   path whose bytes are not decodable at all still crashes in pre-parse token
   scanning under a UTF-8 locale, before any syscall sees it. The locales where
   non-UTF-8 filenames actually occur, `C` and the latin-1 family, are unaffected.
+  A second gap in the exemption, also tracked separately as issue #228: the
+  scanner that classifies path arguments does not honor a standalone `--`, so a
+  positional shaped like an inline path option -- `log -- --state-root=<invalid>`
+  -- is exempted when it should be validated, and its bytes reach stdout. Every
+  other undecodable positional, including after `--`, is rejected.
 
   Some arguments a non-UTF-8 locale used to accept are now refused, and the
   bounded guarantee is this: every argument written into state or used to address
