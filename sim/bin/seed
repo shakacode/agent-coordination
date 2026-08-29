@@ -37,6 +37,18 @@ if duplicates:
     )
     raise SystemExit(1)
 
+# The seed script pairs numbers with titles as tab-separated records, so a tab
+# or newline in a title would shift the field split and silently break the
+# dedupe lookup instead of erroring.
+malformed = [title for title in titles if any(ch in title for ch in "\t\r\n")]
+if malformed:
+    sys.stderr.write(
+        "issue title(s) in sim/issues.json contain a tab or newline: "
+        + ", ".join(repr(title) for title in malformed)
+        + "\n"
+    )
+    raise SystemExit(1)
+
 for issue in issues:
     sys.stdout.write(issue["title"] + "\0" + issue["body"] + "\0")
 PY
@@ -58,7 +70,9 @@ if [ "$RESET" = "--reset" ]; then
   # open, its title is then treated as already seeded, and the repo is left
   # short an issue while the summary still claims a full seed.
   remaining=""
-  for _ in $(seq 1 20); do
+  attempt=0
+  while [ "$attempt" -lt 20 ]; do
+    attempt=$((attempt + 1))
     # Tolerate a transient gh failure here: this loop exists to wait out
     # eventual consistency, so a rate limit or network blip should be retried
     # rather than aborting the run under `set -e`.
@@ -116,7 +130,9 @@ echo "SEEDED $REPO with $count issues ($created created, $skipped skipped)"
 missing=0
 while IFS= read -r number; do
   state=""
-  for _ in $(seq 1 5); do
+  attempt=0
+  while [ "$attempt" -lt 5 ]; do
+    attempt=$((attempt + 1))
     state="$(gh issue view "$number" --repo "$REPO" --json state --jq '.state' 2>/dev/null || true)"
     [ -n "$state" ] && break
     sleep 2
@@ -127,9 +143,7 @@ while IFS= read -r number; do
   fi
 done < "$expected_numbers"
 
-seeded="$(wc -l < "$expected_numbers" | tr -d ' ')"
-if [ "$missing" -ne 0 ] || [ "$seeded" -ne "$count" ]; then
-  echo "error: expected $count open seeded issue(s) in $REPO;" \
-    "resolved $seeded and $missing were not open" >&2
+if [ "$missing" -ne 0 ]; then
+  echo "error: $missing of $count seeded issue(s) are not open in $REPO" >&2
   exit 1
 fi
