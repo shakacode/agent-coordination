@@ -671,10 +671,12 @@ module AgentCoord
     # A whitespace-only selector is not a selection. The CLI flags reject such a
     # value outright, so treating an exported AGENT_COORD_STATE_ROOT='   ' as a
     # process-tier selection would let the environment shadow a configured
-    # backend in a way the equivalent flag cannot.
+    # backend in a way the equivalent flag cannot. Both the resolver and
+    # `config show` pick their tier here, so they cannot disagree about which
+    # tier is in play.
     def process_selects_backend?
       BACKEND_SELECTOR_ENV_KEYS.any? do |key|
-        !@process_config&.fetch(key, nil).to_s.strip.empty?
+        AgentCoord.config_value_set?(@process_config&.fetch(key, nil))
       end
     end
 
@@ -825,7 +827,7 @@ module AgentCoord
     # identity, and out-of-range ports already take, and it removes the need for
     # any downstream branch to model an empty explicit selector.
     def explicit_selector_value!(value, flag)
-      return value unless value.to_s.strip.empty?
+      return value if AgentCoord.config_value_set?(value)
 
       raise Error, "#{flag} requires a non-empty value"
     end
@@ -1118,9 +1120,9 @@ module AgentCoord
       env_api = effective_backend_env_value("AGENT_COORD_API_URL")
       env_root = effective_backend_env_value("AGENT_COORD_STATE_ROOT")
       env_backend = effective_backend_env_value("AGENT_COORD_BACKEND")
-      env_api = nil if env_api.to_s.strip.empty?
-      env_root = nil if env_root.to_s.strip.empty?
-      env_backend = nil if env_backend.to_s.strip.empty?
+      env_api = nil unless AgentCoord.config_value_set?(env_api)
+      env_root = nil unless AgentCoord.config_value_set?(env_root)
+      env_backend = nil unless AgentCoord.config_value_set?(env_backend)
 
       configured = { api_url: env_api, state_root: env_root, backend: env_backend }
       return if resolve_cli_backend?(options, cli_api, configured)
@@ -2300,7 +2302,7 @@ module AgentCoord
       token = token.sub(/\r?\n\z/, "")
       # Reject blank input, but persist the unstripped value: internal and
       # trailing whitespace inside a real token is significant.
-      raise Error, "--token-stdin requires a non-empty token" if token.strip.empty?
+      raise Error, "--token-stdin requires a non-empty token" unless AgentCoord.config_value_set?(token)
       raise Error, "--token-stdin token must be one line" if token.match?(/[\r\n\0]/)
 
       token
@@ -6629,15 +6631,25 @@ module AgentCoord
     # selector now carries a non-empty value or the command never got this far,
     # so every one of them is a real selection and none of them can fall through
     # to the implicit local default the way an empty --backend used to.
+    #
+    # Configured selectors must be tested with the same predicate
+    # resolve_backend_env applies, or reporting and resolution disagree about
+    # the same file. A bare `.to_s.empty?` here reported a canonical
+    # AGENT_COORD_API_URL='   ' as `backend: http, configured: true` while
+    # resolution stripped it and fell through to another selector or the
+    # implicit local backend, so a workflow enforcing `required` coordination
+    # from `config show --json` accepted a configuration whose commands write to
+    # implicit local state -- the exact failure this reporting exists to catch.
     def selected_coordination_backend(options)
       return ["local", true, "cli"] if options[:state_root_cli]
       return ["http", true, "cli"] if options[:api_url_cli]
       return ["github", true, "cli"] if options[:backend_cli]
 
       selectors = effective_backend_selector_set
-      return ["http", true, selectors.fetch(:source)] unless selectors.fetch(:api_url).to_s.empty?
-      return ["local", true, selectors.fetch(:source)] unless selectors.fetch(:state_root).to_s.empty?
-      return ["github", true, selectors.fetch(:source)] unless selectors.fetch(:backend).to_s.empty?
+      source = selectors.fetch(:source)
+      return ["http", true, source] if AgentCoord.config_value_set?(selectors.fetch(:api_url))
+      return ["local", true, source] if AgentCoord.config_value_set?(selectors.fetch(:state_root))
+      return ["github", true, source] if AgentCoord.config_value_set?(selectors.fetch(:backend))
 
       ["local", false, "default"]
     end
@@ -7475,13 +7487,38 @@ module AgentCoord
     [nil, SESSION_SOURCE_UNSET]
   end
 
+  # The single rule for "is this AGENT_COORD_* value set?", wherever the value
+  # comes from: the process environment, the canonical user file, or an option
+  # already resolved from either. Surrounding whitespace is not content, so a
+  # whitespace-only value is unset -- an exported-but-empty wrapper variable
+  # (`export AGENT_COORD_API_URL="$URL"` with URL unset and quoted) must not
+  # read as a selection.
+  #
+  # Every reader that used to spell this rule for itself is why the same defect
+  # shipped three times: `config show` reported `backend: http` for a canonical
+  # AGENT_COORD_API_URL='   ' while resolution stripped it and fell through to
+  # the implicit local backend, and a blank exported AGENT_COORD_REF displaced a
+  # saved ref and was then sent to the GitHub API as a real ref
+  # (`git/trees/   `). Reporting, resolution, and every guard that asks whether
+  # a value is configured must route through this predicate rather than
+  # re-deriving it, or they will disagree again.
+  #
+  # Deciding presence is all this does; it never rewrites the value. Callers
+  # that keep a value keep it verbatim, because internal and trailing
+  # whitespace inside a real token or path is significant.
+  def self.config_value_set?(value)
+    !value.to_s.strip.empty?
+  end
+
   # Reads from the live process environment by default. load_user_configuration!
   # passes its pre-injection snapshot instead so that one strip-before-empty rule
   # decides both whether a process value overrides a saved one and what the
   # writers later record.
   def self.environment_identity_value(name, env: ENV)
-    value = env.fetch(name, "").to_s.strip
-    value.empty? ? nil : value
+    value = env.fetch(name, nil)
+    return nil unless config_value_set?(value)
+
+    value.to_s.strip
   end
 
   def self.state_record_path?(path)

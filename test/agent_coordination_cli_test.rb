@@ -1600,6 +1600,40 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     end
   end
 
+  # `config show --json` is the enforcement seam: a workflow that requires
+  # coordination reads it and refuses to run when no backend is configured.
+  # Reporting spelled its own emptiness rule, so a canonical
+  # AGENT_COORD_API_URL='   ' was announced as `backend: http, configured: true`
+  # while resolution stripped the same value and fell through to the implicit
+  # local backend. The enforcing workflow passed and every command then wrote to
+  # local state the fleet never reads -- precisely the split-brain this
+  # reporting exists to prevent. Reporting and resolution must answer from one
+  # predicate, so assert both halves against the same config file.
+  def test_config_show_agrees_with_resolution_on_a_whitespace_only_configured_api_url
+    with_private_config_tmpdir("agent-coord-blank-configured-api-url") do |root|
+      config_home = File.join(root, "config")
+      env_file = File.join(config_home, "agent-coord", "env")
+      FileUtils.mkdir_p(File.dirname(env_file))
+      File.chmod(0o700, File.dirname(env_file))
+      File.write(env_file, "AGENT_COORD_API_URL='   '\n")
+      File.chmod(0o600, env_file)
+      env = { "XDG_CONFIG_HOME" => config_home, "XDG_STATE_HOME" => File.join(root, "state") }
+
+      shown = run_command(env, RbConfig.ruby, BIN, "config", "show", "--json")
+      resolved = run_command(env, RbConfig.ruby, BIN, "doctor", "--json")
+
+      assert_equal 0, shown.status.exitstatus, shown.stderr
+      assert_equal 0, resolved.status.exitstatus, resolved.stderr
+      coordination = JSON.parse(shown.stdout).fetch("coordination")
+      assert_equal "local", JSON.parse(resolved.stdout).fetch("backend")
+      assert_equal "local", coordination.fetch("backend"),
+                   "config show must not report a backend resolution will not use"
+      refute coordination.fetch("configured"),
+             "a whitespace-only configured selector is not a configured backend"
+      assert_equal "default", coordination.fetch("source").fetch("backend")
+    end
+  end
+
   def test_configured_state_root_warns_when_it_shadows_a_configured_backend
     with_private_config_tmpdir("agent-coord-state-root-over-backend") do |root|
       config_home = File.join(root, "config")
