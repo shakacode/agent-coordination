@@ -9,6 +9,37 @@ when releases begin.
 
 ### Added
 
+- The telemetry ledger now retains `event_type` for every event the CLI emits,
+  rather than only `lane_closed` (issue #112). `Harvester::EVENT_TYPES` had been
+  fitted to the archived 2026-07-18 baseline instead of to current `bin/agent-coord`
+  output, so the three auto-emitted lifecycle types (`claim.acquired`,
+  `claim.released`, `phase.changed`) and the four typed operational signals
+  (`help_requested`, `escalation_requested`, `error`, `human_intervention`) all
+  landed with `event_type = NULL`. Any ledger analysis grouping or filtering by
+  event type came back silently empty rather than visibly wrong, so ranking error
+  and friction clusters by measured cost had to fall back to raw
+  `agent-coord status --json`. Migration
+  `schema/telemetry-ledger/0004_event_type_retention.sql` additively adds
+  `event_type_raw`, `severity`, `category`, `kind`, and `reason` to `events`,
+  carrying the fields `record-event` validates at write time but ingest had been
+  discarding, and adds an `event_type_drift` view so an unrecognized type is a
+  countable `event_type IS NULL AND event_type_raw IS NOT NULL` row instead of a
+  silent `NULL`. Because the drift rather than the list is the real defect, a test
+  derives the CLI's emitted event-type set from `bin/agent-coord` two independent
+  ways -- the declared constants and a scan of the literal `type:` emission sites
+  -- and fails until the harvester ingests every member; a deliberate exclusion
+  must be named rather than merely omitted, and cannot cover every emitted type.
+  Free-form signal values are sanitized rather than rejected, so an oversized or
+  control-bearing value is bounded and digest-marked instead of dropped: the
+  surrounding-trim class is derived as `{space} + (SIGNAL - LOG)` so nothing
+  `bin/agent-coord` treats as terminal-unsafe can be removed by normalization,
+  and the digest-marker shape is reserved so a clean value cannot be stored as
+  another value's sanitized form. This unblocks the intervention, help,
+  escalation, and rework scorecard fields tracked in issue #143. Note that
+  `known()` still strips NUL and covers only C0 controls, so a control-bearing
+  value whose trimmed form is allowlisted is still classified rather than
+  surfaced by the drift view -- tracked in issue #171.
+
 - An `agent-coord log` command that renders the per-work-item custody trail the
   event store already records, so an operator can ask where the work on one issue
   or PR stands without reading the full coordination dump (issue #129).
