@@ -5,10 +5,10 @@ REPO="${1:?usage: seed <owner/repo> [--reset]}"
 RESET="${2:-}"
 HERE="$(cd "$(dirname "$0")/.." && pwd)"
 WORK="$(mktemp -d)"
-ISSUE_PAIRS="$(mktemp)"
+ISSUE_PLAN="$(mktemp)"
 cleanup() {
   rm -R -f "$WORK"
-  rm -f "$ISSUE_PAIRS"
+  rm -f "$ISSUE_PLAN"
 }
 trap cleanup EXIT
 
@@ -21,7 +21,7 @@ case "$REPO" in
     ;;
 esac
 
-python3 - "$HERE/issues.json" > "$ISSUE_PAIRS" <<'PY'
+python3 - "$HERE/issues.json" <<'PY'
 import json
 import sys
 from collections import Counter
@@ -37,9 +37,24 @@ if duplicates:
     )
     raise SystemExit(1)
 
-# The seed script pairs numbers with titles as tab-separated records, so a tab
-# or newline in a title would shift the field split and silently break the
-# dedupe lookup instead of erroring.
+# Titles and bodies cross into the shell as a NUL-delimited stream, so an
+# embedded NUL in either would shift every subsequent title/body pairing and
+# silently misassign the rest of the run.
+embedded_nul = [
+    issue["title"]
+    for issue in issues
+    if "\0" in issue["title"] or "\0" in issue["body"]
+]
+if embedded_nul:
+    sys.stderr.write(
+        "issue title(s)/body(ies) in sim/issues.json contain a NUL byte: "
+        + ", ".join(repr(title) for title in embedded_nul)
+        + "\n"
+    )
+    raise SystemExit(1)
+
+# Titles are matched for dedupe and printed in diagnostics; a control line break
+# would corrupt both.
 malformed = [title for title in titles if any(ch in title for ch in "\t\r\n")]
 if malformed:
     sys.stderr.write(
@@ -48,9 +63,6 @@ if malformed:
         + "\n"
     )
     raise SystemExit(1)
-
-for issue in issues:
-    sys.stdout.write(issue["title"] + "\0" + issue["body"] + "\0")
 PY
 
 cp -R "$HERE/template/." "$WORK/"
@@ -97,9 +109,33 @@ gh label create sim-batch --repo "$REPO" --color 5319e7 \
 
 # Record numbers alongside titles so verification can read each issue directly
 # instead of trusting the same search listing that produced the dedupe set.
-existing="$WORK/existing"
+existing_json="$WORK/existing.json"
 gh issue list --repo "$REPO" --label sim-batch --state open --limit 1000 --json number,title \
-  --jq '.[] | "\(.number)\t\(.title)"' > "$existing"
+  > "$existing_json"
+
+# Match in Python against raw JSON rather than with `awk` over a tab-separated
+# file: `awk -v` applies backslash-escape processing to the value it assigns and
+# `==` coerces numeric-looking strings, so titles like `C:\temp` or `01` would
+# mis-compare. Python compares decoded strings exactly, and a tab already
+# present in a GitHub issue title cannot shift a field boundary because there
+# are no fields.
+python3 - "$HERE/issues.json" "$existing_json" > "$ISSUE_PLAN" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as handle:
+    issues = json.load(handle)["issues"]
+with open(sys.argv[2], encoding="utf-8") as handle:
+    existing = json.load(handle)
+
+by_title = {}
+for row in existing:
+    by_title.setdefault(row["title"], str(row["number"]))
+
+for issue in issues:
+    number = by_title.get(issue["title"], "")
+    sys.stdout.write(number + "\0" + issue["title"] + "\0" + issue["body"] + "\0")
+PY
 
 count=0
 created=0
@@ -108,9 +144,8 @@ skipped=0
 expected_numbers="$WORK/expected_numbers"
 : > "$expected_numbers"
 
-while IFS= read -r -d '' TITLE && IFS= read -r -d '' BODY; do
+while IFS= read -r -d '' number && IFS= read -r -d '' TITLE && IFS= read -r -d '' BODY; do
   count=$((count + 1))
-  number="$(awk -F'\t' -v title="$TITLE" '$2 == title { print $1; exit }' "$existing")"
   if [ -n "$number" ]; then
     skipped=$((skipped + 1))
   else
@@ -120,7 +155,7 @@ while IFS= read -r -d '' TITLE && IFS= read -r -d '' BODY; do
     created=$((created + 1))
   fi
   printf '%s\n' "$number" >> "$expected_numbers"
-done < "$ISSUE_PAIRS"
+done < "$ISSUE_PLAN"
 
 echo "SEEDED $REPO with $count issues ($created created, $skipped skipped)"
 
@@ -131,7 +166,7 @@ missing=0
 while IFS= read -r number; do
   state=""
   attempt=0
-  while [ "$attempt" -lt 5 ]; do
+  while [ "$attempt" -lt 20 ]; do
     attempt=$((attempt + 1))
     state="$(gh issue view "$number" --repo "$REPO" --json state --jq '.state' 2>/dev/null || true)"
     [ -n "$state" ] && break
