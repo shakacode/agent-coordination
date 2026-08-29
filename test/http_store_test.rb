@@ -1665,13 +1665,16 @@ class LogHttpBackendTest < HttpEnvTestCase
   # a whole custody trail would let `log` report the wrong current state with no
   # sign anything was withheld (PR #131 review).
   def test_log_warns_when_the_event_trail_is_filtered_by_a_scoped_token
-    stub = HttpStoreStub.new([[200, { "entries" => [], "filtered" => true }]])
+    stub = HttpStoreStub.new([[200, { "entries" => [], "filtered" => true }], [200, { "entries" => [] }]])
     with_env("AGENT_COORD_API_URL" => stub.base_url, "AGENT_COORD_API_TOKEN" => "tok") do
       code, _out, err = run_cli(["log"], {})
 
       assert_equal 0, code
-      assert_includes err, "filtered by scoped token"
+      assert_includes err, "events filtered by scoped token"
       assert_includes err, "may be incomplete"
+      # The archive listing answered cleanly, so nothing here is being satisfied
+      # by a degradation this test is not about.
+      refute_includes err, "archived events"
     end
   ensure
     stub.shutdown
@@ -1680,13 +1683,14 @@ class LogHttpBackendTest < HttpEnvTestCase
   # A read-only query must degrade the way status does rather than crashing when a
   # scoped token cannot list events, and it must say the trail is short (PR #131).
   def test_log_degrades_when_the_event_listing_is_forbidden_to_a_scoped_token
-    stub = HttpStoreStub.new([[403, { "error" => "forbidden" }]])
+    stub = HttpStoreStub.new([[403, { "error" => "forbidden" }], [200, { "entries" => [] }]])
     with_env("AGENT_COORD_API_URL" => stub.base_url, "AGENT_COORD_API_TOKEN" => "tok") do
       code, _out, err = run_cli(["log"], {})
 
       assert_equal 0, code
-      assert_includes err, "not readable by scoped token"
+      assert_includes err, "events not readable by scoped token"
       assert_includes err, "may be incomplete"
+      refute_includes err, "archived events"
     end
   ensure
     stub.shutdown
@@ -1706,6 +1710,7 @@ class LogHttpBackendTest < HttpEnvTestCase
     [[newer, older], [older, newer]].each do |first, second|
       stub = HttpStoreStub.new([
                                  [200, { "entries" => [] }],
+                                 [200, { "entries" => [] }],
                                  [200, { "entries" => [
                                    { "path" => "claims/a/1.json", "data" => first, "version" => 1 },
                                    { "path" => "claims/b/1.json", "data" => second, "version" => 1 }
@@ -1724,12 +1729,16 @@ class LogHttpBackendTest < HttpEnvTestCase
   # A partial listing would write a partial mirror that later reads as complete --
   # the same hazard the narrowing options are rejected for.
   def test_log_sync_refuses_to_write_a_mirror_from_a_filtered_listing
-    stub = HttpStoreStub.new([[200, { "entries" => [], "filtered" => true }]])
+    stub = HttpStoreStub.new([[200, { "entries" => [], "filtered" => true }], [200, { "entries" => [] }]])
     with_env("AGENT_COORD_API_URL" => stub.base_url, "AGENT_COORD_API_TOKEN" => "tok") do
       code, _out, err = run_cli(["log", "--sync"], {})
 
       assert_equal 2, code
-      assert_includes err, "incomplete"
+      # Named, so the filtered events listing is demonstrably what refused the
+      # mirror. A bare "incomplete" was also satisfied by the archive listing
+      # falling through to the stub's 500, which is a different failure.
+      assert_includes err, "refusing to sync an incomplete trail: events"
+      refute_includes err, "archived events"
     end
   ensure
     stub.shutdown
@@ -1738,7 +1747,8 @@ class LogHttpBackendTest < HttpEnvTestCase
   # A filtered claims listing can hide the very claim being asked about, so a
   # silent "no claim" would be indistinguishable from a real absence.
   def test_log_warns_when_the_claim_listing_is_filtered_by_a_scoped_token
-    stub = HttpStoreStub.new([[200, { "entries" => [] }], [200, { "entries" => [], "filtered" => true }]])
+    stub = HttpStoreStub.new([[200, { "entries" => [] }], [200, { "entries" => [] }],
+                              [200, { "entries" => [], "filtered" => true }]])
     with_env("AGENT_COORD_API_URL" => stub.base_url, "AGENT_COORD_API_TOKEN" => "tok") do
       code, out, err = run_cli(["log", "shakacode/example#1"], {})
 
@@ -1753,13 +1763,133 @@ class LogHttpBackendTest < HttpEnvTestCase
   # Swallowing every claims failure made "this token cannot read claims" print
   # identically to "this work item has no claim".
   def test_log_warns_when_the_claim_lookup_is_forbidden_to_a_scoped_token
-    stub = HttpStoreStub.new([[200, { "entries" => [] }], [403, { "error" => "forbidden" }]])
+    stub = HttpStoreStub.new([[200, { "entries" => [] }], [200, { "entries" => [] }],
+                              [403, { "error" => "forbidden" }]])
     with_env("AGENT_COORD_API_URL" => stub.base_url, "AGENT_COORD_API_TOKEN" => "tok") do
       code, out, err = run_cli(["log", "shakacode/example#1"], {})
 
       assert_equal 0, code
       assert_includes out, "no events"
       assert_includes err, "claims not readable by scoped token"
+    end
+  ensure
+    stub.shutdown
+  end
+
+  # gc compacts a completed lane's events into archive/events, so that prefix is
+  # part of the trail (issue #139). A token that can read events but not the
+  # archive must still get the live events, and must be told the rest was
+  # withheld -- a silently short trail reads exactly like a complete one.
+  def test_log_degrades_when_the_archived_event_listing_is_forbidden_to_a_scoped_token
+    event = { "schema_version" => 2, "event_id" => "e1", "batch_id" => "b1", "type" => "claim.acquired",
+              "repo" => "shakacode/example", "target" => "1", "machine_id" => "m5", "host" => "codex",
+              "agent_id" => "live-worker", "at" => "2026-08-01T00:00:00Z" }
+    stub = HttpStoreStub.new([
+                               [200, { "entries" => [
+                                 { "path" => "events/b1/e1.json", "data" => event, "version" => 1 }
+                               ] }],
+                               [403, { "error" => "forbidden" }],
+                               [200, { "entries" => [] }]
+                             ])
+    with_env("AGENT_COORD_API_URL" => stub.base_url, "AGENT_COORD_API_TOKEN" => "tok") do
+      code, out, err = run_cli(["log", "shakacode/example#1"], {})
+
+      assert_equal 0, code
+      assert_includes out, "live-worker"
+      assert_includes err, "archived events not readable by scoped token"
+      assert_includes err, "may be incomplete"
+      assert_includes stub.requests.map { |request| request[:path] }, "/v1/state?prefix=archive%2Fevents"
+    end
+  ensure
+    stub.shutdown
+  end
+
+  # The mirror is the copy that outlives both compaction and delete_after, so it
+  # must never be written from a read that could not see the archive.
+  def test_log_sync_refuses_to_write_a_mirror_when_the_archive_is_forbidden
+    stub = HttpStoreStub.new([[200, { "entries" => [] }], [403, { "error" => "forbidden" }]])
+    with_env("AGENT_COORD_API_URL" => stub.base_url, "AGENT_COORD_API_TOKEN" => "tok") do
+      code, _out, err = run_cli(["log", "--sync"], {})
+
+      assert_equal 2, code
+      assert_includes err, "refusing to sync an incomplete trail: archive/events"
+    end
+  ensure
+    stub.shutdown
+  end
+
+  # A backend with no archive prefix cannot have stored an archived event: the
+  # worker change that made archive/events listable is the one that made it
+  # writable. So an unsupported archive listing leaves the trail complete, and
+  # --sync must still write the mirror -- this command's own documentation asks
+  # operators to run it before every gc --execute, and refusing forever on an
+  # older backend breaks that workflow rather than protecting it.
+  def test_log_sync_writes_the_mirror_when_the_backend_has_no_archive_prefix
+    root = Dir.mktmpdir("agent-coord-http-sync")
+    event = { "schema_version" => 2, "event_id" => "e1", "batch_id" => "b1", "type" => "claim.acquired",
+              "repo" => "shakacode/example", "target" => "1", "machine_id" => "m5", "host" => "codex",
+              "agent_id" => "live-worker", "at" => "2026-08-01T00:00:00Z" }
+    stub = HttpStoreStub.new([
+                               [200, { "entries" => [
+                                 { "path" => "events/b1/e1.json", "data" => event, "version" => 1 }
+                               ] }],
+                               [400, { "error" => "invalid_prefix" }]
+                             ])
+    with_env("AGENT_COORD_API_URL" => stub.base_url, "AGENT_COORD_API_TOKEN" => "tok",
+             "AGENT_COORD_STATUS_STATE_ROOT" => root) do
+      code, out, err = run_cli(["log", "--sync"], {})
+
+      assert_equal 0, code, err
+      assert_includes out, "synced 1 new event"
+      assert_includes File.read(File.join(root, "log.tsv")), "live-worker"
+      assert_includes err, "archived events not supported by backend"
+      refute_includes err, "may be incomplete"
+      refute_includes err, "refusing to sync"
+    end
+  ensure
+    stub.shutdown
+    FileUtils.remove_entry(root) if root
+  end
+
+  # Forbidden is the other half of the distinction and must keep refusing: an
+  # archive this token cannot read may still hold events, so the trail is short.
+  def test_log_sync_still_refuses_when_the_archive_is_forbidden_rather_than_unsupported
+    stub = HttpStoreStub.new([[200, { "entries" => [] }], [403, { "error" => "forbidden" }]])
+    with_env("AGENT_COORD_API_URL" => stub.base_url, "AGENT_COORD_API_TOKEN" => "tok") do
+      code, _out, err = run_cli(["log", "--sync"], {})
+
+      assert_equal 2, code
+      assert_includes err, "refusing to sync an incomplete trail: archive/events"
+    end
+  ensure
+    stub.shutdown
+  end
+
+  # An unsupported live events listing keeps marking the trail incomplete: that
+  # prefix is where the answer comes from, so an unimplemented one is a missing
+  # answer rather than an empty one.
+  def test_log_sync_still_refuses_when_the_live_events_listing_is_unsupported
+    stub = HttpStoreStub.new([[400, { "error" => "invalid_prefix" }], [200, { "entries" => [] }]])
+    with_env("AGENT_COORD_API_URL" => stub.base_url, "AGENT_COORD_API_TOKEN" => "tok") do
+      code, _out, err = run_cli(["log", "--sync"], {})
+
+      assert_equal 2, code
+      assert_includes err, "refusing to sync an incomplete trail: events"
+    end
+  ensure
+    stub.shutdown
+  end
+
+  # The refusal names every prefix that degraded, in read order. The trail is
+  # read from two listings, so recording only the most recent degradation told an
+  # operator whose live events were unreadable to go and look at the archive.
+  def test_log_sync_refusal_names_every_prefix_that_degraded
+    stub = HttpStoreStub.new([[403, { "error" => "forbidden" }], [403, { "error" => "forbidden" }]])
+    with_env("AGENT_COORD_API_URL" => stub.base_url, "AGENT_COORD_API_TOKEN" => "tok") do
+      code, _out, err = run_cli(["log", "--sync"], {})
+
+      assert_equal 2, code
+      assert_includes err, "refusing to sync an incomplete trail: events, archive/events"
     end
   ensure
     stub.shutdown
