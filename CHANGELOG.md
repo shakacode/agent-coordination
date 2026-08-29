@@ -384,10 +384,24 @@ when releases begin.
   are state keys and identities -- a scrubbed `--agent-id` or `--repo` would be
   written into coordination state as a silently different identity -- which is
   how `--launch-prompt` already treats invalid UTF-8; the value echoed back is
-  scrubbed so the error cannot itself emit an invalid byte sequence. Nothing that
-  already worked changes: every argument that was accepted before is still
-  accepted and still stored byte-for-byte as before, and the exit codes that move
-  are the failures above. Environment-sourced strings are not covered by
+  scrubbed so the error cannot itself emit an invalid byte sequence. Filesystem
+  paths are exempt from all of this: the values of `--state-root`, `--file`,
+  `--launch-prompt`, `--install-dir`, `--status-state-root`, and `--profile`
+  reach the operating system with exactly the bytes the operator typed, because a
+  path is a name a syscall has to match rather than text bound for JSON, and
+  transcoding one silently addresses a different file -- on a filesystem that
+  permits non-UTF-8 names, `status --state-root` against a transcoded root
+  reports empty coordination state and exits `0`, which reads as "nothing is
+  claimed". That set is derived from the option declarations themselves rather
+  than kept as a separate list, so it cannot drift away from them. One thing that
+  used to exit `0` now exits `1`: a read-only filter carrying a non-ASCII byte
+  sequence that is not UTF-8, such as `log --machine`, `log --type`, or the `log`
+  work item under `LC_ALL=C`. Such a filter could never match anything, because
+  state is UTF-8 and the argument was not, so the old `0` reported "no events"
+  for a question that could not be asked. Otherwise nothing that already worked
+  changes: arguments that were accepted before are still accepted and still
+  stored byte-for-byte as before, and the remaining exit codes that move are the
+  failures above. Environment-sourced strings are not covered by
   this change: under the same locale Ruby tags an ASCII-only environment value
   `US-ASCII`, but one carrying non-ASCII bytes `ASCII-8BIT`, so a non-ASCII
   `AGENT_COORD_MACHINE_ID` or sibling identity variable still reaches

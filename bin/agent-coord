@@ -280,12 +280,13 @@ module AgentCoord
   # Records the long-option declaration shapes used by this CLI so pre-parse
   # token detection can share its registered option names.
   class OptionRegistry
-    attr_reader :value_options, :flag_options
+    attr_reader :value_options, :flag_options, :path_options
 
     def initialize(parser)
       @parser = parser
       @value_options = []
       @flag_options = []
+      @path_options = []
     end
 
     def on(*declarations, &)
@@ -298,6 +299,11 @@ module AgentCoord
         option_name, argument = long_declaration.split(/\s+/, 2)
         target = argument ? @value_options : @flag_options
         target << option_name
+        # A PATH placeholder is the declaration saying this value addresses the
+        # filesystem. Those values are handed to syscalls rather than serialized,
+        # so argv normalization has to leave their bytes alone, and deriving the
+        # set from the declarations keeps it from drifting out of step with them.
+        @path_options << option_name if argument.to_s.start_with?("PATH")
       end
       @parser
     end
@@ -413,21 +419,42 @@ module AgentCoord
     # aggregator reads 1 as degraded and then finds no report to parse. The
     # exit code is therefore resolved here instead.
     def normalized_argv(argv)
-      AgentCoord.normalize_argv(argv)
+      raw = argv.map { |argument| argument.to_s.b }
+      AgentCoord.normalize_argv(argv, raw_indexes: path_argument_indexes(raw))
     rescue Error => e
-      raise unless e.exit_code == EXIT_USAGE && stack_json_argv?(argv)
+      raise unless e.exit_code == EXIT_USAGE && stack_json_argv?(raw)
 
       raise Error.new(e.message, exit_code: STACK_EXIT_USAGE)
     end
 
-    # Detection runs on a BINARY copy of the raw argv, because
-    # standalone_option_token_count splits each argument on "=" and String#split
-    # raises on a UTF-8-tagged string holding invalid bytes -- exactly the input
-    # that got us here. Option names are ASCII, and an ASCII-only string
-    # compares equal to its BINARY copy, so the match is unaffected. The command
-    # token is dropped to match what run_doctor_command inspects.
-    def stack_json_argv?(argv)
-      raw = argv.map { |argument| argument.to_s.b }
+    # A path is a byte string on its way to a syscall; every other argument is
+    # text on its way to JSON. Transcoding a path changes which file it names --
+    # a latin-1 `/tmp/café` becomes a different, probably nonexistent directory,
+    # and `status --state-root` would report empty coordination state for a root
+    # that is not empty -- so those values keep the bytes the operator typed.
+    # The set comes from the option declarations' PATH placeholder rather than a
+    # second list that could drift away from them.
+    def path_argument_indexes(raw)
+      # The command decides which options are registered, and it is still raw
+      # here. A non-ASCII one cannot name a real command, and interpolating it
+      # into the parser banner would raise, so it falls back to the global set.
+      command = raw.first.to_s
+      command = "" unless command.ascii_only?
+      paths = registered_options(command).path_options
+      indexes = []
+      scan_raw_options(raw, command:) do |index, option, value_of, _awaits_value|
+        indexes << index if paths.include?(value_of || option)
+      end
+      indexes
+    end
+
+    # Takes the BINARY copy built above, because standalone_option_token_count
+    # splits each argument on "=" and String#split raises on a UTF-8-tagged
+    # string holding invalid bytes -- exactly the input that got us here. Option
+    # names are ASCII, and an ASCII-only string compares equal to its BINARY
+    # copy, so the match is unaffected. The command token is dropped to match
+    # what run_doctor_command inspects.
+    def stack_json_argv?(raw)
       raw.first == "doctor" && stack_json_option_token?(raw.drop(1))
     end
 
@@ -1608,26 +1635,36 @@ module AgentCoord
       standalone_option_token_count(argv, [token], command:).positive?
     end
 
-    def standalone_option_token_count(argv, tokens, command:)
+    # One walk over raw argv, shared by every pre-parse scan. Yields each
+    # argument as (index, the long option it names, the option it is the value
+    # of, whether it is an option still awaiting a separate value). Arguments
+    # are expected to be BINARY copies: String#split raises on a UTF-8-tagged
+    # string holding invalid bytes, which is reachable from every caller.
+    def scan_raw_options(argv, command:)
       command_options = registered_options(command)
       doctor_options = command == "doctor" ? command_options : registered_options("doctor")
       value_options = command_options.value_options
-      skip_next = false
-      argv.count do |arg|
-        if skip_next
-          skip_next = false
-          next false
+      awaiting = nil
+      argv.each_with_index do |argument, index|
+        if awaiting
+          yield(index, nil, awaiting, false)
+          awaiting = nil
+          next
         end
 
-        option_name, option_value = arg.split("=", 2)
-        resolved_option = resolve_standalone_option(option_name, command_options, doctor_options)
-        if option_value.nil? && value_options.include?(resolved_option)
-          skip_next = true
-          false
-        else
-          tokens.include?(resolved_option)
-        end
+        option_name, inline_value = argument.split("=", 2)
+        option = resolve_standalone_option(option_name, command_options, doctor_options)
+        awaiting = option if inline_value.nil? && value_options.include?(option)
+        yield(index, option, nil, !awaiting.nil?)
       end
+    end
+
+    def standalone_option_token_count(argv, tokens, command:)
+      count = 0
+      scan_raw_options(argv, command:) do |_index, option, value_of, awaits_value|
+        count += 1 if value_of.nil? && !awaits_value && tokens.include?(option)
+      end
+      count
     end
 
     def resolve_standalone_option(option_name, command_options, target_options)
@@ -6617,11 +6654,15 @@ module AgentCoord
   # could neither renew nor release its own claim. Doing this once at the Runner
   # boundary covers the command token, every option value, the `log` positional,
   # and demo's passthrough argv together, so an option added later cannot forget
-  # it. Returns a new array rather than normalizing in place: Runner#run and
-  # parse_options consume the array they are given, and that must not reach back
-  # into an ARGV or a caller's array they do not own.
-  def self.normalize_argv(argv)
-    argv.map { |argument| normalize_argument(argument.to_s) }
+  # it. raw_indexes carries the exceptions: values that address the filesystem
+  # rather than coordination state keep their bytes, because normalizing a path
+  # changes which file it names. Returns a new array rather than normalizing in
+  # place: Runner#run and parse_options consume the array they are given, and
+  # that must not reach back into an ARGV or a caller's array they do not own.
+  def self.normalize_argv(argv, raw_indexes: [])
+    argv.each_with_index.map do |argument, index|
+      raw_indexes.include?(index) ? argument.to_s : normalize_argument(argument.to_s)
+    end
   end
 
   # How Ruby tagged the argument decides what normalizing it means. BINARY is

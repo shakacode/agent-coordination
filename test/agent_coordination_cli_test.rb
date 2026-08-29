@@ -5124,6 +5124,70 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     end
   end
 
+  # A path is a byte string on its way to a syscall; every other argument is text
+  # on its way to JSON. Transcoding a path changes which file it names -- a
+  # latin-1 /tmp/café becomes a different, probably nonexistent directory, and on
+  # a filesystem that permits non-UTF-8 names `status --state-root` would then
+  # report empty coordination state for a root that is not empty, which reads as
+  # "nothing is claimed". The exempt set is derived from the option
+  # declarations' PATH placeholder, so it is asserted here rather than restated:
+  # an option that gains or loses that placeholder changes this list.
+  def test_path_option_values_keep_the_bytes_the_operator_typed
+    typed = "/tmp/caf\xE9".b
+    path_options = AgentCoord::Runner.new([], stdout: StringIO.new, stderr: StringIO.new)
+                                     .send(:registered_options, "status").path_options
+
+    assert_equal %w[--file --install-dir --launch-prompt --profile --state-root --status-state-root],
+                 path_options.sort
+    path_options.each do |option|
+      {
+        "declared latin-1" => typed.dup.force_encoding(Encoding::ISO_8859_1),
+        "binary" => typed.dup
+      }.each do |tagging, value|
+        {
+          "separate" => [["status", option, value], typed],
+          "equals" => [["status", "#{option}=#{value.b}".b.force_encoding(value.encoding)],
+                       "#{option}=#{typed}".b]
+        }.each do |form, (argv, expected)|
+          label = "#{option} #{tagging} #{form}"
+          normalized = AgentCoord::Runner.new(argv, stdout: StringIO.new, stderr: StringIO.new)
+                                         .instance_variable_get(:@argv)
+
+          assert_equal expected, normalized.last.b, label
+          assert_equal value.encoding, normalized.last.encoding, label
+        end
+      end
+    end
+  end
+
+  # The counterpart, so marking every argument raw would fail: a value that is
+  # not a path is still normalized in the same position under the same tagging.
+  def test_non_path_option_values_are_still_normalized
+    latin1 = "caf\xE9".b.force_encoding(Encoding::ISO_8859_1)
+
+    normalized = AgentCoord::Runner.new(["status", "--message", latin1],
+                                        stdout: StringIO.new, stderr: StringIO.new)
+                                   .instance_variable_get(:@argv)
+
+    assert_equal "café", normalized.last
+    assert_equal Encoding::UTF_8, normalized.last.encoding
+    assert_equal [99, 97, 102, 195, 169], normalized.last.bytes
+  end
+
+  # End to end for the same property, without needing a filesystem that accepts
+  # non-UTF-8 names: the root the CLI reports as missing has to be the bytes it
+  # was given, because that is the name it passed to the syscall.
+  def test_a_non_utf8_state_root_reaches_the_filesystem_unchanged
+    typed = "#{@state_root}/caf\xE9".b
+
+    result = run_agent_coord("doctor", "--state-root", typed, state_root: nil,
+                                                              env: { "LC_ALL" => "C", "LANG" => "C" })
+
+    assert_equal 2, result.status.exitstatus, result.stderr
+    assert_includes result.stderr.b, typed
+    refute_includes result.stderr.b, "caf\xC3\xA9".b
+  end
+
   # End to end through the real store rather than only through normalize_argv:
   # the transcoded value has to survive JSON.generate and the atomic write, so
   # this asserts the bytes on disk.
