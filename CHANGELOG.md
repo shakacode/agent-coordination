@@ -413,6 +413,11 @@ when releases begin.
   positional shaped like an inline path option -- `log -- --state-root=<invalid>`
   -- is exempted when it should be validated, and its bytes reach stdout. Every
   other undecodable positional, including after `--`, is rejected.
+  One argument crosses into a subprocess rather than into state: `--ref` is
+  interpolated into a GitHub REST URL and handed to `gh`. On a tagged non-UTF-8
+  terminal it now arrives as UTF-8 rather than as the terminal's own bytes, which
+  is the correct wire encoding for that URL, and under `LC_ALL=C` an undecodable
+  ref is refused before `gh` is invoked at all rather than passed through.
 
   Some arguments a non-UTF-8 locale used to accept are now refused, and the
   bounded guarantee is this: every argument written into state or used to address
