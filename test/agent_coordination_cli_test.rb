@@ -8864,8 +8864,11 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
 
     # These fixtures intentionally run Runner instances concurrently in one
     # process. Keep their injected stores independent of Runner#run's temporary,
-    # process-wide user-configuration ENV projection.
-    def load_user_configuration!
+    # process-wide user-configuration ENV projection. The keyword only decides
+    # whether a missing explicit config file is tolerated, and this stub reads no
+    # file at all, but the signature has to track Runner's.
+    def load_user_configuration!(creating_user_config: false)
+      @creating_user_config = creating_user_config
       @process_config = AgentCoord::USER_CONFIG_ENV_KEYS.to_h { |key| [key, nil] }
       @user_config_path = nil
       @user_config_path_explicit = false

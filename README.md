@@ -998,13 +998,13 @@ printf '%s\n' "$AGENT_COORD_API_TOKEN" |
 
 `config set` validates or securely creates the full parent chain, stages one
 canonical mode-`0600` file, syncs it, atomically renames it under an exclusive
-config lock, and syncs the containing directory. This is also how you create the
-file for the first time: point `AGENT_COORD_ENV_FILE` at the path you want and
-run `config set`, and the command writes exactly that path. Until it exists,
-every other command still fails with `configured user env file does not exist`. Endpoint, token, identity, and
-policy therefore become visible together through one rename. Each setter
-re-reads under the lock, so concurrent updates preserve unspecified supported
-keys; readers use a shared lock once the lock file exists. The adjacent lock is
+config lock, and syncs the containing directory. Endpoint, token, identity, and
+policy therefore become visible together through one rename. This is also how
+you create the file for the first time: point `AGENT_COORD_ENV_FILE` at the path
+you want and run `config set`, and the command writes exactly that path. Until
+it exists, every other command still fails with `configured user env file does
+not exist`. Each setter re-reads under the lock, so concurrent updates preserve
+unspecified supported keys; readers use a shared lock once the lock file exists. The adjacent lock is
 namespaced to the selected config file, so an explicit file in a shared parent
 does not reuse or modify an unrelated `.config.lock`.
 A saved URL cannot be changed while preserving its old token:
