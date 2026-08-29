@@ -334,9 +334,281 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     assert_equal "dry-run", payload.fetch("mode")
     assert_equal 7, payload.fetch("policy").fetch("hot_days")
     assert_equal 30, payload.fetch("policy").fetch("archive_days")
-    assert_equal(["claims/shakacode/example/old.json"], payload.fetch("actions").map { |row| row.fetch("source_path") })
-    assert_equal "archive", payload.fetch("actions").first.fetch("action")
+    archived = payload.fetch("actions").select { |row| row.fetch("action") == "archive" }
+    assert_equal(["claims/shakacode/example/old.json"], archived.map { |row| row.fetch("source_path") })
+    # Terminal semantics still gate the archive path: the active claim reaches
+    # the plan through the expired-lease reaper, not through archive.
+    assert_equal(["claims/shakacode/example/active.json"], reap_sources(payload))
     assert_empty Dir.glob(File.join(@state_root, "archive", "**", "*.json"))
+  end
+
+  def test_gc_reaps_an_expired_claim_only_when_its_holder_heartbeat_is_gone
+    now = Time.utc(2026, 7, 12, 12, 0, 0)
+    expired_lease_holder_records(now).each { |path, data| write_state_record(path, data) }
+    stdout = StringIO.new
+    runner = AgentCoord::Runner.new([], stdout: stdout, clock: FixedClock.new(now))
+
+    assert_equal 0, runner.send(:gc, state_root: @state_root, dry_run: true, execute: false, json: true)
+
+    payload = JSON.parse(stdout.string)
+    # live and stale holders still own their lanes past the lease, exactly as
+    # the takeover path treats them; only dead and missing holders are reaped.
+    assert_equal(
+      %w[claims/shakacode/example/dead.json claims/shakacode/example/missing.json],
+      reap_sources(payload)
+    )
+    reaps = payload.fetch("actions").select { |action| action.fetch("action") == "reap" }
+    assert_equal payload.fetch("actions"), reaps
+    assert_equal(["expired_lease"], reaps.map { |action| action.fetch("reason") }.uniq)
+    assert_equal(
+      [(now - (3 * 86_400)).iso8601],
+      reaps.map { |action| action.fetch("eligible_at") }.uniq
+    )
+    assert_equal 1, payload.fetch("policy").fetch("lease_grace_days")
+
+    scoped = StringIO.new
+    scoped_runner = AgentCoord::Runner.new([], stdout: scoped, clock: FixedClock.new(now))
+    assert_equal 0, scoped_runner.send(
+      :gc, state_root: @state_root, dry_run: true, execute: false, json: true, prefixes: ["heartbeats"]
+    )
+    assert_empty reap_sources(JSON.parse(scoped.string))
+  end
+
+  def test_gc_reap_holds_a_claim_inside_the_lease_grace_margin_and_takes_it_just_past
+    now = Time.utc(2026, 7, 12, 12, 0, 0)
+    write_abandoned_claim("inside-grace", now - 86_400 + 1)
+    write_abandoned_claim("past-grace", now - 86_400)
+    stdout = StringIO.new
+    runner = AgentCoord::Runner.new([], stdout: stdout, clock: FixedClock.new(now))
+
+    assert_equal 0, runner.send(:gc, state_root: @state_root, dry_run: true, execute: false, json: true)
+
+    assert_equal(["claims/shakacode/example/past-grace.json"], reap_sources(JSON.parse(stdout.string)))
+
+    widened = StringIO.new
+    widened_runner = AgentCoord::Runner.new([], stdout: widened, clock: FixedClock.new(now))
+    assert_equal 0, widened_runner.send(
+      :gc, state_root: @state_root, dry_run: true, execute: false, json: true, lease_grace_days: 2
+    )
+    widened_payload = JSON.parse(widened.string)
+    assert_empty reap_sources(widened_payload)
+    assert_equal 2, widened_payload.fetch("policy").fetch("lease_grace_days")
+  end
+
+  def test_gc_rejects_a_negative_lease_grace_window
+    runner = AgentCoord::Runner.new([], stdout: StringIO.new)
+
+    error = assert_raises(AgentCoord::Error) do
+      runner.send(:gc, state_root: @state_root, dry_run: true, execute: false, json: true, lease_grace_days: -1)
+    end
+
+    assert_equal "--lease-grace-days must be zero or greater", error.message
+  end
+
+  def test_gc_reap_execute_matches_the_dry_run_plan_and_does_not_repeat_itself
+    now = Time.utc(2026, 7, 12, 12, 0, 0)
+    lease_ended = now - (3 * 86_400)
+    claim_path = write_abandoned_claim("abandoned", lease_ended)
+    dry = StringIO.new
+    dry_runner = AgentCoord::Runner.new([], stdout: dry, clock: FixedClock.new(now))
+    assert_equal 0, dry_runner.send(:gc, state_root: @state_root, dry_run: true, execute: false, json: true)
+    executed = StringIO.new
+    execute_runner = AgentCoord::Runner.new([], stdout: executed, clock: FixedClock.new(now))
+    assert_equal 0, execute_runner.send(:gc, state_root: @state_root, dry_run: false, execute: true, json: true)
+
+    assert_equal JSON.parse(dry.string).fetch("actions"), JSON.parse(executed.string).fetch("actions")
+    reaped = JSON.parse(File.read(File.join(@state_root, claim_path)))
+    assert_equal "expired", reaped.fetch("status")
+    assert_equal now.iso8601, reaped.fetch("reaped_at")
+    # The lease and the holder's last write survive the reap, so an abandoned
+    # lane stays countable instead of reading as a fresh or clean handoff.
+    assert_equal (lease_ended - 14_400).iso8601, reaped.fetch("updated_at")
+    assert_equal lease_ended.iso8601, reaped.fetch("expires_at")
+    refute reaped.key?("released_at")
+
+    replay = StringIO.new
+    replay_runner = AgentCoord::Runner.new([], stdout: replay, clock: FixedClock.new(now + 60))
+    assert_equal 0, replay_runner.send(:gc, state_root: @state_root, dry_run: true, execute: false, json: true)
+    assert_empty JSON.parse(replay.string).fetch("actions")
+  end
+
+  def test_gc_archives_a_reaped_claim_on_a_hot_window_that_starts_at_the_reap
+    now = Time.utc(2026, 7, 12, 12, 0, 0)
+    claim_path = write_abandoned_claim("aged-out", now - (30 * 86_400))
+    synthetic_path = write_abandoned_claim("aged-out-synthetic", now - (30 * 86_400), "synthetic" => true)
+    reap_runner = AgentCoord::Runner.new([], stdout: StringIO.new, clock: FixedClock.new(now))
+    assert_equal 0, reap_runner.send(:gc, state_root: @state_root, dry_run: false, execute: true, json: true)
+
+    early = StringIO.new
+    early_runner = AgentCoord::Runner.new([], stdout: early, clock: FixedClock.new(now + (2 * 86_400)))
+    assert_equal 0, early_runner.send(:gc, state_root: @state_root, dry_run: true, execute: false, json: true)
+    early_actions = JSON.parse(early.string).fetch("actions")
+    assert_equal([synthetic_path], early_actions.map { |action| action.fetch("source_path") })
+    assert_equal "archive", early_actions.first.fetch("action")
+    assert_equal "terminal_claim", early_actions.first.fetch("reason")
+    assert_equal now.iso8601, early_actions.first.fetch("eligible_at")
+
+    late = StringIO.new
+    late_runner = AgentCoord::Runner.new([], stdout: late, clock: FixedClock.new(now + (8 * 86_400)))
+    assert_equal 0, late_runner.send(:gc, state_root: @state_root, dry_run: true, execute: false, json: true)
+    late_actions = JSON.parse(late.string).fetch("actions")
+    assert_equal([claim_path, synthetic_path].sort, late_actions.map { |action| action.fetch("source_path") }.sort)
+    assert_equal(["terminal_claim"], late_actions.map { |action| action.fetch("reason") }.uniq)
+  end
+
+  def test_gc_never_reaps_a_claim_whose_lease_is_absent_and_fails_closed_on_an_unparseable_one
+    now = Time.utc(2026, 7, 12, 12, 0, 0)
+    lease_less_path = "claims/shakacode/example/lease-less.json"
+    write_state_record(
+      lease_less_path,
+      "schema_version" => 1, "repo" => "shakacode/example", "target" => "lease-less",
+      "agent_id" => "worker-lease-less", "status" => "active",
+      "claimed_at" => (now - (30 * 86_400)).iso8601, "updated_at" => (now - (30 * 86_400)).iso8601
+    )
+    stdout = StringIO.new
+    runner = AgentCoord::Runner.new([], stdout: stdout, clock: FixedClock.new(now))
+    assert_equal 0, runner.send(:gc, state_root: @state_root, dry_run: true, execute: false, json: true)
+
+    assert_empty JSON.parse(stdout.string).fetch("actions")
+    assert_path_exists File.join(@state_root, lease_less_path)
+
+    { "text" => "not-a-time", "typed" => 12_345 }.each do |name, value|
+      claim_path = write_abandoned_claim("bad-lease-#{name}", now - (30 * 86_400), "expires_at" => value)
+
+      result = run_agent_coord("gc", "--dry-run", "--json")
+
+      # Fail closed on the record, not on the run: the corrupt claim is never
+      # reaped, but it is reported rather than raised so it cannot deny gc to
+      # every other record in the fleet.
+      assert_equal 0, result.status.exitstatus, result.stderr
+      assert_includes result.stderr, "gc claim has invalid expires_at at #{claim_path}"
+      refute_includes result.stderr, "bin/agent-coord:"
+      assert_empty reap_sources(JSON.parse(result.stdout))
+      assert_path_exists File.join(@state_root, claim_path)
+      FileUtils.rm(File.join(@state_root, claim_path))
+    end
+  end
+
+  def test_gc_corrupt_claim_lease_does_not_deny_retention_work_for_every_other_record
+    now = Time.utc(2026, 7, 12, 12, 0, 0)
+    write_abandoned_claim("bad-lease", now - (30 * 86_400), "expires_at" => "soon")
+    # A non-string lease must be named by type: interpolating it raw would spill
+    # the whole nested value into the operator's warning.
+    write_abandoned_claim("typed-lease", now - (30 * 86_400), "expires_at" => { "nested" => "leaked-secret" })
+    write_state_record(
+      "claims/shakacode/example/good.json",
+      "schema_version" => 1, "repo" => "shakacode/example", "target" => "good",
+      "agent_id" => "worker-good", "status" => "released", "updated_at" => (now - (30 * 86_400)).iso8601
+    )
+    stdout = StringIO.new
+    stderr = StringIO.new
+    runner = AgentCoord::Runner.new([], stdout: stdout, stderr: stderr, clock: FixedClock.new(now))
+
+    assert_equal 0, runner.send(:gc, state_root: @state_root, dry_run: true, execute: false, json: true)
+
+    actions = JSON.parse(stdout.string).fetch("actions")
+
+    assert_equal(["claims/shakacode/example/good.json"], actions.map { |action| action.fetch("source_path") })
+    assert_equal(["archive"], actions.map { |action| action.fetch("action") })
+    assert_includes stderr.string, "invalid expires_at at claims/shakacode/example/bad-lease.json: \"soon\""
+    assert_includes stderr.string, "invalid expires_at at claims/shakacode/example/typed-lease.json: non-string Hash"
+    refute_includes stderr.string, "leaked-secret"
+  end
+
+  def test_gc_reads_each_claim_holder_heartbeat_once_per_run
+    now = Time.utc(2026, 7, 12, 12, 0, 0)
+    3.times do |index|
+      write_abandoned_claim("shared-#{index}", now - (3 * 86_400), "agent_id" => "shared-holder")
+    end
+    write_state_record(
+      "heartbeats/shared-holder.json",
+      "schema_version" => 1, "agent_id" => "shared-holder", "status" => "in_progress",
+      "updated_at" => (now - 7200).iso8601, "expires_at" => (now - 6300).iso8601
+    )
+    store = CountingLocalStore.new(@state_root)
+    runner = AgentCoord::Runner.new([], stdout: StringIO.new, clock: FixedClock.new(now))
+
+    candidates = runner.send(:gc_reap_candidates, store, now, 1, %w[claims heartbeats])
+
+    assert_equal 3, candidates.length
+    assert_equal 1, store.reads.count("heartbeats/shared-holder.json")
+  end
+
+  def test_gc_withholds_the_reaper_when_heartbeats_are_outside_the_selected_prefixes
+    now = Time.utc(2026, 7, 12, 12, 0, 0)
+    claim_path = write_abandoned_claim("abandoned", now - (3 * 86_400))
+    stdout = StringIO.new
+    stderr = StringIO.new
+    runner = AgentCoord::Runner.new([], stdout: stdout, stderr: stderr, clock: FixedClock.new(now))
+
+    assert_equal 0, runner.send(
+      :gc, state_root: @state_root, dry_run: true, execute: false, json: true, prefixes: ["claims"]
+    )
+
+    # The documented claims-scoped token can read claims and their archive
+    # mirror and nothing else, so the reaper must withdraw rather than widen the
+    # run into heartbeats. It says why, so an empty plan is not a mystery.
+    assert_empty reap_sources(JSON.parse(stdout.string))
+    assert_includes stderr.string, "--prefix heartbeats alongside --prefix claims"
+    assert_path_exists File.join(@state_root, claim_path)
+
+    store = CountingLocalStore.new(@state_root)
+
+    assert_empty runner.send(:gc_reap_candidates, store, now, 1, ["claims"])
+    assert_empty store.reads.grep(%r{\Aheartbeats/})
+  end
+
+  def test_gc_does_not_reap_a_claim_whose_holder_heartbeat_is_unreadable
+    now = Time.utc(2026, 7, 12, 12, 0, 0)
+    2.times { |index| write_abandoned_claim("forbidden-#{index}", now - (3 * 86_400), "agent_id" => "forbidden") }
+    readable_path = write_abandoned_claim("readable", now - (3 * 86_400), "agent_id" => "readable")
+    stderr = StringIO.new
+    runner = AgentCoord::Runner.new([], stdout: StringIO.new, stderr: stderr, clock: FixedClock.new(now))
+    store = ForbiddenHeartbeatStore.new(@state_root, "heartbeats/forbidden.json")
+
+    candidates = runner.send(:gc_reap_candidates, store, now, 1, %w[claims heartbeats])
+
+    # An unreadable heartbeat is not evidence the holder is gone, so its claims
+    # are left alone; a backend that answered 404 instead of 403 would otherwise
+    # let gc reap a live lane. Unrelated reaping still proceeds.
+    assert_equal([readable_path], candidates.map { |candidate| candidate.dig(:action, "source_path") })
+    assert_equal 1, stderr.string.scan("cannot read the heartbeat for claim holder \"forbidden\"").length
+    assert_equal 1, store.reads.count("heartbeats/forbidden.json")
+  end
+
+  def test_gc_plans_one_action_per_record_and_reaping_outranks_archiving
+    now = Time.utc(2026, 7, 12, 12, 0, 0)
+    # Active but already carrying a terminal marker: eligible for the archive
+    # pass and the reaper at once.
+    claim_path = write_abandoned_claim("dual", now - (4 * 86_400), "terminal" => "done")
+    dry = StringIO.new
+    AgentCoord::Runner.new([], stdout: dry, clock: FixedClock.new(now))
+                      .send(:gc, state_root: @state_root, dry_run: true, execute: false, json: true)
+    executed = StringIO.new
+    execute_runner = AgentCoord::Runner.new([], stdout: executed, clock: FixedClock.new(now))
+
+    assert_equal 0, execute_runner.send(:gc, state_root: @state_root, dry_run: false, execute: true, json: true)
+
+    planned = JSON.parse(dry.string).fetch("actions")
+
+    assert_equal planned, JSON.parse(executed.string).fetch("actions")
+    assert_equal([{ "action" => "reap", "source_path" => claim_path, "reason" => "expired_lease",
+                    "eligible_at" => (now - (4 * 86_400)).iso8601 }], planned)
+    reaped = JSON.parse(File.read(File.join(@state_root, claim_path)))
+
+    assert_equal "expired", reaped.fetch("status")
+    assert_empty Dir.glob(File.join(@state_root, "archive", "**", "*.json"))
+
+    # The reap is not a dead end: the ordinary terminal-claim path collects the
+    # record once its hot window elapses from the reap.
+    later = StringIO.new
+    later_runner = AgentCoord::Runner.new([], stdout: later, clock: FixedClock.new(now + (8 * 86_400)))
+
+    assert_equal 0, later_runner.send(:gc, state_root: @state_root, dry_run: true, execute: false, json: true)
+    assert_equal(
+      [["archive", claim_path, "terminal_claim"]],
+      JSON.parse(later.string).fetch("actions").map { |action| action.values_at("action", "source_path", "reason") }
+    )
   end
 
   def test_gc_applies_synthetic_window_only_after_family_specific_eligibility
@@ -6728,6 +7000,46 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     }
   end
 
+  # Four claims whose leases all ended three days ago, differing only in the
+  # holder heartbeat the reaper has to consult before touching them.
+  def expired_lease_holder_records(now)
+    lease_ended = now - (3 * 86_400)
+    ttls = { "live" => [now - 300, now + 600], "stale" => [now - 1800, now - 900],
+             "dead" => [now - 7200, now - 6300] }
+    records = ttls.to_h do |holder, (updated_at, expires_at)|
+      ["heartbeats/#{holder}-holder.json",
+       { "schema_version" => 1, "agent_id" => "#{holder}-holder", "status" => "in_progress",
+         "updated_at" => updated_at.iso8601, "expires_at" => expires_at.iso8601 }]
+    end
+    (ttls.keys + ["missing"]).each_with_object(records) do |holder, all|
+      all["claims/shakacode/example/#{holder}.json"] = {
+        "schema_version" => 1, "repo" => "shakacode/example", "target" => holder,
+        "agent_id" => "#{holder}-holder", "status" => "active",
+        "claimed_at" => (lease_ended - 14_400).iso8601, "updated_at" => (lease_ended - 14_400).iso8601,
+        "expires_at" => lease_ended.iso8601
+      }
+    end
+  end
+
+  def write_abandoned_claim(target, lease_ended, extra = {})
+    path = "claims/shakacode/example/#{target}.json"
+    write_state_record(
+      path,
+      { "schema_version" => 1, "repo" => "shakacode/example", "target" => target,
+        "agent_id" => "worker-#{target}", "status" => "active",
+        "claimed_at" => (lease_ended - 14_400).iso8601, "updated_at" => (lease_ended - 14_400).iso8601,
+        "expires_at" => lease_ended.iso8601 }.merge(extra)
+    )
+    path
+  end
+
+  def reap_sources(payload)
+    payload.fetch("actions")
+           .select { |action| action.fetch("action") == "reap" }
+           .map { |action| action.fetch("source_path") }
+           .sort
+  end
+
   def write_expired_reuse_candidates(now)
     old = (now - (8 * 86_400)).iso8601
     expired = (now - 86_400).iso8601
@@ -6795,6 +7107,38 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
   FixedClock = Struct.new(:time) do
     def now
       time
+    end
+  end
+
+  # Records every record read so a gc pass can be held to one heartbeat round
+  # trip per holder rather than one per claim.
+  class CountingLocalStore < AgentCoord::LocalStore
+    attr_reader :reads
+
+    def initialize(root)
+      super
+      @reads = []
+    end
+
+    def read_json(path)
+      @reads << path
+      super
+    end
+  end
+
+  # Stands in for a least-privileged HTTP token: one heartbeat path answers the
+  # way a forbidden read does, while every other record reads normally.
+  class ForbiddenHeartbeatStore < CountingLocalStore
+    def initialize(root, forbidden_path)
+      super(root)
+      @forbidden_path = forbidden_path
+    end
+
+    def read_json(path)
+      return super unless path == @forbidden_path
+
+      @reads << path
+      raise AgentCoord::OperationalError, "state read forbidden at #{path}"
     end
   end
 

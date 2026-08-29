@@ -401,7 +401,7 @@ bin/agent-coord log [OWNER/REPO#TARGET] [--since VALUE] [--machine ID] [--host c
 bin/agent-coord version [--json]
 bin/agent-coord config [show] [--json]
 bin/agent-coord doctor [--json|--stack-json] [--deep] [--doctor-prefix PREFIX] [--state-root PATH|--api-url URL|--backend OWNER/REPO]
-bin/agent-coord gc (--dry-run|--execute) [--json] [--hot-days DAYS] [--archive-days DAYS] [--synthetic-hot-days DAYS]
+bin/agent-coord gc (--dry-run|--execute) [--json] [--hot-days DAYS] [--archive-days DAYS] [--synthetic-hot-days DAYS] [--lease-grace-days DAYS]
 bin/agent-coord bootstrap [--install-dir PATH] [--profile PATH] [--no-profile]
 bin/agent-coord demo
 ```
@@ -902,8 +902,53 @@ delete can leave a stale expiring envelope, but CAS prevents deletion of the
 new live payload.
 Expired archive envelopes are deleted with the same compare-and-swap guard.
 
+A claim whose lease elapsed but was never released has its own disposition.
+Nothing else transitions such a record, so without this pass it stays `active`
+forever and `status` stops being a usable signal. `gc` reaps it: the record is
+rewritten in place to the terminal `expired` status with a `reaped_at` stamp,
+under the `reap` action and the `expired_lease` reason in the plan. The reap is
+deliberately not an archive. `expired` is terminal but distinct from `released`,
+so an abandoned lane stays countable rather than being laundered into a clean
+handoff, and it stays visible to `status`, `log`, and scorecards for the normal
+hot window before the ordinary `terminal_claim` path archives it. That hot
+window starts at `reaped_at`; `updated_at` and `expires_at` are left as the
+holder wrote them, so a long-abandoned lane keeps reading as long abandoned. A
+record already carrying `expired` is not reaped again.
+
+A reap requires both that the holder is gone and that the lease has been over
+for a while. The holder test is the takeover rule, unchanged: a `live` or
+`stale` holder heartbeat still owns the lane even past its lease and is never
+reaped, while a `dead` or absent heartbeat falls through to the lease itself.
+The lease test is `expires_at` plus `--lease-grace-days`
+(default 1), so a slow renewal on a paused or throttled machine does not cost a
+lane its claim. A claim with no `expires_at` never recorded a lease and is left
+hot.
+
+The reaper is fail-closed about holder evidence, because a holder wrongly judged
+gone costs a working lane its live claim. Reaping therefore needs `heartbeats`
+among the selected prefixes: with `--prefix claims` alone it withdraws instead of
+reading outside the requested scope, plans no reaps, and reports on stderr how
+many expired-lease claims it left alone and which prefix to add. A heartbeat that
+cannot be read — a scoped token refusing one holder, an unreachable backend — is
+not evidence of absence either, so that holder's claims are reported and left
+alone while the rest of the run proceeds. Likewise a present but unparseable
+`expires_at` is a corrupt record: it is never reaped and is reported with its
+path, but it does not deny GC to every other record, since the lease is read for
+every active claim rather than only for records already found eligible. A
+non-string lease is named by type so a nested value is not spilled into the
+warning.
+
+Each record gets at most one action per plan. A claim that is still `active`
+while carrying a terminal marker is eligible for both the archive pass and the
+reaper, and the reap wins: archiving a claim nobody released would file it away
+still reading `active` and lose the abandonment the reap exists to record. The
+reaped record reaches the archive on a later run through the ordinary
+`terminal_claim` path, so nothing is stranded and `--dry-run` still describes
+exactly what `--execute` applies.
+
 | Record state | Hot retention | Archive retention | Result |
 | --- | ---: | ---: | --- |
+| Active claim past its lease, holder heartbeat not live or stale | lease + 1 day | n/a | Reap to `expired` in place |
 | Released/terminal claim | 7 days | 30 days | Archive, then delete |
 | Dead or terminal heartbeat | 7 days | 30 days | Archive, then delete |
 | Completed batch | 7 days | 30 days | Archive, then delete |
@@ -911,9 +956,14 @@ Expired archive envelopes are deleted with the same compare-and-swap guard.
 | Eligible claim/heartbeat/batch with `synthetic: true` | 1 day | 30 days | Aggressive archive, then delete |
 | Fully synthetic orphan event generation | 1 day per event | 30 days | Compact, then delete |
 
-`--hot-days`, `--archive-days`, and `--synthetic-hot-days` override those
-defaults. Archive retention starts at `archived_at`, so the default lifecycle
-is 7 hot days followed by 30 archive days. Producers mark non-production state
+`--hot-days`, `--archive-days`, `--synthetic-hot-days`, and
+`--lease-grace-days` override those defaults; each rejects a negative value.
+Archive retention starts at `archived_at`, so the default lifecycle
+is 7 hot days followed by 30 archive days. A reaped claim then follows the
+ordinary claim lifecycle from its reap, including the synthetic window.
+The effective policy, `--lease-grace-days` included, is echoed in the `policy`
+block of every plan, so a `--dry-run --json` plan is self-describing and
+`--execute` applies exactly the actions the dry run listed. Producers mark non-production state
 with `--synthetic --synthetic-kind simulation|smoke`; batch manifests may carry
 the same fields. The marker shortens retention only after normal family
 eligibility: active claims, live heartbeats, and incomplete batches remain hot.
@@ -931,6 +981,9 @@ example, `agent-coord gc --execute --prefix claims` works with a
 least-privileged token that can read the selected claims subtree plus its
 archive mirror and can write/delete both. Forbidden selected prefixes remain an
 operational error; GC never silently widens or skips requested scope.
+Expired-lease reaping is the one disposition that needs a second prefix, because
+it must read holder heartbeats to tell an abandoned lane from a working one: run
+`--prefix claims --prefix heartbeats`, or the default all-family scan, to reap.
 Scoped HTTP tokens used for GC need read and write coverage for each selected
 hot prefix and `archive`; use `--all-state` only for a trusted operator machine.
 `release` marks a claim released while preserving the record for auditability.
@@ -1111,8 +1164,15 @@ does not show fake work.
 Required fields: `schema_version`, `repo`, `target`, `agent_id`, `status`,
 `claimed_at`, `updated_at`, `expires_at`.
 
-Allowed claim `status` values are `active` and `released`. A released claim may
-also carry terminal `done`, `abandoned`, or `superseded` semantics. For lane
+Allowed claim `status` values are `active`, `released`, and `expired`. A
+released claim may also carry terminal `done`, `abandoned`, or `superseded`
+semantics. `expired` is written only by `gc`, when a lease elapsed and nobody
+released it; it is terminal like `released` but deliberately distinct from it,
+so an abandoned lane stays countable. An expired claim carries the `reaped_at`
+stamp of that write and keeps the `expires_at` and `updated_at` the holder left
+behind. It never carries a `terminal` state: `done`, `abandoned`, and
+`superseded` are protocol-declared lane outcomes, and an unreleased lease is not
+a declaration. For lane
 status, protocol-declared terminal state wins over heartbeat or GitHub-derived
 state; consumers derive from GitHub only when terminal protocol state is absent.
 Coordinators should treat a claim holder with a `dead` heartbeat as recoverable
