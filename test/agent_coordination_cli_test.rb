@@ -4417,10 +4417,11 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
   # reads, not a scan. plan-pr-batch probes this through `agent-coord-bounded
   # --timeout 20` before assigning work, so a listing here would make every
   # planning probe walk the whole fleet. Alias resolution (#147) widened the set
-  # from one claim path to the work item's three spellings; the bound is still a
-  # constant -- at most three claim reads plus one heartbeat per distinct holder
-  # -- and this asserts the exact paths rather than a count, so an extra read
-  # cannot hide behind an inequality.
+  # from one claim path to the spellings that fold onto the same work item; the
+  # bound is still a constant -- at most four claim reads, three for a canonically
+  # spelled number like this one, plus one heartbeat per distinct holder -- and
+  # this asserts the exact paths rather than a count, so an extra read cannot hide
+  # behind an inequality.
   def test_status_target_scope_json_reads_only_claim_and_holder_heartbeat
     now = Time.utc(2026, 6, 20, 12, 0, 0)
     store = TargetScopedStore.new(now)
@@ -4773,9 +4774,31 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     assert_equal ["worker-4150"], holders
   end
 
-  # A target with no alias family costs exactly the one read it always did.
-  def test_status_target_scope_reads_one_path_for_a_target_with_no_alias_family
-    %w[adhoc:4150 backfill-docs issue:backfill-docs].each do |target|
+  # The candidate set is not an enumeration kept in sync with `log` by hand; it is
+  # the identity itself. Every spelling this scope resolves has to fold back onto
+  # the queried work item, or `status` would report a claim `log` says belongs to
+  # something else. Asserted against work_item_parts directly, so a change to the
+  # folding rule cannot silently widen the candidate set past it.
+  def test_status_target_scope_candidates_all_fold_onto_the_queried_identity
+    runner = AgentCoord::Runner.new([])
+    targets = %w[
+      4150 issue:4150 pr:4150 ISSUE:4150 4150:qa 4150:QA issue:4150:qa
+      backfill-docs adhoc:backfill-docs Backfill-Docs backfill-docs:qa adhoc:backfill-docs:qa
+      adhoc:4150 issue:backfill-docs
+    ]
+
+    targets.each do |target|
+      wanted = AgentCoord.work_item_parts(target)
+      runner.send(:target_alias_spellings, target).each do |spelling|
+        assert_equal wanted, AgentCoord.work_item_parts(spelling), "#{spelling} is not the work item #{target} names"
+      end
+    end
+  end
+
+  # A prefix that survives folding is part of the base, so the target names only
+  # itself and costs exactly the one read it always did.
+  def test_status_target_scope_reads_one_path_for_a_target_whose_prefix_is_part_of_its_base
+    %w[adhoc:4150 issue:backfill-docs pr:backfill-docs].each do |target|
       expected = ["claims/shakacode/react_on_rails/#{target}.json"]
       store = CandidatePathStore.new(expected)
       runner = AgentCoord::Runner.new([], stdout: StringIO.new, clock: FixedClock.new(Time.now.utc))
@@ -4783,18 +4806,75 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
 
       runner.send(:render_status, repo: "shakacode/react_on_rails", target: target, json: true)
 
-      assert_equal expected, store.reads, "#{target} has no alias family"
+      assert_equal expected, store.reads, "#{target} names only itself"
     end
   end
 
-  # Casing is not folded, and the bound is why: claim paths are literal, so
-  # covering casings would cost a read per casing instead of a closed set. The
-  # kind the operator already spelled is not regenerated in canonical case, which
-  # is what keeps this at three reads rather than four.
-  def test_status_target_scope_keeps_three_claim_reads_for_a_mixed_case_kind_prefix
+  # `adhoc:` decorates a slug the way `issue:`/`pr:` decorate a number, so a slug
+  # has a family too -- 90 of the fleet's live claims are `adhoc:` targets, and
+  # resolving only the literal spelling left `status` disagreeing with `log` for
+  # every one of them.
+  def test_status_target_scope_resolves_the_adhoc_family_of_a_slug_target
+    expected = [
+      "claims/shakacode/react_on_rails/backfill-docs.json",
+      "claims/shakacode/react_on_rails/adhoc:backfill-docs.json"
+    ]
+    store = CandidatePathStore.new(expected)
+    runner = AgentCoord::Runner.new([], stdout: StringIO.new, clock: FixedClock.new(Time.now.utc))
+    runner.define_singleton_method(:build_store) { |_options| store }
+
+    runner.send(:render_status, repo: "shakacode/react_on_rails", target: "backfill-docs", json: true)
+
+    assert_equal expected, store.reads
+  end
+
+  def test_status_target_scope_resolves_the_slug_family_of_an_adhoc_target
+    expected = [
+      "claims/shakacode/react_on_rails/adhoc:backfill-docs.json",
+      "claims/shakacode/react_on_rails/backfill-docs.json"
+    ]
+    store = CandidatePathStore.new(expected)
+    runner = AgentCoord::Runner.new([], stdout: StringIO.new, clock: FixedClock.new(Time.now.utc))
+    runner.define_singleton_method(:build_store) { |_options| store }
+
+    runner.send(:render_status, repo: "shakacode/react_on_rails", target: "adhoc:backfill-docs", json: true)
+
+    assert_equal expected, store.reads
+  end
+
+  # A claim written `adhoc:<slug>` answers a query for the bare slug and back
+  # again, the same way `issue:<n>` and `<n>` answer for each other.
+  def test_status_target_scope_finds_a_claim_written_under_the_adhoc_spelling
+    now = Time.now.utc
+    write_claim("adhoc:backfill-docs", agent_id: "worker-docs", updated_at: now - 60, expires_at: now + 3600)
+
+    assert_equal ["adhoc:backfill-docs"], status_target_claim_targets("backfill-docs")
+  end
+
+  def test_status_target_scope_finds_a_bare_slug_claim_from_an_adhoc_target
+    now = Time.now.utc
+    write_claim("backfill-docs", agent_id: "worker-docs", updated_at: now - 60, expires_at: now + 3600)
+
+    assert_equal ["backfill-docs"], status_target_claim_targets("adhoc:backfill-docs")
+  end
+
+  # The lane rides along on the slug family too, and the parent stays separate.
+  def test_status_target_scope_folds_the_adhoc_family_within_a_lane
+    now = Time.now.utc
+    write_claim("adhoc:backfill-docs:qa", agent_id: "worker-lane", updated_at: now - 60, expires_at: now + 3600)
+
+    assert_equal ["adhoc:backfill-docs:qa"], status_target_claim_targets("backfill-docs:qa")
+    assert_empty status_target_claim_targets("backfill-docs")
+  end
+
+  # A mixed-case query costs the canonical spelling of what was typed on top of
+  # the family, and nothing else: four paths, still a constant. Arbitrary casings
+  # are unbounded, so this covers the query side only -- see the limit test below.
+  def test_status_target_scope_keeps_four_claim_reads_for_a_mixed_case_kind_prefix
     expected = [
       "claims/shakacode/react_on_rails/ISSUE:4150.json",
       "claims/shakacode/react_on_rails/4150.json",
+      "claims/shakacode/react_on_rails/issue:4150.json",
       "claims/shakacode/react_on_rails/pr:4150.json"
     ]
     store = CandidatePathStore.new(expected)
@@ -4804,6 +4884,218 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     runner.send(:render_status, repo: "shakacode/react_on_rails", target: "ISSUE:4150", json: true)
 
     assert_equal expected, store.reads
+  end
+
+  # A slug target gets its canonical spelling probed too, because `log` folds
+  # casing for slugs as well and the two commands have to agree there. Three paths
+  # for a mixed-case slug, two when the query is already canonical.
+  def test_status_target_scope_reads_the_canonical_spelling_of_a_mixed_case_slug_target
+    expected = [
+      "claims/shakacode/react_on_rails/Backfill-Docs.json",
+      "claims/shakacode/react_on_rails/backfill-docs.json",
+      "claims/shakacode/react_on_rails/adhoc:backfill-docs.json"
+    ]
+    store = CandidatePathStore.new(expected)
+    runner = AgentCoord::Runner.new([], stdout: StringIO.new, clock: FixedClock.new(Time.now.utc))
+    runner.define_singleton_method(:build_store) { |_options| store }
+
+    runner.send(:render_status, repo: "shakacode/react_on_rails", target: "Backfill-Docs", json: true)
+
+    assert_equal expected, store.reads
+  end
+
+  # The query side of casing is closed; the stored side is not. `log` would report
+  # a claim written `Issue:4150` for `--target 4150`, and no closed point-read set
+  # can, because the casings are unbounded. Pinned so the limit stays deliberate
+  # and documented rather than becoming an accident.
+  def test_status_target_scope_does_not_probe_arbitrary_casings_of_a_stored_claim
+    expected = [
+      "claims/shakacode/react_on_rails/4150.json",
+      "claims/shakacode/react_on_rails/issue:4150.json",
+      "claims/shakacode/react_on_rails/pr:4150.json"
+    ]
+    store = CandidatePathStore.new(expected)
+    runner = AgentCoord::Runner.new([], stdout: StringIO.new, clock: FixedClock.new(Time.now.utc))
+    runner.define_singleton_method(:build_store) { |_options| store }
+
+    runner.send(:render_status, repo: "shakacode/react_on_rails", target: "4150", json: true)
+
+    assert_equal expected, store.reads
+    refute_includes store.reads, "claims/shakacode/react_on_rails/Issue:4150.json"
+  end
+
+  # A mixed-case query has to reach the canonical key the fleet actually holds, or
+  # `status` and `log` are back in disagreement. Store double, not the filesystem:
+  # on a case-insensitive checkout this passes without the candidate existing.
+  def test_status_target_scope_finds_a_canonically_stored_claim_from_a_mixed_case_query
+    now = Time.utc(2026, 6, 20, 12, 0, 0)
+    expected = [
+      "claims/shakacode/react_on_rails/ISSUE:4150.json",
+      "claims/shakacode/react_on_rails/4150.json",
+      "claims/shakacode/react_on_rails/issue:4150.json",
+      "claims/shakacode/react_on_rails/pr:4150.json",
+      "heartbeats/worker-4150.json"
+    ]
+    records = {
+      "claims/shakacode/react_on_rails/issue:4150.json" => target_claim_fixture(now, "issue:4150", "worker-4150"),
+      "heartbeats/worker-4150.json" => target_heartbeat_fixture(now, "worker-4150")
+    }
+    store = CandidatePathStore.new(expected, records)
+    stdout = StringIO.new
+    runner = AgentCoord::Runner.new([], stdout: stdout, clock: FixedClock.new(now))
+    runner.define_singleton_method(:build_store) { |_options| store }
+
+    result = runner.send(:render_status, repo: "shakacode/react_on_rails", target: "ISSUE:4150", json: true)
+    payload = JSON.parse(stdout.string)
+    claimed = payload.fetch("claims").map { |claim| claim.fetch("target") }
+
+    assert_equal 0, result
+    assert_equal expected, store.reads
+    assert_equal ["issue:4150"], claimed
+    assert_equal "ISSUE:4150", payload.fetch("scope").fetch("target")
+  end
+
+  # One key written under two casings is a single lease recorded twice, and on a
+  # case-insensitive checkout the two candidates are literally one file. Collapse
+  # on the case-folded claim key the way `log_claim_lookup` does -- newest wins --
+  # while two genuinely distinct keys stay two leases. The superseded record's
+  # holder is never read, because the collapse happens before heartbeats.
+  def test_status_target_scope_collapses_one_lease_recorded_under_two_casings
+    now = Time.utc(2026, 6, 20, 12, 0, 0)
+    expected = [
+      "claims/shakacode/react_on_rails/ISSUE:4150.json",
+      "claims/shakacode/react_on_rails/4150.json",
+      "claims/shakacode/react_on_rails/issue:4150.json",
+      "claims/shakacode/react_on_rails/pr:4150.json",
+      "heartbeats/worker-new.json",
+      "heartbeats/worker-pr.json"
+    ]
+    records = {
+      "claims/shakacode/react_on_rails/ISSUE:4150.json" =>
+        target_claim_fixture(now, "issue:4150", "worker-old", updated_at: now - 600),
+      "claims/shakacode/react_on_rails/issue:4150.json" =>
+        target_claim_fixture(now, "issue:4150", "worker-new", updated_at: now - 60),
+      "claims/shakacode/react_on_rails/pr:4150.json" =>
+        target_claim_fixture(now, "pr:4150", "worker-pr", updated_at: now - 30),
+      "heartbeats/worker-new.json" => target_heartbeat_fixture(now, "worker-new"),
+      "heartbeats/worker-pr.json" => target_heartbeat_fixture(now, "worker-pr")
+    }
+    store = CandidatePathStore.new(expected, records)
+    stdout = StringIO.new
+    runner = AgentCoord::Runner.new([], stdout: stdout, clock: FixedClock.new(now))
+    runner.define_singleton_method(:build_store) { |_options| store }
+
+    runner.send(:render_status, repo: "shakacode/react_on_rails", target: "ISSUE:4150", json: true)
+    payload = JSON.parse(stdout.string)
+    holders = payload.fetch("claims").map { |claim| claim.fetch("agent_id") }
+    claimed = payload.fetch("claims").map { |claim| claim.fetch("target") }
+
+    assert_equal expected, store.reads
+    assert_equal ["issue:4150", "pr:4150"], claimed
+    assert_equal %w[worker-new worker-pr], holders
+  end
+
+  # A stale or half-written sibling is not an answer to the question that was
+  # asked. Aborting on it turns a query the healthy record answers perfectly into
+  # exit 2, which a plan-pr-batch probe reads as "custody unknown" and stops on.
+  def test_status_target_scope_reports_a_healthy_claim_when_a_sibling_alias_is_corrupt
+    now = Time.now.utc
+    write_claim("4150", agent_id: "worker-a", updated_at: now - 60, expires_at: now + 3600)
+    write_state_file("claims/shakacode/react_on_rails/pr:4150.json", "{")
+
+    status = run_agent_coord("status", "--repo", "shakacode/react_on_rails", "--target", "4150", "--json")
+
+    assert_equal 0, status.status.exitstatus, status.stderr
+    payload = JSON.parse(status.stdout)
+    claimed = payload.fetch("claims").map { |claim| claim.fetch("target") }
+    note = "claims/shakacode/react_on_rails/pr:4150.json unreadable; a claim there would not be reported"
+
+    assert_equal ["4150"], claimed
+    assert_equal note, payload.fetch("section_notes").fetch("claims")
+    assert_includes payload.fetch("degraded"), note
+  end
+
+  # Valid JSON that is not an object cannot be a claim, and reading a field off it
+  # raises. That is the same "this candidate cannot answer" as a truncated file,
+  # so it degrades the same way rather than crashing on an unrelated sibling.
+  def test_status_target_scope_reports_a_healthy_claim_when_a_sibling_alias_is_not_an_object
+    now = Time.now.utc
+    write_claim("4150", agent_id: "worker-a", updated_at: now - 60, expires_at: now + 3600)
+    write_state_file("claims/shakacode/react_on_rails/pr:4150.json", "[]")
+
+    status = run_agent_coord("status", "--repo", "shakacode/react_on_rails", "--target", "4150", "--json")
+
+    assert_equal 0, status.status.exitstatus, status.stderr
+    payload = JSON.parse(status.stdout)
+    claimed = payload.fetch("claims").map { |claim| claim.fetch("target") }
+    note = "claims/shakacode/react_on_rails/pr:4150.json not a claim record; a claim there would not be reported"
+
+    assert_equal ["4150"], claimed
+    assert_equal note, payload.fetch("section_notes").fetch("claims")
+  end
+
+  # The degraded note is the whole reason skipping the candidate is honest: an
+  # operator who reads `none` must be told a candidate could not be read, or
+  # "could not check" prints identically to "definitely unclaimed".
+  def test_status_target_scope_names_an_unreadable_alias_when_nothing_else_is_claimed
+    write_state_file("claims/shakacode/react_on_rails/issue:4150.json", "{")
+
+    status = run_agent_coord("status", "--repo", "shakacode/react_on_rails", "--target", "4150")
+
+    assert_equal 0, status.status.exitstatus, status.stderr
+    assert_includes status.stdout, "claims/shakacode/react_on_rails/issue:4150.json unreadable"
+    assert_includes status.stdout, "a claim there would not be reported"
+  end
+
+  # The queried spelling is the question that was asked, so it keeps the failure
+  # it has always had -- even when an alias could have answered instead. Softening
+  # this would answer a different question than the operator typed.
+  def test_status_target_scope_still_fails_hard_when_the_queried_claim_is_corrupt
+    now = Time.now.utc
+    write_claim("issue:4150", agent_id: "worker-a", updated_at: now - 60, expires_at: now + 3600)
+    write_state_file("claims/shakacode/react_on_rails/4150.json", "{")
+
+    status = run_agent_coord("status", "--repo", "shakacode/react_on_rails", "--target", "4150", "--json")
+
+    assert_equal 2, status.status.exitstatus
+    assert_empty status.stdout
+    assert_includes status.stderr, "state unreadable"
+  end
+
+  # Exact record-path read scopes are part of the authorization contract, so a
+  # token can legitimately reach the queried claim and none of its siblings. That
+  # is a candidate that cannot answer, not a failed query.
+  def test_status_target_scope_degrades_when_an_alias_is_forbidden_by_a_scoped_token
+    now = Time.utc(2026, 6, 20, 12, 0, 0)
+    path = "claims/shakacode/react_on_rails/pr:4150.json"
+    store = FailingAliasTargetScopedStore.new(now, "http backend read #{path} failed: 403 forbidden")
+    stdout = StringIO.new
+    runner = AgentCoord::Runner.new([], stdout: stdout, clock: FixedClock.new(now))
+    runner.define_singleton_method(:build_store) { |_options| store }
+
+    result = runner.send(:render_status, repo: "shakacode/react_on_rails", target: "4150", json: true)
+    payload = JSON.parse(stdout.string)
+    claimed = payload.fetch("claims").map { |claim| claim.fetch("target") }
+    note = "#{path} not readable by scoped token; a claim there would not be reported"
+
+    assert_equal 0, result
+    assert_equal ["4150"], claimed
+    assert_equal note, payload.fetch("section_notes").fetch("claims")
+    assert_includes payload.fetch("degraded"), note
+  end
+
+  # Narrowly rescued: a dead backend is a failed query, not an absent claim, and
+  # reporting it as one would be the silent wrong answer this scope exists to
+  # prevent.
+  def test_status_target_scope_does_not_degrade_past_an_unexpected_alias_failure
+    now = Time.utc(2026, 6, 20, 12, 0, 0)
+    store = FailingAliasTargetScopedStore.new(now, "http backend read claims failed: 500 internal error")
+    runner = AgentCoord::Runner.new([], stdout: StringIO.new, clock: FixedClock.new(now))
+    runner.define_singleton_method(:build_store) { |_options| store }
+
+    assert_raises(AgentCoord::OperationalError) do
+      runner.send(:render_status, repo: "shakacode/react_on_rails", target: "4150", json: true)
+    end
   end
 
   # Generating candidates must not swallow the validation error the queried
@@ -4824,8 +5116,21 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     write_claim("issue:4150", agent_id: "worker-a", updated_at: now - 60, expires_at: now + 3600)
     write_claim("pr:4150", agent_id: "worker-b", updated_at: now - 30, expires_at: now + 3600)
     write_claim("4150:qa", agent_id: "worker-lane", updated_at: now - 30, expires_at: now + 3600)
+    # Every spelling below is answered by a claim written under some *other*
+    # spelling of it, so a row cannot agree vacuously by finding nothing on both
+    # sides. `adhoc:` decorates a slug, so `adhoc:backfill-docs` answers for
+    # `backfill-docs`; `adhoc:4150` is its own item and must answer for neither.
+    write_claim("adhoc:backfill-docs", agent_id: "worker-docs", updated_at: now - 30, expires_at: now + 3600)
+    write_claim("adhoc:4150", agent_id: "worker-adhoc", updated_at: now - 30, expires_at: now + 3600)
 
-    %w[4150 issue:4150 pr:4150 4150:qa issue:4150:qa adhoc:4150 backfill-docs].each do |spelling|
+    # The mixed-case spellings are the ones that diverge on a case-sensitive
+    # backend; on a case-insensitive checkout the filesystem hides the difference,
+    # so this pins agreement on CI rather than here.
+    spellings = %w[
+      4150 issue:4150 pr:4150 ISSUE:4150 4150:qa issue:4150:qa
+      adhoc:4150 backfill-docs adhoc:backfill-docs Backfill-Docs issue:backfill-docs
+    ]
+    spellings.each do |spelling|
       log = run_agent_coord("log", "--repo", "shakacode/react_on_rails", "--target", spelling, "--json")
 
       assert_equal 0, log.status.exitstatus, log.stderr
@@ -7277,20 +7582,41 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     end
   end
 
-  # Holds nothing and answers every declared path with a miss: for tests whose
-  # subject is the candidate set itself rather than the records behind it. Reading
-  # anything the test did not declare raises, so an extra candidate cannot pass by
-  # returning nil.
+  # Answers exactly the paths a test declares -- with a record where the test
+  # supplies one, otherwise with a miss -- and raises for anything else, so an
+  # extra candidate cannot pass by returning nil. Path matching is case-sensitive
+  # by construction, which is the point: a case-insensitive checkout folds
+  # `ISSUE:4150.json` onto `issue:4150.json` and would pass a filesystem test even
+  # if the candidate were never generated.
   class CandidatePathStore < NoBroadScanStore
-    def initialize(expected)
+    def initialize(expected, records = {})
       super()
       @expected = expected
+      @records = records
     end
 
     def read_json(path)
       raise AgentCoord::OperationalError, "unexpected read #{path}" unless @expected.include?(path)
 
-      missing(path)
+      @records.key?(path) ? stored(path, @records.fetch(path)) : missing(path)
+    end
+  end
+
+  # One alias candidate fails at the store layer; everything else answers as
+  # usual. The message decides whether that is a candidate this scope may degrade
+  # past or a failure of the whole query.
+  class FailingAliasTargetScopedStore < TargetScopedStore
+    FAILING_PATH = "claims/shakacode/react_on_rails/pr:4150.json"
+
+    def initialize(now, message)
+      super(now)
+      @message = message
+    end
+
+    def read_json(path)
+      raise AgentCoord::OperationalError, @message if path == FAILING_PATH
+
+      super
     end
   end
 
@@ -7900,6 +8226,38 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
 
     assert_equal target, payload.fetch("scope").fetch("target"), "scope echoes the spelling that was asked about"
     payload.fetch("claims").map { |claim| claim.fetch("target") }
+  end
+
+  def write_state_file(path, contents)
+    full_path = File.join(@state_root, path)
+    FileUtils.mkdir_p(File.dirname(full_path))
+    File.write(full_path, contents)
+  end
+
+  def target_claim_fixture(now, target, agent_id, updated_at: now - 60)
+    {
+      "schema_version" => 1,
+      "repo" => "shakacode/react_on_rails",
+      "target" => target,
+      "agent_id" => agent_id,
+      "branch" => "jg-codex/#{agent_id}",
+      "status" => "active",
+      "claimed_at" => (updated_at - 30).iso8601,
+      "updated_at" => updated_at.iso8601,
+      "expires_at" => (now + 3600).iso8601
+    }
+  end
+
+  def target_heartbeat_fixture(now, agent_id)
+    {
+      "schema_version" => 1,
+      "agent_id" => agent_id,
+      "repo" => "shakacode/react_on_rails",
+      "target" => "4150",
+      "status" => "in_progress",
+      "updated_at" => (now - 60).iso8601,
+      "expires_at" => (now + 600).iso8601
+    }
   end
 
   def write_state_record(path, payload)

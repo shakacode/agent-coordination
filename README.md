@@ -708,22 +708,37 @@ lanes, lane dependencies, blocked-on refs, and recent events for broad audits.
 Scoped status is the preferred batch-workflow path:
 
 - `status --repo OWNER/REPO --target ISSUE_OR_PR` reads only the claim paths for
-  that work item's spellings, plus one heartbeat per distinct claim holder. A
-  target naming a GitHub number resolves three claim paths: the queried spelling,
-  plus the item's other spellings drawn from `<n>`, `issue:<n>`, and `pr:<n>`.
-  `claim` writes the raw target, so the same item can be held under any of them,
-  and `log` folds those spellings onto one identity. Every claim found is reported, so two agents
-  holding `9832` and `pr:9832` both appear. Any other target — a slug, an `adhoc:`
-  target, `issue:<slug>` — has no alias family and costs the single literal read
-  it always did. So target scope is at most three claim reads plus one heartbeat
-  per holder, independent of fleet size: point reads only, never a listing or a
-  prefix scan. Two limits are deliberate. Lane suffixes are never folded away
-  (`--target 319` does not report a claim on `319:qa`, and `--target 319:qa`
-  resolves `issue:319:qa` and `pr:319:qa`, not `319`), because a lane holds its
-  own lease. Casing is not folded: claim paths are literal, so the generated
-  spellings carry the queried casing for the number and lane, and lowercase
-  `issue:`/`pr:` for a prefix the query did not itself spell — a claim written
-  `ISSUE:319` is found by that spelling and by no other.
+  that work item's spellings, plus one heartbeat per distinct claim holder.
+  `claim` writes the raw target, so one item can be held under any spelling of
+  itself, and the candidate set is exactly the spellings `log` folds onto the same
+  work item: `<n>`, `issue:<n>`, and `pr:<n>` for a number; `<slug>` and
+  `adhoc:<slug>` for a slug. A prefix that survives folding is part of the
+  identity, so `adhoc:319` and `issue:<slug>` each name only themselves and cost
+  the single literal read they always did. A query spelled in non-canonical case
+  also probes its canonical form. That is at most four claim reads — three for a
+  canonically spelled number, two for a slug, one where the prefix is part of the
+  base — plus one heartbeat per distinct holder, independent of fleet size: point
+  reads only, never a listing or a prefix scan. Every claim found is reported, so
+  two agents holding `9832` and `pr:9832` both appear; one lease recorded under
+  two casings collapses to its newest record, the same grouping `log` uses. Lane
+  suffixes are never folded away, because a lane holds its own lease: `--target
+  319` does not report a claim on `319:qa`, and `--target 319:qa` resolves
+  `issue:319:qa` and `pr:319:qa`, not `319`.
+  - The queried spelling and the alias spellings fail differently on purpose. A
+    corrupt or unreadable record at the *queried* path is still a hard error with
+    exit 2, unchanged. An *alias* candidate that cannot be read — malformed, not a
+    claim object, or outside a scoped token's read prefixes — does not abort the
+    query: the healthy records still answer, the exit stays 0, and a `claims`
+    section note names the path and says a claim there would not be reported. That
+    note also appears in `degraded`. Read it: `claims: none` with such a note is
+    "could not check everything", which is not the same answer as a bare
+    `claims: none`.
+  - Casing is folded on the query side only. Claim paths are literal, so covering
+    every casing a claim could have been *written* under would cost a read per
+    casing rather than a closed set. `--target Issue:319` finds a claim stored
+    canonically as `issue:319`, but a claim stored as `Issue:319` is found only by
+    that same spelling — `--target 319` will not find it. `log`, which lists and
+    folds, still will.
 - `status --batch-id ID` reads only `batches/<id>.json`, `events/<id>/`,
   lane-owner heartbeats, and dependency batch files plus referenced lane-owner
   heartbeats needed to compute `blocked_on`.

@@ -398,26 +398,43 @@ when releases begin.
   `claims` section read `- none` — while `log --target 319` reported that same
   live claim; and with `9832` and `pr:9832` held at the same time by two different
   agents, `status --target 9832` reported only the first holder while `log`
-  reported both. Target scope now reads a closed candidate set of point reads —
-  the queried spelling first, then the item's other spellings drawn from `<n>`,
-  `issue:<n>`, and `pr:<n>` — which is at most three claim reads plus one
-  heartbeat per distinct holder, independent of how many claims the fleet holds.
-  It is deliberately not a claims listing: `plan-pr-batch` probes this scope
-  through `agent-coord-bounded --timeout 20` before assigning work, so a listing
-  would make every planning probe scan the whole fleet. Every claim found is
-  reported, matching what `log` already did, so two agents holding `9832` and
-  `pr:9832` both appear rather than one hiding the other, and each holder's
-  heartbeat is read once however many of its leases answer. A lane holds its own
-  lease, so lane suffixes stay distinct and ride along on each spelling instead of
-  being folded away: `--target 319` still does not report a claim on `319:qa`,
-  while `--target 319:qa` now also resolves `issue:319:qa` and `pr:319:qa`.
-  `adhoc:319` is not a candidate for `319`, following the same decorative-prefix
-  rule — `issue:`/`pr:` come off ahead of a number, `adhoc:` does not. Casing is
-  deliberately not folded, because claim paths are literal and covering casings
-  would cost a read per casing rather than a closed set: a generated spelling
-  carries the casing the query used and lowercases only a prefix the query did not
-  itself spell, so a claim written `ISSUE:319` is found by that spelling and by no
-  other (issue #147).
+  reported both. Ad hoc work had the same divergence in a different spelling and
+  is 21% of the live fleet: `status --target <slug>` reported nothing for a claim
+  held under `adhoc:<slug>`, which `log` reported. Target scope now reads exactly
+  the spellings that fold onto the queried work item — `<n>`, `issue:<n>`,
+  `pr:<n>` for a number, `<slug>` and `adhoc:<slug>` for a slug, and only itself
+  where the prefix is part of the identity, as in `adhoc:319` or `issue:<slug>` —
+  asked of the same decorative-prefix rule `log` matches with, so the two agree by
+  construction rather than by a second enumeration that can drift. A query spelled
+  in non-canonical case also probes its canonical form, so `--target Issue:320`
+  finds the `issue:320` the fleet holds. That is at most four claim reads — three
+  for a canonically spelled number, two for a slug, one where the prefix is part
+  of the base — plus one heartbeat per distinct holder, independent of how many
+  claims the fleet holds. It is deliberately not a claims listing: `plan-pr-batch`
+  probes this scope through `agent-coord-bounded --timeout 20` before assigning
+  work, so a listing would make every planning probe scan the whole fleet; the
+  extra point reads measured at roughly 130ms of added median latency against the
+  live backend, under 5% of that budget. Every claim found is reported, matching
+  what `log` already did, so two agents holding `9832` and `pr:9832` both appear
+  rather than one hiding the other, while one lease recorded under two casings
+  collapses to its newest record through the same grouping `log` uses. Each
+  holder's heartbeat is read once however many of its leases answer. A lane holds
+  its own lease, so lane suffixes stay distinct and ride along on each spelling
+  instead of being folded away: `--target 319` still does not report a claim on
+  `319:qa`, while `--target 319:qa` now also resolves `issue:319:qa` and
+  `pr:319:qa`. The queried spelling and the alias spellings fail differently on
+  purpose. A corrupt or unreadable record at the queried path is still a hard
+  error with exit 2, exactly as before; an alias candidate that cannot be read —
+  malformed, not a claim object, or outside a scoped token's read prefixes — no
+  longer aborts a query the healthy records answer perfectly, which had turned a
+  good answer into the `UNKNOWN` exit code a `plan-pr-batch` probe stops on.
+  Instead the exit stays 0 and a `claims` section note names the path and says a
+  claim there would not be reported, because `claims: none` with a note is "could
+  not check everything" and must not be read as "definitely unclaimed". Casing is
+  folded on the query side only: claim paths are literal, so covering every casing
+  a claim could have been written under would cost a read per casing rather than a
+  closed set, and a claim stored as `Issue:319` is still found only by that
+  spelling (issue #147).
 - `agent-coord log` now reads the events `gc` compacted into `archive/events`
   instead of reporting `no events` for the work item they belong to (issue #139).
   Compaction moves a completed lane's events into an immutable

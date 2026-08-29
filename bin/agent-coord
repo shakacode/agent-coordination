@@ -4904,7 +4904,7 @@ module AgentCoord
     def target_status_payload(store, options, now)
       repo = options.fetch(:repo)
       target = options.fetch(:target)
-      claim_entries = target_claim_candidate_paths(repo, target).filter_map { |path| store.read_json(path) }
+      claim_entries, claim_notes = target_claim_entries(store, repo, target)
       heartbeat_entries, holder_notes = target_holder_heartbeats(store, claim_entries)
       # Claims and heartbeats are cleared on release and expiry, so this scope
       # alone cannot distinguish "never worked" from "worked and finished". Name
@@ -4912,6 +4912,7 @@ module AgentCoord
       # sections that read like an answer.
       unchecked = "not checked in target scope; run `agent-coord log` for this target's history"
       section_notes = { "batches" => unchecked, "events" => unchecked }
+      section_notes["claims"] = claim_notes.join("; ") unless claim_notes.empty?
       section_notes["heartbeats"] = holder_notes.join("; ") unless holder_notes.empty?
 
       status_payload(
@@ -4939,10 +4940,84 @@ module AgentCoord
     # identity, so resolving this scope through the single literal path would
     # report "unclaimed" for an item `log` reports as claimed, in the same second.
     #
+    # The two kinds of read here fail differently on purpose. The queried spelling
+    # is the question the operator asked, so it keeps the semantics it has always
+    # had: a corrupt or forbidden record there is still a hard error. An alias is
+    # a spelling the operator did not ask about, and letting an unrelated stale or
+    # half-written sibling abort a query the healthy record answers perfectly turns
+    # a good answer into exit 2 -- which a plan-pr-batch probe reads as "custody
+    # unknown" and stops on. Those degrade to a note instead.
+    #
+    # A note rather than a silent skip, and this is the load-bearing half: an
+    # operator who sees "none" plus a degraded note must not read it as "definitely
+    # unclaimed". Dropping the failed candidate quietly would produce exactly the
+    # answer this whole scope exists to prevent -- reporting unclaimed while a read
+    # failed -- so the note names the path and says a claim there would not have
+    # been reported. Exit stays 0, matching how status_list_entries already
+    # degrades a forbidden listing and what the README says degraded notes mean.
+    def target_claim_entries(store, repo, target)
+      queried, *aliases = target_claim_candidate_paths(repo, target)
+      notes = []
+      entries = [store.read_json(queried)]
+      aliases.each { |path| entries << target_alias_claim(store, path, notes) }
+      [target_collapsed_claims(entries.compact), notes]
+    end
+
+    # Narrow on purpose. A malformed record and a scope that cannot reach this one
+    # path are both "this candidate cannot answer"; anything else -- a dead
+    # backend, an unsupported route -- is still a failure of the whole query and
+    # must not be reported as an absent claim.
+    def target_alias_claim(store, path, notes)
+      entry = store.read_json(path)
+      # Valid JSON that is not an object cannot be a claim, and reading a field off
+      # it raises -- which would let an unrelated malformed sibling take down a
+      # query the queried spelling answered perfectly.
+      return entry if entry.nil? || entry.data.is_a?(Hash)
+
+      notes << target_alias_note(path, "not a claim record")
+      nil
+    rescue JSON::ParserError
+      notes << target_alias_note(path, "unreadable")
+      nil
+    rescue OperationalError => e
+      raise unless scoped_http_forbidden_read?(e, path)
+
+      notes << target_alias_note(path, "not readable by scoped token")
+      nil
+    end
+
+    def target_alias_note(path, reason)
+      "#{path} #{reason}; a claim there would not be reported"
+    end
+
+    # Exact record-path read scopes are part of the authorization contract
+    # (docs/backend-design.md), so a token may legitimately reach the queried claim
+    # and none of its siblings.
+    def scoped_http_forbidden_read?(error, path)
+      error.message.match?(/\Ahttp backend read #{Regexp.escape(path)} failed: 403 forbidden\z/)
+    end
+
+    # Two candidate paths can name one lease: a case-insensitive checkout resolves
+    # `ISSUE:319.json` and `issue:319.json` to the same file, and one key written
+    # under two casings is a single lease recorded twice. Collapse on the same key
+    # `log` groups on -- the case-folded exact claim key, newest by `updated_at`
+    # winning -- so the two commands agree by construction rather than by
+    # coincidence. Distinct keys such as `9832` and `pr:9832` are two leases and
+    # stay separate; concealing that pair is the failure mode this scope exists to
+    # fix. Group order follows candidate order, and a tie inside a group keeps the
+    # earlier candidate, which is the operator's own spelling.
+    def target_collapsed_claims(entries)
+      entries.group_by { |entry| log_claim_key(entry) }
+             .values
+             .map { |group| group.max_by { |entry| log_at_key(entry.data["updated_at"]) } }
+    end
+
     # This stays a closed set of point reads rather than a claims listing:
     # plan-pr-batch probes target-scoped status through `agent-coord-bounded
     # --timeout 20` before assigning work, so a listing would make every planning
-    # probe scan the whole fleet. At most three reads, whatever the fleet holds.
+    # probe scan the whole fleet. At most four claim reads -- three for a
+    # canonically spelled number, two for a slug, one for a target whose prefix is
+    # part of its base -- whatever the fleet holds.
     #
     # The order is both the read order and the render order: the operator's own
     # spelling first, then the family in a fixed order. Ordering by claim
@@ -4952,8 +5027,9 @@ module AgentCoord
       # The queried spelling resolves first and unrescued: it is the one the
       # operator asked about, so a segment it cannot form must still raise the
       # error it raises today rather than being silently dropped as a candidate.
-      # The generated spellings only add or remove a leading `issue:`/`pr:` on a
-      # segment this call already accepted, so none of them can fail on their own.
+      # The generated spellings are the accepted segment's own characters, folded
+      # to lower case, with a `kind:` prefix added, dropped, or swapped, so none of
+      # them can fail validation once this call has accepted the query.
       paths = [AgentCoord.claim_path(repo, target)]
       target_alias_spellings(target).each do |spelling|
         path = AgentCoord.claim_path(repo, spelling)
@@ -4963,38 +5039,42 @@ module AgentCoord
     end
 
     # Every spelling `claim` could have written for the work item this target
-    # names. Only a GitHub number has a family: work_item_parts drops `issue:`/`pr:`
-    # ahead of a number and nowhere else, so `adhoc:319`, `foo`, and `issue:foo`
-    # each name exactly themselves and degrade to the single literal read this
-    # scope has always done.
+    # names, in canonical case: exactly the set work_item_parts folds onto this
+    # target's (base, lane) identity, so `status` resolves what `log` matches by
+    # construction rather than by a second enumeration that can drift from it.
+    #
+    # Which kinds decorate is the #145 rule, asked of that rule's own predicate
+    # rather than restated here: `issue:`/`pr:` decorate a number, `adhoc:`
+    # decorates a slug. So a number folds with `issue:<n>`/`pr:<n>`, a slug folds
+    # with `adhoc:<slug>` -- 90 of the fleet's claims are `adhoc:` targets and
+    # missing that family was the same divergence in a different spelling -- and a
+    # prefix that was kept is part of the base, so `adhoc:319` and `issue:foo` each
+    # name only themselves.
+    #
+    # Casing is identity to `log`, which matches through work_item_parts and
+    # downcases, but a claim path is literal, so the canonical spelling of what was
+    # typed is always among the candidates: an operator typing `Issue:320` must
+    # find the `issue:320` the fleet actually holds. That is the tractable half.
+    # The other half is not: a claim *written* under an arbitrary casing cannot be
+    # found by a closed point-read set, because the casings are unbounded --
+    # `--target 319` will not find a claim stored as `Issue:319`. README states
+    # that limit. This is strictly more answers than the single literal read, never
+    # fewer, so no query that resolved before stops resolving.
     #
     # A lane suffix rides along on every spelling rather than being folded off. A
     # lane holds its own lease, so `319:qa` is not `319` -- but `issue:319:qa` and
     # `319:qa` are the same lane of the same item, and missing that would hide a
     # live lane holder exactly the way the bare item's aliases hid one.
-    #
-    # Casing is deliberately not folded. work_item_parts downcases for identity,
-    # but claim paths are literal, so covering casings would cost a read per casing
-    # rather than a closed set. Generated spellings therefore carry the operator's
-    # own casing for the number and lane and canonical lowercase for a prefix this
-    # method supplies: a claim written `ISSUE:319` is found by that spelling and by
-    # no other. README states the same limit.
     def target_alias_spellings(target)
-      raw = target.to_s
-      base, = AgentCoord.work_item_parts(raw)
-      return [] unless base.match?(WORK_ITEM_NUMBER)
+      base, lane = AgentCoord.work_item_parts(target)
+      suffix = lane.nil? ? "" : ":#{lane}"
+      # A kept prefix leaves its colon in the base, and prefixing a kind ahead of
+      # that splits differently: `adhoc:adhoc:319` is the `319` lane of an item
+      # called `adhoc`, not the item `adhoc:319`. Such a target names only itself.
+      return ["#{base}#{suffix}"] if base.include?(":")
 
-      # A numeric base means raw is either the bare number or exactly one
-      # decorative kind segment ahead of it -- nothing else parses to a number --
-      # so the tail from the number onward is the bare spelling, lane included.
-      bare = raw.start_with?(base) ? raw : raw.split(":", 2).last
-      spelled = raw == bare ? nil : raw.split(":", 2).first.downcase
-      # The kind the query already spells is never regenerated. `ISSUE:319` is that
-      # operator's spelling of the issue alias, so emitting `issue:319` beside it
-      # would buy a fourth read purely to fold a casing this scope does not fold --
-      # and on a case-insensitive checkout the two paths are one file, which would
-      # report a single lease twice.
-      [bare, *WORK_ITEM_GITHUB_KINDS.reject { |kind| kind == spelled }.map { |kind| "#{kind}:#{bare}" }]
+      kinds = WORK_ITEM_KINDS.select { |kind| AgentCoord.decorative_work_item_kind?(kind, base) }
+      ["#{base}#{suffix}", *kinds.map { |kind| "#{kind}:#{base}#{suffix}" }]
     end
 
     # One heartbeat read per distinct holder, not per claim: two spellings held by
