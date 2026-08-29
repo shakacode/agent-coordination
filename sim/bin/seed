@@ -138,9 +138,18 @@ gh label create sim-batch --repo "$REPO" --color 5319e7 \
 
 # Record numbers alongside titles so verification can read each issue directly
 # instead of trusting the same search listing that produced the dedupe set.
+# Retried like the other reads: this is the most consequential listing in the
+# script, since it decides what gets skipped rather than created.
 existing_json="$WORK/existing.json"
-gh issue list --repo "$REPO" --label sim-batch --state open --limit 1000 --json number,title \
-  > "$existing_json"
+if ! retry_gh_read "$RETRY_ATTEMPTS" accept_nonempty \
+  gh issue list --repo "$REPO" --label sim-batch --state open --limit 1000 --json number,title \
+  > "$existing_json"; then
+  echo "error: could not read the open sim-batch issues in $REPO" >&2
+  if [ -s "$WORK/retry_err" ]; then
+    sed 's/^/    /' "$WORK/retry_err" >&2
+  fi
+  exit 1
+fi
 
 # Match in Python against raw JSON rather than with `awk` over a tab-separated
 # file: `awk -v` applies backslash-escape processing to the value it assigns and
@@ -222,11 +231,39 @@ fi
 # `gh issue list` and `GET /repos/:owner/:repo/issues` were observed lagging
 # identically -- so this cannot be prevented here, only reported instead of
 # silently leaving a repository that disagrees with the manifest.
+#
+# The listing must first catch up with this run's own creations, or a lagging
+# response could show one of each title and hide the duplicate it just caused.
+# `accept_all_titles_present` retries until every expected title is visible.
 open_titles="$WORK/open_titles.json"
-gh issue list --repo "$REPO" --label sim-batch --state open --limit 1000 --json title \
-  > "$open_titles" 2>/dev/null || : > "$open_titles"
-if [ -s "$open_titles" ]; then
-  python3 - "$HERE/issues.json" "$open_titles" <<'PY'
+accept_all_titles_present() {
+  [ -n "$1" ] || return 1
+  printf '%s' "$1" > "$WORK/titles_probe.json"
+  python3 - "$HERE/issues.json" "$WORK/titles_probe.json" >/dev/null 2>&1 <<'PY'
+import json
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as handle:
+    expected = {issue["title"] for issue in json.load(handle)["issues"]}
+with open(sys.argv[2], encoding="utf-8") as handle:
+    seen = {row["title"] for row in json.load(handle)}
+
+raise SystemExit(0 if expected <= seen else 1)
+PY
+}
+
+if ! retry_gh_read "$RETRY_ATTEMPTS" accept_all_titles_present \
+  gh issue list --repo "$REPO" --label sim-batch --state open --limit 1000 --json title \
+  > "$open_titles"; then
+  echo "error: could not confirm the seeded issues are all open in $REPO;" \
+    "duplicates cannot be ruled out" >&2
+  if [ -s "$WORK/retry_err" ]; then
+    sed 's/^/    /' "$WORK/retry_err" >&2
+  fi
+  exit 1
+fi
+
+python3 - "$HERE/issues.json" "$open_titles" <<'PY'
 import json
 import sys
 from collections import Counter
@@ -245,7 +282,6 @@ if duplicated:
     )
     raise SystemExit(1)
 PY
-fi
 
 # Printed only after verification passes, so stdout never carries a success
 # summary for a run that then exits nonzero.
