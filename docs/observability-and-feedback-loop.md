@@ -60,13 +60,14 @@ vocabulary the retro depends on:
 | `error` | `--severity`, `--category`, `--message` | severity `P0`, `P1`, `P2`, `P3` |
 | `human_intervention` | `--kind` | `takeover`, `supersede`, `manual-fix`, `drain` |
 
-`--type` itself is not a closed enum: any string is accepted, and only the four
-above have enforced fields. **Use the typed forms.** Their value today is at the
-raw-record layer: the enforced fields make severity, category, reason, and kind
-reliably present in the event JSON, which is what the retro actually reads. They
-do *not* currently reach the telemetry ledger with their type intact — see the
-[gap register](#gap-register-what-is-not-measured-yet), which is the thing to fix
-if cluster ranking is to become mechanical. Typing is still the higher-leverage
+`--type` itself is not a closed enum: any string is accepted, with no allowlist
+and no length bound, and only the four above have enforced fields. **Use the
+typed forms.** The enforced fields make severity, category, reason, and kind
+reliably present in the event JSON, and since issue #112 those four fields and
+the event type itself are retained in the telemetry ledger, so friction clusters
+can be grouped there rather than only in raw records. What is still missing is
+the rollup over them — see the
+[gap register](#gap-register-what-is-not-measured-yet). Typing is still the higher-leverage
 discipline, because the archived baseline shows that untyped intervention events
 were the reason interventions could only be classified by string-matching after
 the fact (see
@@ -164,9 +165,11 @@ total, never zero. The packaged rate snapshot is
 
 ### Gap register: what is not measured yet
 
-Do not write a hypothesis against any of the following. Nothing in this repo
-emits them today, and a plan that assumes otherwise will produce a permanently
-`inconclusive` ledger row.
+Do not write a hypothesis against any of the following. No scorecard field
+measures them today, and a plan that assumes otherwise will produce a
+permanently `inconclusive` ledger row. Where an entry records that part of a
+gap has since been closed, that part is settled — do not re-report it, and read
+the remaining scope as the live gap.
 
 - **No duration, latency, or wall-clock metric.** The scorecard emits none. The
   `batches` table carries `registered_at` and `updated_at` and `github_prs`
@@ -174,36 +177,38 @@ emits them today, and a plan that assumes otherwise will produce a permanently
   scorecard exposes no such field. The archived baseline could reconstruct
   claim-to-merge duration for only 1 of 107 merged PRs, and that limit has not
   been lifted.
-- **No error or friction cluster rollup, and the friction events do not survive
-  ingest at all.** This gap is worse than a missing view. Two separate losses
-  compound:
-  1. The ledger's `events` table has no severity, category, or kind column. The
-     `--severity` and `--category` fields that `record-event --type error`
-     validates at write time are **not** carried into the ledger.
-  2. The harvester clamps `event_type` through an `EVENT_TYPES` allowlist
-     (`lib/agent_coordination/harvester.rb`), and `enum` returns `nil` for any
-     value outside it — so a non-allowlisted type is stored as SQL `NULL`. That
-     allowlist contains `claim`, `release`, and `lane_closed`, but the CLI
-     actually emits the dotted forms `claim.acquired`, `claim.released`, and
-     `phase.changed`, and none of the four typed friction values appear in it at
-     all. **Of the event types this CLI generates on its own — the four typed
-     friction values, the three auto-emitted lifecycle types, and `lane_closed`
-     — only `lane_closed` survives ingest with a non-`NULL` `event_type`.**
-     `help_requested`, `escalation_requested`, `error`, `human_intervention`,
-     `claim.acquired`, `claim.released`, and `phase.changed` all land as `NULL`.
-     Because `--type` is an open string, an operator who passes a value that
-     happens to match the allowlist — `replacement`, say — would survive ingest;
-     the allowlist was fitted to the historical spellings catalogued in the
-     archived 2026-07-18 baseline, not to current CLI output.
-
-  So the type itself is lost, not merely its attributes, and no view groups by
-  `event_type` in any case. Ranking error and friction clusters therefore
-  requires reading raw event records via `agent-coord status --batch-id ID
-  --json`, not the scorecard or the ledger. Note this does **not** affect
-  `batch-audit`, which reads raw coordination state rather than the ledger.
-- **No intervention counter.** `human_intervention` events are written and are
-  visible in raw state, but no scorecard field counts them, the ledger keeps no
-  `kind`, and per the clamp above the ledger does not even retain the type.
+- **No error or friction cluster rollup.** The underlying events now survive
+  ingest — issue #112 fixed that — but nothing rolls them up. Scope the
+  remaining gap precisely before writing a hypothesis against it:
+  - *Fixed, do not re-report.* The `EVENT_TYPES` allowlist in
+    `lib/agent_coordination/harvester.rb` had been fitted to the historical
+    spellings catalogued in the archived 2026-07-18 baseline rather than to
+    current CLI output, so it intersected what the CLI emits at exactly
+    `lane_closed` and the other seven types were stored as SQL `NULL`. The
+    allowlist now covers every type the CLI emits — the three auto-emitted
+    lifecycle types, `lane_closed`, and the four typed operational signals —
+    and a test derives that set from `bin/agent-coord` itself, both from its
+    constants and by scanning its literal `type:` emission sites, so a newly
+    emitted type fails the suite rather than silently disappearing. Migration
+    `0004_event_type_retention.sql` added `severity`, `category`, `kind`, and
+    `reason` to `events`, so the fields `record-event` validates at write time
+    are now retained at ingest. A type outside the allowlist is no longer an
+    invisible `NULL`: the raw string is kept in `event_type_raw` and the
+    `event_type_drift` view counts it. That column is sanitized but never
+    rejected -- it is `NULL` only when the source event carried no usable type,
+    meaning absent or whitespace-only -- so an oversized, control-bearing, or
+    literally `UNKNOWN` type stays countable rather than falling back out of
+    sight. `category` is sanitized the same way, so an oversized `error`
+    category is bounded rather than discarded.
+  - *Still open.* No view or scorecard field groups by `event_type`, so ranking
+    error and friction clusters by measured cost is still not a one-query
+    answer from the scorecard. Issue #143 owns those fields. The ledger columns
+    they need now exist; the aggregation does not.
+  - Note none of this ever affected `batch-audit`, which reads raw coordination
+    state rather than the ledger.
+- **No intervention counter.** `human_intervention` events are written, are
+  visible in raw state, and since #112 are retained in the ledger with their
+  `kind` — but no scorecard field counts them. That counter is issue #143.
 - **No rework, retry, or review-round counter.**
 - **No `pack_sha`.** No code, schema, state contract, or batch manifest in this
   repo defines or emits it; the only occurrences are in this document and the
