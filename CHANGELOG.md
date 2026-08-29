@@ -31,14 +31,15 @@ when releases begin.
   must be named rather than merely omitted, and cannot cover every emitted type.
   Free-form signal values are sanitized rather than rejected, so an oversized or
   control-bearing value is bounded and digest-marked instead of dropped: the
-  surrounding-trim class is derived as `{space} + (SIGNAL - LOG)` so nothing
+  surrounding-trim class is derived as `{space} + (INGEST - LOG)` so nothing
   `bin/agent-coord` treats as terminal-unsafe can be removed by normalization,
   and the digest-marker shape is reserved so a clean value cannot be stored as
   another value's sanitized form. This unblocks the intervention, help,
-  escalation, and rework scorecard fields tracked in issue #143. Note that
-  `known()` still strips NUL and covers only C0 controls, so a control-bearing
-  value whose trimmed form is allowlisted is still classified rather than
-  surfaced by the drift view -- tracked in issue #171.
+  escalation, and rework scorecard fields tracked in issue #143. The residual
+  recorded here -- that `known()` still stripped NUL and covered only C0
+  controls, so a control-bearing value whose trimmed form was allowlisted stayed
+  classified rather than surfaced by the drift view -- is closed by the issue
+  #171 entry under Fixed below.
 
 - An `agent-coord log` command that renders the per-work-item custody trail the
   event store already records, so an operator can ask where the work on one issue
@@ -329,6 +330,57 @@ when releases begin.
 
 ### Fixed
 
+- Telemetry ingest no longer accepts a control-bearing value into the identity
+  and enum columns fed by the coordination and GitHub documents, and no longer
+  promotes one past a closed allowlist there (issue #171, the residual deferred from
+  #155). Host-session ingest is a separate path and is deliberately NOT covered:
+  `HostAdapters#known` still trims with `String#strip` and applies no control
+  check, so `high<NUL>` is still promoted to the allowlisted `high` in
+  `host_sessions` and flows into `usage_calls`. That is pre-existing, unchanged
+  here, and tracked in issue #200. `Harvester#known` -- the guard on `batch_id`,
+  `repo`, `target`, `lane_id`, `owner_ref`, `session_ref`, `status`, `terminal`,
+  `host_family`, the PR and review-finding fields, `model` and `effort` on review
+  receipts (the same two on a host session go through `HostAdapters`, not this
+  guard), and the `event["id"]` behind `opaque_value` -- carried its own copy of the
+  repo's control-character definition, and that copy had drifted in two ways. It
+  covered C0 and DEL only, so the whole C1 range passed through, including U+009B
+  (CSI), which opens an ANSI escape sequence on its own with no preceding ESC. And
+  it trimmed with `String#strip`, which removes NUL, VT, and FF as well as
+  whitespace; because `enum()` calls `known()` before checking set membership, a
+  trailing control character was trimmed away and the remainder promoted, so an
+  event typed `error<NUL>` was classified as the allowlisted `error` while
+  `event_type_raw` recorded the same input digest-marked as `error~6e7af28ae2a0`.
+  That row was visibly inconsistent yet uncounted, because `event_type_drift` keys
+  on `event_type IS NULL`; `event_type` is now `NULL` and the row appears in the
+  view. The fix is reuse rather than another copy of the vocabulary: `known` and
+  `bounded_signal` share one control class and one trim class, renamed from
+  `SIGNAL_*` to `INGEST_*` now that they are not signal-column-specific, so
+  agreement is structural instead of test-enforced. A codepoint test across
+  `0x00..0x9F` pins that `known`'s behaviour still tracks the shared constant at
+  the start, the interior, and the end of a value -- position being where the old
+  bug hid, since it rejected NUL inside a value and trimmed it at the edge -- and
+  that the control class still contains the CLI's own `LOG_CONTROL_CHARACTERS`
+  while the trim class stays disjoint from it. One
+  behavior change beyond the two defects: `batch<VT>` and `batch<FF>` were
+  accepted as `batch` and are now rejected. That is the correction rather than a
+  side effect -- both are control characters by `AgentCoord::LOG_CONTROL_CHARACTERS`
+  and `known` already rejected them in the interior, so accepting them at the ends
+  was `strip` leaking its notion of whitespace into a security boundary. What a
+  rejection costs is not uniform across the columns, and three of them act as
+  guards rather than merely degrading: a rejected `batch_id` skips the batch
+  outright, and with it that batch's lanes, target observations, claims, and
+  events, so those rows never reach `join_status` at all; a rejected `repo`,
+  `url`, or `state` on a pull request drops that `pull_requests` row along with
+  its review receipts and findings; and a rejected `lane_id` skips the `lanes`
+  row, though that lane's target observations still land carrying a `NULL`
+  `lane_id`. Elsewhere the row lands and the bad value becomes
+  visible: a rejected `repo` or `target` on an event, claim, or target
+  observation reports `missing_repo` / `missing_target` instead of `exact`, and a
+  rejected enum lands as `NULL` -- which for `event_type` is what puts the row
+  inside `event_type_drift`. One upgrade note: a ledger populated before this
+  change may hold a batch whose id is now rejected, and a named
+  `harvest --batch-id` will neither refresh nor remove it, reporting `batches=0`;
+  a date-range harvest covering that batch clears it. Tracked in issue #204.
 - `agent-coord log` now matches a target on the work item it names rather than on
   its literal spelling, so one item's custody trail stops splitting into partial
   answers. Issues and pull requests share one number sequence per repository, and

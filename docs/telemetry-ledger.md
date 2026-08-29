@@ -119,24 +119,104 @@ is a cryptographic bound rather than an exact guarantee.
 The set of trimmed characters is derived rather than chosen, because the trim
 runs before control detection: any character that is both trimmable and a
 control character would be silently removed, storing identically to a value that
-never carried it. Ruby's `String#strip` overlaps on NUL; `[[:space:]]` overlaps
-on NEL (U+0085). So the trim set is exactly space plus the three characters the
-CLI's own control definition deliberately omits — tab, LF, and CR, which are
-formatting rather than terminal injection. Nothing the CLI treats as
-terminal-unsafe is ever trimmable, which makes NUL, NEL, VT, FF, and the whole
-C1 range structurally unable to launder: they take the digest-marked control
-path. A value consisting only of control characters is therefore stored as a
-bare digest rather than `NULL` — it carried something.
+never carried it. Ruby's `String#strip` overlaps on NUL, VT, and FF;
+`[[:space:]]` overlaps on NEL (U+0085). So the trim set is exactly space plus
+the three characters the CLI's own control definition deliberately omits — tab,
+LF, and CR, which are formatting rather than terminal injection. Nothing the CLI
+treats as terminal-unsafe is ever trimmable, which makes NUL, NEL, VT, FF, and
+the whole C1 range structurally unable to launder: they take the digest-marked
+control path. A value consisting only of control characters is therefore stored
+as a bare digest rather than `NULL` — it carried something.
 
 Tab, LF, and CR are trimmed at the ends (layout noise) but stripped and
 digest-marked in the interior (content corruption).
 
-One known gap: `event_type_drift` keys on `event_type IS NULL`, so it does not
-surface a control-bearing type whose trimmed form is allowlisted. Such a row is
-still visibly inconsistent — a clean `event_type` beside a digest-marked
-`event_type_raw` — but it is not counted in the view. In practice a CLI-written type
-cannot contain whitespace or control characters at all, since `--type` is
-restricted to `[A-Za-z0-9_:-]` and dot separators at write time.
+The trim class and the control class are single definitions within the
+harvester, not per-column copies. The harvester runs two sanitizers with
+opposite policies — `bounded_signal` strips and digest-marks the free-form
+columns, `known` rejects outright for the identity and enum columns — and both
+read the same
+`INGEST_SURROUNDING_WHITESPACE` and `INGEST_CONTROL_CHARACTERS`. They may
+disagree about what to do with a control character; they cannot disagree about
+what one is. That is structural rather than test-enforced, which matters because
+the drift a test would have to catch is exactly what went wrong: `known` carried
+its own C0-and-DEL-only copy, so it missed the entire C1 range including U+009B
+(CSI), and it trimmed with `String#strip`, so a trailing NUL was removed before
+the allowlist comparison and `error<NUL>` was promoted to the allowlisted
+`error` (issue #171).
+
+That scoping is deliberate, because the harvester is not the whole ingest path.
+Host-session ingest does not share these definitions: `AgentCoord::HostAdapters`
+carries its own `known()` that trims with `String#strip` and applies no control
+check at all, so a host session's `model` and `effort` are still promoted past
+their closed allowlists. Pre-existing, unchanged by #171, and tracked in issue
+#200.
+
+Closing that promotion also made `known` self-consistent. It had rejected NUL,
+VT, and FF in the interior of a value while accepting them at the ends, purely
+because `strip` removes them; all three are control characters by the CLI's own
+definition, so they are now rejected wherever they appear. This is the one
+behavior change beyond the two defects — a value like `batch<VT>` was previously
+accepted as `batch` and is now rejected.
+
+What a rejection costs depends on the column, and it is not uniform. Three
+callers treat a rejected value as a guard rather than merely storing `NULL`:
+
+- **`batch_id`.** `harvest_batches` builds its selected-id set with
+  `filter_map { known(...) }` and then skips any batch whose id is rejected, so
+  the batch disappears along with everything under it — its lanes, target
+  observations, claims, and events. Those rows never reach `join_status`, which
+  is why `missing_batch` is in practice unreachable by this path: an event or
+  claim whose own `batch_id` is rejected is filtered out of the selected set
+  rather than landing with a partial join.
+- **`repo`, `url`, and `state` on a pull request.** `insert_pull_request`
+  returns early unless all of them survive, dropping that `pull_requests` row
+  together with its review receipts and findings. Worth knowing that `repo()`
+  and `github_url()` match with `[^/\s]+`, and `\s` does not cover C1 — so a
+  C1-bearing repo segment or PR URL previously passed both regexes and landed in
+  the ledger, to be rendered in terminal-facing scorecards.
+- **`lane_id`.** `insert_lane` writes the `lanes` row only when the lane's name
+  (or its `id`, whichever the document carries) survives, so a rejected one skips
+  that row. This is a partial skip rather than
+  a whole subtree: the lane's `target_observations` still land, carrying a `NULL`
+  `lane_id`, so the targets stay visible even though the lane record does not.
+
+Everywhere else rejection degrades the row rather than removing it, which is the
+common case. A rejected `repo` or `target` on an event, claim, or target
+observation still lands the row and reports `missing_repo` / `missing_target`
+rather than `exact`. A rejected enum lands as `NULL` — and for `event_type` that
+`NULL` is precisely what puts the row inside `event_type_drift`, which keys on
+`event_type IS NULL`, so a control-bearing type is now counted by the view
+rather than sitting outside it as a clean `event_type` beside a digest-marked
+`event_type_raw`. The `event_ref`, `review_ref`, and `finding_ref` columns
+degrade further still, falling back to a positional identifier rather than
+`NULL`.
+
+In practice a CLI-written *identifier* cannot contain whitespace or control
+characters at all, since `AgentCoord.validate_segment!` constrains those at write
+time. That is not true of every CLI-written value — `--category` is deliberately
+free-form and unbounded, which is exactly why it goes through `bounded_signal`
+rather than this guard. And the guard matters regardless, because ingest also
+reads hand-written files, archived baselines, and the HTTP backend, none of which
+pass through the CLI's write-time validation at all.
+
+**Upgrade note.** A ledger populated before this change may already hold a batch
+whose id is now rejected — only from one of those non-CLI sources, since
+`validate_segment!` cannot produce such an id. A named `harvest --batch-id` will
+not refresh or remove that batch: the id is matched against the raw document
+string, so the batch is found, but it is rejected before it reaches the set of
+ids the harvest replaces, so the command exits 0 reporting `batches=0` while the
+stored row stays queryable and can still be emitted by `scorecard`. A date-range
+harvest covering that batch does clear it — it removes the stale row rather than
+refreshing it, since the id is still rejected and so cannot be re-ingested — and
+that is the workaround. This is an upgrade hazard rather than new exposure: the
+row is already in the ledger and already reachable today, and a re-harvest before
+this change would have replaced it with the same control-bearing value. Tracked
+in issue #204.
+
+Note the `0004` migration's own comment still describes the promotion as an open
+gap. Applied migrations are hash-pinned historical records and are not edited;
+this document is the live description.
 
 `category` gets the same sanitize-never-reject treatment, for the same reason:
 it is required for `error` events but bounded nowhere at write time, so
