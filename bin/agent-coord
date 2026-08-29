@@ -234,6 +234,15 @@ module AgentCoord
   # narrowed --sync are the same question -- "was this answer filtered?" -- so
   # they read one list and a new filter cannot be added to only one of them.
   LOG_TRAIL_FILTERS = %i[since machine host type limit].freeze
+  # Where gc puts a completed lane's events once it has compacted them and
+  # deleted the hot copies. The trail is read from here as well as from `events`,
+  # because a custody trail that ends when the work completes is the one case it
+  # was written to answer.
+  LOG_ARCHIVED_EVENTS_PREFIX = "archive/events"
+  # The degradation reason for a prefix the backend does not implement, named so
+  # the listing that classifies it and the caller that decides what it means
+  # cannot drift apart.
+  LOG_UNSUPPORTED_REASON = "not supported by backend"
   LOG_SYNC_FILENAME = "log.tsv"
   LOG_SYNC_LOCK_SUFFIX = ".lock"
   # C0 controls and DEL, minus the tab/CR/LF handled separately above. Text and
@@ -242,6 +251,13 @@ module AgentCoord
   # encoder escapes these already.
   LOG_CONTROL_CHARACTERS = /[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F\u0080-\u009F]/
   LOG_UNKNOWN = "?"
+  # Issues and pull requests share one number sequence per repository, so
+  # `319`, `issue:319`, and `pr:319` are the same item and the prefix is
+  # decoration. `adhoc` is not that space: its ids are operator-chosen slugs, so
+  # it is folded only where it cannot collide with a GitHub number.
+  WORK_ITEM_GITHUB_KINDS = %w[issue pr].freeze
+  WORK_ITEM_KINDS = (WORK_ITEM_GITHUB_KINDS + ["adhoc"]).freeze
+  WORK_ITEM_NUMBER = /\A\d+\z/
   LOG_SINCE_UNITS = { "m" => 60, "h" => 3600, "d" => 86_400, "w" => 604_800 }.freeze
   BATCH_AUDIT_TERMINAL_REQUIRED_FACT_FIELDS = %w[event_id repo target terminal workspace at].freeze
   BATCH_AUDIT_TERMINAL_OPTIONAL_FACT_FIELDS = %w[
@@ -357,6 +373,9 @@ module AgentCoord
       @stderr = stderr
       @clock = clock
       @backend_conflict_warnings = backend_conflict_warnings
+      # Set on the first degraded listing; read by both the --sync guard and the
+      # --json trail state, so it must exist before either runs.
+      @log_incomplete = nil
     end
 
     # Commands that provably consult neither @user_config nor @process_config
@@ -1233,6 +1252,12 @@ module AgentCoord
     # Read-only, status-style commands that prefer the status state root over the
     # write-mode local default. batch-audit reads coordination state exactly like
     # status, so it resolves and warns identically.
+    #
+    # resolve_default_local_backend is the only place that default is applied, and
+    # it yields to an explicitly selected backend. A command body that re-applies
+    # it -- `options[:state_root] ||= default_status_state_root` -- runs after that
+    # decision and silently answers from local state for a request that named a
+    # different backend, so do not reintroduce one.
     def status_read_command?(command)
       %w[status log doctor batch-audit].include?(command)
     end
@@ -1479,6 +1504,8 @@ module AgentCoord
       opts.separator "    agent-coord log OWNER/REPO#TARGET   every event for one issue or PR"
       opts.separator "Columns: at, machine, host, work item, type, phase, agent, detail."
       opts.separator "Where it is now is the last line; a move is a change of machine, host, or agent."
+      opts.separator "TARGET names a work item, not a spelling: 319, issue:319, and pr:319 are one trail."
+      opts.separator "A trailing segment is a lane (issue:319:qa); the bare item covers its lanes."
       opts.separator "    --since VALUE        3d, 12h, 30m, or an ISO8601 timestamp"
       opts.separator "    --machine ID         only events from one machine, e.g. m1"
       opts.separator "    --host FAMILY        only events from codex or claude"
@@ -2530,19 +2557,17 @@ module AgentCoord
     def doctor(options)
       return stack_doctor(options) if options[:stack_json]
 
-      doctor_options = options.dup
-      apply_status_state_root_fallback!(doctor_options)
-      backend_kind = doctor_backend_kind(doctor_options)
+      backend_kind = doctor_backend_kind(options)
       begin
-        FileUtils.mkdir_p(doctor_options.fetch(:state_root)) if doctor_options[:implicit_local]
-        store = verify_doctor_store(doctor_options, backend_kind, deep: options[:deep])
+        FileUtils.mkdir_p(options.fetch(:state_root)) if options[:implicit_local]
+        store = verify_doctor_store(options, backend_kind, deep: options[:deep])
         store.verify_layout!(STATE_PREFIXES)
         section_notes, resource_checks, identity = doctor_deep_results(store, backend_kind, options)
       rescue JSON::ParserError, SystemCallError => e
         raise OperationalError, "state unreadable: #{e.message}"
       end
 
-      payload = doctor_payload(doctor_options, backend_kind, options[:deep])
+      payload = doctor_payload(options, backend_kind, options[:deep])
       payload["resource_checks"] = resource_checks if resource_checks
       payload["identity"] = identity if identity
       environment_identity = options[:deep] ? environment_identity_report(identity) : nil
@@ -2555,7 +2580,7 @@ module AgentCoord
         payload["section_notes"] = section_notes
       end
       emit_payload(payload, options) do
-        render_doctor_text(payload, doctor_options, section_notes)
+        render_doctor_text(payload, options, section_notes)
       end
       raise_machine_identity_mismatch!(environment_identity) if environment_identity
       raise_consumer_split_brain!(payload)
@@ -4089,15 +4114,17 @@ module AgentCoord
       log_options = options.dup
       store = build_store(log_options)
       rows = log_rows(store, options)
+      log_note_archived(options)
       if options[:sync]
         # A partial listing would write a partial mirror that later reads as
         # complete -- the same hazard the narrowing options are rejected for.
-        raise OperationalError, "refusing to sync an incomplete trail: #{@log_incomplete}" if @log_incomplete
+        raise OperationalError, "refusing to sync an incomplete trail: #{log_incomplete_prefixes}" if @log_incomplete
 
         return log_sync(log_options, rows)
       end
 
-      emit_log(rows, options, log_claim_for(store, options, rows))
+      claims = log_claim_for(store, options, rows)
+      emit_log(log_limited(rows, options), options, claims, matched: rows)
       0
     rescue JSON::ParserError, SystemCallError => e
       raise OperationalError, "state unreadable: #{e.message}"
@@ -4137,15 +4164,39 @@ module AgentCoord
 
     def log_rows(store, options)
       since = log_since_timestamp(options)
-      rows = log_event_entries(store).map { |entry| log_row(entry.data) }
+      rows = log_event_rows(store)
       rows = rows.reject { |row| row.fetch("synthetic") } unless options[:include_synthetic]
-      rows = log_filtered(rows, options, since).sort_by { |row| [row.fetch("at_key"), row.fetch("event_id")] }
+      # The trail the query is about, before the options that narrow the view of
+      # it. This is the rule log_limited states for the claim, applied to the
+      # archive note: --limit and --since trim what is shown, never the evidence
+      # that decides a question. The note is evidence -- this work item's history
+      # is compacted and expiring however few of its rows the caller asked to see.
+      @log_scoped_rows = log_work_item_rows(rows, options)
+      log_filtered(rows, options, since).sort_by { |row| [row.fetch("at_key"), row.fetch("event_id")] }
+    end
+
+    # Scoped by the work item and nothing else: --since, --machine, --host,
+    # --type and --limit describe the view of a subject rather than the subject
+    # itself. Matched through the same identity folding log_filtered uses, so a
+    # bare repo#123 query still covers the repo#123:qa lane.
+    def log_work_item_rows(rows, options)
+      wanted = log_wanted_identity(options)
+      return rows unless wanted
+
+      rows.select { |row| log_identity_match?(row.fetch("identity"), wanted) }
+    end
+
+    # --limit trims the trail that is shown, never the evidence that decides
+    # whether a claim still stands: dropping a release because a newer event on
+    # another alias filled the window would report a stale lease as live custody.
+    def log_limited(rows, options)
       options[:limit] ? rows.last(options[:limit]) : rows
     end
 
     def log_filtered(rows, options, since)
+      wanted = log_wanted_identity(options)
       rows.select do |row|
-        log_matches?(row, "work_item", options[:work_item]) &&
+        (wanted.nil? || log_identity_match?(row.fetch("identity"), wanted)) &&
           log_matches?(row, "machine", options[:machine]) &&
           log_matches?(row, "host", options[:host]) &&
           log_matches?(row, "type", options[:type]) &&
@@ -4153,9 +4204,9 @@ module AgentCoord
       end
     end
 
-    # Repo names are case-insensitive on GitHub, and the event store has recorded
-    # the same repo under more than one casing. Matching case-sensitively would
-    # split one work item's history into two partial answers.
+    # The scalar column filters. The work item is not one of them: it is matched on
+    # parsed identity in log_filtered, because one item's records carry several
+    # spellings and a string compare would answer with only the queried one.
     def log_matches?(row, field, wanted)
       return true if wanted.nil? || wanted.to_s.empty?
 
@@ -4166,6 +4217,52 @@ module AgentCoord
       row.fetch(field).casecmp?(wanted.to_s)
     end
 
+    # Compare on work-item identity rather than the literal string: the store
+    # holds one item as `319`, `issue:319`, and `pr:319`, and matching literally
+    # answers with whichever third of its history shares the queried spelling.
+    # A query that names a lane keeps its narrower meaning; a query that does not
+    # covers the item and every lane under it.
+    #
+    # Both sides are parsed from raw repo/target rather than from the rendered
+    # work item, which substitutes a "?" placeholder for a missing value -- text
+    # meant for a reader, never for deciding identity.
+    #
+    # Both arguments are already-parsed [repo, base, lane] identities. Accepting a
+    # raw string here too would re-split the query once per row compared, which is
+    # the cost log_identity exists to pay exactly once.
+    # The identity the query names, or nil when it named none. Read once and
+    # shared, so the rows a filter keeps and the envelopes the archive note
+    # scopes to cannot disagree about what was asked for.
+    def log_wanted_identity(options)
+      value = options[:work_item].to_s
+      return nil if value.empty?
+
+      log_identity(*log_split_work_item(value))
+    end
+
+    def log_identity_match?(candidate, wanted, lane_exact: false)
+      return false unless candidate.fetch(0).casecmp?(wanted.fetch(0))
+      return false unless candidate.fetch(1) == wanted.fetch(1)
+      return wanted.fetch(2) == candidate.fetch(2) if lane_exact
+
+      wanted.fetch(2).nil? || wanted.fetch(2) == candidate.fetch(2)
+    end
+
+    # [repo, base, lane]. Parsed once per query and once per record, never per
+    # comparison: a long trail would otherwise re-split the same query string for
+    # every row it is matched against.
+    def log_identity(repo, target)
+      base, lane = AgentCoord.work_item_parts(target)
+      [repo.to_s, base, lane]
+    end
+
+    # Targets contain colons, repos do not contain "#", so the last "#" is the
+    # boundary.
+    def log_split_work_item(value)
+      repo, _, target = value.to_s.rpartition("#")
+      [repo, target]
+    end
+
     def log_row(data)
       {
         "at" => log_present(data["at"]),
@@ -4173,6 +4270,8 @@ module AgentCoord
         "machine" => log_present(data["machine_id"] || log_closed_by(data, "machine")),
         "host" => log_host_family(data["host"]),
         "work_item" => log_work_item(data),
+        "identity" => log_identity(data["repo"].to_s.strip, data["target"].to_s.strip),
+        "target" => data["target"].to_s.strip,
         "type" => log_present(data["type"]),
         "phase" => log_present(data["phase"] || data["new_phase"] || data["terminal"] || data["status"]),
         "agent_id" => log_present(data["agent_id"] || log_closed_by(data, "agent_id")),
@@ -4193,8 +4292,516 @@ module AgentCoord
       log_listing(store, "events") { |reason| "warning: events #{reason}; this trail may be incomplete" }
     end
 
+    # gc compacts a completed lane's events into archive/events and deletes the
+    # hot copies, so reading only the live prefix answered "no events" for
+    # precisely the work most likely to be asked about after the fact -- and
+    # said it in the same words it uses for work that never happened. The
+    # archived payloads are the same event records log_row already consumes, so
+    # they are folded back in by default rather than behind a flag: a continuous
+    # custody trail is what this command promises, and the silence was the defect.
+    def log_event_rows(store)
+      seen = {}
+      rows = log_event_entries(store).map do |entry|
+        row = log_row(entry.data)
+        # The row itself, not a marker: an archived duplicate of this event needs
+        # somewhere to record the envelope it came from, and the row that is
+        # reported is the only thing the note can still see.
+        seen[log_event_dedup_key(entry.data)] = row
+        row
+      end
+      rows + log_archived_event_rows(store, seen)
+    end
+
+    # Compaction writes the archive envelope before deleting its sources, so a
+    # run interrupted between the two leaves one event readable from both places.
+    # The live copy wins. Ordering is left to log_rows, which already sorts the
+    # merged set by instant, so archived and live events for one work item
+    # interleave rather than arriving in two blocks.
+    def log_archived_event_rows(store, seen)
+      log_archived_event_entries(store).flat_map do |entry|
+        # Records first. log_archived_event_data is what rejects a record this
+        # version cannot read, and the ledger entry reaches into the same
+        # envelope, so building it ahead of that check let a record that is not
+        # an object end the command with a raw TypeError.
+        read = log_archived_event_data(entry)
+        # nil is an entry nothing can be trusted about, not even its clock.
+        # Anything else is registered even when it yielded no legible record:
+        # the envelope exists and is expiring, and dropping it from the ledger
+        # took its delete_after out of the note along with its rows.
+        next [] unless read
+
+        records, malformed = read
+        log_archive_record_envelope(entry, records, malformed)
+        next [] if records.empty?
+
+        records.filter_map do |data|
+          identity = log_event_dedup_key(data)
+          twin = seen[identity]
+          next log_archive_twin(twin) if twin
+
+          row = log_row(data).merge("archived" => true, "archive_held" => true)
+          seen[identity] = row
+          row
+        end
+      end
+    end
+
+    # The live copy wins the row, but the event is in the archive all the same
+    # and on the same clock, so the row records that it is held there. Only a
+    # flag: everything the note needs about the envelope is in the ledger, which
+    # is what stopped this from having to carry -- and guard against overwriting
+    # -- a whole provenance blob. Returns nil so filter_map drops the duplicate.
+    def log_archive_twin(row)
+      row["archive_held"] = true
+      nil
+    end
+
+    # The key two records are the same event under -- not to be confused with
+    # log_identity, which folds the spellings of one work item. This one answers
+    # "have I already reported this event", nothing about work items.
+    #
+    # The batch and the event id together, because event_id is not unique across
+    # the store: a terminal event takes its id from the lane name alone (see
+    # stable_terminal_event_id), so two batches that each register a lane named
+    # "qa" write the same event_id under different batch paths. Deduplicating on
+    # the bare id let a live event in one batch suppress an archived event in
+    # another -- reporting no events for a work item whose history is sitting in
+    # the archive, which is the failure this read exists to remove. The real
+    # duplicate this still has to collapse, one event readable from both events/
+    # and archive/events/ after an interrupted compaction, carries both halves.
+    #
+    # Both halves are required rather than assumed. event_payload does stamp them
+    # together, but that is one producer's behavior, not a rule the store
+    # enforces: a hand-migrated record, a future producer, or a record written
+    # after event ids but before batch stamping would key as [nil, event_id] and
+    # collide across contexts exactly the way the bare id did. A record missing
+    # either half falls back to the whole record instead.
+    #
+    # That fallback also covers the roughly one in ten recorded events that
+    # predate event ids; collapsing those onto one missing-id key would drop real
+    # history as a false duplicate. It needs no batch scope of its own, since the
+    # record it keys on already carries batch_id when the event has one. The
+    # residual collision it cannot narrow is two records identical in every
+    # recorded field -- same batch, instant, type, work item, machine, and agent,
+    # or none of them stamped at all. Those two render as the same line, so the
+    # trail loses a repeat rather than a fact.
+    def log_event_dedup_key(data)
+      event_id = data["event_id"]
+      batch_id = data["batch_id"]
+      return data unless log_identity_part?(event_id) && log_identity_part?(batch_id)
+
+      [batch_id, event_id]
+    end
+
+    def log_identity_part?(value)
+      value.is_a?(String) && !value.empty?
+    end
+
+    # Only families whose payload is an event, and only from the archived events
+    # prefix. An archived claim or heartbeat is a different record living under
+    # archive/claims or archive/heartbeats, and folding one in would report it as
+    # an event it never was. An unrecognized family is reported rather than
+    # skipped -- silently dropping archived history is the bug being fixed.
+    # A record that is not a JSON object has no family at all. Truncated JSON
+    # already degrades through the listing, but valid JSON holding an array or a
+    # scalar reached this far, and the http backend does not shape-check the
+    # payload it hands back, so it takes the same reported-not-skipped path.
+    def log_archived_event_data(entry)
+      data = entry.data
+      case data.is_a?(Hash) ? data["record_family"] : nil
+      when "compacted_events" then log_compacted_records(entry, data)
+      when "archived_record" then log_archived_record(entry, data)
+      else
+        log_archive_incomplete(entry, "unknown archived record family")
+        nil
+      end
+    end
+
+    # A compacted envelope describes a generation: source_paths is what gc
+    # consumed and records is the subset it kept, so the two have to agree before
+    # either can be trusted. An absent or non-array source_paths used to pass
+    # through Array(), which yields 0 for nil and an arbitrary count for a hash,
+    # and the note then reported no compaction loss for an envelope whose source
+    # metadata was unreadable. Retaining more records than were consumed is
+    # likewise impossible, since compaction keeps a subset.
+    #
+    # One sentence per envelope: the defects are ordered from the most
+    # fundamental, and only the first is reported, so a doubly corrupt record
+    # does not print twice. Legible records are still returned in every case --
+    # a corrupt envelope header does not make the events inside it wrong, and
+    # dropping them would be the silent loss this read exists to remove.
+    def log_compacted_records(entry, data)
+      records = data["records"]
+      legible = records.is_a?(Array) ? records.grep(Hash) : []
+      defect = log_compaction_defect(records, data["source_paths"])
+      if defect
+        log_archive_incomplete(entry, defect)
+        return [legible, true]
+      end
+
+      log_archive_report_expiry(entry, data)
+      [legible, false]
+    end
+
+    # The retention clock is the one warning that says this history is going to
+    # disappear, so filtering an unreadable one out of the comparison and saying
+    # nothing left the trail reading complete while it expired. It is reported
+    # instead, and marks the trail incomplete so --sync refuses -- but it is not
+    # treated as making the envelope unreadable, because a bad clock says nothing
+    # about the records or the source paths beside it. Reached only when nothing
+    # else was wrong, so an envelope still gets one sentence.
+    def log_archive_report_expiry(entry, data)
+      return if log_archive_expiry?(data["delete_after"].to_s)
+
+      log_archive_incomplete(entry, "unreadable archive expiry")
+    end
+
+    def log_compaction_defect(records, sources)
+      return "malformed archived record body" unless records.is_a?(Array)
+      return "malformed archived source paths" unless sources.is_a?(Array)
+      return "malformed archived source paths" unless sources.all? { |path| log_archive_path?(path) }
+      return "duplicate archived source paths" unless sources.uniq.length == sources.length
+      # Past this point log_archive_source_list? holds, so the ledger records
+      # exactly the paths counted here.
+      # gc retains at least the first and last event of every generation it
+      # compacts (see gc_compacted_entries), so retaining nothing while naming
+      # consumed sources is corruption rather than an empty generation. Both
+      # empty is degenerate but not self-contradictory and is left alone.
+      return log_archive_empty_defect(sources) if records.empty?
+
+      # Compared on the records that can actually be read. Counting the raw array
+      # called a mixed envelope impossible -- "3 retained records exceed 2 source
+      # paths" -- when what happened was that two of its three were unreadable,
+      # which is the next rung and the one the operator needs.
+      legible = records.grep(Hash)
+      if legible.length > sources.length
+        return "#{legible.length} retained records exceed #{log_archive_count(sources.length, 'source path')}"
+      end
+
+      dropped = records.length - legible.length
+      log_archive_count(dropped, "unreadable archived record") if dropped.positive?
+    end
+
+    # Both empty is degenerate but not self-contradictory: the envelope consumed
+    # nothing and retained nothing, so there is nothing to report.
+    def log_archive_empty_defect(sources)
+      return nil if sources.empty?
+
+      "no retained records for #{log_archive_count(sources.length, 'source path')}"
+    end
+
+    # One archived event rather than a generation, so there is one source_path
+    # rather than a list -- but it is still the path this entry consumed, and the
+    # note counts it, so an absent or unusable one leaves the arithmetic short
+    # rather than merely uninformative. Laddered like the compacted case so a
+    # doubly corrupt entry still prints one sentence.
+    def log_archived_record(entry, data)
+      defect = log_archived_record_defect(data)
+      if defect
+        log_archive_incomplete(entry, defect)
+        return [[], true]
+      end
+
+      log_archive_report_expiry(entry, data)
+      [[data["data"]], false]
+    end
+
+    def log_archived_record_defect(data)
+      return log_archive_count(1, "unreadable archived record") unless data["data"].is_a?(Hash)
+      return "malformed archived source paths" unless log_archive_path?(data["source_path"])
+
+      nil
+    end
+
+    # A path is only a path if it is a non-empty string. nil, an empty string, a
+    # number, or a nested object are all values the dropped-source arithmetic
+    # cannot count, and counting them anyway is what let a retained record cancel
+    # a source that really was omitted.
+    def log_archive_path?(value)
+      value.is_a?(String) && !value.strip.empty?
+    end
+
+    def log_archive_count(count, noun)
+      "#{count} #{noun}#{'s' unless count == 1}"
+    end
+
+    # The path and the error text both come from the backend -- over HTTP the
+    # path is whatever the server put in its listing response -- so they are
+    # scrubbed before reaching a terminal, the same way the note scrubs the
+    # delete_after it prints. An archive record is not a trusted source of
+    # escape sequences.
+    def log_archive_incomplete(entry, reason)
+      log_note_incomplete(LOG_ARCHIVED_EVENTS_PREFIX,
+                          log_scrub("warning: #{reason} at #{entry.path}; this trail may be incomplete"))
+    end
+
+    # Provenance for the note, not for the rendered row. It is keyed by archive
+    # path so one envelope's dropped-source count is counted once rather than
+    # once per row it contributed: a compacted envelope lists every source path
+    # it consumed but retains only the first, last, terminal, and phase-changing
+    # events, so a restored trail can be shorter than the one gc swallowed.
+    # Every envelope the read consulted, recorded as it is read rather than
+    # reconstructed afterwards from whichever rows survived. Rows are the wrong
+    # carrier for an envelope-level fact: deduplication, the synthetic filter,
+    # --since, --machine and --limit each remove rows, and each removal used to
+    # take an envelope's delete_after and dropped-source count out of the note
+    # with it. A ledger entry outlives all of them, so the note is a function of
+    # what was read and what was asked, not of what happened to be displayed.
+    #
+    # records is kept so the note can scope itself to the queried work item --
+    # the note must describe the item asked about, never another lane's clock --
+    # and synthetic is the envelope's own flag, which gc sets only when every
+    # entry it consumed was synthetic. A mixed generation therefore stays
+    # reportable even when the default filter removes all of its rows, because
+    # its source count still proves a real event was consumed.
+    #
+    # Only an array-valued source_paths is recorded. Array() would turn a hash
+    # into an arbitrary number of pairs and nil into zero, either of which
+    # reports a confident count for an envelope whose source metadata
+    # log_compaction_defect has just warned is unreadable.
+    def log_archive_record_envelope(entry, records, malformed)
+      data = entry.data
+      (@log_archive_ledger ||= []) << {
+        "malformed" => malformed,
+        "path" => entry.path,
+        "delete_after" => data["delete_after"].to_s,
+        "sources" => log_archive_sources(data),
+        "identities" => records.map { |record| log_event_dedup_key(record) },
+        "records" => records,
+        "synthetic" => data["synthetic"] == true
+      }
+    end
+
+    # archived_record names the one path it consumed as a singular source_path,
+    # where compacted_events carries an array. Recording no sources for it while
+    # still counting its identity as retained made the two cancel: a compacted
+    # envelope that genuinely dropped a source reported none as soon as an
+    # archived_record sat beside it in the same scope.
+    def log_archive_sources(data)
+      sources = data["source_paths"]
+      # Only a validated list reaches the ledger. log_compaction_defect and
+      # log_archived_record_defect have already reported anything rejected here,
+      # so leaving it out understates the loss rather than inventing a count,
+      # and the trail is marked incomplete either way.
+      return log_archive_source_list?(sources) ? sources : [] if sources.is_a?(Array)
+
+      source = data["source_path"]
+      log_archive_path?(source) ? [source] : []
+    end
+
+    # A usable list of consumed paths: every entry a real path, and no entry
+    # twice, since one path names one consumed event.
+    def log_archive_source_list?(sources)
+      sources.uniq.length == sources.length && sources.all? { |path| log_archive_path?(path) }
+    end
+
+    # Scoped by the work item the query names, not by which rows survived
+    # display. A wholly synthetic generation is excluded under the default
+    # policy the same way its rows are.
+    def log_archive_ledger(options)
+      wanted = log_wanted_identity(options)
+      Array(@log_archive_ledger).select { |envelope| log_archive_envelope_scoped?(envelope, options, wanted) }
+    end
+
+    # Scoped on the records themselves, the same way rows are. gc sets an
+    # envelope's own synthetic flag only when every entry it consumed was
+    # synthetic, but a foreign or corrupted envelope can carry that flag over a
+    # record whose own flag is false -- and that record's row survives the
+    # default filter, because rows read each record's flag. Scoping the ledger
+    # by the envelope instead dropped the provenance of a row that was still
+    # being reported, so the event printed with no retention or expiry note and
+    # --sync accepted the trail as complete.
+    #
+    # The envelope's flag is the fallback only where there is no record to ask:
+    # nothing legible came out of it, so there is also no work item to match,
+    # and only an unscoped query can claim it.
+    def log_archive_envelope_scoped?(envelope, options, wanted)
+      return false unless log_archive_envelope_visible?(envelope, options)
+
+      records = envelope.fetch("records")
+      # Nothing legible came out of it, so there is no work item to match and
+      # only an unscoped query can claim it.
+      return wanted.nil? if records.empty?
+
+      records.any? { |record| log_archive_record_scoped?(record, wanted) }
+    end
+
+    # Hidden only when the envelope is synthetic by both measures: gc's own
+    # judgement, which it records only when every entry it consumed was
+    # synthetic, and every record it retained saying so as well. Either one alone
+    # still leaves real information here, and the two cases are mirror images.
+    #
+    # An envelope flag of false means a real event was consumed even if none was
+    # retained, so its source count still proves a real loss. A record whose own
+    # flag is false has its row reported -- rows read each record's flag, not the
+    # envelope's -- so its provenance has to be reported beside it, or the event
+    # prints with no retention or expiry note and --sync takes the trail as
+    # complete. gc produces neither combination; foreign or corrupted state does,
+    # and having decided to read such envelopes, reading them inconsistently with
+    # the rows is worse than not reading them at all.
+    def log_archive_envelope_visible?(envelope, options)
+      return true if options[:include_synthetic]
+      return true unless envelope.fetch("synthetic")
+
+      envelope.fetch("records").any? { |record| !record["synthetic"] }
+    end
+
+    # Matched on identity rather than on the recorded spelling: the same folding
+    # log_filtered applies to rows, so an envelope holding issue:123 events is in
+    # scope for a bare #123 query, and a #123 query covers its :qa lane.
+    def log_archive_record_scoped?(record, wanted)
+      return true if wanted.nil?
+
+      identity = log_identity(record["repo"].to_s.strip, record["target"].to_s.strip)
+      log_identity_match?(identity, wanted)
+    end
+
+    # Additive by construction: reading the archive can add rows or a warning,
+    # and must never turn a trail that reads today into a failure. So every
+    # archive read failure degrades, including the ones log_listing re-raises --
+    # an archive directory that is unreadable, or holds a record that will not
+    # parse or that this process cannot open, is not a reason to stop reporting
+    # the live events beside it. SystemCallError is named because the local store
+    # reads each record outside the listing's own guard, so a record file the
+    # process cannot open arrives here as a bare Errno, not an OperationalError.
+    #
+    # The breadth is deliberate, so do not narrow this rescue to match the two
+    # shapes log_listing can classify. listing_degradation only recognizes
+    # :forbidden and :unsupported; a malformed pagination response, a 500, or any
+    # other backend defect falls outside both, and from here they are all the
+    # same fact -- the archive did not answer -- layered onto a query that
+    # already has an answer without it.
+    #
+    # Degrading is not the same as swallowing. Every path through here warns on
+    # stderr on every invocation and marks the trail incomplete, and an
+    # incomplete trail makes --sync refuse with exit 2 and write nothing, which
+    # is the operation where completeness actually matters. (The marker reaches
+    # the operator through those two channels; it is not yet a field in --json
+    # output.)
+    #
+    # The asymmetry with the live events prefix, which fails hard on the same
+    # listing errors, is intended at this level: an unreadable events prefix
+    # means the query has no answer at all, so failing is the honest result
+    # there, while an unreadable archive only means the answer is shorter. The
+    # record-level asymmetry is not intended and is tracked in issue #176.
+    # A backend with no archive prefix cannot be hiding archived events, because
+    # it cannot have stored any: the worker change that made archive/events
+    # listable is the same one that made it writable. STATE_PATH gained its
+    # archive arm and STATE_PREFIX gained ARCHIVE_PREFIX in one commit, both
+    # built from the same RECORD_PATH and ACTIVE_PREFIX constants, and validPath
+    # gates PUT and DELETE as well as GET -- so a backend that rejects the
+    # listing rejected gc's writes too. Reporting that as an incomplete trail
+    # made --sync refuse forever on older backends, and this command's own
+    # documentation asks operators to run it before every gc.
+    def log_archived_event_entries(store)
+      log_listing(store, LOG_ARCHIVED_EVENTS_PREFIX) do |reason|
+        next "warning: archived events #{reason}; nothing can have been archived there" if
+          reason == LOG_UNSUPPORTED_REASON
+
+        "warning: archived events #{reason}; this trail may be incomplete"
+      end
+    rescue OperationalError, JSON::ParserError, SystemCallError => e
+      log_note_incomplete(
+        LOG_ARCHIVED_EVENTS_PREFIX,
+        log_scrub("warning: archived events unreadable (#{e.message}); this trail may be incomplete")
+      )
+      []
+    end
+
+    # Provenance goes to stderr rather than into the trail. An archived event is
+    # the same event it always was, so its row stays byte-identical: text, tsv,
+    # and --json are read by other tools, and --sync dedupes on the exact tsv
+    # line, so a decorated archived row would mirror as a second copy of an event
+    # the file already holds. What the rows cannot show is that part of this
+    # history now sits on a delete_after clock, and that compaction did not
+    # retain every source event it consumed.
+    def log_note_archived(options)
+      envelopes = log_archive_ledger(options)
+      return if envelopes.empty?
+
+      dropped = log_archive_dropped(envelopes)
+      expires = log_archive_soonest_expiry(envelopes)
+      parts = log_archive_coverage(Array(@log_scoped_rows))
+      if dropped.positive?
+        verb = dropped == 1 ? "was" : "were"
+        parts << "#{log_archive_count(dropped, 'source event')} #{verb} dropped by compaction"
+      end
+      # Silence here would be the defect this read exists to remove: a confident
+      # loss count computed from the legible remainder, with no sign that some of
+      # the evidence could not be read at all.
+      unreadable = envelopes.count { |envelope| envelope.fetch("malformed") }
+      if unreadable.positive?
+        parts << "compaction loss unknown for #{log_archive_count(unreadable, 'unreadable envelope')}"
+      end
+      parts << "archive deleted after #{expires}" if expires
+      parts << "mirror it with log --sync" unless options[:sync]
+      @stderr.puts log_scrub(parts.join("; "))
+    end
+
+    # Unique source paths against unique retained identities. Two envelopes left
+    # overlapping by an interrupted compaction can name the same consumed source
+    # and each omit it, so differencing them separately counted one lost event
+    # twice; taking both sides as sets counts it once and makes the total
+    # independent of listing order.
+    # Only envelopes we could read. An envelope already reported as malformed
+    # cannot also yield a trustworthy loss count: its retained identities come
+    # from the records that parsed, while its source paths count every event it
+    # consumed, so differencing the two claims a loss for records that are merely
+    # unreadable. A count computed from data we have just told the operator we
+    # could not read is worse than no count, so it is left out and said so.
+    def log_archive_dropped(envelopes)
+      countable = envelopes.reject { |envelope| envelope.fetch("malformed") }
+      consumed = countable.flat_map { |envelope| envelope.fetch("sources") }.uniq
+      retained = countable.flat_map { |envelope| envelope.fetch("identities") }.uniq
+      [consumed.length - retained.length, 0].max
+    end
+
+    # Counted over the trail the query is about, so --limit and --since cannot
+    # decide whether the clock gets reported. Three cases, because they are three
+    # different facts: nothing of this trail survives but the archive still holds
+    # a compacted record of it; every archived event was also readable live, so
+    # nothing here came from the archive; or some rows were read from the archive
+    # and others merely duplicate what it holds. That last distinction is worth
+    # keeping -- a row read from the archive disappears when delete_after passes,
+    # while a live duplicate outlives it until gc finishes deleting its source --
+    # but counting only the first hid the rest of what is on the clock.
+    def log_archive_coverage(rows)
+      archived = rows.count { |row| row["archived"] }
+      held = rows.count { |row| row["archive_held"] }
+      return ["note: the archive holds a compacted record for this trail"] if held.zero?
+      return ["note: #{held} of #{rows.length} events are also held in the archive"] if archived.zero?
+
+      clauses = ["note: #{archived} of #{rows.length} events read from the archive"]
+      clauses << "#{held - archived} more held there too" if held > archived
+      clauses
+    end
+
+    # The soonest clock, ordered on the parsed instant like every other
+    # comparison here, so an offset timestamp cannot sort ahead of a Z one. A
+    # value that is not a timestamp is not a clock, so it is dropped rather than
+    # compared: log_at_key floors an unparseable string to -Infinity, which let
+    # one unreadable delete_after sort first and hide the real date the rest of
+    # the archive is deleted on.
+    def log_archive_soonest_expiry(envelopes)
+      dated = envelopes.filter_map do |envelope|
+        value = envelope.fetch("delete_after")
+        [value, log_at_key(value)] if log_archive_expiry?(value)
+      end
+      dated.min_by { |_value, key| key }&.first
+    end
+
+    def log_archive_expiry?(value)
+      log_at_key(value) != -Float::INFINITY
+    end
+
     # One listing path for both families: warn on a partial or degraded read,
     # remember that it happened, and hand back whatever was legible.
+    #
+    # Two degradations that are not the same fact. A forbidden prefix may hold
+    # records this token cannot see, so the answer is short and must be reported
+    # as such. A prefix the backend does not implement holds nothing, so nothing
+    # is missing -- and treating that as an incomplete trail is what stopped
+    # --sync writing a mirror at all on such a backend.
     def log_listing(store, prefix)
       entries = store.list_json(prefix)
       log_note_incomplete(prefix, yield("filtered by scoped token")) if filtered_status_list?(store, prefix)
@@ -4203,14 +4810,47 @@ module AgentCoord
       degradation = listing_degradation(e, prefix)
       raise unless degradation
 
-      reason = degradation == :forbidden ? "not readable by scoped token" : "not supported by backend"
-      log_note_incomplete(prefix, yield(reason))
+      reason = degradation == :forbidden ? "not readable by scoped token" : LOG_UNSUPPORTED_REASON
+      message = yield(reason)
+      if degradation == :unsupported && unsupported_prefix_is_empty?(prefix)
+        @stderr.puts(message)
+      else
+        log_note_incomplete(prefix, message)
+      end
       []
     end
 
+    # Read off the prefix rather than asked of the caller, so the rule holds for
+    # every archive prefix by construction and a later reader of archive/claims
+    # or archive/heartbeats cannot reintroduce the bug by forgetting to opt in.
+    #
+    # An archive prefix the backend does not implement cannot be hiding anything,
+    # because it cannot have been written either: the worker change that made
+    # archive listable is the same one that made it writable. STATE_PATH gained
+    # its archive arm and STATE_PREFIX gained ARCHIVE_PREFIX in one commit, both
+    # built from the same RECORD_PATH and ACTIVE_PREFIX constants, and validPath
+    # gates PUT and DELETE as well as GET, so a backend that rejects the listing
+    # rejected gc's writes too.
+    #
+    # The live prefixes are deliberately excluded. For events and claims an
+    # unimplemented prefix is a missing answer rather than an empty one, because
+    # that is where the answer comes from in the first place.
+    def unsupported_prefix_is_empty?(prefix)
+      prefix == "archive" || prefix.start_with?("archive/")
+    end
+
+    # Every prefix that degraded, not the last one to degrade. The trail is read
+    # from two listings now, so a scalar named whichever wrote last -- telling an
+    # operator whose live events were unreadable to go look at the archive.
     def log_note_incomplete(prefix, message)
-      @log_incomplete = prefix
+      @log_incomplete ||= []
+      @log_incomplete << prefix unless @log_incomplete.include?(prefix)
       @stderr.puts message
+    end
+
+    # Read order, so the prefix an operator reads first is the one read first.
+    def log_incomplete_prefixes
+      Array(@log_incomplete).join(", ")
     end
 
     # Order on a parsed instant, never on the rendered string. Lexical comparison
@@ -4300,20 +4940,57 @@ module AgentCoord
       raise Error, "--json and --format are mutually exclusive"
     end
 
-    def emit_log(rows, options, claim = nil)
+    # `matched` is required rather than defaulting to `rows`: `rows` here is the
+    # --limit-trimmed display slice, and silently falling back to it would rebuild
+    # provenance from the limited set -- the exact bug log_limited exists to avoid.
+    def emit_log(rows, options, claims, matched:)
       format = options[:format].to_s
+      records = claims.map { |claim| claim.fetch("record") }
       if options[:json]
         events = rows.map { |row| log_scrub_values(row.slice(*LOG_TSV_FIELDS)) }
-        @stdout.puts JSON.pretty_generate({ "events" => events, "claim" => claim }.compact)
+        # Provenance describes the search, so it is built from every matched row.
+        # A display limit that shrank it would understate which spellings answered.
+        payload = { "work_item" => log_work_item_summary(options, matched, claims),
+                    "trail" => log_trail_state,
+                    "events" => events, "claim" => records.last }.compact
+        # Oldest first, like the trail above it, so the last thing printed or listed
+        # is the current one. `claim` stays the newest for consumers that read one;
+        # `claims` carries every holder so a concurrent alias claim is never
+        # dropped from the answer.
+        payload["claims"] = records unless records.empty?
+        @stdout.puts JSON.pretty_generate(payload)
       elsif format == "tsv"
         # tsv is a data stream, so notes go to stderr rather than inventing a row
         # a consumer would have to parse around.
         rows.each { |row| @stdout.puts log_tsv_line(row) }
-        log_report_trailer(options, claim, rows, @stderr)
+        log_report_trailer(options, claims, rows, @stderr)
       else
         log_report_rows(rows)
-        log_report_trailer(options, claim, rows, @stdout)
+        log_report_trailer(options, claims, rows, @stdout)
       end
+    end
+
+    # Which spellings actually answered the query. An operator auditing "was this
+    # ever worked" needs to see that `issue:319` and `pr:319` were folded in, and
+    # an empty list is the explicit "searched, matched nothing" that a bare empty
+    # events array cannot say on its own.
+    def log_work_item_summary(options, rows, claims = [])
+      wanted = options[:work_item].to_s
+      return nil if wanted.empty?
+
+      repo, target = log_split_work_item(wanted)
+      # A live claim with no events is a supported answer, so its target counts as
+      # a match; reporting the claim while reporting that nothing matched would
+      # contradict itself. Targets come from the raw records the rows already
+      # carry, not from re-splitting the rendered work item.
+      matched = (rows.map { |row| row.fetch("target") } + claims.map { |claim| claim.fetch("target") }).uniq.sort
+      { "repo" => repo, "target" => target, "matched_targets" => matched }
+    end
+
+    # stderr already warns, but a --json consumer never sees it: without this a
+    # trail cut short by a scoped token is byte-identical to a complete empty one.
+    def log_trail_state
+      @log_incomplete ? "incomplete" : "complete"
     end
 
     def log_report_rows(rows)
@@ -4326,9 +5003,12 @@ module AgentCoord
 
     # A claim reaches here only when it is the latest thing known about the work
     # item, so it always belongs last: it is the answer to "where is it now".
-    def log_report_trailer(options, claim, rows, stream)
+    def log_report_trailer(options, claims, rows, stream)
       stream.puts "no events for #{options[:work_item] || 'the current filters'}" if rows.empty?
-      stream.puts log_claim_note_line(claim) if claim
+      # One line per holder, oldest first: with two live alias claims, printing
+      # only the newest would read as sole custody, and printing them newest-first
+      # would contradict the trail's own last-line-is-current reading.
+      claims.each { |claim| stream.puts log_claim_note_line(claim.fetch("record")) }
     end
 
     # Columns are sized to the rows actually being rendered so a single-work-item
@@ -4356,33 +5036,80 @@ module AgentCoord
     # only on an empty trail would answer "where is it now" with the last thing
     # that happened to leave a trace, while a live claim sat unmentioned.
     def log_claim_for(store, options, rows)
-      claim = log_claim_lookup(store, options)
-      return nil unless claim
-      return claim if rows.empty?
+      claims = log_claim_lookup(store, options)
+      # Freshness is judged against the claim's own lane only. A lane holds a
+      # separate lease, so an event on `issue:319:qa` says nothing about whether
+      # the parent's custody still stands, and letting it decide would drop a live
+      # holder from the answer.
+      claims.reject { |claim| log_claim_superseded?(claim, rows) }
+    end
 
-      claim if log_at_key(claim.fetch("updated_at")) >= rows.last.fetch("at_key")
+    # Only the claim's own key can supersede it. Aliases are separate leases, so an
+    # event on `pr:1` says nothing about whether the lease on `1` still stands, and
+    # letting it decide would drop a live holder. This is also what the literal
+    # match did before identity folding: a claim was only ever weighed against
+    # events recorded under its own spelling.
+    def log_claim_superseded?(claim, rows)
+      key = claim.fetch("target").downcase
+      latest = rows.select { |row| row.fetch("target").downcase == key }.last
+      latest && log_at_key(claim.fetch("record").fetch("updated_at")) < latest.fetch("at_key")
     end
 
     def log_claim_lookup(store, options)
       wanted = options[:work_item].to_s
-      return nil if wanted.empty?
+      return [] if wanted.empty?
       # A filter emptying the trail is a different answer from having no trail;
       # the claim is not evaluated against those filters, so reporting it here
       # would answer a question the operator did not ask.
-      return nil if LOG_TRAIL_FILTERS.any? { |field| log_narrowing_option?(options, field) }
+      return [] if LOG_TRAIL_FILTERS.any? { |field| log_narrowing_option?(options, field) }
 
       claims = log_listing(store, "claims") do |reason|
         "warning: claims #{reason}; a claim for this work item would not be reported"
       end
+      wanted_identity = log_identity(*log_split_work_item(wanted))
       matches = claims.select do |candidate|
         next false if candidate.data["synthetic"] && !options[:include_synthetic]
 
-        log_claim_work_item(candidate).casecmp?(wanted)
+        log_identity_match?(log_claim_identity(candidate), wanted_identity, lane_exact: true)
       end
-      # Casing variants produce two claim paths for one work item; the newest is
-      # the one that describes where the work actually is.
-      newest = matches.max_by { |candidate| log_at_key(candidate.data["updated_at"]) }
-      newest && log_claim_record(newest.data, now_utc)
+      # Two records can mean two different things, and the difference is the exact
+      # claim key. One key written under two casings is a single lease recorded
+      # twice, so the newest describes where the work is and the older is stale
+      # noise. Two distinct keys are two leases: `claim` writes raw target paths,
+      # so `9832` and `pr:9832` are independently claimable and the fleet holds
+      # such pairs live under different agents -- collapsing those would conceal
+      # exactly the double-claim an operator most needs to see. Lanes are matched
+      # exactly rather than rolled up, because a lane holds its own lease too.
+      matches.group_by { |candidate| log_claim_key(candidate) }
+             .values
+             .map { |variants| variants.max_by { |candidate| log_at_key(candidate.data["updated_at"]) } }
+             .sort_by { |candidate| log_at_key(candidate.data["updated_at"]) }
+             .map do |candidate|
+               { "record" => log_claim_record(candidate.data, now_utc, log_claim_target(candidate)),
+                 "target" => log_claim_target(candidate),
+                 "identity" => log_claim_identity(candidate) }
+             end
+    end
+
+    # The exact lease key, case-folded. Not the work-item identity: that folds
+    # aliases, which are separate leases.
+    def log_claim_key(entry)
+      [log_claim_repo(entry).downcase, log_claim_target(entry).downcase]
+    end
+
+    def log_claim_identity(entry)
+      log_identity(log_claim_repo(entry), log_claim_target(entry))
+    end
+
+    # Claims written before repo/target became explicit payload fields carry them
+    # only in the path, which is why claim_status_hash falls back to it. Reading
+    # the payload alone would leave such a claim unmatchable.
+    def log_claim_repo(entry)
+      (entry.data["repo"] || AgentCoord.repo_from_claim_path(entry.path)).to_s.strip
+    end
+
+    def log_claim_target(entry)
+      (entry.data["target"] || AgentCoord.target_from_path(entry.path)).to_s.strip
     end
 
     # Built from claim fields directly rather than through log_row, whose "phase"
@@ -4393,24 +5120,15 @@ module AgentCoord
     def log_narrowing_option?(options, field)
       return options[field]&.zero? if field == :limit
 
-      # Matches log_matches?: an empty value is the absence of a filter, so the
-      # two halves of one query cannot disagree about whether it was narrowed.
+      # Matches the column filters and the work-item match in log_filtered: an
+      # empty value is the absence of a filter, so the two halves of one query
+      # cannot disagree about whether it was narrowed.
       !options[field].to_s.empty?
     end
 
     # Structured so a --json consumer reads the claim's fields instead of
     # re-parsing the sentence the text renderer builds from them.
-    # Claims written before repo/target became explicit payload fields carry them
-    # only in the path, which is why claim_status_hash falls back to it. Reading
-    # the payload alone would leave such a claim unmatchable.
-    def log_claim_work_item(entry)
-      data = entry.data
-      repo = data["repo"] || AgentCoord.repo_from_claim_path(entry.path)
-      target = data["target"] || AgentCoord.target_from_path(entry.path)
-      log_work_item("repo" => repo, "target" => target)
-    end
-
-    def log_claim_record(data, now)
+    def log_claim_record(data, now, target)
       {
         "status" => log_present(data["status"]),
         "machine" => log_present(data["machine_id"]),
@@ -4418,7 +5136,10 @@ module AgentCoord
         "agent_id" => log_present(data["agent_id"]),
         "phase" => log_phase_or_dash(data["phase"]),
         "updated_at" => log_present(data["updated_at"]),
-        "expires_at" => log_present(data["expires_at"])
+        "expires_at" => log_present(data["expires_at"]),
+        # Two holders are only actionable if each names the lease it holds: the
+        # exact target is what a release or handoff has to address.
+        "target" => log_present(target)
       }.transform_values { |value| log_scrub(value) }
        .merge(
          "lease_elapsed" => log_claim_lease_elapsed?(data, now),
@@ -4444,7 +5165,8 @@ module AgentCoord
       parts = ["claim", claim.fetch("status")]
       parts << "[synthetic]" if claim.fetch("synthetic")
       parts.push(claim.fetch("machine"), claim.fetch("host"), claim.fetch("agent_id"),
-                 "phase", claim.fetch("phase"), "updated", claim.fetch("updated_at"))
+                 claim.fetch("target"), "phase", claim.fetch("phase"),
+                 "updated", claim.fetch("updated_at"))
       parts.push("lease elapsed", claim.fetch("expires_at")) if claim.fetch("lease_elapsed")
       parts.join(" ")
     end
@@ -4574,9 +5296,7 @@ module AgentCoord
     end
 
     def render_status(options)
-      status_options = options.dup
-      apply_status_state_root_fallback!(status_options)
-      store = build_store(status_options)
+      store = build_store(options)
       now = now_utc
       payload =
         case status_scope(options)
@@ -4615,9 +5335,7 @@ module AgentCoord
     # UNKNOWN (unregistered/unreadable batch).
     def batch_audit(options)
       require_options(options, :batch_id)
-      audit_options = options.dup
-      apply_status_state_root_fallback!(audit_options)
-      store = build_store(audit_options)
+      store = build_store(options)
       report = batch_audit_report(store, options.fetch(:batch_id))
       emit_batch_audit_report(report, options)
       BATCH_AUDIT_EXIT_CODES.fetch(report.fetch("verdict"))
@@ -5019,10 +5737,12 @@ module AgentCoord
         heartbeat = read_status_heartbeat(store, holder)
         heartbeat_entries << heartbeat if valid_status_heartbeat?(heartbeat)
       end
-      section_notes = {
-        "batches" => "not checked in target scope",
-        "events" => "not checked in target scope"
-      }
+      # Claims and heartbeats are cleared on release and expiry, so this scope
+      # alone cannot distinguish "never worked" from "worked and finished". Name
+      # the command that can, rather than leaving the operator with two empty
+      # sections that read like an answer.
+      unchecked = "not checked in target scope; run `agent-coord log` for this target's history"
+      section_notes = { "batches" => unchecked, "events" => unchecked }
       if claim && heartbeat_entries.empty?
         section_notes["heartbeats"] = if heartbeat == :invalid
                                         "holder heartbeat unreadable"
@@ -5044,8 +5764,8 @@ module AgentCoord
         section_notes: section_notes,
         claim_entries: [claim].compact,
         heartbeat_entries: heartbeat_entries,
-        batch_entries: [],
-        event_entries: [],
+        batch_entries: nil,
+        event_entries: nil,
         heartbeats_by_agent: heartbeats_by_agent(heartbeat_entries),
         lane_states: {},
         now: now
@@ -5169,8 +5889,11 @@ module AgentCoord
         "section_notes" => section_notes,
         "claims" => claim_entries.map { |entry| claim_status_hash(entry) },
         "heartbeats" => heartbeat_entries.map { |entry| heartbeat_status_hash(entry, now) },
-        "batches" => batch_entries.map { |entry| batch_status_hash(entry, heartbeats_by_agent, lane_states, now) },
-        "events" => event_entries.map { |entry| event_status_hash(entry) }
+        # nil is "this section was not read"; [] is "read, and there is nothing".
+        # Collapsing the two lets an unchecked scope answer a question it never
+        # asked -- see the section note for which command can answer it.
+        "batches" => batch_entries&.map { |entry| batch_status_hash(entry, heartbeats_by_agent, lane_states, now) },
+        "events" => event_entries&.map { |entry| event_status_hash(entry) }
       }
     end
     # rubocop:enable Metrics/ParameterLists
@@ -5204,7 +5927,7 @@ module AgentCoord
       end
 
       @stdout.puts "batches"
-      if payload.fetch("batches").empty?
+      if payload.fetch("batches").to_a.empty?
         @stdout.puts "- #{status_section_note(payload, 'batches') || 'none'}"
       else
         payload.fetch("batches").each do |batch|
@@ -5362,7 +6085,7 @@ module AgentCoord
 
     def render_status_events(payload)
       @stdout.puts "events"
-      if payload.fetch("events").empty?
+      if payload.fetch("events").to_a.empty?
         @stdout.puts "- #{status_section_note(payload, 'events') || 'none'}"
       else
         payload.fetch("events").each do |event|
@@ -5641,12 +6364,6 @@ module AgentCoord
       AgentCoord.state_root?(source_root) ? source_root : nil
     end
 
-    def apply_status_state_root_fallback!(options)
-      return if options[:state_root] || options[:api_url] || !options[:backend].to_s.empty?
-
-      options[:state_root] = default_status_state_root
-    end
-
     def default_local_state_root
       state_home = ENV.fetch("XDG_STATE_HOME", nil)
       state_home = nil unless Pathname.new(state_home.to_s).absolute?
@@ -5761,7 +6478,7 @@ module AgentCoord
     end
 
     def load_batch_manifest(path)
-      JSON.parse(File.read(path))
+      JSON.parse(File.read(path, encoding: "UTF-8"))
     rescue JSON::ParserError => e
       raise Error, "batch manifest JSON invalid: #{e.message}"
     rescue SystemCallError => e
@@ -6062,11 +6779,17 @@ module AgentCoord
       raise OperationalError, "state root is not readable: #{@root}"
     end
 
+    # State records are JSON, which is UTF-8 by definition, so every read and
+    # write in this store names that encoding instead of inheriting
+    # Encoding.default_external. Under a non-UTF-8 locale the default is
+    # US-ASCII, and one record holding a non-ASCII byte would otherwise fail
+    # JSON.parse with Encoding::InvalidByteSequenceError and take down every
+    # command that walks the store.
     def read_json(path)
       file = readable_record_file(path)
       return nil unless file
 
-      StoredJson.new(path: path, data: JSON.parse(File.read(file)), sha: file_sha(file))
+      StoredJson.new(path: path, data: JSON.parse(File.read(file, encoding: "UTF-8")), sha: file_sha(file))
     end
 
     # LocalStore keeps GitHubStore's keyword interface; only GitHubStore uses message.
@@ -6087,7 +6810,7 @@ module AgentCoord
 
       list_json_files(directory, prefix).map do |file|
         path = file.delete_prefix("#{@root}/")
-        StoredJson.new(path: path, data: JSON.parse(File.read(file)), sha: file_sha(file))
+        StoredJson.new(path: path, data: JSON.parse(File.read(file, encoding: "UTF-8")), sha: file_sha(file))
       end
     end
 
@@ -6237,7 +6960,7 @@ module AgentCoord
     def atomic_write_json(file, data)
       temporary = File.join(File.dirname(file), ".#{File.basename(file)}.tmp-#{Process.pid}-#{SecureRandom.hex(8)}")
       mode = File.exist?(file) ? File.stat(file).mode & 0o777 : 0o666
-      File.open(temporary, File::WRONLY | File::CREAT | File::EXCL, mode) do |output|
+      File.open(temporary, File::WRONLY | File::CREAT | File::EXCL, mode, encoding: "UTF-8") do |output|
         output.chmod(mode) if File.exist?(file)
         output.write("#{JSON.pretty_generate(data)}\n")
         output.flush
@@ -6846,6 +7569,48 @@ module AgentCoord
 
   def self.target_from_path(path)
     File.basename(path, ".json")
+  end
+
+  # Split a target into the work item it names and the sub-lane within it:
+  # `issue:319:qa` is the qa lane of item 319. Claims key those separately on
+  # purpose -- a lane holds its own lease -- so this is a read-path identity
+  # only. Folding the two together in a claim key would break lease exclusion.
+  #
+  # `adhoc:` is dropped only when what follows cannot be a GitHub number.
+  # Nothing stops an operator naming an ad hoc task `adhoc:319`, and stripping
+  # that would merge it into issue 319 -- the same wrong answer this identity
+  # exists to prevent, arrived at from the other direction.
+  def self.work_item_parts(target)
+    # -1 keeps a trailing empty field: `319:` is a legal claim segment and a
+    # different key from `319`, so dropping it would answer for both at once.
+    segments = work_item_segments(target.to_s.strip.split(":", -1))
+    base = segments.shift.to_s.downcase
+    [base, segments.empty? ? nil : segments.join(":").downcase]
+  end
+
+  # A kind prefix comes off only where it is decoration rather than identity.
+  # `issue:`/`pr:` decorate a GitHub number, so they come off ahead of one and
+  # stay ahead of a slug -- `issue:foo` is not the separately keyed `foo`.
+  # `adhoc:` is the mirror image: it decorates a slug, and ahead of a number it
+  # stays, so `adhoc:319` is neither issue 319 nor the `319` lane of a work item
+  # called "adhoc". A prefix that stays is part of the base, never a lane.
+  def self.work_item_segments(segments)
+    return segments unless segments.length > 1
+
+    kind = segments.first.downcase
+    return segments unless WORK_ITEM_KINDS.include?(kind)
+    return segments.drop(1) if decorative_work_item_kind?(kind, segments[1])
+
+    [segments.take(2).join(":"), *segments.drop(2)]
+  end
+
+  def self.decorative_work_item_kind?(kind, id)
+    # An absent id decorates nothing. Without this, `adhoc:` comes off an empty
+    # segment and `adhoc::qa` collapses onto the separately keyed `:qa`.
+    return false if id.to_s.empty?
+
+    numeric = id.to_s.match?(WORK_ITEM_NUMBER)
+    WORK_ITEM_GITHUB_KINDS.include?(kind) ? numeric : !numeric
   end
 
   def self.source_root

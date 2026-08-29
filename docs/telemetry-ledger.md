@@ -46,7 +46,8 @@ Only bounded metadata is retained:
 
 - Coordination: batch identity/status/time, normalized lane membership,
   repo/target join components, structured claim/event classifications, opaque
-  owner/session references, and recognized PR URLs.
+  owner/session references, and recognized PR URLs. See
+  [Events](#events) for the `events` column contract.
 - GitHub: repository, PR number/state/timestamps, review provenance counters,
   and finding severity/disposition/verification status. Bodies, titles,
   comments, inline text, and recommendations are ignored.
@@ -65,6 +66,96 @@ output is aggregate-only.
 Native counters stay separate: input, cache read, cache write, output,
 reasoning output, and host-reported total. An absent or literal `UNKNOWN`
 counter becomes SQL `NULL`; the harvester never recomputes a missing host total.
+
+## Events
+
+`events.event_type` is clamped to a closed vocabulary so grouping is over a
+fixed set. That vocabulary covers every type `bin/agent-coord` emits — the
+auto-emitted lifecycle types `claim.acquired`, `claim.released`, and
+`phase.changed`; the terminal `lane_closed`; and the typed operational signals
+`help_requested`, `escalation_requested`, `error`, and `human_intervention` —
+plus nine historical spellings that appear only in the archived 2026-07-18
+baseline. Those nine are retained so already-harvested rows keep their
+classification; they do **not** make that archive broadly readable, since
+re-harvesting it classifies 210 of 959 events and leaves 749 spread over 166
+distinct spellings. What makes those 749 usable is `event_type_raw`, below.
+
+The emitted set is derived from `bin/agent-coord` by a test rather than
+restated, and derived two ways: from the CLI's constants, and by scanning its
+source for literal `type:` emission sites. Both are needed — the four types the
+CLI emits itself are bare literals at their call sites, so a new hardcoded
+emission touches no constant and a constants-only check would miss it. A newly
+emitted type therefore fails the suite until the harvester either ingests it or
+names it an explicit exclusion, and the exclusion list cannot name every emitted
+type. A type outside the vocabulary is
+never silently dropped: the raw string is always stored in `event_type_raw`, so
+an unrecognized value is a countable
+`event_type IS NULL AND event_type_raw IS NOT NULL` row, exposed by the
+`event_type_drift` view.
+
+`event_type_raw` is sanitized but never rejected, which is what makes that
+guarantee hold: **it is `NULL` if and only if the source event carried no usable
+type — absent, or nothing but whitespace.** Control
+characters are removed, because drift output is read in a terminal, and the
+stored value is bounded to 256 bytes; the literal string `UNKNOWN` is kept
+verbatim, since the column is explicitly the raw string and an absent type is
+already `NULL`. A value that had to be truncated carries a short digest of the
+original, so two distinct oversized types stay distinct rather than collapsing
+into one drift row. Sanitizing never conceals a classified event, because every
+allowlisted type is short and control-character free and so can never require it.
+
+Values are normalized by trimming surrounding whitespace before any of that, so
+two inputs differing only there are stored identically — they are the same type,
+and reporting them as two drift rows would be worse output. Beyond that
+normalization, distinct originals stay distinct. The digest suffix shape is
+reserved, so a clean value that happens to equal another value's sanitized form
+is itself digest-marked rather than stored as that form — the two paths' outputs
+are disjoint, and a stored value ending in the marker shape is always one the
+sanitizer produced. (A legitimate value ending in the marker plus twelve hex
+characters is therefore marked too. Rare, harmless, and the right trade.) Beyond
+that, two sanitized values collide only on a SHA-256 hex-prefix collision, which
+is a cryptographic bound rather than an exact guarantee.
+
+The set of trimmed characters is derived rather than chosen, because the trim
+runs before control detection: any character that is both trimmable and a
+control character would be silently removed, storing identically to a value that
+never carried it. Ruby's `String#strip` overlaps on NUL; `[[:space:]]` overlaps
+on NEL (U+0085). So the trim set is exactly space plus the three characters the
+CLI's own control definition deliberately omits — tab, LF, and CR, which are
+formatting rather than terminal injection. Nothing the CLI treats as
+terminal-unsafe is ever trimmable, which makes NUL, NEL, VT, FF, and the whole
+C1 range structurally unable to launder: they take the digest-marked control
+path. A value consisting only of control characters is therefore stored as a
+bare digest rather than `NULL` — it carried something.
+
+Tab, LF, and CR are trimmed at the ends (layout noise) but stripped and
+digest-marked in the interior (content corruption).
+
+One known gap: `event_type_drift` keys on `event_type IS NULL`, so it does not
+surface a control-bearing type whose trimmed form is allowlisted. Such a row is
+still visibly inconsistent — a clean `event_type` beside a digest-marked
+`event_type_raw` — but it is not counted in the view. In practice a CLI-written type
+cannot contain whitespace or control characters at all, since `--type` is
+restricted to `[A-Za-z0-9_:-]` and dot separators at write time.
+
+`category` gets the same sanitize-never-reject treatment, for the same reason:
+it is required for `error` events but bounded nowhere at write time, so
+rejecting an oversized value would destroy the friction classifier it carries.
+It differs in one respect — a literal `UNKNOWN` category is stored as `NULL`,
+because a category is a semantic classifier and this repo reads `UNKNOWN` as
+"no value", whereas `event_type_raw` keeps it verbatim. `severity`, `kind`, and
+`reason` need no sanitizing: they are closed enums, so a value outside the set
+is correctly `NULL` whatever its length.
+
+Typed signals keep the attributes the CLI validates at write time. `severity`,
+`kind`, and `reason` are validated against mirrors of the CLI's own enums and
+stored as `NULL` if they fall outside them; `category` is free-form at write
+time, so it is sanitized and bounded rather than enum-checked (see above). `escalation_requested`'s
+`from_route`, `to_route`, and `evidence` are deliberately **not** retained:
+`evidence` is free prose that does not belong in an analysis column, and the
+route strings are unbounded free text duplicating the route/model dimension
+`host_sessions` already carries. Only the `escalation_requested` count is
+needed, and `event_type` provides it.
 
 ## Joins and outcomes
 

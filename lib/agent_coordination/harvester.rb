@@ -20,10 +20,128 @@ module AgentCoord
       BATCH_STATUSES = %w[active blocked cancelled completed done in_progress].freeze
       HOST_FAMILIES = %w[codex claude].freeze
       PR_STATES = %w[open closed merged].freeze
-      EVENT_TYPES = %w[
-        claim release lane_closed dispatch-replaced replacement worker-replacement
+      # Event types `bin/agent-coord` writes, split the way the CLI defines them
+      # so drift is mechanical to check (issue #112).
+      #
+      # Only four are emitted by the CLI itself, as bare `type:` literals at
+      # their call sites: the three lifecycle types (from claim, release, and a
+      # heartbeat that moves an already-set phase) and `lane_closed` (from the
+      # terminal closeout path). The four typed signals are operator-supplied
+      # via `record-event --type`; the CLI validates their required fields but
+      # never originates them.
+      #
+      # Note `--type` is an OPEN vocabulary. `AgentCoord.validate_segment!`
+      # constrains the character set but applies no allowlist and no length
+      # bound, so an arbitrary -- and arbitrarily long -- type can reach ingest.
+      # That is why `event_type_raw` has to sanitize rather than reject.
+      CLI_LIFECYCLE_EVENT_TYPES = %w[claim.acquired claim.released phase.changed].freeze
+      CLI_TERMINAL_EVENT_TYPES = %w[lane_closed].freeze
+      CLI_TYPED_EVENT_TYPES = %w[help_requested escalation_requested error human_intervention].freeze
+      CLI_EVENT_TYPES = (CLI_LIFECYCLE_EVENT_TYPES + CLI_TERMINAL_EVENT_TYPES + CLI_TYPED_EVENT_TYPES).freeze
+      # CLI-emitted types ingest deliberately declines to classify. Empty today.
+      # An exclusion must be named here rather than simply omitted, so the
+      # source-of-truth drift test still fails on an *unlisted* new CLI type.
+      EXCLUDED_CLI_EVENT_TYPES = [].freeze
+      # Spellings that only ever appear in the archived 2026-07-18 baseline
+      # (docs/archive/reports/2026-07-18-historical-batch-baseline*). No current
+      # code path emits them. They are retained because dropping them would
+      # reclassify already-harvested rows for no gain, NOT because they make that
+      # archive readable: re-harvesting it classifies 210 of 959 events (21.9%),
+      # leaving 749 spread over 166 distinct spellings, `handoff` alone
+      # accounting for 263. What actually makes those 749 usable is
+      # `event_type_raw`, which now records every one of them as a countable
+      # drift row instead of an invisible NULL.
+      #
+      # Deliberately NOT extended to chase those 166 spellings: #112's scope is
+      # the types the CLI emits today, and archive vocabulary coverage is a
+      # separate, evidence-driven decision tracked on its own issue.
+      HISTORICAL_EVENT_TYPES = %w[
+        claim release dispatch-replaced replacement worker-replacement
         lane-takeover collision-blocked model-escalation MODEL_ESCALATION_REQUEST
       ].freeze
+      EVENT_TYPES = (CLI_EVENT_TYPES - EXCLUDED_CLI_EVENT_TYPES + HISTORICAL_EVENT_TYPES).freeze
+      # Mirrors of the CLI's write-time enums: AgentCoord::ERROR_SEVERITIES,
+      # AgentCoord::HUMAN_INTERVENTION_KINDS, and
+      # AgentCoord::HELP_REQUESTED_REASONS. Mirrored rather than imported so the
+      # harvester never loads the CLI at runtime; the drift test pins that these
+      # still match their source. `category` has no mirror because it is
+      # free-form at write time; it goes through `bounded_signal` instead.
+      EVENT_SEVERITIES = %w[P0 P1 P2 P3].freeze
+      EVENT_KINDS = %w[takeover supersede manual-fix drain].freeze
+      EVENT_REASONS = %w[blocked-user-input question permission].freeze
+      # Bind order for the `events` INSERT; `source_record_sha256` is appended
+      # separately because it digests the built row rather than reading from it.
+      EVENT_COLUMNS = %w[
+        event_ref batch_id repo target event_type event_type_raw observed_at terminal
+        severity category kind reason join_status source_artifact_id
+      ].freeze
+      # Bounds for the free-form signal columns (`event_type_raw`, `category`).
+      # Control characters are the one thing that must never survive verbatim:
+      # this output is read in a terminal, where an escape sequence recorded
+      # inside a value could rewrite the report around it. Everything else is
+      # kept, truncated rather than dropped.
+      #
+      # C0, DEL, and C1. The C1 range matters as much as C0 -- U+009B is CSI, a
+      # single character that opens an escape sequence on its own -- and this
+      # deliberately agrees with the repo's other terminal-facing sanitizer,
+      # `AgentCoord::LOG_CONTROL_CHARACTERS` in bin/agent-coord, which covers the
+      # same range. This one additionally strips tab/CR/LF, which that one
+      # handles separately, because a signal value is a single-line classifier
+      # and never legitimately contains them.
+      #
+      # That relationship is containment, not equality, and it is enforced rather
+      # than merely asserted here. See
+      # test_signal_control_characters_cover_the_cli_terminal_sanitizer, which
+      # compares the two by codepoint: widening the CLI's set without widening
+      # this one fails the suite.
+      SIGNAL_CONTROL_CHARACTERS = /[\u0000-\u001F\u007F-\u009F]/
+      # Characters trimmed from the ends of a signal value (see `bounded_signal`).
+      #
+      # The trim runs before control detection, so ANY character that is both
+      # trimmable and control gets laundered: it is silently removed, and the
+      # value stores identically to one that never contained it, with no digest
+      # marker. `String#strip` overlapped on NUL. `[[:space:]]` overlaps on NEL
+      # (U+0085). Picking another convenient class would just wait for the next
+      # overlapping character, so this class is not chosen -- it is derived, as
+      # exactly the complement of the CLI's own control definition:
+      #
+      #   SIGNAL_SURROUNDING_WHITESPACE == {space} + (SIGNAL_CONTROL_CHARACTERS -
+      #                                               AgentCoord::LOG_CONTROL_CHARACTERS)
+      #
+      # `LOG_CONTROL_CHARACTERS` deliberately excludes tab, LF, and CR because
+      # they are formatting rather than terminal injection; space is not a
+      # control character anywhere. So the invariant that kills this bug class is
+      # that nothing the CLI considers terminal-unsafe is ever trimmable, which
+      # makes NUL, NEL, VT, FF, and the whole C1 range structurally unable to
+      # launder -- they take the digest-marked control path instead. Pinned by
+      # test_trimmable_characters_never_overlap_the_cli_control_definition.
+      #
+      # Note the overlap with SIGNAL_CONTROL_CHARACTERS on exactly tab/LF/CR is
+      # intended: trimmed at the ends (layout noise, the T3 decision), stripped
+      # and digest-marked in the interior (content corruption).
+      SIGNAL_SURROUNDING_WHITESPACE = /\A[\u0009\u000A\u000D\u0020]+|[\u0009\u000A\u000D\u0020]+\z/
+      SIGNAL_MAX_BYTES = 256
+      SIGNAL_DIGEST_LENGTH = 12
+      SIGNAL_TRUNCATION_MARKER = "~"
+      SIGNAL_PREFIX_BYTES =
+        SIGNAL_MAX_BYTES - SIGNAL_DIGEST_LENGTH - SIGNAL_TRUNCATION_MARKER.bytesize
+      # The shape a sanitized value ends in. Reserved: an input already wearing
+      # it is never returned unchanged, so a stored value ending in this shape is
+      # always one the sanitizer produced. Without the reservation an operator
+      # could supply the literal sanitized form of some other value -- say the
+      # exact string a control-bearing category sanitizes to -- and the two would
+      # store identically, collapsing two friction clusters into one.
+      #
+      # The cost is that a legitimate clean value that happens to end in the
+      # marker plus twelve hex characters is also digest-marked. That is rare and
+      # harmless, and it is the trade we want: an odd-looking stored value is
+      # cheaper than a stored value that cannot be traced back to one input.
+      #
+      # Derived from the marker and digest-length constants so it cannot drift
+      # from what the sanitizer actually emits; pinned by
+      # test_sanitized_shape_matches_what_the_sanitizer_emits.
+      SIGNAL_SANITIZED_SHAPE =
+        /#{Regexp.escape(SIGNAL_TRUNCATION_MARKER)}[0-9a-f]{#{SIGNAL_DIGEST_LENGTH}}\z/
       REVIEW_DISPOSITIONS = %w[
         should_fix discuss optional skipped resolved accepted-waiver accepted-deferral not-applicable
       ].freeze
@@ -510,30 +628,83 @@ module AgentCoord
       def insert_event(event, index, source_artifact_id)
         return unless event.is_a?(Hash)
 
-        row = {
-          "event_ref" => opaque_value(event["id"]) || "record-#{index}",
-          "batch_id" => known(event["batch_id"]),
-          "repo" => repo(event["repo"]),
-          "target" => known(event["target"]),
-          "event_type" => enum(event["type"], EVENT_TYPES),
-          "observed_at" => timestamp(event["at"] || event["timestamp"]),
-          "terminal" => enum(event["terminal"], STRUCTURED_STATUSES),
-          "join_status" => join_status(known(event["batch_id"]), repo(event["repo"]), known(event["target"])),
-          "source_artifact_id" => source_artifact_id,
-          "source_ordinal" => index
-        }
+        row = event_row(event, index, source_artifact_id)
         @ledger.execute(
           <<~SQL,
             INSERT INTO events (
-              event_ref, batch_id, repo, target, event_type, observed_at, terminal,
+              event_ref, batch_id, repo, target, event_type, event_type_raw, observed_at, terminal,
+              severity, category, kind, reason,
               join_status, source_artifact_id, source_record_sha256
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
           SQL
-          row.except("source_ordinal").values_at(
-            "event_ref", "batch_id", "repo", "target", "event_type", "observed_at", "terminal",
-            "join_status", "source_artifact_id"
-          ) + [allowlisted_digest(row)]
+          row.except("source_ordinal").values_at(*EVENT_COLUMNS) + [allowlisted_digest(row)]
         )
+      end
+
+      # `event_type` stays clamped to the closed EVENT_TYPES vocabulary so
+      # grouping is safe, while `event_type_raw` retains the raw string for every
+      # event that carried one -- sanitized but never dropped, see
+      # `bounded_signal`. A type the allowlist rejects is therefore a
+      # countable `event_type IS NULL AND event_type_raw IS NOT NULL` row (see
+      # the `event_type_drift` view) rather than the silent NULL that produced
+      # #112. Known gap: that view filters on `event_type IS NULL`, so it does
+      # not surface a control-bearing value whose trimmed form happens to be
+      # allowlisted -- a NUL-suffixed "error" classifies as `error` while its
+      # raw column records the digest-marked form. The mismatch is visible in the row, just
+      # not in the view; the underlying cause is `known()` stripping NUL, which
+      # is tracked in issue #171.
+      #
+      # Sanitizing never hides a classified row: every EVENT_TYPES member
+      # is short and control-character free, so a value that needs sanitizing can
+      # never also match the allowlist (asserted by the harvester tests).
+      def event_row(event, index, source_artifact_id)
+        batch_id = known(event["batch_id"])
+        event_repo = repo(event["repo"])
+        target = known(event["target"])
+        {
+          "event_ref" => opaque_value(event["id"]) || "record-#{index}",
+          "batch_id" => batch_id,
+          "repo" => event_repo,
+          "target" => target,
+          "event_type" => enum(event["type"], EVENT_TYPES),
+          # unknown_is_value: this column is the raw type string, so a literal
+          # "unknown" -- which the CLI writes for a type-less record -- is a real
+          # observation to keep, not an absent value. Contrast `category` below.
+          "event_type_raw" => bounded_signal(event["type"], unknown_is_value: true),
+          "observed_at" => timestamp(event["at"] || event["timestamp"]),
+          "terminal" => enum(event["terminal"], STRUCTURED_STATUSES),
+          "join_status" => join_status(batch_id, event_repo, target),
+          "source_artifact_id" => source_artifact_id,
+          "source_ordinal" => index
+        }.merge(event_signal_fields(event))
+      end
+
+      # Typed operational-signal attributes (#112, consumed by #143).
+      # `severity`, `kind`, and `reason` are closed enums, validated against
+      # mirrors of the CLI's own write-time enums. They need no sanitizing:
+      # `enum` correctly nils anything outside the set whatever its length, and
+      # no member of any of the three is a value `known()` would drop (pinned by
+      # test). `category` is free-form at write time and unbounded there, so it
+      # goes through `bounded_signal` instead. `from_route`, `to_route`, and `evidence` are
+      # deliberately not ingested: `evidence` is free prose that does not belong
+      # in a ledger analysis column, and the route strings are unbounded free
+      # text duplicating the route/model dimension `host_sessions` already
+      # carries -- #143 needs only `escalation_requested` counts, which
+      # `event_type` alone provides.
+      def event_signal_fields(event)
+        {
+          "severity" => enum(event["severity"], EVENT_SEVERITIES),
+          # Sanitized, not rejected: `--category` is required for `error` events
+          # but is bounded nowhere at write time (it is not a path segment, so
+          # `validate_segment!` never sees it), and `known()` was silently
+          # dropping oversized and control-character values -- destroying the
+          # very classifier this column carries. `unknown_is_value: false`
+          # because a category is a semantic classifier and this repo reads
+          # UNKNOWN as "no value"; contrast `event_type_raw` above.
+          "category" => bounded_signal(event["category"], unknown_is_value: false),
+          "kind" => enum(event["kind"], EVENT_KINDS),
+          "reason" => enum(event["reason"], EVENT_REASONS)
+        }
       end
 
       def ingest_github(source)
@@ -807,6 +978,79 @@ module AgentCoord
       def opaque_value(value)
         value = known(value)
         value && Digest::SHA256.hexdigest(value)[0, 32]
+      end
+
+      # Shared sanitizer for the free-form signal columns: `event_type_raw` and
+      # `category`. Deliberately NOT `known()`. `known()` guards identity fields,
+      # where an out-of-bounds value must be rejected outright, so it returns nil
+      # for an oversized string, one carrying control characters, and the literal
+      # "UNKNOWN". Reusing it for these columns silently dropped exactly the
+      # signals they exist to carry -- for `event_type_raw` the row landed with
+      # both it and `event_type` NULL and vanished from `event_type_drift`, and
+      # for `category` an `error` event lost its required classifier and with it
+      # the friction clustering the column was added for. These columns have the
+      # opposite requirement: record that a value was present, bounded, rather
+      # than reject it.
+      #
+      # Invariant: NULL if and only if the source carried no usable value --
+      # absent, or nothing but whitespace.
+      #
+      # NUL is deliberately not treated as whitespace. It is a control
+      # character, so a NUL-bearing value takes the control path below and is
+      # stripped and digest-marked like any other, instead of being quietly
+      # trimmed into a value identical to its clean twin. `String#strip` does
+      # remove NUL, which is exactly the laundering this avoids, so the trim
+      # uses SIGNAL_SURROUNDING_WHITESPACE rather than `strip`. A value that is
+      # nothing but control characters is therefore stored as a bare digest,
+      # not NULL -- it carried something, and this column's job is to say so.
+      #
+      # `unknown_is_value:` is the one deliberate asymmetry between the callers,
+      # and it is a difference in the columns' contracts, not an oversight:
+      #   - `event_type_raw` passes true. That column's entire purpose is to
+      #     capture the raw type string, an absent type is already NULL so there
+      #     is no ambiguity, and the CLI itself writes the literal "unknown" for
+      #     a type-less event record -- dropping it would hide an ordinary case.
+      #   - `category` passes false. It is a semantic classifier, and this repo
+      #     treats UNKNOWN as "no value", so it maps to NULL like any other
+      #     absent classifier.
+      #
+      # A value that had to be changed to be stored carries a short digest of the
+      # original, so modified values stay visibly modified *and* distinct from
+      # one another. A bare "truncated" marker would collapse every oversized
+      # value into one identical string and make the drift counts wrong, the same
+      # class of failure these columns were added to fix.
+      #
+      # Scope of that distinctness claim, stated precisely:
+      #
+      #   - Values are first normalized by trimming surrounding whitespace, so
+      #     two inputs differing only there store identically. Deliberate: they
+      #     are the same value, and two rows would be worse output.
+      #   - No clean value can store as some other value's sanitized form,
+      #     because SIGNAL_SANITIZED_SHAPE is reserved -- an input already
+      #     wearing that shape is routed through the sanitizer and gets its own
+      #     digest. So the two paths' outputs are disjoint by construction, and
+      #     a stored value ending in the shape is always sanitizer-produced.
+      #   - Two sanitized values can only collide by colliding on a
+      #     SIGNAL_DIGEST_LENGTH-character SHA-256 hex prefix. That is a
+      #     cryptographic bound, not an exact guarantee -- worth knowing, but a
+      #     different and far weaker class than the constructible collisions
+      #     above, which are closed outright.
+      #
+      # CLI-written types cannot contain whitespace or control characters anyway:
+      # `AgentCoord.validate_segment!` restricts `--type` to `[A-Za-z0-9_:-]` and
+      # dot separators.
+      def bounded_signal(value, unknown_is_value:)
+        original = value.to_s.gsub(SIGNAL_SURROUNDING_WHITESPACE, "")
+        return if original.empty?
+        return if !unknown_is_value && original.casecmp?("UNKNOWN")
+        return original if original.bytesize <= SIGNAL_MAX_BYTES &&
+                           !original.match?(SIGNAL_CONTROL_CHARACTERS) &&
+                           !original.match?(SIGNAL_SANITIZED_SHAPE)
+
+        prefix = original.gsub(SIGNAL_CONTROL_CHARACTERS, "")
+                         .byteslice(0, SIGNAL_PREFIX_BYTES).to_s.scrub("")
+        digest = Digest::SHA256.hexdigest(original)[0, SIGNAL_DIGEST_LENGTH]
+        "#{prefix}#{SIGNAL_TRUNCATION_MARKER}#{digest}"
       end
 
       def known(value)

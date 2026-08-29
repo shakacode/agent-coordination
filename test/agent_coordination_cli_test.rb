@@ -4918,6 +4918,39 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     FileUtils.remove_entry(fake_bin) if fake_bin && Dir.exist?(fake_bin)
   end
 
+  # Regression for issue #132: an explicit --backend must win over a configured
+  # status state root, not be silently answered from local state.
+  def test_status_prefers_explicit_backend_over_status_state_root
+    now = Time.now.utc
+    write_heartbeat(
+      "worker-local-must-not-appear",
+      updated_at: now - (5 * 60),
+      expires_at: now + (10 * 60)
+    )
+    fake_bin = Dir.mktmpdir("agent-coord-gh")
+    File.write(File.join(fake_bin, "gh"), "#!/bin/sh\necho explicit-backend-reached-gh >&2\nexit 1\n")
+    FileUtils.chmod(0o755, File.join(fake_bin, "gh"))
+
+    result = run_command(
+      {
+        "AGENT_COORD_STATE_ROOT" => nil,
+        "AGENT_COORD_STATUS_STATE_ROOT" => @state_root,
+        "PATH" => [fake_bin, File.dirname(RbConfig.ruby), "/usr/bin", "/bin"].join(File::PATH_SEPARATOR)
+      },
+      RbConfig.ruby,
+      BIN,
+      "status",
+      "--backend",
+      "some/repo"
+    )
+
+    assert_equal 2, result.status.exitstatus, result.stderr
+    assert_includes result.stderr, "explicit-backend-reached-gh"
+    refute_includes result.stdout, "worker-local-must-not-appear"
+  ensure
+    FileUtils.remove_entry(fake_bin) if fake_bin && Dir.exist?(fake_bin)
+  end
+
   def test_doctor_defaults_to_status_state_root_without_global_state_root
     now = Time.now.utc
     write_heartbeat(
@@ -4944,6 +4977,75 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     assert_includes result.stdout, "backend: local"
     assert_includes result.stdout, "state_root: #{@state_root}"
     refute_includes result.stderr, "unexpected gh"
+  ensure
+    FileUtils.remove_entry(fake_bin) if fake_bin && Dir.exist?(fake_bin)
+  end
+
+  # Regression for issue #132: an explicit --backend must win over a configured
+  # status state root, not be silently answered from local state.
+  # Regression for issue #132: AGENT_COORD_BACKEND selects a backend exactly like
+  # --backend does, so the status state root must yield to it too. Covered
+  # separately because only --backend sets :explicit_backend, so a future change
+  # that keys off that flag would leave the env-var path silently reading local
+  # state again.
+  def test_status_prefers_backend_env_var_over_status_state_root
+    now = Time.now.utc
+    write_heartbeat(
+      "worker-env-local-must-not-appear",
+      updated_at: now - (5 * 60),
+      expires_at: now + (10 * 60)
+    )
+    fake_bin = Dir.mktmpdir("agent-coord-gh")
+    File.write(File.join(fake_bin, "gh"), "#!/bin/sh\necho explicit-backend-reached-gh >&2\nexit 1\n")
+    FileUtils.chmod(0o755, File.join(fake_bin, "gh"))
+
+    result = run_command(
+      {
+        "AGENT_COORD_STATE_ROOT" => nil,
+        "AGENT_COORD_BACKEND" => "some/repo",
+        "AGENT_COORD_STATUS_STATE_ROOT" => @state_root,
+        "PATH" => [fake_bin, File.dirname(RbConfig.ruby), "/usr/bin", "/bin"].join(File::PATH_SEPARATOR)
+      },
+      RbConfig.ruby,
+      BIN,
+      "status"
+    )
+
+    assert_equal 2, result.status.exitstatus, result.stderr
+    assert_includes result.stderr, "explicit-backend-reached-gh"
+    refute_includes result.stdout, "worker-env-local-must-not-appear"
+  ensure
+    FileUtils.remove_entry(fake_bin) if fake_bin && Dir.exist?(fake_bin)
+  end
+
+  def test_doctor_prefers_explicit_backend_over_status_state_root
+    now = Time.now.utc
+    write_heartbeat(
+      "worker-doctor-local-must-not-appear",
+      updated_at: now - (5 * 60),
+      expires_at: now + (10 * 60)
+    )
+    fake_bin = Dir.mktmpdir("agent-coord-gh")
+    File.write(File.join(fake_bin, "gh"), "#!/bin/sh\necho explicit-backend-reached-gh >&2\nexit 1\n")
+    FileUtils.chmod(0o755, File.join(fake_bin, "gh"))
+
+    result = run_command(
+      {
+        "AGENT_COORD_STATE_ROOT" => nil,
+        "AGENT_COORD_STATUS_STATE_ROOT" => @state_root,
+        "PATH" => [fake_bin, File.dirname(RbConfig.ruby), "/usr/bin", "/bin"].join(File::PATH_SEPARATOR)
+      },
+      RbConfig.ruby,
+      BIN,
+      "doctor",
+      "--backend",
+      "some/repo"
+    )
+
+    assert_equal 2, result.status.exitstatus, result.stderr
+    assert_includes result.stderr, "explicit-backend-reached-gh"
+    refute_includes result.stdout, "backend: local"
+    refute_includes result.stdout, "worker-doctor-local-must-not-appear"
   ensure
     FileUtils.remove_entry(fake_bin) if fake_bin && Dir.exist?(fake_bin)
   end
@@ -6338,11 +6440,59 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     assert_equal "target", payload.fetch("scope").fetch("kind")
     assert_equal "shakacode/react_on_rails", payload.fetch("scope").fetch("repo")
     assert_equal "4150", payload.fetch("scope").fetch("target")
-    assert_equal ["not checked in target scope"], payload.fetch("degraded")
-    assert_equal "not checked in target scope", payload.fetch("section_notes").fetch("batches")
-    assert_equal "not checked in target scope", payload.fetch("section_notes").fetch("events")
+    unchecked = "not checked in target scope; run `agent-coord log` for this target's history"
+    assert_equal [unchecked], payload.fetch("degraded")
+    assert_equal unchecked, payload.fetch("section_notes").fetch("batches")
+    assert_equal unchecked, payload.fetch("section_notes").fetch("events")
     assert_equal "jg-codex/4150-worker", payload.fetch("claims").first.fetch("branch")
     assert_equal "worker-4150", payload.fetch("heartbeats").first.fetch("agent_id")
+  end
+
+  # A section that was never read must not render as a section that was read and
+  # found empty: an operator asking "was this target ever worked" reads the empty
+  # array as the answer. null is unmistakably "no answer here".
+  def test_status_target_scope_reports_unchecked_sections_as_null_not_empty
+    now = Time.utc(2026, 6, 20, 12, 0, 0)
+    store = TargetScopedStore.new(now)
+    stdout = StringIO.new
+    runner = AgentCoord::Runner.new([], stdout: stdout, clock: FixedClock.new(now))
+    runner.define_singleton_method(:build_store) { |_options| store }
+
+    runner.send(:render_status, repo: "shakacode/react_on_rails", target: "4150", json: true)
+    payload = JSON.parse(stdout.string)
+
+    assert_nil payload.fetch("batches")
+    assert_nil payload.fetch("events")
+    refute_empty payload.fetch("claims"), "the sections that were read still carry their records"
+  end
+
+  # The note is the only place the operator learns the question is answerable
+  # elsewhere, so it names the command that answers it.
+  def test_status_target_scope_note_points_at_the_command_that_can_answer
+    now = Time.utc(2026, 6, 20, 12, 0, 0)
+    store = TargetScopedStore.new(now)
+    stdout = StringIO.new
+    runner = AgentCoord::Runner.new([], stdout: stdout, clock: FixedClock.new(now))
+    runner.define_singleton_method(:build_store) { |_options| store }
+
+    runner.send(:render_status, repo: "shakacode/react_on_rails", target: "4150", json: true)
+    note = JSON.parse(stdout.string).fetch("section_notes").fetch("events")
+
+    assert_includes note, "not checked in target scope"
+    assert_includes note, "agent-coord log"
+  end
+
+  def test_status_target_scope_text_renders_unchecked_sections_without_crashing
+    now = Time.utc(2026, 6, 20, 12, 0, 0)
+    store = TargetScopedStore.new(now)
+    stdout = StringIO.new
+    runner = AgentCoord::Runner.new([], stdout: stdout, clock: FixedClock.new(now))
+    runner.define_singleton_method(:build_store) { |_options| store }
+
+    result = runner.send(:render_status, repo: "shakacode/react_on_rails", target: "4150")
+
+    assert_equal 0, result
+    assert_includes stdout.string, "not checked in target scope"
   end
 
   def test_status_target_scope_reports_malformed_claim_as_unknown
@@ -6678,6 +6828,69 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
       refute_includes result.stderr, "JSON::GeneratorError", source
       refute_path_exists File.join(@state_root, "batches", "#{batch_id}.json"), source
     end
+  end
+
+  # State JSON is UTF-8 by definition, but the store used to read it through
+  # Encoding.default_external, which is US-ASCII under a non-UTF-8 locale. One
+  # record holding a non-ASCII byte then crashed JSON.parse with
+  # Encoding::InvalidByteSequenceError, taking down every command that walks the
+  # store. These pin the list scan and the batch manifest read under LC_ALL=C.
+  def test_status_reads_non_ascii_state_records_under_an_ascii_locale
+    write_state_record(
+      "events/batch-non-ascii/e1.json",
+      "schema_version" => 1, "event_id" => "e1", "batch_id" => "batch-non-ascii", "type" => "lane",
+      "repo" => "shakacode/example", "target" => "4711",
+      "message" => "PR 4711 merged — verified", "at" => "2026-07-17T22:52:29Z"
+    )
+
+    result = run_agent_coord("status", env: { "LC_ALL" => "C", "LANG" => "C" })
+
+    assert_equal 0, result.status.exitstatus, result.stderr
+    refute_includes result.stderr, "Encoding::InvalidByteSequenceError"
+    assert_includes result.stdout, "PR 4711 merged — verified"
+  end
+
+  def test_register_batch_reads_non_ascii_manifests_under_an_ascii_locale
+    manifest_path = File.join(@state_root, "batch-manifest-non-ascii.json")
+    File.write(
+      manifest_path,
+      JSON.pretty_generate(
+        "batch_id" => "batch-manifest-non-ascii",
+        "goal" => "land the fix — today",
+        "lanes" => [{ "name" => "docs", "owner" => "worker-docs", "targets" => ["3972"] }]
+      )
+    )
+
+    result = run_agent_coord(
+      "register-batch", "--file", manifest_path, env: { "LC_ALL" => "C", "LANG" => "C" }
+    )
+
+    assert_equal 0, result.status.exitstatus, result.stderr
+    refute_includes result.stderr, "Encoding::InvalidByteSequenceError"
+    stored_path = File.join(@state_root, "batches", "batch-manifest-non-ascii.json")
+    assert_equal "land the fix — today", JSON.parse(File.read(stored_path, encoding: "UTF-8")).fetch("goal")
+  end
+
+  # Scoped status is the single-record read (LocalStore#read_json), which the two
+  # tests above do not reach: they exercise the list scan and the manifest read.
+  # stdout is compared UTF-8-tagged so this pins the CLI's behavior rather than
+  # the locale the test runner itself happens to be started under.
+  def test_scoped_status_reads_a_non_ascii_claim_record_under_an_ascii_locale
+    write_state_record(
+      "claims/shakacode/example/4711.json",
+      "schema_version" => 1, "repo" => "shakacode/example", "target" => "4711",
+      "agent_id" => "worker-café", "status" => "active",
+      "message" => "holding — do not steal"
+    )
+
+    result = run_agent_coord(
+      "status", "--repo", "shakacode/example", "--target", "4711",
+      env: { "LC_ALL" => "C", "LANG" => "C" }
+    )
+
+    assert_equal 0, result.status.exitstatus, result.stderr
+    refute_includes result.stderr, "Encoding::InvalidByteSequenceError"
+    assert_includes result.stdout.dup.force_encoding(Encoding::UTF_8), "worker-café"
   end
 
   def test_record_event_writes_append_only_event_and_status_metadata
@@ -7807,6 +8020,40 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     assert_includes result.stdout, "batch-audit batch-status-root incomplete"
     refute_includes result.stderr, "local mode — single-machine only"
     refute_includes result.stderr, "unexpected gh"
+  ensure
+    FileUtils.remove_entry(fake_bin) if fake_bin && Dir.exist?(fake_bin)
+  end
+
+  # Regression for issue #132: an explicit --backend must win over a configured
+  # status state root, not be silently answered from local state.
+  def test_batch_audit_prefers_explicit_backend_over_status_state_root
+    write_batch(
+      "batch-local-must-not-appear",
+      lanes: [{ "name" => "code", "owner" => "worker-a", "targets" => ["101"] }]
+    )
+    fake_bin = Dir.mktmpdir("agent-coord-gh")
+    File.write(File.join(fake_bin, "gh"), "#!/bin/sh\necho explicit-backend-reached-gh >&2\nexit 1\n")
+    FileUtils.chmod(0o755, File.join(fake_bin, "gh"))
+
+    result = run_command(
+      {
+        "AGENT_COORD_STATE_ROOT" => nil,
+        "AGENT_COORD_STATUS_STATE_ROOT" => @state_root,
+        "PATH" => [fake_bin, File.dirname(RbConfig.ruby), "/usr/bin", "/bin"].join(File::PATH_SEPARATOR)
+      },
+      RbConfig.ruby,
+      BIN,
+      "batch-audit",
+      "--batch-id",
+      "batch-local-must-not-appear",
+      "--backend",
+      "some/repo"
+    )
+
+    assert_equal 2, result.status.exitstatus, result.stderr
+    assert_includes result.stdout, "batch-audit batch-local-must-not-appear unknown"
+    assert_includes result.stdout, "explicit-backend-reached-gh"
+    refute_includes result.stdout, "batch-audit batch-local-must-not-appear incomplete"
   ensure
     FileUtils.remove_entry(fake_bin) if fake_bin && Dir.exist?(fake_bin)
   end

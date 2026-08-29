@@ -144,6 +144,7 @@ class PackagingTest < Minitest::Test
     schema/telemetry-ledger/0001_initial.sql
     schema/telemetry-ledger/0002_host_usage.sql
     schema/telemetry-ledger/0003_pricing_scorecards.sql
+    schema/telemetry-ledger/0004_event_type_retention.sql
   ].freeze
 
   def gem_command

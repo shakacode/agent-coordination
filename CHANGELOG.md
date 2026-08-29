@@ -298,6 +298,104 @@ when releases begin.
 
 ### Fixed
 
+- `agent-coord log` now matches a target on the work item it names rather than on
+  its literal spelling, so one item's custody trail stops splitting into partial
+  answers. Issues and pull requests share one number sequence per repository, and
+  the store holds the same item as `319`, `issue:319`, and `pr:319`; every
+  spelling now returns the whole trail. Against the live fleet backend,
+  `--target 319` returned 7 events and `--target issue:319` returned 28 for the
+  same issue, with neither reporting that it was showing a share of the history;
+  all spellings now return the union of 35. A trailing segment stays a lane within
+  the item (`issue:319:qa`): asking for the item covers its lanes, asking for a
+  lane stays narrow. Claim keys are unchanged — this is a read-path identity only,
+  because a lane holds its own lease and merging keys would break exclusion. The
+  reported claim follows that same rule: it folds casing and kind prefixes, which
+  name one lease, but matches the lane exactly, so a parent and a lane that are
+  live at the same time are each reported under their own query instead of the
+  newer one hiding the other. `claim` writes raw target paths, so `9832` and
+  `pr:9832` are independently claimable and the fleet holds such pairs live under
+  different agents; `--json` therefore gained a `claims` array carrying every
+  holder, with the singular `claim` still the newest for existing consumers, and
+  text output prints one line per holder. One key recorded under two casings is
+  still a single lease written twice, so those collapse to the newest as before —
+  the grouping is on the exact claim key, not on the work-item identity. Whether a claim is still the latest
+  thing known is judged against events recorded under that claim's own key, since
+  a separate lease — whether a lane like `issue:319:qa` or an alias like `pr:319` —
+  says nothing about whether this one still stands. That is also what the literal
+  match did before identity folding. `--limit` trims the trail that is displayed
+  and no longer trims the evidence that decides this, so a release dropped by the
+  limit can still supersede a claim. Every reported claim now carries the exact
+  `target` it holds, in both JSON and text, since with two holders that key is
+  what a release or handoff has to address, and claim lines read oldest-first like
+  the trail above them so the last one printed is the current one (issue #141).
+- `adhoc:` targets are no longer folded into the GitHub number space when their id
+  is a bare number. Ad hoc ids are operator-chosen slugs, and nothing stops one
+  being named `adhoc:319`, which would otherwise have merged with issue 319 — the
+  same wrong answer this identity exists to prevent, reached from the other
+  direction. A kept prefix stays part of the base rather than making the number a
+  lane, so `adhoc:319` is also not swept up by a query for a work item called
+  `adhoc`. A slug id such as `adhoc:20260731-backend-policy` still folds with its
+  bare spelling, which is the case that made the prefix foldable. `issue:` and
+  `pr:` are the mirror image and now follow the same rule: they come off ahead of
+  a number, which is what they decorate, and stay ahead of a slug, so a bare `foo`
+  and a separately keyed `issue:foo` are no longer merged. A prefix with no id
+  after it decorates nothing and is kept for the same reason, so `adhoc::qa` stays
+  distinct from the separately keyed `:qa` rather than folding onto it. Every
+  `issue:`/`pr:` target in the fleet store is numeric, so this splits nothing that
+  folded before (issue #141).
+- `agent-coord log --json` now reports `work_item.matched_targets` and a `trail`
+  of `complete` or `incomplete`. The degraded-listing warning went only to stderr,
+  so a trail cut short by a scoped token was byte-identical to a complete empty
+  one for any JSON consumer, and "searched everything, found nothing" could not be
+  told apart from "could not search". `matched_targets` describes the search
+  rather than the rendered rows, so a `--limit` that trims the displayed trail
+  does not understate which spellings answered (issue #141).
+- `agent-coord status --repo R --target N` now reports the `batches` and `events`
+  sections it does not read as `null` rather than as empty arrays, and its section
+  note names `agent-coord log` as the command that can answer for that target.
+  Claims and heartbeats are cleared on release and expiry, so target scope alone
+  cannot tell "never worked" from "worked and finished" — and two empty arrays
+  read like an answer to exactly that question (issue #141).
+- `agent-coord log` now reads the events `gc` compacted into `archive/events`
+  instead of reporting `no events` for the work item they belong to (issue #139).
+  Compaction moves a completed lane's events into an immutable
+  `record_family: compacted_events` envelope and deletes the hot copies, while
+  `log` listed only the `events` prefix -- so the trail disappeared for exactly
+  the completed work most likely to be audited after the fact, and it said so in
+  the same words the command uses for work that never happened. The archived
+  records are the same event payloads `log` already renders, so they are folded
+  into the trail by default rather than behind a flag: a continuous custody trail
+  is the property the command promises, and the silence was the defect more than
+  the omission. Archived and live events for one work item interleave through the
+  existing timestamp ordering, and an event readable from both prefixes -- a
+  compaction interrupted between writing its envelope and deleting its sources --
+  is reported once. Only the archived events prefix is read and only
+  event-bearing record families are folded in, so an archived claim or heartbeat
+  is never reported as an event it never was, and an unrecognized record family
+  is reported rather than silently skipped. Rows are unchanged, so text,
+  `--format tsv`, `--json`, and the `--sync` mirror hold exactly what they held
+  before `gc` ran, and the mirror's line-level deduplication still recognizes an
+  event it already has. Provenance is reported on stderr instead: how many of the
+  reported events came from the archive, how many source events compaction did
+  not retain, and the `delete_after` date on which the rest is deleted. Reading
+  the archive is additive by construction -- it can add rows or a warning, never
+  turn a trail that reads today into a failure -- so an unreadable directory or
+  an archive record that will not parse degrades to a warning that also marks the
+  trail incomplete. A backend with no `archive/events` prefix is deliberately not
+  treated that way: the Worker change that made that prefix listable is the one
+  that made it writable, so such a backend cannot have stored an archived event
+  and nothing is missing. It warns without marking the trail incomplete, and
+  `log --sync` still writes the mirror -- refusing there would have broken the
+  precondition this same change documents. One consequence is worth knowing
+  before upgrading: a scoped HTTP token that can read `events` but not
+  `archive/events` (the prefix this read lists, not the whole `archive` tree)
+  now prints a warning on every `log` invocation, and `log --sync` refuses to
+  write a mirror for it, because a mirror written from a read that could not see
+  the archive would later be indistinguishable from a complete one. The README
+  now documents `log --sync` as a precondition for running `gc` rather than a
+  convenience: compaction drops the source events an envelope does not retain the
+  moment it runs, and `delete_after` removes the envelope holding the rest, so
+  the mirror is the only copy that survives both.
 - The consumer env-file probe no longer reads a commented-out assignment such as
   `AGENT_COORD_API_URL= # remote disabled` as a configured fleet URL. Sourcing
   that file leaves the variable empty, so it selects no fleet backend; the value
