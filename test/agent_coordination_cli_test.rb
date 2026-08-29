@@ -4991,6 +4991,283 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     FileUtils.remove_entry(fake_bin) if fake_bin && Dir.exist?(fake_bin)
   end
 
+  # The write half of the same locale contract. Ruby tags ARGV with the locale
+  # encoding, so under LC_ALL=C every CLI-sourced string used to reach
+  # JSON.generate as BINARY; json warns today and raises in 3.0, which would
+  # turn every launchd/cron write into a crash. Assert the warning is gone and
+  # that the bytes still round-trip, so a fix that dropped them would not pass.
+  def test_record_event_writes_non_ascii_cli_values_under_an_ascii_locale
+    result = run_agent_coord(
+      "record-event", "--batch-id", "batch-locale-write", "--type", "lane",
+      "--agent-id", "worker-café", "--repo", "shakacode/example", "--target", "4711",
+      "--message", "PR 4711 merged — verified",
+      env: { "LC_ALL" => "C", "LANG" => "C" }
+    )
+
+    assert_equal 0, result.status.exitstatus, result.stderr
+    refute_includes result.stderr, "passed as BINARY"
+    refute_includes result.stderr, "JSON::GeneratorError"
+    stored = Dir.glob(File.join(@state_root, "events", "batch-locale-write", "*.json")).fetch(0)
+    event = JSON.parse(File.read(stored, encoding: "UTF-8"))
+    assert_equal "worker-café", event.fetch("agent_id")
+    assert_equal "PR 4711 merged — verified", event.fetch("message")
+  end
+
+  # Genuinely invalid bytes are rejected rather than scrubbed, matching
+  # load_launch_prompt: a scrubbed --agent-id or --repo would be written into
+  # coordination state as a silently different identity. Normalization runs at
+  # the Runner boundary, so it covers option values, the positional, and the
+  # command token alike, and the echoed value is scrubbed so the usage error
+  # itself cannot emit an invalid byte sequence onto stderr.
+  def test_cli_rejects_invalid_utf8_arguments_before_writing_state
+    {
+      "option value" => [
+        "record-event", "--batch-id", "batch-invalid-argv", "--type", "lane",
+        "--agent-id", "worker-a", "--repo", "shakacode/example", "--target", "4711",
+        "--message", "merged \xFF verified"
+      ],
+      "positional" => ["log", "shakacode/example#\xFF"],
+      "command token" => ["\xFFstatus"]
+    }.each do |source, args|
+      result = run_agent_coord(*args, env: { "LC_ALL" => "C", "LANG" => "C" })
+
+      assert_equal 1, result.status.exitstatus, source
+      assert_includes result.stderr, "command-line argument must be valid UTF-8", source
+      refute_includes result.stderr, "JSON::GeneratorError", source
+    end
+
+    refute_path_exists File.join(@state_root, "events", "batch-invalid-argv")
+  end
+
+  # `LC_ALL=C` is not the only non-UTF-8 case, and the two need opposite
+  # treatment. A genuinely non-UTF-8 locale tags its arguments with a real
+  # encoding, and that tag is a claim about what the bytes mean: latin-1 `café`
+  # is `caf\xE9`, which force_encoding would have rejected as invalid UTF-8 and
+  # which no amount of retagging turns into the text the operator typed. BINARY
+  # is the opposite -- the absence of a tag -- and there retagging is the only
+  # correct move. Pinned in process because ARGV's tagging follows the locale
+  # and a latin-1 locale is not generated on every machine the suite runs on.
+  def test_argv_normalization_transcodes_declared_encodings_and_retags_binary
+    latin1 = "caf\xE9".b.force_encoding(Encoding::ISO_8859_1)
+    binary = "caf\xC3\xA9".b
+    ascii = "plain".dup.force_encoding(Encoding::US_ASCII)
+
+    normalized = AgentCoord.normalize_argv([latin1, binary, ascii])
+
+    assert_equal %w[café café plain], normalized
+    assert_equal [Encoding::UTF_8] * 3, normalized.map(&:encoding)
+    assert_equal [[99, 97, 102, 195, 169], [99, 97, 102, 195, 169]], normalized.take(2).map(&:bytes)
+    # Every byte is valid ISO-8859-1, so a latin-1 terminal's 0xFF is `ÿ` and
+    # transcodes rather than being rejected as the invalid UTF-8 it is not.
+    assert_equal ["cafÿ"], AgentCoord.normalize_argv(["caf\xFF".b.force_encoding(Encoding::ISO_8859_1)])
+  end
+
+  # String#encode from UTF-8 to UTF-8 is a no-op that does not validate, so the
+  # valid_encoding? check still has to run after transcoding or a UTF-8 locale
+  # would pass invalid bytes straight through to the store. The rejected value is
+  # echoed through AgentCoord.utf8_diagnostic, the same message-path treatment
+  # the subprocess capture seam uses, so the undecodable byte reads as U+FFFD and
+  # the error itself is valid UTF-8 whatever the argument claimed to be.
+  def test_argv_normalization_rejects_invalid_bytes_in_every_declared_encoding
+    {
+      "utf-8 tagged" => "caf\xFF".b.force_encoding(Encoding::UTF_8),
+      "binary tagged" => "caf\xFF".b,
+      "us-ascii tagged" => "caf\xE9".b.force_encoding(Encoding::US_ASCII)
+    }.each do |label, argument|
+      error = assert_raises(AgentCoord::Error, label) { AgentCoord.normalize_argv([argument]) }
+
+      assert_equal "command-line argument must be valid UTF-8: caf\uFFFD", error.message, label
+      assert_equal AgentCoord::EXIT_USAGE, error.exit_code, label
+      assert_predicate error.message, :valid_encoding?, label
+    end
+  end
+
+  # Runner#run and parse_options consume the array they are handed, so
+  # normalizing in place would reach back into ARGV or a caller's array. Nothing
+  # else in the suite fails if this becomes `argv.map!`.
+  def test_argv_normalization_returns_a_copy_of_the_callers_array
+    argv = ["status", "--state-root", @state_root]
+    original = argv.dup
+
+    AgentCoord::Runner.new(argv, stdout: StringIO.new, stderr: StringIO.new).run
+
+    assert_equal original, argv
+  end
+
+  # The stack-json exit code is resolved during normalization, and the detection
+  # that resolves it splits each argument on "=". String#split raises
+  # ArgumentError on a UTF-8-tagged string holding invalid bytes -- exactly the
+  # input that reaches it -- so the detection has to run on a BINARY copy. Only
+  # some argument shapes reach that split: a value option's value is skipped
+  # before it, so the cases that matter are the `--opt=value` form, a bare
+  # positional, and a token that merely looks like an option. A UTF-8 locale is
+  # what produces this tagging and one is not generated on every machine the
+  # suite runs on, so it is pinned in process rather than through the shell.
+  def test_stack_json_exit_code_survives_a_utf8_tagged_invalid_argument
+    invalid = "claims/\xFF".b.force_encoding(Encoding::UTF_8)
+    equals_form = "--doctor-prefix=claims/\xFF".b.force_encoding(Encoding::UTF_8)
+    option_shaped = "--own\xFF".b.force_encoding(Encoding::UTF_8)
+    stack = ["doctor", "--stack-json", "--state-root", @state_root]
+
+    refute_predicate invalid, :valid_encoding?
+    {
+      "value of a value option" => [stack + ["--doctor-prefix", invalid], AgentCoord::STACK_EXIT_USAGE],
+      "equals form" => [stack + [equals_form], AgentCoord::STACK_EXIT_USAGE],
+      "bare positional" => [stack + [invalid], AgentCoord::STACK_EXIT_USAGE],
+      "option-shaped token" => [stack + [option_shaped], AgentCoord::STACK_EXIT_USAGE],
+      "no stack-json" => [["doctor", "--state-root", @state_root, invalid], AgentCoord::EXIT_USAGE],
+      "another command" => [["status", "--state-root", @state_root, invalid], AgentCoord::EXIT_USAGE],
+      # --stack-json is a doctor-only flag, so on any other command it is just an
+      # unknown option and the exit code stays the ordinary usage one. Without
+      # the command gate every command would inherit doctor's 64.
+      "stack-json on another command" =>
+        [["status", "--stack-json", "--state-root", @state_root, invalid], AgentCoord::EXIT_USAGE],
+      "stack-json on a write command" =>
+        [["record-event", "--stack-json", "--state-root", @state_root, invalid], AgentCoord::EXIT_USAGE]
+    }.each do |label, (argv, expected)|
+      error = assert_raises(AgentCoord::Error, label) do
+        AgentCoord::Runner.new(argv, stdout: StringIO.new, stderr: StringIO.new)
+      end
+
+      assert_equal expected, error.exit_code, label
+      assert_includes error.message, "command-line argument must be valid UTF-8", label
+    end
+  end
+
+  # A path is a byte string on its way to a syscall; every other argument is text
+  # on its way to JSON. Transcoding a path changes which file it names -- a
+  # latin-1 /tmp/café becomes a different, probably nonexistent directory, and on
+  # a filesystem that permits non-UTF-8 names `status --state-root` would then
+  # report empty coordination state for a root that is not empty, which reads as
+  # "nothing is claimed". The exempt set is derived from the option
+  # declarations' PATH placeholder, so it is asserted here rather than restated:
+  # an option that gains or loses that placeholder changes this list.
+  def test_path_option_values_keep_the_bytes_the_operator_typed
+    typed = "/tmp/caf\xE9".b
+    path_options = AgentCoord::Runner.new([], stdout: StringIO.new, stderr: StringIO.new)
+                                     .send(:registered_options, "status").path_options
+
+    assert_equal %w[--file --install-dir --launch-prompt --profile --state-root --status-state-root],
+                 path_options.sort
+    path_options.each do |option|
+      {
+        "declared latin-1" => typed.dup.force_encoding(Encoding::ISO_8859_1),
+        "binary" => typed.dup
+      }.each do |tagging, value|
+        {
+          "separate" => [["status", option, value], typed],
+          "equals" => [["status", "#{option}=#{value.b}".b.force_encoding(value.encoding)],
+                       "#{option}=#{typed}".b]
+        }.each do |form, (argv, expected)|
+          label = "#{option} #{tagging} #{form}"
+          normalized = AgentCoord::Runner.new(argv, stdout: StringIO.new, stderr: StringIO.new)
+                                         .instance_variable_get(:@argv)
+
+          assert_equal expected, normalized.last.b, label
+          assert_equal value.encoding, normalized.last.encoding, label
+        end
+      end
+    end
+  end
+
+  # The counterpart, so marking every argument raw would fail: a value that is
+  # not a path is still normalized in the same position under the same tagging.
+  def test_non_path_option_values_are_still_normalized
+    latin1 = "caf\xE9".b.force_encoding(Encoding::ISO_8859_1)
+
+    normalized = AgentCoord::Runner.new(["status", "--message", latin1],
+                                        stdout: StringIO.new, stderr: StringIO.new)
+                                   .instance_variable_get(:@argv)
+
+    assert_equal "café", normalized.last
+    assert_equal Encoding::UTF_8, normalized.last.encoding
+    assert_equal [99, 97, 102, 195, 169], normalized.last.bytes
+  end
+
+  # End to end for the same property, without needing a filesystem that accepts
+  # non-UTF-8 names: the root the CLI reports as missing has to be the bytes it
+  # was given, because that is the name it passed to the syscall.
+  def test_a_non_utf8_state_root_reaches_the_filesystem_unchanged
+    typed = "#{@state_root}/caf\xE9".b
+
+    result = run_agent_coord("doctor", "--state-root", typed, state_root: nil,
+                                                              env: { "LC_ALL" => "C", "LANG" => "C" })
+
+    assert_equal 2, result.status.exitstatus, result.stderr
+    assert_includes result.stderr.b, typed
+    refute_includes result.stderr.b, "caf\xC3\xA9".b
+  end
+
+  # End to end through the real store rather than only through normalize_argv:
+  # the transcoded value has to survive JSON.generate and the atomic write, so
+  # this asserts the bytes on disk.
+  def test_a_transcoded_latin1_argument_reaches_state_as_utf8
+    argv = [
+      "record-event", "--batch-id", "batch-latin1", "--type", "lane",
+      "--agent-id", "worker-a", "--repo", "shakacode/example", "--target", "4711",
+      "--message", "merged caf\xE9".b.force_encoding(Encoding::ISO_8859_1),
+      "--state-root", @state_root
+    ]
+
+    code = AgentCoord::Runner.new(argv, stdout: StringIO.new, stderr: StringIO.new).run
+
+    assert_equal 0, code
+    stored = Dir.glob(File.join(@state_root, "events", "batch-latin1", "*.json")).fetch(0)
+    message = JSON.parse(File.read(stored, encoding: "UTF-8")).fetch("message")
+    assert_equal "merged café", message
+    assert_equal [109, 101, 114, 103, 101, 100, 32, 99, 97, 102, 195, 169], message.bytes
+  end
+
+  # The write path's quietest failure. A BINARY argument is not `==` to the same
+  # text read back from state, so the holder check treated an agent as a
+  # stranger to its own live claim: exit 3, a plausible CLAIM_REFUSED naming the
+  # holder as itself, and a lease-renewal loop that silently stops renewing.
+  def test_claim_renews_a_non_ascii_holder_under_an_ascii_locale
+    ascii_locale = { "LC_ALL" => "C", "LANG" => "C" }
+    args = [
+      "claim", "--agent-id", "worker-café", "--repo", "shakacode/example",
+      "--target", "4711", "--batch-id", "batch-locale-renew", "--ttl", "3600"
+    ]
+
+    first = run_agent_coord(*args, env: ascii_locale)
+    renewal = run_agent_coord(*args, env: ascii_locale)
+
+    assert_equal 0, first.status.exitstatus, first.stderr
+    assert_equal 0, renewal.status.exitstatus, renewal.stderr
+    refute_includes renewal.stderr, "CLAIM_REFUSED"
+    claim_path = File.join(@state_root, "claims", "shakacode", "example", "4711.json")
+    assert_equal "worker-café", JSON.parse(File.read(claim_path, encoding: "UTF-8")).fetch("agent_id")
+  end
+
+  # A BINARY string and a UTF-8 string with identical bytes are not `==` once
+  # either holds a non-ASCII byte, so under LC_ALL=C the holder check compared
+  # the stored UTF-8 agent_id against the BINARY --agent-id, concluded the claim
+  # belonged to someone else, and then crashed with Encoding::CompatibilityError
+  # while interpolating the BINARY value into the refusal message. The holder
+  # could not release its own claim. Normalizing argv restores the identity match.
+  def test_release_matches_a_non_ascii_holder_under_an_ascii_locale
+    ascii_locale = { "LC_ALL" => "C", "LANG" => "C" }
+    claim = run_agent_coord(
+      "claim", "--agent-id", "worker-café", "--repo", "shakacode/example",
+      "--target", "4711", "--batch-id", "batch-locale-release", "--ttl", "3600",
+      env: ascii_locale
+    )
+    assert_equal 0, claim.status.exitstatus, claim.stderr
+
+    result = run_agent_coord(
+      "release", "--agent-id", "worker-café", "--repo", "shakacode/example",
+      "--target", "4711", "--message", "merged — verified", env: ascii_locale
+    )
+
+    assert_equal 0, result.status.exitstatus, result.stderr
+    refute_includes result.stderr, "Encoding::CompatibilityError"
+    refute_includes result.stderr, "cannot release it"
+    claim_path = File.join(@state_root, "claims", "shakacode", "example", "4711.json")
+    stored = JSON.parse(File.read(claim_path, encoding: "UTF-8"))
+    assert_equal "released", stored.fetch("status")
+    assert_equal "worker-café", stored.fetch("released_by")
+  end
+
   def test_record_event_writes_append_only_event_and_status_metadata
     write_batch(
       "batch-b",
