@@ -75,51 +75,85 @@ module AgentCoord
         event_ref batch_id repo target event_type event_type_raw observed_at terminal
         severity category kind reason join_status source_artifact_id
       ].freeze
-      # Bounds for the free-form signal columns (`event_type_raw`, `category`).
-      # Control characters are the one thing that must never survive verbatim:
-      # this output is read in a terminal, where an escape sequence recorded
-      # inside a value could rewrite the report around it. Everything else is
-      # kept, truncated rather than dropped.
+      # The ingest boundary's definition of "control character", shared by both
+      # sanitizers in THIS FILE: `bounded_signal`, which strips and digest-marks the
+      # free-form signal columns (`event_type_raw`, `category`), and `known`, which
+      # rejects outright for the identity and enum columns it guards. The
+      # two disagree about what to *do* with a control character; they must not
+      # disagree about what one *is*. A copy that can silently drift is itself the
+      # bug -- `known` carried its own C0-and-DEL-only literal until issue #171, and
+      # so missed the entire C1 range.
       #
-      # C0, DEL, and C1. The C1 range matters as much as C0 -- U+009B is CSI, a
-      # single character that opens an escape sequence on its own -- and this
-      # deliberately agrees with the repo's other terminal-facing sanitizer,
-      # `AgentCoord::LOG_CONTROL_CHARACTERS` in bin/agent-coord, which covers the
-      # same range. This one additionally strips tab/CR/LF, which that one
-      # handles separately, because a signal value is a single-line classifier
-      # and never legitimately contains them.
+      # Scoped to this file deliberately, because this file is not the whole ingest
+      # path. `AgentCoord::HostAdapters` carries a THIRD `known()` that this constant
+      # does not reach and does not share: it trims with `String#strip` and applies
+      # no control check at all, so a host session's `model`, `effort`, and
+      # `pricing_profile` are still laundered past their closed allowlists --
+      # "high<NUL>" parses as "high". Pre-existing, unchanged by #171, out of scope
+      # here because that file has its own consumers and needs its own regression
+      # pass, and tracked on its own issue. Named here so this comment is not read as
+      # claiming more coverage than it has.
       #
-      # That relationship is containment, not equality, and it is enforced rather
-      # than merely asserted here. See
-      # test_signal_control_characters_cover_the_cli_terminal_sanitizer, which
-      # compares the two by codepoint: widening the CLI's set without widening
-      # this one fails the suite.
-      SIGNAL_CONTROL_CHARACTERS = /[\u0000-\u001F\u007F-\u009F]/
-      # Characters trimmed from the ends of a signal value (see `bounded_signal`).
+      # Named for the boundary that owns it, deliberately parallel to
+      # `AgentCoord::LOG_CONTROL_CHARACTERS` in bin/agent-coord: that one is the
+      # log-rendering boundary's definition, this one is the ledger-ingest boundary's.
+      # The prefix used to be SIGNAL_, which was accurate while `bounded_signal` was
+      # the only caller and became misleading the moment `known` shared it.
+      #
+      # Control characters are the one thing that must never survive verbatim: this
+      # output is read in a terminal, where an escape sequence recorded inside a value
+      # could rewrite the report around it.
+      #
+      # C0, DEL, and C1. The C1 range matters as much as C0 -- U+009B is CSI, a single
+      # character that opens an escape sequence on its own, with no preceding ESC --
+      # and this deliberately agrees with the CLI's sanitizer, which covers the same
+      # range. This one additionally covers tab/CR/LF, which that one handles
+      # separately, because an ingested value is a single-line classifier or
+      # identifier and never legitimately contains them.
+      #
+      # That relationship is containment, not equality, and it is enforced rather than
+      # merely asserted here. See
+      # test_ingest_control_characters_cover_the_cli_terminal_sanitizer, which
+      # compares the two by codepoint: widening the CLI's set without widening this
+      # one fails the suite. Reuse itself is pinned separately, by
+      # test_known_control_range_agrees_with_the_shared_ingest_definition -- that one
+      # probes `known` behaviourally, so a private literal there that DIVERGES from
+      # this constant fails even though it would leave the constant untouched. A
+      # byte-equivalent private copy passes, which is the honest limit of a
+      # behavioural probe: it catches drift, not duplication. That is still the bug
+      # class that matters, since an equivalent copy is harmless until it drifts and
+      # the drift is exactly what fails.
+      INGEST_CONTROL_CHARACTERS = /[\u0000-\u001F\u007F-\u009F]/
+      # Characters trimmed from the ends of an ingested value, by both
+      # `bounded_signal` and `known`.
       #
       # The trim runs before control detection, so ANY character that is both
-      # trimmable and control gets laundered: it is silently removed, and the
-      # value stores identically to one that never contained it, with no digest
-      # marker. `String#strip` overlapped on NUL. `[[:space:]]` overlaps on NEL
+      # trimmable and control gets laundered: it is silently removed, and the value is
+      # handled identically to one that never contained it. In `bounded_signal` that
+      # means storing with no digest marker. In `known` it is worse -- the value is
+      # promoted past a closed allowlist, so `enum("error<NUL>", EVENT_TYPES)`
+      # returned the allowlisted "error" (issue #171).
+      #
+      # `String#strip` overlaps on NUL, VT, and FF; `[[:space:]]` overlaps on NEL
       # (U+0085). Picking another convenient class would just wait for the next
       # overlapping character, so this class is not chosen -- it is derived, as
       # exactly the complement of the CLI's own control definition:
       #
-      #   SIGNAL_SURROUNDING_WHITESPACE == {space} + (SIGNAL_CONTROL_CHARACTERS -
+      #   INGEST_SURROUNDING_WHITESPACE == {space} + (INGEST_CONTROL_CHARACTERS -
       #                                               AgentCoord::LOG_CONTROL_CHARACTERS)
       #
-      # `LOG_CONTROL_CHARACTERS` deliberately excludes tab, LF, and CR because
-      # they are formatting rather than terminal injection; space is not a
-      # control character anywhere. So the invariant that kills this bug class is
-      # that nothing the CLI considers terminal-unsafe is ever trimmable, which
-      # makes NUL, NEL, VT, FF, and the whole C1 range structurally unable to
-      # launder -- they take the digest-marked control path instead. Pinned by
-      # test_trimmable_characters_never_overlap_the_cli_control_definition.
+      # `LOG_CONTROL_CHARACTERS` deliberately excludes tab, LF, and CR because they
+      # are formatting rather than terminal injection; space is not a control
+      # character anywhere. So the invariant that kills this bug class is that nothing
+      # the CLI considers terminal-unsafe is ever trimmable, which makes NUL, NEL, VT,
+      # FF, and the whole C1 range structurally unable to launder: they take the
+      # digest-marked control path in `bounded_signal` and the reject path in `known`.
+      # Pinned by test_trimmable_characters_never_overlap_the_cli_control_definition.
       #
-      # Note the overlap with SIGNAL_CONTROL_CHARACTERS on exactly tab/LF/CR is
-      # intended: trimmed at the ends (layout noise, the T3 decision), stripped
-      # and digest-marked in the interior (content corruption).
-      SIGNAL_SURROUNDING_WHITESPACE = /\A[\u0009\u000A\u000D\u0020]+|[\u0009\u000A\u000D\u0020]+\z/
+      # Note the overlap with INGEST_CONTROL_CHARACTERS on exactly tab/LF/CR is
+      # intended: trimmed at the ends (layout noise, the T3 decision), treated as
+      # control in the interior (content corruption).
+      INGEST_SURROUNDING_WHITESPACE = /\A[\u0009\u000A\u000D\u0020]+|[\u0009\u000A\u000D\u0020]+\z/
       SIGNAL_MAX_BYTES = 256
       SIGNAL_DIGEST_LENGTH = 12
       SIGNAL_TRUNCATION_MARKER = "~"
@@ -647,12 +681,17 @@ module AgentCoord
       # `bounded_signal`. A type the allowlist rejects is therefore a
       # countable `event_type IS NULL AND event_type_raw IS NOT NULL` row (see
       # the `event_type_drift` view) rather than the silent NULL that produced
-      # #112. Known gap: that view filters on `event_type IS NULL`, so it does
-      # not surface a control-bearing value whose trimmed form happens to be
-      # allowlisted -- a NUL-suffixed "error" classifies as `error` while its
-      # raw column records the digest-marked form. The mismatch is visible in the row, just
-      # not in the view; the underlying cause is `known()` stripping NUL, which
-      # is tracked in issue #171.
+      # #112.
+      #
+      # That view used to have a gap, and this is the method where it lived: the view
+      # filters on `event_type IS NULL`, and a control-bearing type whose trimmed
+      # form was allowlisted did not have a NULL `event_type`. A NUL-suffixed "error"
+      # classified as `error` while its raw column recorded the digest-marked form --
+      # the mismatch visible in the row but absent from the view. Closed in issue
+      # #171: `known` no longer trims NUL away ahead of the allowlist comparison, so
+      # the type is rejected, `event_type` is NULL, and the row is counted. Pinned
+      # end to end by test_nul_suffixed_allowlisted_type_is_counted_by_the_drift_view,
+      # which asserts through the view rather than through `known`.
       #
       # Sanitizing never hides a classified row: every EVENT_TYPES member
       # is short and control-character free, so a value that needs sanitizing can
@@ -1000,7 +1039,7 @@ module AgentCoord
       # stripped and digest-marked like any other, instead of being quietly
       # trimmed into a value identical to its clean twin. `String#strip` does
       # remove NUL, which is exactly the laundering this avoids, so the trim
-      # uses SIGNAL_SURROUNDING_WHITESPACE rather than `strip`. A value that is
+      # uses INGEST_SURROUNDING_WHITESPACE rather than `strip`. A value that is
       # nothing but control characters is therefore stored as a bare digest,
       # not NULL -- it carried something, and this column's job is to say so.
       #
@@ -1040,23 +1079,95 @@ module AgentCoord
       # `AgentCoord.validate_segment!` restricts `--type` to `[A-Za-z0-9_:-]` and
       # dot separators.
       def bounded_signal(value, unknown_is_value:)
-        original = value.to_s.gsub(SIGNAL_SURROUNDING_WHITESPACE, "")
+        original = value.to_s.gsub(INGEST_SURROUNDING_WHITESPACE, "")
         return if original.empty?
         return if !unknown_is_value && original.casecmp?("UNKNOWN")
         return original if original.bytesize <= SIGNAL_MAX_BYTES &&
-                           !original.match?(SIGNAL_CONTROL_CHARACTERS) &&
+                           !original.match?(INGEST_CONTROL_CHARACTERS) &&
                            !original.match?(SIGNAL_SANITIZED_SHAPE)
 
-        prefix = original.gsub(SIGNAL_CONTROL_CHARACTERS, "")
+        prefix = original.gsub(INGEST_CONTROL_CHARACTERS, "")
                          .byteslice(0, SIGNAL_PREFIX_BYTES).to_s.scrub("")
         digest = Digest::SHA256.hexdigest(original)[0, SIGNAL_DIGEST_LENGTH]
         "#{prefix}#{SIGNAL_TRUNCATION_MARKER}#{digest}"
       end
 
+      # Guard for the identity and enum columns written from THIS file: `batch_id`,
+      # `repo`, `target`, `lane_id`, `owner_ref`, `session_ref`, `status`,
+      # `terminal`, `host_family`, the PR and review-finding fields, and the
+      # `event["id"]` input to `opaque_value`.
+      #
+      # It also guards `model`, `effort`, and `pricing_profile` -- but only on review
+      # receipts. The same three columns on a host session are parsed by
+      # `AgentCoord::HostAdapters`, which has its own unshared `known()` with no
+      # control check, so this guard is not the only thing standing behind those
+      # three. See the note on INGEST_CONTROL_CHARACTERS.
+      #
+      # Rejects rather than sanitizes -- the deliberate opposite of
+      # `bounded_signal` -- because an out-of-bounds identity value has no useful
+      # bounded form. A truncated `batch_id` is not a batch id, it is a different
+      # and wrong one, so it must not be stored as though it were the original.
+      #
+      # Both the trim class and the control class are the shared INGEST_
+      # constants rather than private literals, and that is the point: it makes
+      # agreement with `bounded_signal` and with the CLI's own definition
+      # structural instead of merely test-enforced. `known` previously used
+      # `String#strip` and its own C0-and-DEL-only pattern, and both halves were
+      # wrong (issue #171):
+      #
+      #   - `strip` removes NUL, VT, and FF as well as whitespace, and `enum`
+      #     calls `known` BEFORE checking set membership. So a trailing control
+      #     character was trimmed away and the remainder promoted past a closed
+      #     allowlist: `enum("error<NUL>", EVENT_TYPES)` returned "error". The
+      #     same character in the interior was rejected, so `known` was not even
+      #     self-consistent about it.
+      #   - The C0-and-DEL-only range let the entire C1 block through, including
+      #     U+009B (CSI), which opens an ANSI escape sequence on its own with no
+      #     preceding ESC. `known` was the only one of this repo's three
+      #     sanitizers that missed it.
+      #
+      # What a rejection costs depends on the column, and it is NOT uniform.
+      # Three callers treat a nil as a guard rather than merely storing NULL:
+      #
+      #   - `batch_id`. `harvest_batches` builds `selected_ids` with
+      #     `filter_map { known(...) }` and then `next unless batch_id`, so a
+      #     rejected batch id skips the batch AND everything under it -- its
+      #     lanes, target observations, claims, and events. Those rows never
+      #     reach `join_status` at all, which is why `missing_batch` is in
+      #     practice unreachable by this path: an event or claim whose own
+      #     `batch_id` is rejected is filtered out by `selected_ids.include?`
+      #     rather than landing with a partial join.
+      #   - `insert_pull_request`, whose `return unless pr_repo && number &&
+      #     state && url` drops the `pull_requests` row along with its review
+      #     receipts and findings. Note `repo()` and `github_url()` match with
+      #     `[^/\s]+`, and `\s` does not cover C1, so a C1-bearing repo segment
+      #     or PR URL used to pass those regexes and land in the ledger.
+      #   - `insert_lane`, which writes the `lanes` row only `if lane_id`. A
+      #     PARTIAL skip rather than a whole subtree: that lane's target
+      #     observations still land, carrying a NULL `lane_id`, so the targets
+      #     stay visible even though the lane record does not.
+      #
+      # Everywhere else rejection degrades the row rather than removing it, which
+      # is the common case: a rejected `repo` or `target` on an event, claim, or
+      # target observation still lands and reports `missing_repo` /
+      # `missing_target` instead of `exact`, and a rejected enum lands as SQL
+      # NULL -- and for `event_type` that NULL is precisely what makes the row
+      # countable in the `event_type_drift` view, which keys on `event_type IS
+      # NULL`. The `*_ref` columns degrade further still, falling back to a
+      # positional identifier rather than NULL.
+      #
+      # Stated at this length because "stricter" invites the assumption that
+      # nothing is lost, and for two of these columns something is.
+      #
+      # The 256-byte bound stays a literal rather than borrowing
+      # SIGNAL_MAX_BYTES. The magnitudes coincide today, but the operations do
+      # not -- `bounded_signal` truncates *to* that size, `known` rejects *above*
+      # it -- and tying them would let a future widening of the signal columns
+      # silently widen what counts as an acceptable identifier.
       def known(value)
-        string = value.to_s.strip
+        string = value.to_s.gsub(INGEST_SURROUNDING_WHITESPACE, "")
         return if string.empty? || string.casecmp?("UNKNOWN")
-        return if string.bytesize > 256 || string.match?(/[\u0000-\u001F\u007F]/)
+        return if string.bytesize > 256 || string.match?(INGEST_CONTROL_CHARACTERS)
 
         string
       end

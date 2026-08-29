@@ -17,6 +17,9 @@ class TelemetryHarvesterTest < Minitest::Test # rubocop:disable Metrics/ClassLen
   COORD_CLI = File.join(ROOT, "bin", "agent-coord")
   FIXTURES = File.join(ROOT, "test", "fixtures", "telemetry")
   HARVESTER = AgentCoord::Telemetry::Harvester
+  # The codepoint window the control-character pins compare over: C0, DEL, and
+  # C1, which together cover every range any of the sanitizers targets.
+  CONTROL_CODEPOINTS = (0x00..0x9F).to_a.freeze
   CORPUS_BATCH = "event-corpus-batch"
   CORPUS_REPO = "shakacode/agent-coordination"
   CORPUS_TARGET = "112"
@@ -1189,41 +1192,39 @@ class TelemetryHarvesterTest < Minitest::Test # rubocop:disable Metrics/ClassLen
   end
 
   # The harvester's control-character range and the CLI's terminal sanitizer are
-  # a cross-file pair, and the comment on SIGNAL_CONTROL_CHARACTERS says to keep
+  # a cross-file pair, and the comment on INGEST_CONTROL_CHARACTERS says to keep
   # them in agreement -- but "in agreement" means containment, not equality, and
   # until this test nothing enforced it. An earlier round of this change happened
   # precisely because the two had drifted apart on the C1 range.
   #
   # Compared by codepoint, not by regex source: either pattern may be respelled
   # harmlessly, and only the set of characters it matches is the contract.
-  def test_signal_control_characters_cover_the_cli_terminal_sanitizer
+  def test_ingest_control_characters_cover_the_cli_terminal_sanitizer
     load_agent_coord_cli
-    signal = HARVESTER::SIGNAL_CONTROL_CHARACTERS
-    log = AgentCoord::LOG_CONTROL_CHARACTERS
-
-    # 0x00..0x9F spans C0, DEL, and C1 -- every range either pattern targets.
-    classified = (0x00..0x9F).map do |codepoint|
-      character = [codepoint].pack("U")
-      [codepoint, character.match?(signal), character.match?(log)]
-    end
     hex = ->(codepoints) { codepoints.map { |codepoint| format("0x%02X", codepoint) } }
+
+    # CONTROL_CODEPOINTS spans C0, DEL, and C1 -- every range either pattern
+    # targets. Classified through the shared helper so this file keeps one
+    # definition of the comparison window and one of "matches this pattern".
+    control = codepoints_matching(HARVESTER::INGEST_CONTROL_CHARACTERS)
+    terminal_unsafe = codepoints_matching(AgentCoord::LOG_CONTROL_CHARACTERS)
 
     # Containment: anything the CLI considers terminal-unsafe, the ledger must
     # strip too. This is the direction that matters -- the ledger is downstream.
-    missing = classified.select { |_, in_signal, in_log| in_log && !in_signal }.map(&:first)
+    missing = terminal_unsafe - control
     assert_empty hex.call(missing),
-                 "SIGNAL_CONTROL_CHARACTERS no longer covers every codepoint " \
+                 "INGEST_CONTROL_CHARACTERS no longer covers every codepoint " \
                  "AgentCoord::LOG_CONTROL_CHARACTERS treats as control. Missing: " \
                  "#{hex.call(missing).join(', ')}. Widen the harvester pattern to match."
 
     # The intentional difference, pinned so a move in either direction reads as a
     # decision rather than an accident.
-    signal_only = classified.select { |_, in_signal, in_log| in_signal && !in_log }.map(&:first)
-    assert_equal %w[0x09 0x0A 0x0D], hex.call(signal_only),
-                 "the harvester strips exactly tab/LF/CR beyond the CLI's set, because a signal " \
-                 "value is a single-line classifier while the CLI's log renderer handles those " \
-                 "three separately. Changing this in either direction needs a deliberate call. " \
-                 "Now: #{hex.call(signal_only).join(', ')}"
+    ingest_only = control - terminal_unsafe
+    assert_equal %w[0x09 0x0A 0x0D], hex.call(ingest_only),
+                 "the harvester treats exactly tab/LF/CR as control beyond the CLI's set, because an " \
+                 "ingested value is a single-line classifier or identifier while the CLI's log renderer " \
+                 "handles those three separately. Changing this in either direction needs a deliberate " \
+                 "call. Now: #{hex.call(ingest_only).join(', ')}"
   end
 
   # The structural pin that ends the laundering bug class. Three rounds of this
@@ -1237,36 +1238,150 @@ class TelemetryHarvesterTest < Minitest::Test # rubocop:disable Metrics/ClassLen
   # cannot reintroduce this bug without failing the suite.
   def test_trimmable_characters_never_overlap_the_cli_control_definition
     load_agent_coord_cli
-    log = AgentCoord::LOG_CONTROL_CHARACTERS
-    signal = HARVESTER::SIGNAL_CONTROL_CHARACTERS
     hex = ->(codepoints) { codepoints.map { |codepoint| format("0x%02X", codepoint) } }
 
     # Behavioural probe: a codepoint is trimmable if it is removed at the ends.
-    trimmable = (0x00..0x9F).select do |codepoint|
-      character = [codepoint].pack("U")
-      "x#{character}".gsub(HARVESTER::SIGNAL_SURROUNDING_WHITESPACE, "") == "x"
-    end
+    # Shared with the other control pins via the helper rather than recomputed
+    # here -- two copies of the trim class is the exact defect this file exists
+    # to prevent, and one that drifted would leave this test asserting the old
+    # semantics while still passing.
+    terminal_unsafe = codepoints_matching(AgentCoord::LOG_CONTROL_CHARACTERS)
+    trimmable = trimmable_codepoints
 
     # THE invariant: nothing the CLI considers terminal-unsafe may be trimmed.
     # NUL, NEL, VT, FF and the whole C1 range are all in LOG, so this single
     # assertion covers every past instance and any future one.
-    laundered = trimmable.select { |codepoint| [codepoint].pack("U").match?(log) }
+    laundered = trimmable & terminal_unsafe
     assert_empty hex.call(laundered),
                  "these codepoints are both trimmable and treated as control by " \
                  "AgentCoord::LOG_CONTROL_CHARACTERS, so they are silently removed before control " \
                  "detection and store identically to a value that never carried them: " \
-                 "#{hex.call(laundered).join(', ')}. Remove them from SIGNAL_SURROUNDING_WHITESPACE."
+                 "#{hex.call(laundered).join(', ')}. Remove them from INGEST_SURROUNDING_WHITESPACE."
 
     # And the trim class is derived, not chosen: space plus exactly the
-    # characters SIGNAL treats as control but the CLI does not (tab, LF, CR).
-    formatting_only = (0x00..0x9F).select do |codepoint|
-      character = [codepoint].pack("U")
-      character.match?(signal) && !character.match?(log)
-    end
+    # characters INGEST treats as control but the CLI does not (tab, LF, CR).
+    formatting_only = codepoints_matching(HARVESTER::INGEST_CONTROL_CHARACTERS) - terminal_unsafe
     assert_equal hex.call(([0x20] + formatting_only).sort), hex.call(trimmable),
-                 "the trim class must be exactly {space} + (SIGNAL_CONTROL_CHARACTERS - " \
+                 "the trim class must be exactly {space} + (INGEST_CONTROL_CHARACTERS - " \
                  "LOG_CONTROL_CHARACTERS). Deriving it from the CLI is what keeps it disjoint " \
                  "from the terminal-unsafe set. Now: #{hex.call(trimmable).join(', ')}"
+  end
+
+  # The three-sanitizer agreement issue #171 asked for, stated precisely rather
+  # than vacuously.
+  #
+  # After #171 there are not three control-character definitions left to compare.
+  # `known` and `bounded_signal` share INGEST_CONTROL_CHARACTERS literally, so
+  # asserting those two agree would compare a constant with itself and pass
+  # forever. Reuse is the fix; a test restating it proves nothing.
+  #
+  # What reuse does NOT make automatic, and what this pins instead:
+  #
+  #   1. That `known`'s observable behaviour still tracks the shared constant --
+  #      reintroducing a private literal, or a pre-trim that launders, fails here
+  #      while leaving the constant untouched.
+  #   2. That it tracks it at EVERY position in the string. Position is where the
+  #      bug lived: `known` rejected NUL in the interior and trimmed it away at
+  #      the ends, so an interior-only comparison would have called the old code
+  #      correct.
+  #   3. That both still contain AgentCoord::LOG_CONTROL_CHARACTERS, the CLI's
+  #      own definition. This is the cross-file half, and it is the assertion
+  #      that fails for both #171 defects at once.
+  def test_known_control_range_agrees_with_the_shared_ingest_definition
+    load_agent_coord_cli
+    harvester = HARVESTER.allocate
+    hex = ->(codepoints) { codepoints.map { |codepoint| format("0x%02X", codepoint) } }
+
+    # CONTROL_CODEPOINTS spans C0, DEL, and C1 -- every range any of the three targets.
+    control = codepoints_matching(HARVESTER::INGEST_CONTROL_CHARACTERS)
+    terminal_unsafe = codepoints_matching(AgentCoord::LOG_CONTROL_CHARACTERS)
+    trimmable = trimmable_codepoints
+    interior = known_rejects_at(harvester, :interior)
+    leading = known_rejects_at(harvester, :leading)
+    trailing = known_rejects_at(harvester, :trailing)
+
+    # 1. In the interior, `known` rejects exactly what the shared constant calls
+    #    control -- no more, no less.
+    assert_equal hex.call(control), hex.call(interior),
+                 "known() no longer rejects exactly INGEST_CONTROL_CHARACTERS in the interior. It must " \
+                 "reuse that constant rather than carry its own pattern. Now: #{hex.call(interior).join(', ')}"
+
+    # 2. At the ends, the same set minus only what the trim class removes -- those
+    #    are trimmed off and the remainder accepted, which is the intended
+    #    normalization. Anything else being accepted at an end is laundering.
+    at_ends = hex.call(control - trimmable)
+    assert_equal at_ends, hex.call(leading),
+                 "a control character was laundered at the start of the value: #{hex.call(leading).join(', ')}"
+    assert_equal at_ends, hex.call(trailing),
+                 "a control character was laundered at the end of the value: #{hex.call(trailing).join(', ')}"
+
+    # 3. The cross-file containment, and the assertion that fails for both #171
+    #    defects: C1 was absent from known()'s old range, and NUL/VT/FF were
+    #    laundered at the ends by `String#strip`.
+    escaping = terminal_unsafe.reject do |c|
+      interior.include?(c) && leading.include?(c) && trailing.include?(c)
+    end
+    assert_empty hex.call(escaping),
+                 "these codepoints are terminal-unsafe by AgentCoord::LOG_CONTROL_CHARACTERS but survive " \
+                 "known() somewhere in the string, so a control-bearing value is accepted -- and, through " \
+                 "enum(), promoted into a closed allowlist: #{hex.call(escaping).join(', ')}"
+
+    # 4. The one intentional difference, pinned so a move reads as a decision:
+    #    exactly tab/LF/CR are control in the interior yet trimmed at the ends.
+    assert_equal %w[0x09 0x0A 0x0D], hex.call(interior - trailing),
+                 "the only characters known() may treat differently by position are tab/LF/CR, which are " \
+                 "layout noise at the ends and content corruption inside. Now: " \
+                 "#{hex.call(interior - trailing).join(', ')}"
+  end
+
+  # The behaviour change #171 causes BEYOND the two defects it names. Called out
+  # in its own test because it is real, and should be a decision on the record
+  # rather than something discovered later in production.
+  #
+  # `String#strip` removes NUL, VT (U+000B), and FF (U+000C) as well as
+  # whitespace, so `known("batch<VT>")` used to be accepted as "batch". The
+  # derived trim class removes only tab, LF, CR, and space, so all three are now
+  # rejected instead.
+  #
+  # Rejecting is right on the repo's own terms, not merely stricter. All three
+  # are control characters by AgentCoord::LOG_CONTROL_CHARACTERS, and `known`
+  # already rejected every one of them in the interior. Accepting them at the
+  # ends was never a policy -- it was `strip` leaking its notion of whitespace
+  # into a security boundary, and it left `known` disagreeing with itself about
+  # the same character based only on where it sat in the string.
+  def test_known_rejects_control_characters_at_the_ends_instead_of_trimming_them
+    load_agent_coord_cli
+    harvester = HARVESTER.allocate
+    known = ->(value) { harvester.send(:known, value) }
+
+    # Derived, not listed: exactly the codepoints `strip` removes that the trim
+    # class does not. A future Ruby changing `strip` cannot leave this partial.
+    # The trim half comes from the shared helper, so there is one definition of
+    # "trimmable" in this file rather than one per test.
+    stripped = CONTROL_CODEPOINTS.select { |codepoint| "x#{[codepoint].pack('U')}".strip == "x" }
+    strip_only = stripped - trimmable_codepoints
+    assert_equal %w[0x00 0x0B 0x0C], strip_only.map { |c| format("0x%02X", c) },
+                 "the characters this change stops trimming are not the expected NUL/VT/FF"
+
+    strip_only.each do |codepoint|
+      char = [codepoint].pack("U")
+      label = format("0x%02X", codepoint)
+      # Each is terminal-unsafe by the CLI's own definition. That is what makes
+      # rejecting them correct rather than arbitrary.
+      assert_match AgentCoord::LOG_CONTROL_CHARACTERS, char,
+                   "#{label} would not be worth rejecting if the CLI did not call it control"
+      assert_nil known.call("batch#{char}"), "#{label} was trimmed off the end and the value accepted"
+      assert_nil known.call("#{char}batch"), "#{label} was trimmed off the start and the value accepted"
+      assert_nil known.call("ba#{char}tch"), "#{label} was accepted in the interior"
+    end
+
+    # Genuine whitespace still normalizes away, so no ordinary padded identifier
+    # regresses. Codepoints written explicitly to keep the file greppable.
+    tab = [0x0009].pack("U")
+    lf = [0x000A].pack("U")
+    cr = [0x000D].pack("U")
+    assert_equal "batch-fixture", known.call("  batch-fixture#{lf}")
+    assert_equal "batch-fixture", known.call("#{tab}batch-fixture#{cr}#{lf}")
   end
 
   # `category` is required for `error` events but bounded nowhere at write time,
@@ -1381,7 +1496,7 @@ class TelemetryHarvesterTest < Minitest::Test # rubocop:disable Metrics/ClassLen
       "NEL" => 0x0085, "CSI" => 0x009B
     }.each do |name, codepoint|
       character = [codepoint].pack("U")
-      assert_match HARVESTER::SIGNAL_CONTROL_CHARACTERS, character, "#{name} must count as control"
+      assert_match HARVESTER::INGEST_CONTROL_CHARACTERS, character, "#{name} must count as control"
 
       suffixed = harvester.send(:bounded_signal, "operator-type#{character}", unknown_is_value: true)
       refute_equal clean, suffixed, "a #{name}-suffixed type was laundered into its clean twin"
@@ -1461,7 +1576,7 @@ class TelemetryHarvesterTest < Minitest::Test # rubocop:disable Metrics/ClassLen
     csi = [0x009B].pack("U")
     harvester = HARVESTER.allocate
 
-    assert_match HARVESTER::SIGNAL_CONTROL_CHARACTERS, csi,
+    assert_match HARVESTER::INGEST_CONTROL_CHARACTERS, csi,
                  "C1 controls must be recognized as control characters"
     # Detection and stripping must agree: a value that is nothing but a C1 char
     # takes the sanitized path rather than being returned verbatim.
@@ -1502,7 +1617,7 @@ class TelemetryHarvesterTest < Minitest::Test # rubocop:disable Metrics/ClassLen
       refute_empty stored, "the category was dropped instead of sanitized"
       stored.each do |row|
         refute_includes row.codepoints, 0x009B, "a C1 control survived ingest"
-        refute_match HARVESTER::SIGNAL_CONTROL_CHARACTERS, row
+        refute_match HARVESTER::INGEST_CONTROL_CHARACTERS, row
       end
     end
   end
@@ -1551,7 +1666,7 @@ class TelemetryHarvesterTest < Minitest::Test # rubocop:disable Metrics/ClassLen
                  "these allowlisted types would be altered by event_type_raw sanitizing: #{needing.inspect}"
     HARVESTER::EVENT_TYPES.each do |type|
       assert_operator type.bytesize, :<=, HARVESTER::SIGNAL_MAX_BYTES
-      refute_match HARVESTER::SIGNAL_CONTROL_CHARACTERS, type
+      refute_match HARVESTER::INGEST_CONTROL_CHARACTERS, type
     end
   end
 
@@ -1583,6 +1698,59 @@ class TelemetryHarvesterTest < Minitest::Test # rubocop:disable Metrics/ClassLen
     end
   end
 
+  # The residual PR #155 documented and deliberately left open, proven closed.
+  #
+  # A NUL-suffixed allowlisted type used to be promoted by `known` -- `strip`
+  # removed the NUL, then "error" matched the allowlist -- while `bounded_signal`
+  # digest-marked the very same input. The row landed visibly inconsistent:
+  #
+  #   event_type     = "error"
+  #   event_type_raw = "error~6e7af28ae2a0"
+  #
+  # and `event_type_drift` did not count it, because that view keys on
+  # `event_type IS NULL` and this row's `event_type` was not NULL. So the one
+  # view whose job is to surface unrecognized types stayed silent about a
+  # control-bearing one.
+  #
+  # Asserted end to end -- real CLI, real ledger, query against the view -- rather
+  # than as a unit assertion on `known`, because the claim being made is about
+  # what an operator can actually see in the ledger.
+  def test_nul_suffixed_allowlisted_type_is_counted_by_the_drift_view
+    Dir.mktmpdir("agent-coordination-ledger-nul-promotion") do |dir|
+      source_path = File.join(dir, "coordination.json")
+      ledger_path = File.join(dir, "telemetry.sqlite3")
+      nul = [0x0000].pack("U")
+      source = coordination_fixture
+      source["events"] << {
+        "id" => "event-nul-promotion", "batch_id" => "batch-fixture",
+        "repo" => "shakacode/agent-coordination", "target" => "78",
+        "type" => "error#{nul}", "severity" => "P1", "category" => "test-failure",
+        "at" => "2026-07-18T04:00:00Z"
+      }
+      File.write(source_path, JSON.generate(source))
+
+      _stdout, stderr, status = Open3.capture3(
+        CLI, "harvest", "--ledger", ledger_path,
+        "--coordination-json", source_path, "--batch-id", "batch-fixture"
+      )
+      assert status.success?, stderr
+
+      # No longer promoted: the allowlist never sees a trimmed "error".
+      assert_equal ["NULL"],
+                   sqlite_query(ledger_path, "SELECT COALESCE(event_type, 'NULL') FROM events")
+      # The raw column still records that something was there, digest-marked, so
+      # the drift row carries the evidence rather than just a NULL.
+      raw = sqlite_query(ledger_path, "SELECT event_type_raw FROM events")
+      assert_equal 1, raw.length, "expected exactly one event row: #{raw.inspect}"
+      assert raw.first.start_with?("error~"),
+             "the raw type lost its digest marker: #{raw.inspect}"
+
+      # The whole point: the row is now COUNTED by the view that used to miss it.
+      assert_equal ["batch-fixture|#{raw.first}|1"],
+                   sqlite_query(ledger_path, "SELECT * FROM event_type_drift")
+    end
+  end
+
   private
 
   # bin/agent-coord guards execution with a $PROGRAM_NAME check and keeps the
@@ -1590,6 +1758,42 @@ class TelemetryHarvesterTest < Minitest::Test # rubocop:disable Metrics/ClassLen
   # free and gives the test the CLI's own definitions rather than a copy.
   def load_agent_coord_cli
     load COORD_CLI unless defined?(AgentCoord::TYPED_EVENT_ALLOWED_FIELDS)
+  end
+
+  # Which of CONTROL_CODEPOINTS `pattern` treats as control. Compared by
+  # codepoint rather than by regex source, because either pattern may be
+  # respelled harmlessly and only the set of characters it matches is the
+  # contract.
+  def codepoints_matching(pattern)
+    CONTROL_CODEPOINTS.select { |codepoint| [codepoint].pack("U").match?(pattern) }
+  end
+
+  # Which of CONTROL_CODEPOINTS the ingest trim class removes from the ends of a
+  # value. Probed behaviourally rather than read off the pattern.
+  def trimmable_codepoints
+    CONTROL_CODEPOINTS.select do |codepoint|
+      "x#{[codepoint].pack('U')}".gsub(HARVESTER::INGEST_SURROUNDING_WHITESPACE, "") == "x"
+    end
+  end
+
+  # Which of CONTROL_CODEPOINTS `known` rejects when the character sits at
+  # `position` within an otherwise clean value.
+  #
+  # Position is probed separately because that is exactly where the #171
+  # laundering bug lived: `known` rejected NUL in the interior of a value and
+  # trimmed it away at the ends, so a check that only looked at the interior
+  # would have called the old code correct.
+  def known_rejects_at(harvester, position)
+    CONTROL_CODEPOINTS.select do |codepoint|
+      character = [codepoint].pack("U")
+      value = case position
+              when :leading then "#{character}abcd"
+              when :interior then "ab#{character}cd"
+              when :trailing then "abcd#{character}"
+              else raise ArgumentError, "unknown position #{position.inspect}"
+              end
+      harvester.send(:known, value).nil?
+    end
   end
 
   # Every event type bin/agent-coord writes, derived from the CLI two
