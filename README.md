@@ -707,9 +707,23 @@ state in text or JSON. Full `status` renders compact claims, heartbeats, batch
 lanes, lane dependencies, blocked-on refs, and recent events for broad audits.
 Scoped status is the preferred batch-workflow path:
 
-- `status --repo OWNER/REPO --target ISSUE_OR_PR` reads only
-  `claims/<owner>/<repo>/<issue-or-pr>.json` and that claim holder's heartbeat
-  when a holder exists.
+- `status --repo OWNER/REPO --target ISSUE_OR_PR` reads only the claim paths for
+  that work item's spellings, plus one heartbeat per distinct claim holder. A
+  target naming a GitHub number resolves three claim paths: the queried spelling,
+  plus the item's other spellings drawn from `<n>`, `issue:<n>`, and `pr:<n>`.
+  `claim` writes the raw target, so the same item can be held under any of them,
+  and `log` folds those spellings onto one identity. Every claim found is reported, so two agents
+  holding `9832` and `pr:9832` both appear. Any other target — a slug, an `adhoc:`
+  target, `issue:<slug>` — has no alias family and costs the single literal read
+  it always did. So target scope is at most three claim reads plus one heartbeat
+  per holder, independent of fleet size: point reads only, never a listing or a
+  prefix scan. Two limits are deliberate. Lane suffixes are never folded away
+  (`--target 319` does not report a claim on `319:qa`, and `--target 319:qa`
+  resolves `issue:319:qa` and `pr:319:qa`, not `319`), because a lane holds its
+  own lease. Casing is not folded: claim paths are literal, so the generated
+  spellings carry the queried casing for the number and lane, and lowercase
+  `issue:`/`pr:` for a prefix the query did not itself spell — a claim written
+  `ISSUE:319` is found by that spelling and by no other.
 - `status --batch-id ID` reads only `batches/<id>.json`, `events/<id>/`,
   lane-owner heartbeats, and dependency batch files plus referenced lane-owner
   heartbeats needed to compute `blocked_on`.
