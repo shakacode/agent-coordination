@@ -789,6 +789,12 @@ module AgentCoord
     # Read-only, status-style commands that prefer the status state root over the
     # write-mode local default. batch-audit reads coordination state exactly like
     # status, so it resolves and warns identically.
+    #
+    # resolve_default_local_backend is the only place that default is applied, and
+    # it yields to an explicitly selected backend. A command body that re-applies
+    # it -- `options[:state_root] ||= default_status_state_root` -- runs after that
+    # decision and silently answers from local state for a request that named a
+    # different backend, so do not reintroduce one.
     def status_read_command?(command)
       %w[status log doctor batch-audit].include?(command)
     end
@@ -1752,19 +1758,17 @@ module AgentCoord
     def doctor(options)
       return stack_doctor(options) if options[:stack_json]
 
-      doctor_options = options.dup
-      doctor_options[:state_root] ||= default_status_state_root unless doctor_options[:api_url]
-      backend_kind = doctor_backend_kind(doctor_options)
+      backend_kind = doctor_backend_kind(options)
       begin
-        FileUtils.mkdir_p(doctor_options.fetch(:state_root)) if doctor_options[:implicit_local]
-        store = verify_doctor_store(doctor_options, backend_kind, deep: options[:deep])
+        FileUtils.mkdir_p(options.fetch(:state_root)) if options[:implicit_local]
+        store = verify_doctor_store(options, backend_kind, deep: options[:deep])
         store.verify_layout!(STATE_PREFIXES)
         section_notes, resource_checks, identity = doctor_deep_results(store, backend_kind, options)
       rescue JSON::ParserError, SystemCallError => e
         raise OperationalError, "state unreadable: #{e.message}"
       end
 
-      payload = doctor_payload(doctor_options, backend_kind, options[:deep])
+      payload = doctor_payload(options, backend_kind, options[:deep])
       payload["resource_checks"] = resource_checks if resource_checks
       payload["identity"] = identity if identity
       environment_identity = options[:deep] ? environment_identity_report(identity) : nil
@@ -1777,7 +1781,7 @@ module AgentCoord
         payload["section_notes"] = section_notes
       end
       emit_payload(payload, options) do
-        render_doctor_text(payload, doctor_options, section_notes)
+        render_doctor_text(payload, options, section_notes)
       end
       raise_machine_identity_mismatch!(environment_identity) if environment_identity
       raise_consumer_split_brain!(payload)
@@ -3888,9 +3892,7 @@ module AgentCoord
     end
 
     def render_status(options)
-      status_options = options.dup
-      status_options[:state_root] ||= default_status_state_root unless status_options[:api_url]
-      store = build_store(status_options)
+      store = build_store(options)
       now = now_utc
       payload =
         case status_scope(options)
@@ -3929,9 +3931,7 @@ module AgentCoord
     # UNKNOWN (unregistered/unreadable batch).
     def batch_audit(options)
       require_options(options, :batch_id)
-      audit_options = options.dup
-      audit_options[:state_root] ||= default_status_state_root unless audit_options[:api_url]
-      store = build_store(audit_options)
+      store = build_store(options)
       report = batch_audit_report(store, options.fetch(:batch_id))
       emit_batch_audit_report(report, options)
       BATCH_AUDIT_EXIT_CODES.fetch(report.fetch("verdict"))
