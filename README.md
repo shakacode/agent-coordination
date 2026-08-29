@@ -719,11 +719,17 @@ Scoped status is the preferred batch-workflow path:
   canonically spelled number, two for a slug, one where the prefix is part of the
   base — plus one heartbeat per distinct holder, independent of fleet size: point
   reads only, never a listing or a prefix scan. Every claim found is reported, so
-  two agents holding `9832` and `pr:9832` both appear; two candidate paths that
-  resolve to one file on a case-insensitive checkout return the same record and
-  are reported once. Lane suffixes are never folded away, because a lane holds its
-  own lease: `--target 319` does not report a claim on `319:qa`, and `--target
-  319:qa` resolves `issue:319:qa` and `pr:319:qa`, not `319`.
+  two agents holding `9832` and `pr:9832` both appear. Records are reported once
+  per lease, where a lease is the `repo`, `target`, and `agent_id` the record
+  names: on a case-insensitive checkout two candidate paths reach one file, and
+  reporting it twice would invent a second holder. Because the candidates are
+  separate point reads rather than one snapshot, a renew landing between them
+  changes only the timestamps and still reports one lease — but a *takeover*
+  landing between them returns two different holders for that one record, and both
+  are reported, which is the safer reading of genuinely ambiguous state. Lane
+  suffixes are never folded away, because a lane holds its own lease: `--target
+  319` does not report a claim on `319:qa`, and `--target 319:qa` resolves
+  `issue:319:qa` and `pr:319:qa`, not `319`.
   - The queried spelling and the alias spellings fail differently on purpose. A
     corrupt or unreadable record at the *queried* path is still a hard error with
     exit 2, unchanged. An *alias* candidate that cannot answer does not abort the
@@ -733,7 +739,10 @@ Scoped status is the preferred batch-workflow path:
     the exit stays 0, and a `claims` section note names each such path and says a
     claim there would not be reported; the notes also appear in `degraded`. Read
     them: `claims: none` with such a note is "could not check everything", which is
-    not the same answer as a bare `claims: none`. Anything broader — a 500, a
+    not the same answer as a bare `claims: none`. The same asymmetry applies one
+    level down: the queried claim holder's heartbeat still fails the query if it
+    cannot be read, while a holder reached only through an alias claim degrades to
+    a `heartbeats` note naming that holder. Anything broader — a 500, a
     `route_not_found`, an unreachable backend — is still a failed query, not an
     absent claim.
   - Casing is folded on the query side only. Claim paths are literal, so covering

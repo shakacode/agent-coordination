@@ -4904,8 +4904,8 @@ module AgentCoord
     def target_status_payload(store, options, now)
       repo = options.fetch(:repo)
       target = options.fetch(:target)
-      claim_entries, claim_notes = target_claim_entries(store, repo, target)
-      heartbeat_entries, holder_notes = target_holder_heartbeats(store, claim_entries)
+      claim_entries, claim_notes, queried_holder = target_claim_entries(store, repo, target)
+      heartbeat_entries, holder_notes = target_holder_heartbeats(store, claim_entries, queried_holder)
       # Claims and heartbeats are cleared on release and expiry, so this scope
       # alone cannot distinguish "never worked" from "worked and finished". Name
       # the command that can, rather than leaving the operator with two empty
@@ -4960,7 +4960,9 @@ module AgentCoord
       notes = []
       entries = [store.read_json(queried)]
       aliases.each { |path| entries << target_alias_claim(store, path, notes) }
-      [target_collapsed_claims(entries.compact), notes]
+      # The holder of the queried claim, if it answered. Its heartbeat is a read
+      # that existed before alias resolution and keeps the failure it had then.
+      [target_collapsed_claims(entries.compact), notes, entries.first&.data&.fetch("agent_id", nil).to_s]
     end
 
     # Narrow on purpose. A malformed record and a scope that cannot reach this one
@@ -5021,24 +5023,48 @@ module AgentCoord
     # `ISSUE:319.json` and `issue:319.json` to the same record, and reporting that
     # one lease once per spelling that reached it would invent a second holder.
     #
-    # The test is payload identity, not a case-folded key. Two reads of one file
-    # return the same payload; two files are two independently claimable leases and
-    # their payloads differ, because `claim` writes the target into the record.
-    # Folding on the case-insensitive key instead would discard a live second
-    # holder on a case-sensitive store -- exactly the concurrent double custody
-    # this scope exists to surface, thrown away by the code meant to tidy the
-    # output. It also decides the question without needing to know whether this
-    # filesystem folds case, which nothing here can observe.
+    # The test is the lease the record names -- its repo, target, and holder --
+    # rather than the whole payload. The two point reads are not one atomic read,
+    # so a renew landing between them returns the same lease with a later
+    # `updated_at`, and comparing payloads whole would render that one lease as two
+    # holders: a false positive in the exact signal this scope exists to raise.
+    # Those three fields do not move under a renew.
+    #
+    # Nor is it a case-folded key. Two files are two independently claimable
+    # leases, and `claim` writes the target into the record from the same value it
+    # puts in the path, so their payload targets differ and both are kept --
+    # including two casings of one spelling on a case-sensitive store, and
+    # including one agent holding both. Folding those together would discard a live
+    # second holder, which is the concurrent double custody this scope exists to
+    # surface, thrown away by the code meant to tidy the output. Keying on what the
+    # record says about itself also decides the question without needing to know
+    # whether this filesystem folds case, which nothing here can observe.
+    #
+    # Residual, and inherent to reading one record twice without a snapshot: a
+    # takeover landing between the two reads returns two different holders for one
+    # file, and both are reported. That state is genuinely ambiguous at the moment
+    # it is read, and showing both holders is the safer direction.
+    #
+    # A record that does not name its own lease cannot be matched to another read
+    # of itself, so it keys on its own path and never collapses. Two such records
+    # collapsing would hide a holder, which is the worse error of the two.
     #
     # `log` still folds casing across its listing, so for two live leases under two
     # casings it reports one holder where this reports both. A lease is a file, so
     # `status` is the correct answer there and the divergence is deliberate; do not
     # restore the collapse to hide it.
     #
-    # `uniq` keeps the first of an identical pair -- the operator's own spelling --
-    # and leaves every distinct record in candidate order.
+    # `uniq` keeps the first record of a lease -- the operator's own spelling --
+    # and leaves every distinct lease in candidate order.
     def target_collapsed_claims(entries)
-      entries.uniq(&:data)
+      entries.uniq { |entry| target_lease_key(entry) }
+    end
+
+    def target_lease_key(entry)
+      data = entry.data
+      return entry.path unless data["target"] && data["agent_id"]
+
+      [data["repo"], data["target"], data["agent_id"]]
     end
 
     # This stays a closed set of point reads rather than a claims listing:
@@ -5115,13 +5141,13 @@ module AgentCoord
     # One heartbeat read per distinct holder, not per claim: two spellings held by
     # one agent are one agent, so a second read would spend a round trip to render
     # the same row twice.
-    def target_holder_heartbeats(store, claim_entries)
+    def target_holder_heartbeats(store, claim_entries, queried_holder)
       cache = {}
       entries = []
       notes = []
       claim_entries.each do |claim|
         holder = claim.data["agent_id"].to_s
-        heartbeat = read_cached_status_heartbeat(store, holder, cache)
+        heartbeat = target_holder_heartbeat(store, holder, cache, queried_holder)
         if valid_status_heartbeat?(heartbeat)
           entries << heartbeat unless entries.include?(heartbeat)
         else
@@ -5129,6 +5155,28 @@ module AgentCoord
         end
       end
       [entries, notes]
+    end
+
+    # The same asymmetry as the claim reads, one level down. The queried claim's
+    # holder heartbeat is a read that existed before alias resolution, so an
+    # unreadable one still fails the query exactly as it always did. A holder
+    # reached only because an alias claim answered is a read this scope added, and
+    # letting it abort turns an answer the records themselves gave into exit 2 --
+    # the same stale-sibling breakage, one level down.
+    #
+    # It degrades onto the existing marker rather than a new one, so it renders
+    # through the note the operator already knows: the holder could not be read.
+    # That trades away the distinction between a malformed heartbeat and an
+    # unreachable one, which the claims note keeps; the holder's identity is the
+    # part an operator acts on. The failure is cached so a holder with two leases
+    # is still read once.
+    def target_holder_heartbeat(store, holder, cache, queried_holder)
+      read_cached_status_heartbeat(store, holder, cache)
+    rescue OperationalError => e
+      raise if holder == queried_holder
+      raise unless unreachable_alias_reason(e, AgentCoord.heartbeat_path(holder))
+
+      cache[holder] = :invalid
     end
 
     # The wording is unchanged for a single claim, which was the only case until
