@@ -387,8 +387,9 @@ when releases begin.
   now one policy rather than two: a payload path refuses, because rewriting a
   state record is worse than failing to write it, while a message path
   substitutes, because a diagnostic that crashes while describing a failure is
-  worse than an approximate one. `--launch-prompt` has refused invalid UTF-8 on
-  the same grounds since it was added. The rejected value is echoed through the
+  worse than an approximate one. The prompt *text* `--launch-prompt` reads has been
+  refused on the same grounds since it was added; its *path* is a separate matter,
+  covered by the exemption below. The rejected value is echoed through the
   shared `utf8_diagnostic` helper, so reporting a bad argument cannot itself
   raise on the bytes it is reporting. Filesystem
   paths are exempt from all of this: the values of `--state-root`, `--file`,
@@ -403,6 +404,10 @@ when releases begin.
   `PATH` placeholder spelling rather than on a type, so a path option declared
   `DIR` or `FILE` would not be exempted and nothing would fail loudly; the
   declaration site carries that warning.
+  One limit on that guarantee, unchanged from before and tracked in issue #226: a
+  path whose bytes are not decodable at all still crashes in pre-parse token
+  scanning under a UTF-8 locale, before any syscall sees it. The locales where
+  non-UTF-8 filenames actually occur, `C` and the latin-1 family, are unaffected.
 
   Some arguments a non-UTF-8 locale used to accept are now refused, and the
   bounded guarantee is this: every argument written into state or used to address
