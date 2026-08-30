@@ -7780,8 +7780,14 @@ module AgentCoord
               "backend ref #{@backend}@#{@ref} is not readable: #{result.error_message}"
       end
 
+      response = JSON.parse(result.stdout)
+      if response["truncated"] == true
+        raise OperationalError,
+              "backend ref #{@backend}@#{@ref} recursive tree is truncated; prefix listings would be incomplete"
+      end
+
       @ref_readable = true
-      @tree_nodes = JSON.parse(result.stdout).fetch("tree", [])
+      @tree_nodes = response.fetch("tree", [])
     end
 
     def invalidate_read_cache(path)

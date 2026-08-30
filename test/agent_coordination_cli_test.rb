@@ -5404,6 +5404,16 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     assert_includes error.message, "rate limit"
   end
 
+  def test_github_store_rejects_truncated_recursive_tree
+    store = TruncatedTreeGitHubStore.new
+
+    error = assert_raises(AgentCoord::OperationalError) do
+      store.list_json("claims")
+    end
+    assert_includes error.message, "backend ref shakacode/agent-coordination-state@state"
+    assert_includes error.message, "recursive tree is truncated"
+  end
+
   def test_segment_validation_rejects_consecutive_dots_before_path_validation
     error = assert_raises(AgentCoord::PathValidationError) do
       AgentCoord.batch_path("bad..batch")
@@ -12296,6 +12306,29 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     def gh_api(*args)
       if args == ["repos/shakacode/agent-coordination-state/git/trees/state?recursive=1"]
         return AgentCoord::GhResult.new(stdout: "", stderr: "rate limit", status: FakeStatus.new(false))
+      end
+
+      raise "unexpected gh api #{args.inspect}"
+    end
+  end
+
+  class TruncatedTreeGitHubStore < AgentCoord::GitHubStore
+    def initialize
+      super(backend: "shakacode/agent-coordination-state", ref: "state")
+    end
+
+    private
+
+    def gh_api(*args)
+      if args == ["repos/shakacode/agent-coordination-state/git/trees/state?recursive=1"]
+        return AgentCoord::GhResult.new(
+          stdout: JSON.generate(
+            "tree" => [{ "path" => "claims/shakacode/react_on_rails/4150.json", "type" => "blob" }],
+            "truncated" => true
+          ),
+          stderr: "",
+          status: FakeStatus.new(true)
+        )
       end
 
       raise "unexpected gh api #{args.inspect}"
