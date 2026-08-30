@@ -771,9 +771,52 @@ state in text or JSON. Full `status` renders compact claims, heartbeats, batch
 lanes, lane dependencies, blocked-on refs, and recent events for broad audits.
 Scoped status is the preferred batch-workflow path:
 
-- `status --repo OWNER/REPO --target ISSUE_OR_PR` reads only
-  `claims/<owner>/<repo>/<issue-or-pr>.json` and that claim holder's heartbeat
-  when a holder exists.
+- `status --repo OWNER/REPO --target ISSUE_OR_PR` reads only the claim paths for
+  that work item's spellings, plus one heartbeat per distinct claim holder.
+  `claim` writes the raw target, so one item can be held under any spelling of
+  itself, and the candidate set is exactly the spellings `log` folds onto the same
+  work item: `<n>`, `issue:<n>`, and `pr:<n>` for a number; `<slug>` and
+  `adhoc:<slug>` for a slug. A prefix that survives folding is part of the
+  identity, so `adhoc:319` and `issue:<slug>` each name only themselves and cost
+  the single literal read they always did. A query spelled in non-canonical case
+  also probes its canonical form. That is at most four claim reads — three for a
+  canonically spelled number, two for a slug, one where the prefix is part of the
+  base — plus one heartbeat per distinct holder, independent of fleet size: point
+  reads only, never a listing or a prefix scan. Every claim found is reported, so
+  two agents holding `9832` and `pr:9832` both appear. Records are reported once
+  per lease, where a lease is the `repo`, `target`, and `agent_id` the record
+  names: on a case-insensitive checkout two candidate paths reach one file, and
+  reporting it twice would invent a second holder. Because the candidates are
+  separate point reads rather than one snapshot, a renew landing between them
+  changes only the timestamps and still reports one lease — but a *takeover*
+  landing between them returns two different holders for that one record, and both
+  are reported, which is the safer reading of genuinely ambiguous state. Lane
+  suffixes are never folded away, because a lane holds its own lease: `--target
+  319` does not report a claim on `319:qa`, and `--target 319:qa` resolves
+  `issue:319:qa` and `pr:319:qa`, not `319`.
+  - The queried spelling and the alias spellings fail differently on purpose. A
+    corrupt or unreadable record at the *queried* path is still a hard error with
+    exit 2, unchanged. An *alias* candidate that cannot answer does not abort the
+    query: malformed JSON, a payload that is not a claim object, a path outside a
+    scoped token's read prefixes, an unreadable file, and a symlink where a record
+    belongs are each reported instead of raised. The healthy records still answer,
+    the exit stays 0, and a `claims` section note names each such path and says a
+    claim there would not be reported; the notes also appear in `degraded`. Read
+    them: `claims: none` with such a note is "could not check everything", which is
+    not the same answer as a bare `claims: none`. The same asymmetry applies one
+    level down: the queried claim holder's heartbeat still fails the query if it
+    cannot be read, while a holder reached only through an alias claim degrades to
+    a `heartbeats` note naming that holder. Anything broader — a 500, a
+    `route_not_found`, an unreachable backend — is still a failed query, not an
+    absent claim.
+  - Casing is folded on the query side only. Claim paths are literal, so covering
+    every casing a claim could have been *written* under would cost a read per
+    casing rather than a closed set. `--target Issue:319` finds a claim stored
+    canonically as `issue:319`, but a claim stored as `Issue:319` is found only by
+    that same spelling — `--target 319` will not find it. `log`, which lists and
+    folds, still will. Where two case-differing keys are both live, they are two
+    files and therefore two leases: `status` reports both holders, while `log`
+    folds them and reports one.
 - `status --batch-id ID` reads only `batches/<id>.json`, `events/<id>/`,
   lane-owner heartbeats, and dependency batch files plus referenced lane-owner
   heartbeats needed to compute `blocked_on`.
@@ -1576,6 +1619,90 @@ batches
 Workers with unmet dependencies should set their own heartbeat to `blocked`,
 switch to another independent lane, and check `agent-coord status` again before
 resuming, rebasing, or pushing dependency-sensitive work.
+
+### Issue-targeted lanes and external publication preflights
+
+A lane `targets` entry names a **work item**, not the pull request that resolved
+it. Issues and pull requests share one number sequence per repository, so `130`,
+`issue:130`, and `pr:130` fold to the same work item when a trail is read
+(see [Reading the trail](#reading-the-trail-where-is-the-work-on-an-issue-or-pr)).
+That folding is read-side only. A claim is keyed by the exact target string, so
+`130`, `issue:130`, and `pr:130` are three separate leases and each stays
+independently claimable — a prefixed spelling does not take the bare number's
+lease. Write the bare number in `targets`.
+A lane that is assigned an issue therefore records the issue in `targets` and
+the pull request that resolved it separately in `pr_url` — two different facts,
+not a disagreement.
+
+External closeout tooling does not necessarily share that model. The
+`completed-batch-publication-preflight` helper in
+[shakacode/agent-workflows](https://github.com/shakacode/agent-workflows)'
+`post-merge-audit` skill resolves a lane by parsing each `targets` entry as a
+bare integer and by requiring a lane's `targets` and `pr_url` to name the *same*
+target when both are present. It also derives one expected terminal state per
+target type — `merged` for a pull request, `closed` for an issue — and compares
+all of them against the lane's single `pr_state` scalar. Those two assumptions
+make some correct lane shapes unpublishable there. Measured against that helper
+for a lane that resolved issue 130 with pull request 156:
+
+| Lane shape | Helper's `expected_targets` | Preflight verdict |
+| --- | --- | --- |
+| `targets: ["156"]`, `pr_url` set, `pr_state: merged` | `[pr 156]` | eligible |
+| `targets: ["130"]`, no `pr_url`, `pr_state: closed` | `[issue 130]` | eligible, with the no-PR evidence below |
+| `targets: ["130"]`, `pr_url` set, `pr_state: merged` | any of the three | blocked: lane target absent or ambiguous |
+| `targets: ["130", "156"]`, no `pr_url`, `pr_state: merged` | `[issue 130, pr 156]` | blocked: issue target state is not `closed` |
+| `targets: ["130", "156"]`, no `pr_url`, `pr_state: closed` | `[issue 130, pr 156]` | blocked: PR target state is not `merged` |
+
+The last two rows are the same `terminal: done` lane with the only two values
+`pr_state` can hold: one scalar cannot satisfy two per-type expectations at once,
+so no `targets` spelling reaches them. Each of those rows actually emits two
+blockers — the state mismatch above plus `coordination and target state
+disagree`.
+
+A typed spelling does not help. `validate_segment!` already permits `:`, so
+`targets: ["issue:130"]` round-trips through `register-batch`, `claim`,
+`release`, and `status` today with no schema change — which makes it easy to
+reach for and worth warning about. The helper parses each entry as an integer,
+gets `nil`, and resolves nothing, so a typed spelling leaves every blocked row
+blocked and turns **both** eligible rows into blocked ones: `issue:130` breaks
+the second row and `pr:156` breaks the first. That is why `targets` stays a bare
+work-item id.
+
+The table lists the shapes worth knowing about, not every shape the helper will
+accept. A few others do reach eligible — recording the *issue* URL rather than a
+PR URL in `pr_url`, splitting the work across a separate issue lane and PR lane,
+or closing out `terminal: abandoned` with later authenticated completion — but
+each one either asserts that no implementation PR exists or that the lane was
+abandoned, and neither is true of a lane whose PR merged. The constraint that
+actually matters is that the lane records no PR-pointing url target.
+
+Both eligible shapes in the table carry a cost. Re-registering a lane onto the
+pull-request number mid-flight needs a second claim on that number, and the
+operator must remember to `release` the issue claim first. A plain non-terminal
+release is always available — it only checks that the caller still holds the
+claim — but nothing prompts for it, and by then a *terminal* release of the
+issue fails, because the re-registered manifest no longer has a lane matching
+that target. Skip the release and the batch completes while still holding a live
+lease on the issue. Either way the lane stops recording which issue it worked,
+and `batch-audit` reports `complete` while dropping the pre-PR custody events.
+
+The no-`pr_url` shape needs more than a `closed` target: the helper also requires
+`head_sha: not_applicable`, a `no_pr_evidence` record naming the canonical issue
+target with its exact issue URL and a rationale, and QA evidence replaying to
+`NOT_APPLICABLE` with `required: no`, `status: not_applicable`, and
+`release_blocking: not_applicable`. Together those assert that no implementation
+PR was created, so the shape is only honest for an issue that genuinely closed
+without one.
+
+Until this is resolved upstream, an issue-targeted lane that records its
+`pr_url` cannot publish autonomously. Its closeout has to go through the
+accepted-deferral path in `agent-workflows`' `pr-batch` skill, which needs a
+current write-authorized non-bot maintainer to publish a decision comment
+accepting the exact batch, blocker, owner, predecessor, and preflight digest. An
+agent coordinator cannot self-authorize it, so an operator hitting this needs a
+human in the loop. Tracked here in
+[#172](https://github.com/shakacode/agent-coordination/issues/172) and upstream
+in [shakacode/agent-workflows#522](https://github.com/shakacode/agent-workflows/issues/522).
 
 ## Lifecycle
 

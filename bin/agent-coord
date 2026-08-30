@@ -306,12 +306,13 @@ module AgentCoord
   # Records the long-option declaration shapes used by this CLI so pre-parse
   # token detection can share its registered option names.
   class OptionRegistry
-    attr_reader :value_options, :flag_options
+    attr_reader :value_options, :flag_options, :path_options
 
     def initialize(parser)
       @parser = parser
       @value_options = []
       @flag_options = []
+      @path_options = []
     end
 
     def on(*declarations, &)
@@ -324,6 +325,18 @@ module AgentCoord
         option_name, argument = long_declaration.split(/\s+/, 2)
         target = argument ? @value_options : @flag_options
         target << option_name
+        # A PATH placeholder is the declaration saying this value addresses the
+        # filesystem. Those values are handed to syscalls rather than serialized,
+        # so argv normalization has to leave their bytes alone.
+        #
+        # DECLARING A NEW PATH-VALUED OPTION: its placeholder must start with
+        # PATH (`--archive-dir PATH`), because this match is on the placeholder
+        # spelling, not on a type. `--archive-dir DIR`, `FILE`, `ROOT`, or
+        # `[PATH]` is silently NOT exempted and its value is transcoded, which
+        # changes which file it names; `--archive-dir=PATH` is not even seen as
+        # a value option by the grammar above. Nothing fails loudly if you get
+        # this wrong, so match the spelling.
+        @path_options << option_name if argument.to_s.start_with?("PATH")
       end
       @parser
     end
@@ -367,7 +380,6 @@ module AgentCoord
     # metric's limit; splitting the seam into a bag would only hide it.
     def initialize(argv, stdin: $stdin, stdout: $stdout, stderr: $stderr, clock: Time, # rubocop:disable Metrics/ParameterLists
                    backend_conflict_warnings: true)
-      @argv = argv
       @stdin = stdin
       @stdout = stdout
       @stderr = stderr
@@ -376,6 +388,9 @@ module AgentCoord
       # Set on the first degraded listing; read by both the --sync guard and the
       # --json trail state, so it must exist before either runs.
       @log_incomplete = nil
+      # Last: rejecting an argument builds an option registry to resolve its
+      # exit code, and nothing above depends on argv.
+      @argv = normalized_argv(argv)
     end
 
     # Commands that provably consult neither @user_config nor @process_config
@@ -731,6 +746,52 @@ module AgentCoord
       raise unless stack_json && e.exit_code == EXIT_USAGE
 
       raise Error.new(e.message, exit_code: STACK_EXIT_USAGE)
+    end
+
+    # Argument normalization has to run before anything reads argv, which is
+    # earlier than run_doctor_command's EXIT_USAGE -> STACK_EXIT_USAGE mapping
+    # above, so a rejected argument would otherwise exit 1 where
+    # `doctor --stack-json` promises 64 for every usage error -- and a stack
+    # aggregator reads 1 as degraded and then finds no report to parse. The
+    # exit code is therefore resolved here instead.
+    def normalized_argv(argv)
+      raw = argv.map { |argument| argument.to_s.b }
+      AgentCoord.normalize_argv(argv, raw_indexes: path_argument_indexes(raw))
+    rescue Error => e
+      raise unless e.exit_code == EXIT_USAGE && stack_json_argv?(raw)
+
+      raise Error.new(e.message, exit_code: STACK_EXIT_USAGE)
+    end
+
+    # A path is a byte string on its way to a syscall; every other argument is
+    # text on its way to JSON. Transcoding a path changes which file it names --
+    # a latin-1 `/tmp/café` becomes a different, probably nonexistent directory,
+    # and `status --state-root` would report empty coordination state for a root
+    # that is not empty -- so those values keep the bytes the operator typed.
+    # The set comes from the option declarations' PATH placeholder rather than a
+    # second list that could drift away from them.
+    def path_argument_indexes(raw)
+      # The command decides which options are registered, and it is still raw
+      # here. A non-ASCII one cannot name a real command, and interpolating it
+      # into the parser banner would raise, so it falls back to the global set.
+      command = raw.first.to_s
+      command = "" unless command.ascii_only?
+      paths = registered_options(command).path_options
+      indexes = []
+      scan_raw_options(raw, command:) do |index, option, value_of, _awaits_value|
+        indexes << index if paths.include?(value_of || option)
+      end
+      indexes
+    end
+
+    # Takes the BINARY copy built above, because standalone_option_token_count
+    # splits each argument on "=" and String#split raises on a UTF-8-tagged
+    # string holding invalid bytes -- exactly the input that got us here. Option
+    # names are ASCII, and an ASCII-only string compares equal to its BINARY
+    # copy, so the match is unaffected. The command token is dropped to match
+    # what run_doctor_command inspects.
+    def stack_json_argv?(raw)
+      raw.first == "doctor" && stack_json_option_token?(raw.drop(1))
     end
 
     def print_help
@@ -2062,26 +2123,36 @@ module AgentCoord
       standalone_option_token_count(argv, [token], command:).positive?
     end
 
-    def standalone_option_token_count(argv, tokens, command:)
+    # One walk over raw argv, shared by every pre-parse scan. Yields each
+    # argument as (index, the long option it names, the option it is the value
+    # of, whether it is an option still awaiting a separate value). Arguments
+    # are expected to be BINARY copies: String#split raises on a UTF-8-tagged
+    # string holding invalid bytes, which is reachable from every caller.
+    def scan_raw_options(argv, command:)
       command_options = registered_options(command)
       doctor_options = command == "doctor" ? command_options : registered_options("doctor")
       value_options = command_options.value_options
-      skip_next = false
-      argv.count do |arg|
-        if skip_next
-          skip_next = false
-          next false
+      awaiting = nil
+      argv.each_with_index do |argument, index|
+        if awaiting
+          yield(index, nil, awaiting, false)
+          awaiting = nil
+          next
         end
 
-        option_name, option_value = arg.split("=", 2)
-        resolved_option = resolve_standalone_option(option_name, command_options, doctor_options)
-        if option_value.nil? && value_options.include?(resolved_option)
-          skip_next = true
-          false
-        else
-          tokens.include?(resolved_option)
-        end
+        option_name, inline_value = argument.split("=", 2)
+        option = resolve_standalone_option(option_name, command_options, doctor_options)
+        awaiting = option if inline_value.nil? && value_options.include?(option)
+        yield(index, option, nil, !awaiting.nil?)
       end
+    end
+
+    def standalone_option_token_count(argv, tokens, command:)
+      count = 0
+      scan_raw_options(argv, command:) do |_index, option, value_of, awaits_value|
+        count += 1 if value_of.nil? && !awaits_value && tokens.include?(option)
+      end
+      count
     end
 
     def resolve_standalone_option(option_name, command_options, target_options)
@@ -5755,41 +5826,29 @@ module AgentCoord
     end
 
     def target_status_payload(store, options, now)
-      claim = store.read_json(AgentCoord.claim_path(options.fetch(:repo), options.fetch(:target)))
-      heartbeat_entries = []
-      heartbeat = nil
-      holder = nil
-      if claim
-        holder = claim.data["agent_id"].to_s
-        heartbeat = read_status_heartbeat(store, holder)
-        heartbeat_entries << heartbeat if valid_status_heartbeat?(heartbeat)
-      end
+      repo = options.fetch(:repo)
+      target = options.fetch(:target)
+      claim_entries, claim_notes, queried_holder = target_claim_entries(store, repo, target)
+      heartbeat_entries, holder_notes = target_holder_heartbeats(store, claim_entries, queried_holder)
       # Claims and heartbeats are cleared on release and expiry, so this scope
       # alone cannot distinguish "never worked" from "worked and finished". Name
       # the command that can, rather than leaving the operator with two empty
       # sections that read like an answer.
       unchecked = "not checked in target scope; run `agent-coord log` for this target's history"
       section_notes = { "batches" => unchecked, "events" => unchecked }
-      if claim && heartbeat_entries.empty?
-        section_notes["heartbeats"] = if heartbeat == :invalid
-                                        "holder heartbeat unreadable"
-                                      elsif heartbeat == :mismatched
-                                        "holder heartbeat mismatched"
-                                      elsif holder.to_s.empty?
-                                        "claim holder not set"
-                                      else
-                                        "holder heartbeat not found"
-                                      end
-      end
+      section_notes["claims"] = claim_notes.join("; ") unless claim_notes.empty?
+      section_notes["heartbeats"] = holder_notes.join("; ") unless holder_notes.empty?
 
       status_payload(
         scope: {
           "kind" => "target",
-          "repo" => options.fetch(:repo),
-          "target" => options.fetch(:target).to_s
+          "repo" => repo,
+          # The spelling the operator asked about, never a folded one: aliases
+          # decide which records answer, not what question was asked.
+          "target" => target.to_s
         },
         section_notes: section_notes,
-        claim_entries: [claim].compact,
+        claim_entries: claim_entries,
         heartbeat_entries: heartbeat_entries,
         batch_entries: nil,
         event_entries: nil,
@@ -5797,6 +5856,296 @@ module AgentCoord
         lane_states: {},
         now: now
       )
+    end
+
+    # `claim` writes the raw target, so one work item is independently claimable
+    # under every spelling of itself -- the fleet holds `9832` and `pr:9832` live
+    # under different agents. Since #145 `log` folds those spellings onto one
+    # identity, so resolving this scope through the single literal path would
+    # report "unclaimed" for an item `log` reports as claimed, in the same second.
+    #
+    # The two kinds of read here fail differently on purpose. The queried spelling
+    # is the question the operator asked, so it keeps the semantics it has always
+    # had: a corrupt or forbidden record there is still a hard error. An alias is
+    # a spelling the operator did not ask about, and letting an unrelated stale or
+    # half-written sibling abort a query the healthy record answers perfectly turns
+    # a good answer into exit 2 -- which a plan-pr-batch probe reads as "custody
+    # unknown" and stops on. Those degrade to a note instead.
+    #
+    # A note rather than a silent skip, and this is the load-bearing half: an
+    # operator who sees "none" plus a degraded note must not read it as "definitely
+    # unclaimed". Dropping the failed candidate quietly would produce exactly the
+    # answer this whole scope exists to prevent -- reporting unclaimed while a read
+    # failed -- so the note names the path and says a claim there would not have
+    # been reported. Exit stays 0, matching how status_list_entries already
+    # degrades a forbidden listing and what the README says degraded notes mean.
+    def target_claim_entries(store, repo, target)
+      queried, *aliases = target_claim_candidate_paths(repo, target)
+      notes = []
+      queried_entry = store.read_json(queried)
+      if queried_entry && !queried_entry.data.is_a?(Hash)
+        raise OperationalError, "state record is not a claim object: #{queried}"
+      end
+
+      entries = [queried_entry]
+      aliases.each { |path| entries << target_alias_claim(store, path, notes) }
+      # The holder of the queried claim, if it answered. Its heartbeat is a read
+      # that existed before alias resolution and keeps the failure it had then.
+      [target_collapsed_claims(entries.compact), notes, entries.first&.data&.fetch("agent_id", nil).to_s]
+    end
+
+    # Narrow on purpose. A malformed record and a scope that cannot reach this one
+    # path are both "this candidate cannot answer"; anything else -- a dead
+    # backend, an unsupported route -- is still a failure of the whole query and
+    # must not be reported as an absent claim.
+    def target_alias_claim(store, path, notes)
+      entry = store.read_json(path)
+      # Valid JSON that is not an object cannot be a claim, and reading a field off
+      # it raises -- which would let an unrelated malformed sibling take down a
+      # query the queried spelling answered perfectly.
+      return entry if entry.nil? || entry.data.is_a?(Hash)
+
+      notes << target_alias_note(path, "not a claim record")
+      nil
+    rescue Errno::ENOENT
+      # A lock-free read can race a release after its existence check. At the
+      # alias boundary, that is the same answer as an ordinary missing record.
+      nil
+    rescue JSON::ParserError
+      notes << target_alias_note(path, "unreadable")
+      nil
+    rescue Errno::EACCES
+      notes << target_alias_note(path, "not readable")
+      nil
+    rescue Errno::ENAMETOOLONG
+      notes << target_alias_note(path, "path too long")
+      nil
+    rescue OperationalError => e
+      reason = unreachable_alias_reason(e, path)
+      raise unless reason
+
+      notes << target_alias_note(path, reason)
+      nil
+    end
+
+    def target_alias_note(path, reason)
+      "#{path} #{reason}; a claim there would not be reported"
+    end
+
+    # Every way a single candidate path can be unable to answer, across backends:
+    # a scoped token's 403 from the HTTP backend, and the local store refusing a
+    # record it will not open or that is not a record at all. Exact record-path
+    # read scopes are part of the authorization contract (docs/backend-design.md),
+    # so a token can legitimately reach the queried claim and none of its siblings;
+    # a wrong-mode or symlinked file in a state directory is the same condition
+    # arrived at by accident.
+    #
+    # Enumerated by the exact message each raise site produces, never by a
+    # substring or a class. A 500, a 401, a `route_not_found`, a truncated body, a
+    # dead backend -- none of those are one candidate's problem, and reporting any
+    # of them as an absent claim would be the silent wrong answer this scope
+    # exists to prevent.
+    def unreachable_alias_reason(error, path)
+      forbidden = /\Ahttp backend read #{Regexp.escape(path)} failed: 403 forbidden\z/
+      directory = File.dirname(path)
+      case error.message
+      when forbidden then "not readable by scoped token"
+      when "state record is not readable: #{path}",
+           "state record path is not readable or searchable: #{path}"
+        "not readable"
+      when "state layout invalid: #{path} is a symlink" then "is a symlink"
+      when "state layout invalid: #{path} is not a regular file" then "is not a regular file"
+      when "state layout invalid: #{directory} is a symlink" then "is in a symlinked directory"
+      when "state layout invalid: #{directory} is not a directory" then "is not in a directory"
+      end
+    end
+
+    # Two candidate paths can name one *file*: a case-insensitive checkout resolves
+    # `ISSUE:319.json` and `issue:319.json` to the same record, and reporting that
+    # one lease once per spelling that reached it would invent a second holder.
+    #
+    # The test is the lease the record names -- its repo, target, and holder --
+    # rather than the whole payload. The two point reads are not one atomic read,
+    # so a renew landing between them returns the same lease with a later
+    # `updated_at`, and comparing payloads whole would render that one lease as two
+    # holders: a false positive in the exact signal this scope exists to raise.
+    # Those three fields do not move under a renew.
+    #
+    # Nor is it a case-folded key. Two files are two independently claimable
+    # leases, and `claim` writes the target into the record from the same value it
+    # puts in the path, so their payload targets differ and both are kept --
+    # including two casings of one spelling on a case-sensitive store, and
+    # including one agent holding both. Folding those together would discard a live
+    # second holder, which is the concurrent double custody this scope exists to
+    # surface, thrown away by the code meant to tidy the output. Keying on what the
+    # record says about itself also decides the question without needing to know
+    # whether this filesystem folds case, which nothing here can observe.
+    #
+    # Residual, and inherent to reading one record twice without a snapshot: a
+    # takeover landing between the two reads returns two different holders for one
+    # file, and both are reported. That state is genuinely ambiguous at the moment
+    # it is read, and showing both holders is the safer direction.
+    #
+    # A record that does not name its own lease cannot be matched to another read
+    # of itself, so it keys on its own path and never collapses. Two such records
+    # collapsing would hide a holder, which is the worse error of the two.
+    #
+    # `log` still folds casing across its listing, so for two live leases under two
+    # casings it reports one holder where this reports both. A lease is a file, so
+    # `status` is the correct answer there and the divergence is deliberate; do not
+    # restore the collapse to hide it.
+    #
+    # `uniq` keeps the first record of a lease -- the operator's own spelling --
+    # and leaves every distinct lease in candidate order.
+    def target_collapsed_claims(entries)
+      entries.uniq { |entry| target_lease_key(entry) }
+    end
+
+    def target_lease_key(entry)
+      data = entry.data
+      return entry.path if data["target"].to_s.empty? || data["agent_id"].to_s.empty?
+
+      [data["repo"], data["target"], data["agent_id"]]
+    end
+
+    # This stays a closed set of point reads rather than a claims listing:
+    # plan-pr-batch probes target-scoped status through `agent-coord-bounded
+    # --timeout 20` before assigning work, so a listing would make every planning
+    # probe scan the whole fleet. At most four claim reads -- three for a
+    # canonically spelled number, two for a slug, one for a target whose prefix is
+    # part of its base -- whatever the fleet holds.
+    #
+    # The order is both the read order and the render order: the operator's own
+    # spelling first, then the family in a fixed order. Ordering by claim
+    # timestamp instead would let clock skew between two holders reshuffle the
+    # answer between runs that read identical state.
+    def target_claim_candidate_paths(repo, target)
+      # The queried spelling resolves first and unrescued: it is the one the
+      # operator asked about, so a segment it cannot form must still raise the
+      # error it raises today rather than being silently dropped as a candidate.
+      # Generated spellings can expose a segment-invalid leading dot when folding
+      # off a decorative prefix. Such a spelling cannot be claimed, so omit it;
+      # the queried spelling above remains unrescued.
+      paths = [AgentCoord.claim_path(repo, target)]
+      target_alias_spellings(target).each do |spelling|
+        begin
+          path = AgentCoord.claim_path(repo, spelling)
+        rescue PathValidationError
+          next
+        end
+        paths << path unless paths.include?(path)
+      end
+      paths
+    end
+
+    # Every spelling `claim` could have written for the work item this target
+    # names, in canonical case: exactly the set work_item_parts folds onto this
+    # target's (base, lane) identity, so `status` resolves what `log` matches by
+    # construction rather than by a second enumeration that can drift from it.
+    #
+    # Generated, then verified against that identity, because generating alone is
+    # not safe: the bare spelling is rebuilt as base + ":" + lane, and when folding
+    # leaves a base that is itself a kind word the rebuilt string parses as a
+    # *different* item. `adhoc:issue:319` is the `319` lane of an item called
+    # `issue`, but "issue:319" reads back as issue 319 -- so without the check this
+    # scope would report a holder of issue 319 as holding a work item they have
+    # never touched, the inverse of the divergence it exists to fix. The check is
+    # general on purpose: an enumeration of the shapes that misbehave would miss
+    # the next one. Any target-identity shape list, here or in a test, needs a
+    # target whose folded base is a kind word, because that is the family where
+    # reconstruction re-parses.
+    #
+    # The round trip also subsumes which kinds may decorate: a prefix that does not
+    # decorate this base stays part of the base when re-read -- `adhoc:319` reads
+    # back as the item `adhoc:319`, not as the `319` this target names -- and fails
+    # the check. So `issue:`/`pr:` attach to a number, `adhoc:` to a slug, and a
+    # prefix that was already kept (`issue:foo`, `adhoc:319`) names only itself,
+    # all from one rule rather than a restatement of #145's.
+    #
+    # Casing is identity to `log`, which matches through work_item_parts and
+    # downcases, but a claim path is literal, so the canonical spelling of what was
+    # typed is always among the candidates: an operator typing `Issue:320` must
+    # find the `issue:320` the fleet actually holds. That is the tractable half.
+    # The other half is not: a claim *written* under an arbitrary casing cannot be
+    # found by a closed point-read set, because the casings are unbounded --
+    # `--target 319` will not find a claim stored as `Issue:319`. README states
+    # that limit.
+    #
+    # A lane suffix rides along on every spelling rather than being folded off. A
+    # lane holds its own lease, so `319:qa` is not `319` -- but `issue:319:qa` and
+    # `319:qa` are the same lane of the same item, and missing that would hide a
+    # live lane holder exactly the way the bare item's aliases hid one.
+    def target_alias_spellings(target)
+      identity = AgentCoord.work_item_parts(target)
+      base, lane = identity
+      suffix = lane.nil? ? "" : ":#{lane}"
+      spellings = ["#{base}#{suffix}", *WORK_ITEM_KINDS.map { |kind| "#{kind}:#{base}#{suffix}" }]
+      spellings.select { |spelling| AgentCoord.work_item_parts(spelling) == identity }
+    end
+
+    # One heartbeat read per distinct holder, not per claim: two spellings held by
+    # one agent are one agent, so a second read would spend a round trip to render
+    # the same row twice.
+    def target_holder_heartbeats(store, claim_entries, queried_holder)
+      cache = {}
+      entries = []
+      notes = []
+      claim_entries.each do |claim|
+        holder = claim.data["agent_id"].to_s
+        heartbeat = target_holder_heartbeat(store, holder, cache, queried_holder)
+        if valid_status_heartbeat?(heartbeat)
+          entries << heartbeat unless entries.include?(heartbeat)
+        else
+          notes << target_holder_note(claim, holder, heartbeat, qualified: claim_entries.length > 1)
+        end
+      end
+      [entries, notes]
+    end
+
+    # The same asymmetry as the claim reads, one level down. The queried claim's
+    # holder heartbeat is a read that existed before alias resolution, so an
+    # unreadable one still fails the query exactly as it always did. A holder
+    # reached only because an alias claim answered is a read this scope added, and
+    # letting it abort turns an answer the records themselves gave into exit 2 --
+    # the same stale-sibling breakage, one level down.
+    #
+    # It degrades onto the existing marker rather than a new one, so it renders
+    # through the note the operator already knows: the holder could not be read.
+    # That trades away the distinction between a malformed heartbeat and an
+    # unreachable one, which the claims note keeps; the holder's identity is the
+    # part an operator acts on. The failure is cached so a holder with two leases
+    # is still read once.
+    def target_holder_heartbeat(store, holder, cache, queried_holder)
+      read_cached_status_heartbeat(store, holder, cache)
+    rescue Errno::ENOENT
+      raise if holder == queried_holder
+
+      cache[holder] = nil
+    rescue Errno::EACCES, Errno::ENAMETOOLONG
+      raise if holder == queried_holder
+
+      cache[holder] = :invalid
+    rescue OperationalError => e
+      raise if holder == queried_holder
+      raise unless unreachable_alias_reason(e, AgentCoord.heartbeat_path(holder))
+
+      cache[holder] = :invalid
+    end
+
+    # The wording is unchanged for a single claim, which was the only case until
+    # aliases could produce two. With two holders the bare phrase would not say
+    # which one it describes, so each note names its lease and its holder -- the
+    # exact pair a release or handoff has to address.
+    def target_holder_note(claim, holder, heartbeat, qualified:)
+      note = case heartbeat
+             when :invalid then "holder heartbeat unreadable"
+             when :mismatched then "holder heartbeat mismatched"
+             else holder.empty? ? "claim holder not set" : "holder heartbeat not found"
+             end
+      return note unless qualified
+
+      target = claim.data.fetch("target", AgentCoord.target_from_path(claim.path))
+      holder.empty? ? "#{note} for #{target}" : "#{note} for #{target} (#{holder})"
     end
 
     # rubocop:disable Metrics/AbcSize, Metrics/BlockLength, Metrics/CyclomaticComplexity, Metrics/MethodLength, Metrics/PerceivedComplexity
@@ -6180,6 +6529,7 @@ module AgentCoord
       path = AgentCoord.heartbeat_path(agent_id)
       entry = store.read_json(path)
       return nil unless entry
+      return :invalid unless entry.data.is_a?(Hash)
 
       payload_agent_id = entry.data.fetch("agent_id", AgentCoord.target_from_path(entry.path)).to_s
       return :mismatched unless payload_agent_id == agent_id
@@ -6704,10 +7054,10 @@ module AgentCoord
     end
 
     def check_command!(*args)
-      stdout, stderr, status = Open3.capture3(*args)
+      stdout, stderr, status = AgentCoord.capture3_utf8(*args)
       return if status.success?
 
-      message = [stderr, stdout].reject(&:empty?).join("\n")
+      message = [stderr, stdout].reject(&:empty?).map { |stream| AgentCoord.utf8_diagnostic(stream) }.join("\n")
       raise OperationalError, "#{args.join(' ')} failed: #{message}"
     rescue SystemCallError => e
       raise OperationalError, "#{args.join(' ')} failed: #{e.message}"
@@ -6784,10 +7134,34 @@ module AgentCoord
       shell == "zsh" ? File.join(Dir.home, ".zshrc") : File.join(Dir.home, ".bashrc")
     end
 
+    # This only reads the profile to check whether `line` is already present, and
+    # never writes the read result back, so the comparison is done in bytes
+    # rather than as text. A shell rc file is not guaranteed valid UTF-8 the way
+    # state JSON is, so a plain text read can fail on invalid bytes -- but `line`
+    # is not guaranteed to be a clean UTF-8 string either: Shellwords.escape on a
+    # non-ASCII install_dir (from ARGV, itself ASCII-8BIT-tagged under some
+    # locales) yields an ASCII-8BIT `line`, and comparing that against a
+    # UTF-8-tagged `existing` never matches even when the bytes are identical --
+    # so bootstrap would silently duplicate the PATH line on every rerun instead
+    # of detecting it was already there. Reading with File.binread and comparing
+    # against `line.b` puts both sides in ASCII-8BIT, which has no invalid byte
+    # sequences, so #strip/#lines can never raise regardless of locale, and the
+    # match is a plain byte comparison regardless of what encoding `line`
+    # happened to end up in. Nothing is written back, and the appended line is
+    # still the original `line`, so the user's profile bytes are untouched.
     def ensure_profile_path(profile, install_dir)
       FileUtils.mkdir_p(File.dirname(profile))
-      line = "export PATH=#{Shellwords.escape(install_dir)}:\"$PATH\""
-      existing = File.exist?(profile) ? File.read(profile) : ""
+      # Shellwords.escape emits one backslash per character for a UTF-8-tagged
+      # string but one per byte for a binary one, and install_dir comes from
+      # ARGV, which Ruby tags with the locale encoding. Pin the encoding first
+      # so the generated line is the same bytes under every locale.
+      canonical_dir = install_dir.dup.force_encoding(Encoding::UTF_8)
+      canonical_dir = install_dir.b unless canonical_dir.valid_encoding?
+      line = "export PATH=#{Shellwords.escape(canonical_dir)}:\"$PATH\"".b
+      # Read and compare as bytes: ASCII-8BIT has no invalid byte sequences, so
+      # #strip and #lines cannot raise however the profile is encoded, and the
+      # match does not depend on either side carrying a usable encoding tag.
+      existing = File.exist?(profile) ? File.binread(profile) : ""
       return if existing.lines.any? { |existing_line| existing_line.strip == line }
 
       File.open(profile, "a") do |file|
@@ -7179,7 +7553,7 @@ module AgentCoord
     end
 
     def gh_api(*args)
-      stdout, stderr, status = Open3.capture3("gh", "api", *args)
+      stdout, stderr, status = AgentCoord.capture3_utf8("gh", "api", *args)
       GhResult.new(stdout: stdout, stderr: stderr, status: status)
     rescue SystemCallError => e
       raise OperationalError, "gh api #{args.join(' ')} failed: #{e.message}"
@@ -7472,9 +7846,45 @@ module AgentCoord
       !success? && error_message.match?(/409|422|sha|already exists|conflict/i)
     end
 
+    # Diagnostic text, not payload: scrubbed per stream so that neither the
+    # predicates below nor a --json reporter can raise while describing a
+    # failure. See AgentCoord.utf8_diagnostic.
     def error_message
-      [stderr, stdout].reject(&:empty?).join("\n")
+      [stderr, stdout].reject(&:empty?).map { |stream| AgentCoord.utf8_diagnostic(stream) }.join("\n")
     end
+  end
+
+  # Open3 tags captured output with Encoding.default_external, which is US-ASCII
+  # under LC_ALL=C or LANG=C. Every subprocess captured here emits UTF-8, so that
+  # tag is simply wrong, and correctly formed bytes then raise
+  # Encoding::InvalidByteSequenceError from JSON.parse and ArgumentError from
+  # Regexp#match?. Re-tagging both streams at the capture seam stops the locale
+  # deciding how captured bytes are read; it covers stderr as well as stdout
+  # because an error path that crashes while formatting its own message is worse
+  # than the failure it was reporting.
+  #
+  # Caller contract: this re-tags but deliberately does not scrub, so the payload
+  # stream reaches JSON.parse as the subprocess wrote it. Genuinely malformed
+  # bytes therefore survive here and still raise from Regexp#match? and
+  # JSON.generate. Anything that interpolates either stream into a message must
+  # route it through utf8_diagnostic rather than using it raw.
+  def self.capture3_utf8(*)
+    stdout, stderr, status = Open3.capture3(*)
+    [force_utf8(stdout), force_utf8(stderr), status]
+  end
+
+  def self.force_utf8(text)
+    text.dup.force_encoding(Encoding::UTF_8)
+  end
+
+  # Re-tagging fixes a wrong label but cannot repair genuinely malformed bytes,
+  # and an invalid UTF-8 string still raises from Regexp#match? and from
+  # JSON.generate in the --json reporters. Message paths therefore substitute
+  # U+FFFD for undecodable bytes, because diagnostics are prose and a readable
+  # approximation beats a second crash; payload paths deliberately do not,
+  # because silently rewriting a state record is worse than failing to read it.
+  def self.utf8_diagnostic(text)
+    force_utf8(text).scrub
   end
 
   def self.safe_path!(path)
@@ -7552,6 +7962,65 @@ module AgentCoord
 
   def self.state_directory_prefix?(path)
     path.to_s.match?(STATE_DIRECTORY_PREFIX_PATTERN)
+  end
+
+  # Ruby tags ARGV with the locale encoding, and everything downstream assumes
+  # UTF-8: JSON.generate warns on a non-UTF-8 string today and raises under json
+  # 3.0, and a differently tagged argument does not compare equal to the same
+  # text read back from state, which is why under LC_ALL=C a non-ASCII agent
+  # could neither renew nor release its own claim. Doing this once at the Runner
+  # boundary covers the command token, every option value, the `log` positional,
+  # and demo's passthrough argv together, so an option added later cannot forget
+  # it. raw_indexes carries the exceptions: values that address the filesystem
+  # rather than coordination state keep their bytes, because normalizing a path
+  # changes which file it names. Returns a new array rather than normalizing in
+  # place: Runner#run and parse_options consume the array they are given, and
+  # that must not reach back into an ARGV or a caller's array they do not own.
+  def self.normalize_argv(argv, raw_indexes: [])
+    argv.each_with_index.map do |argument, index|
+      raw_indexes.include?(index) ? argument.to_s : normalize_argument(argument.to_s)
+    end
+  end
+
+  # How Ruby tagged the argument decides what normalizing it means, and argv is
+  # the one boundary where both cases occur. BINARY is the absence of a tag --
+  # what LANG=C/LC_ALL=C produces for an argument holding a non-ASCII byte -- so
+  # there is no source encoding to convert from and force_utf8 retags it as the
+  # UTF-8 it was meant to be, which is the same correction capture3_utf8 applies
+  # to a mislabeled subprocess stream. Any other tag is a real claim about what
+  # those bytes mean, so the argument is transcoded instead: retagging an
+  # ISO-8859-1 terminal's `café` would either reject valid input or, when the
+  # latin-1 bytes happen to form UTF-8, silently store different text than the
+  # operator typed.
+  #
+  # This is a payload path, so it does not scrub, for the reason utf8_diagnostic
+  # documents: rewriting a state record is worse than refusing to write it, and
+  # these values are state keys, so a scrubbed agent-id or repo would be stored
+  # as a silently different identity. load_launch_prompt refuses the same way.
+  def self.normalize_argument(argument)
+    normalized =
+      if argument.encoding == Encoding::ASCII_8BIT
+        force_utf8(argument)
+      else
+        argument.encode(Encoding::UTF_8)
+      end
+    # UTF-8 to UTF-8 is a no-op that does not validate, so a UTF-8-tagged
+    # argument holding invalid bytes is still only caught here.
+    return normalized if normalized.valid_encoding?
+
+    raise Error, invalid_argument_message(argument)
+  rescue EncodingError
+    # Every transcoding failure: undefined conversion, invalid byte sequence in
+    # the declared encoding, or an encoding with no converter to UTF-8.
+    raise Error, invalid_argument_message(argument)
+  end
+
+  # The message half of the same policy: the rejected value is echoed through
+  # utf8_diagnostic, so reporting an argument cannot itself raise on the bytes it
+  # is reporting. force_encoding overrides whatever tag was there, so this
+  # re-derives the value from its bytes whatever encoding it arrived claiming.
+  def self.invalid_argument_message(argument)
+    "command-line argument must be valid UTF-8: #{utf8_diagnostic(argument)}"
   end
 
   def self.validate_repo!(repo, field)
