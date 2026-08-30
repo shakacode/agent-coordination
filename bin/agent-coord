@@ -2365,14 +2365,14 @@ module AgentCoord
       return unless updates.key?("AGENT_COORD_API_URL")
       return if updates.key?("AGENT_COORD_API_TOKEN")
       return if current.fetch("AGENT_COORD_API_URL", nil) == updates.fetch("AGENT_COORD_API_URL")
-      return if current.fetch("AGENT_COORD_API_TOKEN", "").empty?
+      return unless AgentCoord.config_value_set?(current.fetch("AGENT_COORD_API_TOKEN", ""))
 
       raise Error, "--token-stdin is required when changing an API URL that has a saved token"
     end
 
     def validate_config_token_binding!(values)
-      return if values.fetch("AGENT_COORD_API_TOKEN", "").empty?
-      return unless values.fetch("AGENT_COORD_API_URL", "").empty?
+      return unless AgentCoord.config_value_set?(values.fetch("AGENT_COORD_API_TOKEN", ""))
+      return if AgentCoord.config_value_set?(values.fetch("AGENT_COORD_API_URL", ""))
 
       raise Error, "--token-stdin requires a saved API URL or --api-url in the same transaction"
     end
@@ -6691,18 +6691,23 @@ module AgentCoord
     end
 
     def configured_api_token?
-      !@process_config&.fetch("AGENT_COORD_API_TOKEN", nil).to_s.empty? ||
-        !@user_config&.fetch("AGENT_COORD_API_TOKEN", nil).to_s.empty?
+      AgentCoord.config_value_set?(@process_config&.fetch("AGENT_COORD_API_TOKEN", nil)) ||
+        AgentCoord.config_value_set?(@user_config&.fetch("AGENT_COORD_API_TOKEN", nil))
     end
 
     def resolved_http_token(selected_url)
+      # Presence is decided with the shared predicate -- a wholly blank token is
+      # unset, exactly as read_token_from_stdin already refuses one -- but a real
+      # token is returned verbatim, because whitespace inside it is significant.
       process_token = @process_config&.fetch("AGENT_COORD_API_TOKEN", nil)
-      return process_token unless process_token.to_s.empty?
+      return process_token if AgentCoord.config_value_set?(process_token)
 
       saved_token = @user_config&.fetch("AGENT_COORD_API_TOKEN", nil)
       saved_url = @user_config&.fetch("AGENT_COORD_API_URL", nil)
-      return saved_token if !saved_token.to_s.empty? && selected_url == saved_url
-      raise OperationalError, "AGENT_COORD_API_TOKEN is required when using the HTTP backend" if saved_token.to_s.empty?
+      return saved_token if AgentCoord.config_value_set?(saved_token) && selected_url == saved_url
+      unless AgentCoord.config_value_set?(saved_token)
+        raise OperationalError, "AGENT_COORD_API_TOKEN is required when using the HTTP backend"
+      end
 
       raise OperationalError,
             "process-scoped AGENT_COORD_API_TOKEN is required when the selected API URL differs from user config"
@@ -6716,7 +6721,7 @@ module AgentCoord
     # token value is ever printed, and the URL is redacted so userinfo embedded
     # in the selected URL cannot leak into stderr.
     def warn_unbound_process_token(selected_url, options)
-      return if @process_config&.fetch("AGENT_COORD_API_TOKEN", nil).to_s.empty?
+      return unless AgentCoord.config_value_set?(@process_config&.fetch("AGENT_COORD_API_TOKEN", nil))
       return if selected_url == @process_config&.fetch("AGENT_COORD_API_URL", nil)
 
       emit_backend_conflict_warning(

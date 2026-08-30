@@ -672,6 +672,41 @@ class HttpBackendSelectionTest < HttpEnvTestCase # rubocop:disable Metrics/Class
     end
   end
 
+  def test_whitespace_only_process_token_falls_through_to_the_saved_token
+    # read_token_from_stdin already refuses a wholly blank token, so treating an
+    # exported blank one as a real credential both contradicts that and sends
+    # "Bearer    " in place of a perfectly usable saved token.
+    with_private_config_tmpdir("agent-coord-blank-process-token") do |root|
+      config_home = File.join(root, "config")
+      env_file = File.join(config_home, "agent-coord", "env")
+      FileUtils.mkdir_p(File.dirname(env_file))
+      File.chmod(0o700, File.dirname(env_file))
+      stub = HttpStoreStub.new([[200, { "entries" => [] }]])
+      File.write(
+        env_file,
+        "AGENT_COORD_API_URL=#{stub.base_url}\nAGENT_COORD_API_TOKEN=saved-good-token\n"
+      )
+      File.chmod(0o600, env_file)
+
+      env = {
+        "XDG_CONFIG_HOME" => config_home,
+        "AGENT_COORD_API_URL" => nil,
+        "AGENT_COORD_API_TOKEN" => "   ",
+        "AGENT_COORD_STATE_ROOT" => nil,
+        "AGENT_COORD_BACKEND" => nil
+      }
+      begin
+        with_env(env) { run_cli(%w[status --json], env) }
+
+        auth = stub.requests.map { |request| request[:auth] }
+        assert_includes auth, "Bearer saved-good-token"
+        refute_includes auth, "Bearer    "
+      ensure
+        stub.shutdown
+      end
+    end
+  end
+
   def test_saved_token_is_not_sent_to_cli_or_process_endpoint_override
     # rubocop:disable Metrics/BlockLength
     with_private_config_tmpdir("agent-coord-token-provenance") do |root|
