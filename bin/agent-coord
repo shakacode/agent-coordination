@@ -4973,41 +4973,29 @@ module AgentCoord
     end
 
     def target_status_payload(store, options, now)
-      claim = store.read_json(AgentCoord.claim_path(options.fetch(:repo), options.fetch(:target)))
-      heartbeat_entries = []
-      heartbeat = nil
-      holder = nil
-      if claim
-        holder = claim.data["agent_id"].to_s
-        heartbeat = read_status_heartbeat(store, holder)
-        heartbeat_entries << heartbeat if valid_status_heartbeat?(heartbeat)
-      end
+      repo = options.fetch(:repo)
+      target = options.fetch(:target)
+      claim_entries, claim_notes, queried_holder = target_claim_entries(store, repo, target)
+      heartbeat_entries, holder_notes = target_holder_heartbeats(store, claim_entries, queried_holder)
       # Claims and heartbeats are cleared on release and expiry, so this scope
       # alone cannot distinguish "never worked" from "worked and finished". Name
       # the command that can, rather than leaving the operator with two empty
       # sections that read like an answer.
       unchecked = "not checked in target scope; run `agent-coord log` for this target's history"
       section_notes = { "batches" => unchecked, "events" => unchecked }
-      if claim && heartbeat_entries.empty?
-        section_notes["heartbeats"] = if heartbeat == :invalid
-                                        "holder heartbeat unreadable"
-                                      elsif heartbeat == :mismatched
-                                        "holder heartbeat mismatched"
-                                      elsif holder.to_s.empty?
-                                        "claim holder not set"
-                                      else
-                                        "holder heartbeat not found"
-                                      end
-      end
+      section_notes["claims"] = claim_notes.join("; ") unless claim_notes.empty?
+      section_notes["heartbeats"] = holder_notes.join("; ") unless holder_notes.empty?
 
       status_payload(
         scope: {
           "kind" => "target",
-          "repo" => options.fetch(:repo),
-          "target" => options.fetch(:target).to_s
+          "repo" => repo,
+          # The spelling the operator asked about, never a folded one: aliases
+          # decide which records answer, not what question was asked.
+          "target" => target.to_s
         },
         section_notes: section_notes,
-        claim_entries: [claim].compact,
+        claim_entries: claim_entries,
         heartbeat_entries: heartbeat_entries,
         batch_entries: nil,
         event_entries: nil,
@@ -5015,6 +5003,296 @@ module AgentCoord
         lane_states: {},
         now: now
       )
+    end
+
+    # `claim` writes the raw target, so one work item is independently claimable
+    # under every spelling of itself -- the fleet holds `9832` and `pr:9832` live
+    # under different agents. Since #145 `log` folds those spellings onto one
+    # identity, so resolving this scope through the single literal path would
+    # report "unclaimed" for an item `log` reports as claimed, in the same second.
+    #
+    # The two kinds of read here fail differently on purpose. The queried spelling
+    # is the question the operator asked, so it keeps the semantics it has always
+    # had: a corrupt or forbidden record there is still a hard error. An alias is
+    # a spelling the operator did not ask about, and letting an unrelated stale or
+    # half-written sibling abort a query the healthy record answers perfectly turns
+    # a good answer into exit 2 -- which a plan-pr-batch probe reads as "custody
+    # unknown" and stops on. Those degrade to a note instead.
+    #
+    # A note rather than a silent skip, and this is the load-bearing half: an
+    # operator who sees "none" plus a degraded note must not read it as "definitely
+    # unclaimed". Dropping the failed candidate quietly would produce exactly the
+    # answer this whole scope exists to prevent -- reporting unclaimed while a read
+    # failed -- so the note names the path and says a claim there would not have
+    # been reported. Exit stays 0, matching how status_list_entries already
+    # degrades a forbidden listing and what the README says degraded notes mean.
+    def target_claim_entries(store, repo, target)
+      queried, *aliases = target_claim_candidate_paths(repo, target)
+      notes = []
+      queried_entry = store.read_json(queried)
+      if queried_entry && !queried_entry.data.is_a?(Hash)
+        raise OperationalError, "state record is not a claim object: #{queried}"
+      end
+
+      entries = [queried_entry]
+      aliases.each { |path| entries << target_alias_claim(store, path, notes) }
+      # The holder of the queried claim, if it answered. Its heartbeat is a read
+      # that existed before alias resolution and keeps the failure it had then.
+      [target_collapsed_claims(entries.compact), notes, entries.first&.data&.fetch("agent_id", nil).to_s]
+    end
+
+    # Narrow on purpose. A malformed record and a scope that cannot reach this one
+    # path are both "this candidate cannot answer"; anything else -- a dead
+    # backend, an unsupported route -- is still a failure of the whole query and
+    # must not be reported as an absent claim.
+    def target_alias_claim(store, path, notes)
+      entry = store.read_json(path)
+      # Valid JSON that is not an object cannot be a claim, and reading a field off
+      # it raises -- which would let an unrelated malformed sibling take down a
+      # query the queried spelling answered perfectly.
+      return entry if entry.nil? || entry.data.is_a?(Hash)
+
+      notes << target_alias_note(path, "not a claim record")
+      nil
+    rescue Errno::ENOENT
+      # A lock-free read can race a release after its existence check. At the
+      # alias boundary, that is the same answer as an ordinary missing record.
+      nil
+    rescue JSON::ParserError
+      notes << target_alias_note(path, "unreadable")
+      nil
+    rescue Errno::EACCES
+      notes << target_alias_note(path, "not readable")
+      nil
+    rescue Errno::ENAMETOOLONG
+      notes << target_alias_note(path, "path too long")
+      nil
+    rescue OperationalError => e
+      reason = unreachable_alias_reason(e, path)
+      raise unless reason
+
+      notes << target_alias_note(path, reason)
+      nil
+    end
+
+    def target_alias_note(path, reason)
+      "#{path} #{reason}; a claim there would not be reported"
+    end
+
+    # Every way a single candidate path can be unable to answer, across backends:
+    # a scoped token's 403 from the HTTP backend, and the local store refusing a
+    # record it will not open or that is not a record at all. Exact record-path
+    # read scopes are part of the authorization contract (docs/backend-design.md),
+    # so a token can legitimately reach the queried claim and none of its siblings;
+    # a wrong-mode or symlinked file in a state directory is the same condition
+    # arrived at by accident.
+    #
+    # Enumerated by the exact message each raise site produces, never by a
+    # substring or a class. A 500, a 401, a `route_not_found`, a truncated body, a
+    # dead backend -- none of those are one candidate's problem, and reporting any
+    # of them as an absent claim would be the silent wrong answer this scope
+    # exists to prevent.
+    def unreachable_alias_reason(error, path)
+      forbidden = /\Ahttp backend read #{Regexp.escape(path)} failed: 403 forbidden\z/
+      directory = File.dirname(path)
+      case error.message
+      when forbidden then "not readable by scoped token"
+      when "state record is not readable: #{path}",
+           "state record path is not readable or searchable: #{path}"
+        "not readable"
+      when "state layout invalid: #{path} is a symlink" then "is a symlink"
+      when "state layout invalid: #{path} is not a regular file" then "is not a regular file"
+      when "state layout invalid: #{directory} is a symlink" then "is in a symlinked directory"
+      when "state layout invalid: #{directory} is not a directory" then "is not in a directory"
+      end
+    end
+
+    # Two candidate paths can name one *file*: a case-insensitive checkout resolves
+    # `ISSUE:319.json` and `issue:319.json` to the same record, and reporting that
+    # one lease once per spelling that reached it would invent a second holder.
+    #
+    # The test is the lease the record names -- its repo, target, and holder --
+    # rather than the whole payload. The two point reads are not one atomic read,
+    # so a renew landing between them returns the same lease with a later
+    # `updated_at`, and comparing payloads whole would render that one lease as two
+    # holders: a false positive in the exact signal this scope exists to raise.
+    # Those three fields do not move under a renew.
+    #
+    # Nor is it a case-folded key. Two files are two independently claimable
+    # leases, and `claim` writes the target into the record from the same value it
+    # puts in the path, so their payload targets differ and both are kept --
+    # including two casings of one spelling on a case-sensitive store, and
+    # including one agent holding both. Folding those together would discard a live
+    # second holder, which is the concurrent double custody this scope exists to
+    # surface, thrown away by the code meant to tidy the output. Keying on what the
+    # record says about itself also decides the question without needing to know
+    # whether this filesystem folds case, which nothing here can observe.
+    #
+    # Residual, and inherent to reading one record twice without a snapshot: a
+    # takeover landing between the two reads returns two different holders for one
+    # file, and both are reported. That state is genuinely ambiguous at the moment
+    # it is read, and showing both holders is the safer direction.
+    #
+    # A record that does not name its own lease cannot be matched to another read
+    # of itself, so it keys on its own path and never collapses. Two such records
+    # collapsing would hide a holder, which is the worse error of the two.
+    #
+    # `log` still folds casing across its listing, so for two live leases under two
+    # casings it reports one holder where this reports both. A lease is a file, so
+    # `status` is the correct answer there and the divergence is deliberate; do not
+    # restore the collapse to hide it.
+    #
+    # `uniq` keeps the first record of a lease -- the operator's own spelling --
+    # and leaves every distinct lease in candidate order.
+    def target_collapsed_claims(entries)
+      entries.uniq { |entry| target_lease_key(entry) }
+    end
+
+    def target_lease_key(entry)
+      data = entry.data
+      return entry.path if data["target"].to_s.empty? || data["agent_id"].to_s.empty?
+
+      [data["repo"], data["target"], data["agent_id"]]
+    end
+
+    # This stays a closed set of point reads rather than a claims listing:
+    # plan-pr-batch probes target-scoped status through `agent-coord-bounded
+    # --timeout 20` before assigning work, so a listing would make every planning
+    # probe scan the whole fleet. At most four claim reads -- three for a
+    # canonically spelled number, two for a slug, one for a target whose prefix is
+    # part of its base -- whatever the fleet holds.
+    #
+    # The order is both the read order and the render order: the operator's own
+    # spelling first, then the family in a fixed order. Ordering by claim
+    # timestamp instead would let clock skew between two holders reshuffle the
+    # answer between runs that read identical state.
+    def target_claim_candidate_paths(repo, target)
+      # The queried spelling resolves first and unrescued: it is the one the
+      # operator asked about, so a segment it cannot form must still raise the
+      # error it raises today rather than being silently dropped as a candidate.
+      # Generated spellings can expose a segment-invalid leading dot when folding
+      # off a decorative prefix. Such a spelling cannot be claimed, so omit it;
+      # the queried spelling above remains unrescued.
+      paths = [AgentCoord.claim_path(repo, target)]
+      target_alias_spellings(target).each do |spelling|
+        begin
+          path = AgentCoord.claim_path(repo, spelling)
+        rescue PathValidationError
+          next
+        end
+        paths << path unless paths.include?(path)
+      end
+      paths
+    end
+
+    # Every spelling `claim` could have written for the work item this target
+    # names, in canonical case: exactly the set work_item_parts folds onto this
+    # target's (base, lane) identity, so `status` resolves what `log` matches by
+    # construction rather than by a second enumeration that can drift from it.
+    #
+    # Generated, then verified against that identity, because generating alone is
+    # not safe: the bare spelling is rebuilt as base + ":" + lane, and when folding
+    # leaves a base that is itself a kind word the rebuilt string parses as a
+    # *different* item. `adhoc:issue:319` is the `319` lane of an item called
+    # `issue`, but "issue:319" reads back as issue 319 -- so without the check this
+    # scope would report a holder of issue 319 as holding a work item they have
+    # never touched, the inverse of the divergence it exists to fix. The check is
+    # general on purpose: an enumeration of the shapes that misbehave would miss
+    # the next one. Any target-identity shape list, here or in a test, needs a
+    # target whose folded base is a kind word, because that is the family where
+    # reconstruction re-parses.
+    #
+    # The round trip also subsumes which kinds may decorate: a prefix that does not
+    # decorate this base stays part of the base when re-read -- `adhoc:319` reads
+    # back as the item `adhoc:319`, not as the `319` this target names -- and fails
+    # the check. So `issue:`/`pr:` attach to a number, `adhoc:` to a slug, and a
+    # prefix that was already kept (`issue:foo`, `adhoc:319`) names only itself,
+    # all from one rule rather than a restatement of #145's.
+    #
+    # Casing is identity to `log`, which matches through work_item_parts and
+    # downcases, but a claim path is literal, so the canonical spelling of what was
+    # typed is always among the candidates: an operator typing `Issue:320` must
+    # find the `issue:320` the fleet actually holds. That is the tractable half.
+    # The other half is not: a claim *written* under an arbitrary casing cannot be
+    # found by a closed point-read set, because the casings are unbounded --
+    # `--target 319` will not find a claim stored as `Issue:319`. README states
+    # that limit.
+    #
+    # A lane suffix rides along on every spelling rather than being folded off. A
+    # lane holds its own lease, so `319:qa` is not `319` -- but `issue:319:qa` and
+    # `319:qa` are the same lane of the same item, and missing that would hide a
+    # live lane holder exactly the way the bare item's aliases hid one.
+    def target_alias_spellings(target)
+      identity = AgentCoord.work_item_parts(target)
+      base, lane = identity
+      suffix = lane.nil? ? "" : ":#{lane}"
+      spellings = ["#{base}#{suffix}", *WORK_ITEM_KINDS.map { |kind| "#{kind}:#{base}#{suffix}" }]
+      spellings.select { |spelling| AgentCoord.work_item_parts(spelling) == identity }
+    end
+
+    # One heartbeat read per distinct holder, not per claim: two spellings held by
+    # one agent are one agent, so a second read would spend a round trip to render
+    # the same row twice.
+    def target_holder_heartbeats(store, claim_entries, queried_holder)
+      cache = {}
+      entries = []
+      notes = []
+      claim_entries.each do |claim|
+        holder = claim.data["agent_id"].to_s
+        heartbeat = target_holder_heartbeat(store, holder, cache, queried_holder)
+        if valid_status_heartbeat?(heartbeat)
+          entries << heartbeat unless entries.include?(heartbeat)
+        else
+          notes << target_holder_note(claim, holder, heartbeat, qualified: claim_entries.length > 1)
+        end
+      end
+      [entries, notes]
+    end
+
+    # The same asymmetry as the claim reads, one level down. The queried claim's
+    # holder heartbeat is a read that existed before alias resolution, so an
+    # unreadable one still fails the query exactly as it always did. A holder
+    # reached only because an alias claim answered is a read this scope added, and
+    # letting it abort turns an answer the records themselves gave into exit 2 --
+    # the same stale-sibling breakage, one level down.
+    #
+    # It degrades onto the existing marker rather than a new one, so it renders
+    # through the note the operator already knows: the holder could not be read.
+    # That trades away the distinction between a malformed heartbeat and an
+    # unreachable one, which the claims note keeps; the holder's identity is the
+    # part an operator acts on. The failure is cached so a holder with two leases
+    # is still read once.
+    def target_holder_heartbeat(store, holder, cache, queried_holder)
+      read_cached_status_heartbeat(store, holder, cache)
+    rescue Errno::ENOENT
+      raise if holder == queried_holder
+
+      cache[holder] = nil
+    rescue Errno::EACCES, Errno::ENAMETOOLONG
+      raise if holder == queried_holder
+
+      cache[holder] = :invalid
+    rescue OperationalError => e
+      raise if holder == queried_holder
+      raise unless unreachable_alias_reason(e, AgentCoord.heartbeat_path(holder))
+
+      cache[holder] = :invalid
+    end
+
+    # The wording is unchanged for a single claim, which was the only case until
+    # aliases could produce two. With two holders the bare phrase would not say
+    # which one it describes, so each note names its lease and its holder -- the
+    # exact pair a release or handoff has to address.
+    def target_holder_note(claim, holder, heartbeat, qualified:)
+      note = case heartbeat
+             when :invalid then "holder heartbeat unreadable"
+             when :mismatched then "holder heartbeat mismatched"
+             else holder.empty? ? "claim holder not set" : "holder heartbeat not found"
+             end
+      return note unless qualified
+
+      target = claim.data.fetch("target", AgentCoord.target_from_path(claim.path))
+      holder.empty? ? "#{note} for #{target}" : "#{note} for #{target} (#{holder})"
     end
 
     # rubocop:disable Metrics/AbcSize, Metrics/BlockLength, Metrics/CyclomaticComplexity, Metrics/MethodLength, Metrics/PerceivedComplexity
@@ -5398,6 +5676,7 @@ module AgentCoord
       path = AgentCoord.heartbeat_path(agent_id)
       entry = store.read_json(path)
       return nil unless entry
+      return :invalid unless entry.data.is_a?(Hash)
 
       payload_agent_id = entry.data.fetch("agent_id", AgentCoord.target_from_path(entry.path)).to_s
       return :mismatched unless payload_agent_id == agent_id

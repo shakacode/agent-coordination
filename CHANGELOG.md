@@ -596,6 +596,67 @@ when releases begin.
   Claims and heartbeats are cleared on release and expiry, so target scope alone
   cannot tell "never worked" from "worked and finished" — and two empty arrays
   read like an answer to exactly that question (issue #141).
+- `agent-coord status --repo R --target N` now resolves custody by the work item
+  the target names rather than through one literal claim path, so it can no longer
+  contradict `agent-coord log` about the same item in the same second. `claim`
+  writes the raw target, so one item is independently claimable as `319`,
+  `issue:319`, or `pr:319`, and once `log` began folding those spellings onto one
+  identity the two commands were answering different questions from the same
+  state. Reproduced against a real state root before the fix: with a claim held
+  under `issue:319`, `status --target 319` reported no custody at all — its
+  `claims` section read `- none` — while `log --target 319` reported that same
+  live claim; and with `9832` and `pr:9832` held at the same time by two different
+  agents, `status --target 9832` reported only the first holder while `log`
+  reported both. Ad hoc work had the same divergence in a different spelling and
+  is 21% of the live fleet: `status --target <slug>` reported nothing for a claim
+  held under `adhoc:<slug>`, which `log` reported. Target scope now reads exactly
+  the spellings that fold onto the queried work item — `<n>`, `issue:<n>`,
+  `pr:<n>` for a number, `<slug>` and `adhoc:<slug>` for a slug, and only itself
+  where the prefix is part of the identity, as in `adhoc:319` or `issue:<slug>` —
+  asked of the same decorative-prefix rule `log` matches with, so the two agree by
+  construction rather than by a second enumeration that can drift. A query spelled
+  in non-canonical case also probes its canonical form, so `--target Issue:320`
+  finds the `issue:320` the fleet holds. That is at most four claim reads — three
+  for a canonically spelled number, two for a slug, one where the prefix is part
+  of the base — plus one heartbeat per distinct holder, independent of how many
+  claims the fleet holds. It is deliberately not a claims listing: `plan-pr-batch`
+  probes this scope through `agent-coord-bounded --timeout 20` before assigning
+  work, so a listing would make every planning probe scan the whole fleet; the
+  extra point reads measured at roughly 130ms of added median latency against the
+  live backend, under 5% of that budget. Every claim found is reported, matching
+  what `log` already did, so two agents holding `9832` and `pr:9832` both appear
+  rather than one hiding the other. Records are reported once per lease -- the
+  `repo`, `target`, and `agent_id` the record names -- so the one file two
+  candidate paths reach on a case-insensitive checkout is one row even when a
+  renew lands between those two reads, while two case-differing keys that are both
+  live are two files, therefore two leases, and both holders are reported where
+  `log`, which folds casing across its listing, reports one. A takeover landing
+  between the two reads of one record returns two holders and reports both, which
+  is the safer reading of state that is ambiguous at the moment it is read. Each
+  holder's heartbeat is read once however many of its leases answer. A lane holds
+  its own lease, so lane suffixes stay distinct and ride along on each spelling
+  instead of being folded away: `--target 319` still does not report a claim on
+  `319:qa`, while `--target 319:qa` now also resolves `issue:319:qa` and
+  `pr:319:qa`. The queried spelling and the alias spellings fail differently on
+  purpose. A corrupt or unreadable record at the queried path is still a hard
+  error with exit 2, exactly as before; an alias candidate that cannot answer —
+  malformed JSON, a payload that is not a claim object, a path outside a scoped
+  token's read prefixes, a file the local store will not open, or a symlink where
+  a record belongs — no longer aborts a query the healthy records answer
+  perfectly, which had turned a good answer into the `UNKNOWN` exit code a
+  `plan-pr-batch` probe stops on. Instead the exit stays 0 and a `claims` section
+  note names the path and says a claim there would not be reported, because
+  `claims: none` with a note is "could not check everything" and must not be read
+  as "definitely unclaimed". The same asymmetry runs one level down to the
+  heartbeats those claims pull in: the queried claim holder's heartbeat still
+  fails the query when it cannot be read, while a holder reached only through an
+  alias claim degrades to a `heartbeats` note naming it. Broader failures — a 500,
+  a `route_not_found`, an unreachable backend — still raise, because they are not
+  one candidate's problem. Casing is
+  folded on the query side only: claim paths are literal, so covering every casing
+  a claim could have been written under would cost a read per casing rather than a
+  closed set, and a claim stored as `Issue:319` is still found only by that
+  spelling (issue #147).
 - `agent-coord log` now reads the events `gc` compacted into `archive/events`
   instead of reporting `no events` for the work item they belong to (issue #139).
   Compaction moves a completed lane's events into an immutable

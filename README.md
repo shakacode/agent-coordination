@@ -707,9 +707,52 @@ state in text or JSON. Full `status` renders compact claims, heartbeats, batch
 lanes, lane dependencies, blocked-on refs, and recent events for broad audits.
 Scoped status is the preferred batch-workflow path:
 
-- `status --repo OWNER/REPO --target ISSUE_OR_PR` reads only
-  `claims/<owner>/<repo>/<issue-or-pr>.json` and that claim holder's heartbeat
-  when a holder exists.
+- `status --repo OWNER/REPO --target ISSUE_OR_PR` reads only the claim paths for
+  that work item's spellings, plus one heartbeat per distinct claim holder.
+  `claim` writes the raw target, so one item can be held under any spelling of
+  itself, and the candidate set is exactly the spellings `log` folds onto the same
+  work item: `<n>`, `issue:<n>`, and `pr:<n>` for a number; `<slug>` and
+  `adhoc:<slug>` for a slug. A prefix that survives folding is part of the
+  identity, so `adhoc:319` and `issue:<slug>` each name only themselves and cost
+  the single literal read they always did. A query spelled in non-canonical case
+  also probes its canonical form. That is at most four claim reads — three for a
+  canonically spelled number, two for a slug, one where the prefix is part of the
+  base — plus one heartbeat per distinct holder, independent of fleet size: point
+  reads only, never a listing or a prefix scan. Every claim found is reported, so
+  two agents holding `9832` and `pr:9832` both appear. Records are reported once
+  per lease, where a lease is the `repo`, `target`, and `agent_id` the record
+  names: on a case-insensitive checkout two candidate paths reach one file, and
+  reporting it twice would invent a second holder. Because the candidates are
+  separate point reads rather than one snapshot, a renew landing between them
+  changes only the timestamps and still reports one lease — but a *takeover*
+  landing between them returns two different holders for that one record, and both
+  are reported, which is the safer reading of genuinely ambiguous state. Lane
+  suffixes are never folded away, because a lane holds its own lease: `--target
+  319` does not report a claim on `319:qa`, and `--target 319:qa` resolves
+  `issue:319:qa` and `pr:319:qa`, not `319`.
+  - The queried spelling and the alias spellings fail differently on purpose. A
+    corrupt or unreadable record at the *queried* path is still a hard error with
+    exit 2, unchanged. An *alias* candidate that cannot answer does not abort the
+    query: malformed JSON, a payload that is not a claim object, a path outside a
+    scoped token's read prefixes, an unreadable file, and a symlink where a record
+    belongs are each reported instead of raised. The healthy records still answer,
+    the exit stays 0, and a `claims` section note names each such path and says a
+    claim there would not be reported; the notes also appear in `degraded`. Read
+    them: `claims: none` with such a note is "could not check everything", which is
+    not the same answer as a bare `claims: none`. The same asymmetry applies one
+    level down: the queried claim holder's heartbeat still fails the query if it
+    cannot be read, while a holder reached only through an alias claim degrades to
+    a `heartbeats` note naming that holder. Anything broader — a 500, a
+    `route_not_found`, an unreachable backend — is still a failed query, not an
+    absent claim.
+  - Casing is folded on the query side only. Claim paths are literal, so covering
+    every casing a claim could have been *written* under would cost a read per
+    casing rather than a closed set. `--target Issue:319` finds a claim stored
+    canonically as `issue:319`, but a claim stored as `Issue:319` is found only by
+    that same spelling — `--target 319` will not find it. `log`, which lists and
+    folds, still will. Where two case-differing keys are both live, they are two
+    files and therefore two leases: `status` reports both holders, while `log`
+    folds them and reports one.
 - `status --batch-id ID` reads only `batches/<id>.json`, `events/<id>/`,
   lane-owner heartbeats, and dependency batch files plus referenced lane-owner
   heartbeats needed to compute `blocked_on`.
