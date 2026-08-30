@@ -1982,6 +1982,143 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     assert_includes File.read(profile), "export PATH=#{Shellwords.escape(install_dir)}:\"$PATH\""
   end
 
+  # ensure_profile_path used to read the profile with the bare File.read(profile),
+  # which inherits Encoding.default_external -- US-ASCII under LC_ALL=C. A profile
+  # holding any non-ASCII byte then made the next line's #strip raise
+  # Encoding::CompatibilityError, and by that point bootstrap had already
+  # installed the symlink, so the user was left with a half-finished install and
+  # a raw backtrace instead of the exported PATH line. This pins both a
+  # perfectly-valid-UTF-8 non-ASCII byte (an em dash, matching the issue's
+  # example) and a genuinely invalid UTF-8 byte sequence, which a text read
+  # (even one explicitly tagged UTF-8) would still choke on.
+  def test_bootstrap_appends_path_line_to_a_non_ascii_profile_under_an_ascii_locale
+    install_dir = File.join(@state_root, "bin")
+    profile = File.join(@state_root, "profile")
+    File.write(profile, "# my — profile\n")
+    expected_line = "export PATH=#{Shellwords.escape(install_dir)}:\"$PATH\""
+
+    result = run_agent_coord(
+      "bootstrap", "--install-dir", install_dir, "--profile", profile,
+      state_root: nil, env: { "LC_ALL" => "C", "LANG" => "C" }
+    )
+
+    assert_equal 0, result.status.exitstatus, result.stderr
+    refute_includes result.stderr, "Encoding::CompatibilityError"
+    refute_includes result.stderr, "from "
+    assert_includes File.binread(profile), expected_line
+
+    rerun = run_agent_coord(
+      "bootstrap", "--install-dir", install_dir, "--profile", profile,
+      state_root: nil, env: { "LC_ALL" => "C", "LANG" => "C" }
+    )
+
+    assert_equal 0, rerun.status.exitstatus, rerun.stderr
+    profile_content = File.binread(profile)
+    assert_equal 1, profile_content.scan(expected_line).length
+  end
+
+  def test_bootstrap_appends_path_line_to_a_profile_with_invalid_utf8_bytes_under_an_ascii_locale
+    install_dir = File.join(@state_root, "bin")
+    profile = File.join(@state_root, "profile")
+    File.binwrite(profile, "# my \xFFprofile\n".b)
+    expected_line = "export PATH=#{Shellwords.escape(install_dir)}:\"$PATH\""
+
+    result = run_agent_coord(
+      "bootstrap", "--install-dir", install_dir, "--profile", profile,
+      state_root: nil, env: { "LC_ALL" => "C", "LANG" => "C" }
+    )
+
+    assert_equal 0, result.status.exitstatus, result.stderr
+    refute_includes result.stderr, "Encoding::CompatibilityError"
+    refute_includes result.stderr, "from "
+    assert_includes File.binread(profile), expected_line
+  end
+
+  # Codex review on PR #205 caught a regression the two tests above did not:
+  # comparing `existing` (read as text) against `line` (built by interpolating
+  # Shellwords.escape(install_dir)) can fail to match even when the bytes are
+  # identical, because a non-ASCII install_dir taken from ARGV can leave `line`
+  # ASCII-8BIT-tagged rather than UTF-8-tagged. A text-vs-text comparison that
+  # tags one side UTF-8 then never recognizes the line as already present, so
+  # bootstrap silently appended a duplicate PATH line on every rerun instead of
+  # detecting it. Comparing bytes (File.binread on both sides) fixes this
+  # regardless of what encoding `line` happens to end up in. The profile is read
+  # back with File.binread here too, so the assertion itself cannot fall into
+  # the same encoding trap it is checking for.
+  #
+  # Note this does not assert an exact expected byte sequence for the escaped
+  # line: Shellwords.escape itself renders a non-ASCII byte differently
+  # depending on whether the string it is escaping is tagged as text or binary
+  # (one backslash per *character* vs one backslash per *byte*), and under
+  # LC_ALL=C the CLI subprocess's ARGV is ASCII-8BIT-tagged while recomputing
+  # the same escape in this (UTF-8-locale) test process is not -- so the two
+  # would not byte-match even on a correct implementation. What actually
+  # matters for this regression, and what is asserted, is (a) exactly one
+  # `export PATH=` line exists after each run and (b) that line's bytes are
+  # unchanged between the first run and the rerun.
+  def test_bootstrap_profile_idempotence_with_a_non_ascii_install_dir_under_an_ascii_locale
+    install_dir = File.join(@state_root, "bin-café")
+    profile = File.join(@state_root, "profile")
+
+    result = run_agent_coord(
+      "bootstrap", "--install-dir", install_dir, "--profile", profile,
+      state_root: nil, env: { "LC_ALL" => "C", "LANG" => "C" }
+    )
+
+    assert_equal 0, result.status.exitstatus, result.stderr
+    refute_includes result.stderr, "Encoding::CompatibilityError"
+    refute_includes result.stderr, "from "
+    first_run_path_lines = File.binread(profile).lines.grep(/\Aexport PATH=/)
+    assert_equal 1, first_run_path_lines.length
+    assert_equal "export PATH=#{install_dir}:\"$PATH\"".b, first_run_path_lines.first.strip.delete("\\")
+
+    rerun = run_agent_coord(
+      "bootstrap", "--install-dir", install_dir, "--profile", profile,
+      state_root: nil, env: { "LC_ALL" => "C", "LANG" => "C" }
+    )
+
+    assert_equal 0, rerun.status.exitstatus, rerun.stderr
+    refute_includes rerun.stderr, "Encoding::CompatibilityError"
+    refute_includes rerun.stderr, "from "
+    rerun_path_lines = File.binread(profile).lines.grep(/\Aexport PATH=/)
+    assert_equal 1, rerun_path_lines.length
+    assert_equal first_run_path_lines, rerun_path_lines
+  end
+
+  # Codex review on PR #205 caught a second escaping hazard: Shellwords.escape
+  # emits one backslash per *character* for a UTF-8-tagged string but one per
+  # *byte* for a binary one. install_dir comes from ARGV, which Ruby tags with
+  # the locale encoding, so bootstrapping the same non-ASCII path under a UTF-8
+  # locale and then under LC_ALL=C used to generate two different byte
+  # sequences for the same directory -- the second run did not recognize the
+  # first run's line and appended a duplicate. RUBYOPT=-EUTF-8 pins the
+  # subprocess's default_external (and so ARGV's encoding) without depending on
+  # any particular locale being installed on the host, which matters because CI
+  # and developer machines do not agree on which UTF-8 locales exist.
+  def test_bootstrap_profile_idempotence_across_locales_with_a_non_ascii_install_dir
+    install_dir = File.join(@state_root, "bin-café")
+    profile = File.join(@state_root, "profile")
+
+    utf8_run = run_agent_coord(
+      "bootstrap", "--install-dir", install_dir, "--profile", profile,
+      state_root: nil, env: { "LC_ALL" => "C", "LANG" => "C", "RUBYOPT" => "-EUTF-8" }
+    )
+
+    assert_equal 0, utf8_run.status.exitstatus, utf8_run.stderr
+    utf8_path_lines = File.binread(profile).lines.grep(/\Aexport PATH=/)
+    assert_equal 1, utf8_path_lines.length
+
+    ascii_run = run_agent_coord(
+      "bootstrap", "--install-dir", install_dir, "--profile", profile,
+      state_root: nil, env: { "LC_ALL" => "C", "LANG" => "C" }
+    )
+
+    assert_equal 0, ascii_run.status.exitstatus, ascii_run.stderr
+    refute_includes ascii_run.stderr, "Encoding::CompatibilityError"
+    refute_includes ascii_run.stderr, "from "
+    assert_equal utf8_path_lines, File.binread(profile).lines.grep(/\Aexport PATH=/)
+  end
+
   def test_systemd_template_leaves_status_default_for_shell_expansion
     template = File.read(SYSTEMD_TEMPLATE)
 
