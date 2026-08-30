@@ -5029,7 +5029,12 @@ module AgentCoord
     def target_claim_entries(store, repo, target)
       queried, *aliases = target_claim_candidate_paths(repo, target)
       notes = []
-      entries = [store.read_json(queried)]
+      queried_entry = store.read_json(queried)
+      if queried_entry && !queried_entry.data.is_a?(Hash)
+        raise OperationalError, "state record is not a claim object: #{queried}"
+      end
+
+      entries = [queried_entry]
       aliases.each { |path| entries << target_alias_claim(store, path, notes) }
       # The holder of the queried claim, if it answered. Its heartbeat is a read
       # that existed before alias resolution and keeps the failure it had then.
@@ -5243,6 +5248,10 @@ module AgentCoord
     # is still read once.
     def target_holder_heartbeat(store, holder, cache, queried_holder)
       read_cached_status_heartbeat(store, holder, cache)
+    rescue Errno::EACCES
+      raise if holder == queried_holder
+
+      cache[holder] = :invalid
     rescue OperationalError => e
       raise if holder == queried_holder
       raise unless unreachable_alias_reason(e, AgentCoord.heartbeat_path(holder))

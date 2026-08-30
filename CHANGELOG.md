@@ -644,15 +644,15 @@ when releases begin.
   token's read prefixes, a file the local store will not open, or a symlink where
   a record belongs — no longer aborts a query the healthy records answer
   perfectly, which had turned a good answer into the `UNKNOWN` exit code a
-  `plan-pr-batch` probe stops on. The same asymmetry runs one level down to the
+  `plan-pr-batch` probe stops on. Instead the exit stays 0 and a `claims` section
+  note names the path and says a claim there would not be reported, because
+  `claims: none` with a note is "could not check everything" and must not be read
+  as "definitely unclaimed". The same asymmetry runs one level down to the
   heartbeats those claims pull in: the queried claim holder's heartbeat still
   fails the query when it cannot be read, while a holder reached only through an
   alias claim degrades to a `heartbeats` note naming it. Broader failures — a 500,
   a `route_not_found`, an unreachable backend — still raise, because they are not
-  one candidate's problem.
-  Instead the exit stays 0 and a `claims` section note names the path and says a
-  claim there would not be reported, because `claims: none` with a note is "could
-  not check everything" and must not be read as "definitely unclaimed". Casing is
+  one candidate's problem. Casing is
   folded on the query side only: claim paths are literal, so covering every casing
   a claim could have been written under would cost a read per casing rather than a
   closed set, and a claim stored as `Issue:319` is still found only by that

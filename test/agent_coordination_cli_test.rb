@@ -5342,6 +5342,40 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     FileUtils.chmod(0o644, unreadable) if unreadable && File.exist?(unreadable)
   end
 
+  # The local store checks readability before opening, so a raw EACCES only
+  # escapes in a race. An alias-only holder is still a read this scope added and
+  # must degrade onto the same cached marker as the pre-check failure.
+  def test_status_target_scope_degrades_when_an_alias_holder_heartbeat_read_raises_permission_denied
+    now = Time.utc(2026, 6, 20, 12, 0, 0)
+    payload = target_alias_holder_status_error(
+      now,
+      Errno::EACCES.new("heartbeats/worker-b.json")
+    )
+
+    holders = payload.fetch("heartbeats").map { |entry| entry.fetch("agent_id") }
+
+    assert_equal ["worker-a"], holders
+    assert_equal "holder heartbeat unreadable for pr:4150 (worker-b)",
+                 payload.fetch("section_notes").fetch("heartbeats")
+  end
+
+  # Preserve the other half of the failure boundary while rescuing the race: the
+  # queried holder's heartbeat predates alias resolution and still fails hard.
+  def test_status_target_scope_re_raises_permission_denied_for_the_queried_holder_heartbeat
+    path = "heartbeats/worker-a.json"
+    error = Errno::EACCES.new(path)
+    store = CandidatePathStore.new([path], {}, path => error)
+    runner = AgentCoord::Runner.new([], stdout: StringIO.new)
+    cache = {}
+
+    raised = assert_raises(Errno::EACCES) do
+      runner.send(:target_holder_heartbeat, store, "worker-a", cache, "worker-a")
+    end
+
+    assert_same error, raised
+    assert_empty cache
+  end
+
   def test_status_target_scope_degrades_when_an_alias_holder_heartbeat_is_a_symlink
     now = Time.now.utc
     write_claim("4150", agent_id: "worker-a", updated_at: now - 60, expires_at: now + 3600)
@@ -5493,6 +5527,22 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     assert_equal 2, status.status.exitstatus
     assert_empty status.stdout
     assert_includes status.stderr, "state unreadable"
+  end
+
+  # Valid JSON that is not an object is just as unreadable as a malformed queried
+  # claim. Keep that hard-error boundary without exposing the field projection's
+  # raw TypeError to the operator.
+  def test_status_target_scope_still_fails_hard_when_the_queried_claim_is_not_an_object
+    now = Time.now.utc
+    write_claim("issue:4150", agent_id: "worker-a", updated_at: now - 60, expires_at: now + 3600)
+    write_state_file("claims/shakacode/react_on_rails/4150.json", "[]")
+
+    status = run_agent_coord("status", "--repo", "shakacode/react_on_rails", "--target", "4150", "--json")
+
+    assert_equal 2, status.status.exitstatus
+    assert_empty status.stdout
+    assert_includes status.stderr,
+                    "state record is not a claim object: claims/shakacode/react_on_rails/4150.json"
   end
 
   # Exact record-path read scopes are part of the authorization contract, so a
@@ -9094,6 +9144,10 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
   # Queried claim held by worker-a with a readable heartbeat, alias claim held by
   # worker-b whose heartbeat fails the way the caller names.
   def target_alias_holder_status(now, message)
+    target_alias_holder_status_error(now, AgentCoord::OperationalError.new(message))
+  end
+
+  def target_alias_holder_status_error(now, error)
     expected = [
       "claims/shakacode/react_on_rails/4150.json",
       "claims/shakacode/react_on_rails/issue:4150.json",
@@ -9106,7 +9160,7 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
       "claims/shakacode/react_on_rails/pr:4150.json" => target_claim_fixture(now, "pr:4150", "worker-b"),
       "heartbeats/worker-a.json" => target_heartbeat_fixture(now, "worker-a")
     }
-    failures = { "heartbeats/worker-b.json" => AgentCoord::OperationalError.new(message) }
+    failures = { "heartbeats/worker-b.json" => error }
     store = CandidatePathStore.new(expected, records, failures)
     stdout = StringIO.new
     runner = AgentCoord::Runner.new([], stdout: stdout, clock: FixedClock.new(now))
