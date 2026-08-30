@@ -52,7 +52,11 @@ module AgentCoord
   # `scheme://` followed by an authority that ends in `@`. The authority stops
   # at the first `/`, `?`, or `#`, so an `@` in a path or query is never
   # mistaken for credentials.
-  URL_USERINFO_PREFIX = %r{\A([a-zA-Z][a-zA-Z0-9+.-]*://)[^/?\#]*@}
+  URL_USERINFO_PREFIX = %r{\A((?:[a-zA-Z][a-zA-Z0-9+.-]*://)?)[^/?\#\s]*@}
+  # Unanchored twin for prose. URI::InvalidURIError embeds the offending URL in
+  # its message, so a malformed configured value would otherwise reach stderr
+  # with its userinfo intact -- the anchored form cannot match mid-sentence.
+  URL_USERINFO_ANYWHERE = %r{((?:[a-zA-Z][a-zA-Z0-9+.-]*://)|\b)[^\s/?\#"']*:[^\s/?\#"']*@}
   USER_CONFIG_ENV_KEYS = %w[
     AGENT_COORD_API_URL
     AGENT_COORD_API_TOKEN
@@ -6670,9 +6674,7 @@ module AgentCoord
     # working configurations to fix a disclosure that stripping already closes.
     # The scheme, host, port, and path survive, which is all diagnostics need.
     def redact_url_userinfo(value)
-      return value if value.nil?
-
-      value.to_s.sub(URL_USERINFO_PREFIX) { "#{Regexp.last_match(1)}***@" }
+      AgentCoord.redact_url_userinfo(value)
     end
 
     def build_store(options)
@@ -7717,7 +7719,7 @@ module AgentCoord
 
       uri
     rescue URI::InvalidURIError => e
-      raise OperationalError, "invalid HTTP backend URL: #{e.message}"
+      raise OperationalError, "invalid HTTP backend URL: #{AgentCoord.redact_userinfo_in_text(e.message)}"
     end
 
     def state_path(path)
@@ -7793,7 +7795,7 @@ module AgentCoord
       end
     rescue URI::InvalidURIError, SocketError, SystemCallError, Timeout::Error, IOError, OpenSSL::SSL::SSLError => e
       close_http_session
-      raise OperationalError, "http backend unreachable: #{e.message}"
+      raise OperationalError, "http backend unreachable: #{AgentCoord.redact_userinfo_in_text(e.message)}"
     end
 
     def build_http_request(klass, uri, body, headers)
@@ -7951,6 +7953,18 @@ module AgentCoord
   # whitespace inside a real token or path is significant.
   def self.config_value_set?(value)
     !value.to_s.strip.empty?
+  end
+
+  # Whole-value form: redact a URL that is itself the string being reported.
+  def self.redact_url_userinfo(value)
+    return value if value.nil?
+
+    value.to_s.sub(URL_USERINFO_PREFIX) { "#{Regexp.last_match(1)}***@" }
+  end
+
+  # Prose form: redact every credential-bearing URL embedded in a message.
+  def self.redact_userinfo_in_text(text)
+    text.to_s.gsub(URL_USERINFO_ANYWHERE) { "#{Regexp.last_match(1)}***@" }
   end
 
   # Reads from the live process environment by default. load_user_configuration!
