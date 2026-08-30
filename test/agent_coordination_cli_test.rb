@@ -4984,6 +4984,24 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     assert_equal expected, store.reads
   end
 
+  # The queried spelling fits the local filename limit, but adding `adhoc:` to a
+  # maximum-length slug may not. That is one alias candidate failing to answer:
+  # report it as degraded instead of exposing a raw filesystem backtrace.
+  def test_status_target_scope_degrades_when_a_generated_alias_exceeds_the_local_filename_limit
+    target = "x" * 245
+    FileUtils.mkdir_p(File.join(@state_root, "claims", "shakacode", "react_on_rails"))
+
+    status = run_agent_coord("status", "--repo", "shakacode/react_on_rails", "--target", target, "--json")
+
+    assert_equal 0, status.status.exitstatus, status.stderr
+    payload = JSON.parse(status.stdout)
+    assert_empty payload.fetch("claims")
+    assert_empty payload.fetch("heartbeats")
+    note = "claims/shakacode/react_on_rails/adhoc:#{target}.json path too long; " \
+           "a claim there would not be reported"
+    assert_equal note, payload.fetch("section_notes").fetch("claims")
+  end
+
   # A claim written `adhoc:<slug>` answers a query for the bare slug and back
   # again, the same way `issue:<n>` and `<n>` answer for each other.
   def test_status_target_scope_finds_a_claim_written_under_the_adhoc_spelling
@@ -5340,6 +5358,67 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
                  payload.fetch("section_notes").fetch("heartbeats")
   ensure
     FileUtils.chmod(0o644, unreadable) if unreadable && File.exist?(unreadable)
+  end
+
+  # An alias-only holder is the first reason this query touches `heartbeats/`.
+  # If that directory cannot be searched, the added read degrades just like an
+  # inaccessible heartbeat file instead of turning an otherwise good answer into
+  # exit 2.
+  def test_status_target_scope_degrades_when_the_alias_holder_heartbeat_directory_is_unreadable
+    now = Time.now.utc
+    write_claim("pr:4150", agent_id: "worker-b", updated_at: now - 60, expires_at: now + 3600)
+    write_heartbeat("worker-b", updated_at: now - 60, expires_at: now + 600)
+    heartbeats = File.join(@state_root, "heartbeats")
+    FileUtils.chmod(0o000, heartbeats)
+    if File.readable?(heartbeats) && File.executable?(heartbeats)
+      skip "filesystem permissions are not enforced for this user"
+    end
+
+    status = run_agent_coord("status", "--repo", "shakacode/react_on_rails", "--target", "4150", "--json")
+
+    assert_equal 0, status.status.exitstatus, status.stderr
+    payload = JSON.parse(status.stdout)
+    claimed = payload.fetch("claims").map { |claim| claim.fetch("target") }
+
+    assert_equal ["pr:4150"], claimed
+    assert_empty payload.fetch("heartbeats")
+    assert_equal "holder heartbeat unreadable", payload.fetch("section_notes").fetch("heartbeats")
+  ensure
+    FileUtils.chmod(0o700, heartbeats) if heartbeats && File.exist?(heartbeats)
+  end
+
+  # The local store reports a replaced heartbeat directory with either of these
+  # exact layout errors. Both degrade for an alias-only holder, but the same
+  # errors remain hard failures when that holder came from the queried claim.
+  def test_status_target_scope_preserves_the_holder_boundary_for_heartbeat_directory_layout_failures
+    path = "heartbeats/worker-b.json"
+    runner = AgentCoord::Runner.new([], stdout: StringIO.new)
+    messages = [
+      "state layout invalid: heartbeats is a symlink",
+      "state layout invalid: heartbeats is not a directory"
+    ]
+
+    messages.each do |message|
+      alias_error = AgentCoord::OperationalError.new(message)
+      alias_store = CandidatePathStore.new([path], {}, path => alias_error)
+      alias_cache = {}
+
+      result = runner.send(:target_holder_heartbeat, alias_store, "worker-b", alias_cache, "")
+
+      assert_equal :invalid, result
+      assert_equal :invalid, alias_cache.fetch("worker-b")
+
+      queried_error = AgentCoord::OperationalError.new(message)
+      queried_store = CandidatePathStore.new([path], {}, path => queried_error)
+      queried_cache = {}
+
+      raised = assert_raises(AgentCoord::OperationalError) do
+        runner.send(:target_holder_heartbeat, queried_store, "worker-b", queried_cache, "worker-b")
+      end
+
+      assert_same queried_error, raised
+      assert_empty queried_cache
+    end
   end
 
   # The local store checks readability before opening, so a raw EACCES only

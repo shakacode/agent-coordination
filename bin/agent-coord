@@ -5060,6 +5060,9 @@ module AgentCoord
     rescue Errno::EACCES
       notes << target_alias_note(path, "not readable")
       nil
+    rescue Errno::ENAMETOOLONG
+      notes << target_alias_note(path, "path too long")
+      nil
     rescue OperationalError => e
       reason = unreachable_alias_reason(e, path)
       raise unless reason
@@ -5087,11 +5090,16 @@ module AgentCoord
     # exists to prevent.
     def unreachable_alias_reason(error, path)
       forbidden = /\Ahttp backend read #{Regexp.escape(path)} failed: 403 forbidden\z/
+      directory = File.dirname(path)
       case error.message
       when forbidden then "not readable by scoped token"
-      when "state record is not readable: #{path}" then "not readable"
+      when "state record is not readable: #{path}",
+           "state record path is not readable or searchable: #{path}"
+        "not readable"
       when "state layout invalid: #{path} is a symlink" then "is a symlink"
       when "state layout invalid: #{path} is not a regular file" then "is not a regular file"
+      when "state layout invalid: #{directory} is a symlink" then "is in a symlinked directory"
+      when "state layout invalid: #{directory} is not a directory" then "is not in a directory"
       end
     end
 
