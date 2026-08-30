@@ -4952,6 +4952,13 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     end
   end
 
+  # The queried spelling is a valid target, but folding off `adhoc:` exposes a
+  # leading dot that cannot form a claim path. That generated spelling can never
+  # hold a claim, so it must not turn the valid literal query into an error.
+  def test_status_target_scope_skips_a_generated_alias_that_cannot_form_a_claim_path
+    assert_empty status_target_claim_targets("adhoc:.5")
+  end
+
   # `adhoc:` decorates a slug the way `issue:`/`pr:` decorate a number, so a slug
   # has a family too -- 90 of the fleet's live claims are `adhoc:` targets, and
   # resolving only the literal spelling left `status` disagreeing with `log` for
@@ -5269,6 +5276,41 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
                  payload.fetch("section_notes").fetch("claims")
   end
 
+  # A lock-free point read can race a release after its existence check. For an
+  # alias this is indistinguishable from the ordinary missing-record answer and
+  # must not crash a query the literal spelling already answered.
+  def test_status_target_scope_treats_an_alias_that_disappears_during_read_as_missing
+    now = Time.utc(2026, 6, 20, 12, 0, 0)
+    store = FailingAliasTargetScopedStore.new(
+      now,
+      Errno::ENOENT.new(FailingAliasTargetScopedStore::FAILING_PATH)
+    )
+    stdout = StringIO.new
+    runner = AgentCoord::Runner.new([], stdout: stdout, clock: FixedClock.new(now))
+    runner.define_singleton_method(:build_store) { |_options| store }
+
+    result = runner.send(:render_status, repo: "shakacode/react_on_rails", target: "4150", json: true)
+    payload = JSON.parse(stdout.string)
+    claimed = payload.fetch("claims").map { |claim| claim.fetch("target") }
+
+    assert_equal 0, result
+    assert_equal ["4150"], claimed
+    refute payload.fetch("section_notes").key?("claims")
+  end
+
+  def test_status_target_scope_re_raises_a_queried_claim_that_disappears_during_read
+    path = "claims/shakacode/react_on_rails/4150.json"
+    error = Errno::ENOENT.new(path)
+    store = CandidatePathStore.new([path], {}, path => error)
+    runner = AgentCoord::Runner.new([], stdout: StringIO.new)
+
+    raised = assert_raises(Errno::ENOENT) do
+      runner.send(:target_claim_entries, store, "shakacode/react_on_rails", "4150")
+    end
+
+    assert_same error, raised
+  end
+
   # Two candidates can fail at once, for different reasons. The note is the only
   # place the operator learns which paths went unchecked, so it carries both, in
   # candidate order, and `degraded` carries the joined note once.
@@ -5330,6 +5372,34 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     assert_equal expected, store.reads
     assert_equal ["issue:4150"], claimed
     assert_equal ["worker-issue"], holders
+  end
+
+  # Without a holder, two records cannot prove that they name the same lease.
+  # Keep them path-keyed so corrupt siblings never conceal one another.
+  def test_status_target_scope_does_not_collapse_distinct_claims_with_blank_holders
+    now = Time.utc(2026, 6, 20, 12, 0, 0)
+    expected = [
+      "claims/shakacode/react_on_rails/ISSUE:4150.json",
+      "claims/shakacode/react_on_rails/4150.json",
+      "claims/shakacode/react_on_rails/issue:4150.json",
+      "claims/shakacode/react_on_rails/pr:4150.json"
+    ]
+    records = {
+      "claims/shakacode/react_on_rails/ISSUE:4150.json" =>
+        target_claim_fixture(now, "issue:4150", "", updated_at: now - 90),
+      "claims/shakacode/react_on_rails/issue:4150.json" =>
+        target_claim_fixture(now, "issue:4150", "", updated_at: now - 30)
+    }
+    store = CandidatePathStore.new(expected, records)
+    stdout = StringIO.new
+    runner = AgentCoord::Runner.new([], stdout: stdout, clock: FixedClock.new(now))
+    runner.define_singleton_method(:build_store) { |_options| store }
+
+    runner.send(:render_status, repo: "shakacode/react_on_rails", target: "ISSUE:4150", json: true)
+    paths = JSON.parse(stdout.string).fetch("claims").map { |claim| claim.fetch("path") }
+
+    assert_equal expected, store.reads
+    assert_equal [expected.fetch(0), expected.fetch(2)], paths
   end
 
   # A holder reached only because an alias claim answered is a read this scope
@@ -5438,6 +5508,39 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
                  payload.fetch("section_notes").fetch("heartbeats")
   end
 
+  # A valid claim can name an agent whose heartbeat filename exceeds a local
+  # filesystem component limit. The alias-added lookup degrades; the claim still
+  # answers and the CLI stays usable.
+  def test_status_target_scope_degrades_when_an_alias_holder_heartbeat_path_is_too_long
+    now = Time.now.utc
+    holder = "w" * 252
+    write_claim("pr:4150", agent_id: holder, updated_at: now - 60, expires_at: now + 3600)
+    FileUtils.mkdir_p(File.join(@state_root, "heartbeats"))
+
+    status = run_agent_coord("status", "--repo", "shakacode/react_on_rails", "--target", "4150", "--json")
+
+    assert_equal 0, status.status.exitstatus, status.stderr
+    payload = JSON.parse(status.stdout)
+    claimed = payload.fetch("claims").map { |claim| claim.fetch("target") }
+    assert_equal ["pr:4150"], claimed
+    assert_empty payload.fetch("heartbeats")
+    assert_equal "holder heartbeat unreadable", payload.fetch("section_notes").fetch("heartbeats")
+  end
+
+  def test_status_target_scope_treats_an_alias_holder_heartbeat_that_disappears_as_missing
+    now = Time.utc(2026, 6, 20, 12, 0, 0)
+    payload = target_alias_holder_status_error(
+      now,
+      Errno::ENOENT.new("heartbeats/worker-b.json")
+    )
+
+    holders = payload.fetch("heartbeats").map { |entry| entry.fetch("agent_id") }
+
+    assert_equal ["worker-a"], holders
+    assert_equal "holder heartbeat not found for pr:4150 (worker-b)",
+                 payload.fetch("section_notes").fetch("heartbeats")
+  end
+
   # Preserve the other half of the failure boundary while rescuing the race: the
   # queried holder's heartbeat predates alias resolution and still fails hard.
   def test_status_target_scope_re_raises_permission_denied_for_the_queried_holder_heartbeat
@@ -5453,6 +5556,24 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
 
     assert_same error, raised
     assert_empty cache
+  end
+
+  def test_status_target_scope_preserves_the_holder_boundary_for_raw_filesystem_failures
+    path = "heartbeats/worker-a.json"
+    runner = AgentCoord::Runner.new([], stdout: StringIO.new)
+
+    [Errno::ENAMETOOLONG, Errno::ENOENT].each do |error_class|
+      error = error_class.new(path)
+      store = CandidatePathStore.new([path], {}, path => error)
+      cache = {}
+
+      raised = assert_raises(error_class) do
+        runner.send(:target_holder_heartbeat, store, "worker-a", cache, "worker-a")
+      end
+
+      assert_same error, raised
+      assert_empty cache
+    end
   end
 
   def test_status_target_scope_degrades_when_an_alias_holder_heartbeat_is_a_symlink

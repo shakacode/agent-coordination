@@ -5054,6 +5054,10 @@ module AgentCoord
 
       notes << target_alias_note(path, "not a claim record")
       nil
+    rescue Errno::ENOENT
+      # A lock-free read can race a release after its existence check. At the
+      # alias boundary, that is the same answer as an ordinary missing record.
+      nil
     rescue JSON::ParserError
       notes << target_alias_note(path, "unreadable")
       nil
@@ -5146,7 +5150,7 @@ module AgentCoord
 
     def target_lease_key(entry)
       data = entry.data
-      return entry.path unless data["target"] && data["agent_id"]
+      return entry.path if data["target"].to_s.empty? || data["agent_id"].to_s.empty?
 
       [data["repo"], data["target"], data["agent_id"]]
     end
@@ -5166,12 +5170,16 @@ module AgentCoord
       # The queried spelling resolves first and unrescued: it is the one the
       # operator asked about, so a segment it cannot form must still raise the
       # error it raises today rather than being silently dropped as a candidate.
-      # The generated spellings are the accepted segment's own characters, folded
-      # to lower case, with a `kind:` prefix added, dropped, or swapped, so none of
-      # them can fail validation once this call has accepted the query.
+      # Generated spellings can expose a segment-invalid leading dot when folding
+      # off a decorative prefix. Such a spelling cannot be claimed, so omit it;
+      # the queried spelling above remains unrescued.
       paths = [AgentCoord.claim_path(repo, target)]
       target_alias_spellings(target).each do |spelling|
-        path = AgentCoord.claim_path(repo, spelling)
+        begin
+          path = AgentCoord.claim_path(repo, spelling)
+        rescue PathValidationError
+          next
+        end
         paths << path unless paths.include?(path)
       end
       paths
@@ -5256,7 +5264,11 @@ module AgentCoord
     # is still read once.
     def target_holder_heartbeat(store, holder, cache, queried_holder)
       read_cached_status_heartbeat(store, holder, cache)
-    rescue Errno::EACCES
+    rescue Errno::ENOENT
+      raise if holder == queried_holder
+
+      cache[holder] = nil
+    rescue Errno::EACCES, Errno::ENAMETOOLONG
       raise if holder == queried_holder
 
       cache[holder] = :invalid
