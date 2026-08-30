@@ -562,7 +562,7 @@ module AgentCoord
 
     def selected_user_config_path
       configured = ENV.fetch("AGENT_COORD_ENV_FILE", "")
-      unless configured.empty?
+      if AgentCoord.config_value_set?(configured)
         unless Pathname.new(configured).absolute?
           raise OperationalError, "AGENT_COORD_ENV_FILE must be an absolute path"
         end
@@ -1357,7 +1357,7 @@ module AgentCoord
       # doctor reports the enforcing condition itself; do not say it twice.
       return if command == "doctor" && consumer_split_brain_env_file(options)
       return unless options[:state_root] && !options[:api_url]
-      return unless ENV.fetch("AGENT_COORD_API_URL", "").empty?
+      return if AgentCoord.config_value_set?(ENV.fetch("AGENT_COORD_API_URL", ""))
 
       env_file = consumer_env_files.find { |path| consumer_api_url_configured?(path) }
       return unless env_file
@@ -1395,13 +1395,13 @@ module AgentCoord
     def split_brain_eligible_local?(options)
       return true if options[:implicit_local]
 
-      options[:status_root_local] && ENV.fetch("AGENT_COORD_STATE_ROOT", "").empty?
+      options[:status_root_local] && !AgentCoord.config_value_set?(ENV.fetch("AGENT_COORD_STATE_ROOT", ""))
     end
 
     def consumer_split_brain_env_file(options)
       return nil if options[:stack_json]
       return nil unless split_brain_eligible_local?(options)
-      return nil unless ENV.fetch("AGENT_COORD_API_URL", "").empty?
+      return nil if AgentCoord.config_value_set?(ENV.fetch("AGENT_COORD_API_URL", ""))
       return nil if local_mode_opt_in?
       # Consulted from the notice, the refusal and the doctor payload in one run;
       # compute it once rather than re-reading the file at each site.
@@ -1438,7 +1438,7 @@ module AgentCoord
                      else
                        %w[env http-env.sh].map { |name| File.join(config_home, "agent-coord", name) }
                      end
-      ([configured] + conventional).reject(&:empty?).uniq
+      ([configured] + conventional).select { |path| AgentCoord.config_value_set?(path) }.uniq
     end
 
     def consumer_api_url_configured?(path)
@@ -1449,7 +1449,10 @@ module AgentCoord
         match = line.match(/^\s*(?:export\s+)?AGENT_COORD_API_URL=(.*)$/)
         next false unless match
 
-        !consumer_env_assignment_value(match[1].to_s).empty?
+        # Must agree with backend resolution: a blank assignment is not a
+        # configured fleet URL, so treating it as one would hard-stop a write
+        # that resolution correctly sent to the implicit local backend.
+        AgentCoord.config_value_set?(consumer_env_assignment_value(match[1].to_s))
       end
     rescue SystemCallError, ArgumentError
       false

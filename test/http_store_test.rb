@@ -936,6 +936,25 @@ class HttpBackendSelectionTest < HttpEnvTestCase # rubocop:disable Metrics/Class
     end
   end
 
+  def test_write_command_hard_stops_when_a_blank_api_url_masks_the_consumer_env_file
+    # A whitespace-only AGENT_COORD_API_URL resolves to the implicit local
+    # backend, so the split-brain guard must treat it as unset exactly as
+    # backend resolution does. Testing it raw let the blank value suppress
+    # detection of the compatibility file and silently write local state.
+    with_split_brain_config("AGENT_COORD_API_URL" => "   ") do |_root, env_file|
+      code, out, err = run_cli(claim_args, {})
+
+      assert_equal 2, code
+      assert_empty out
+      assert_includes err, "split-brain configuration"
+      assert_includes err, env_file
+      # The refusal happens instead of entering local mode, so the local-mode
+      # notice must not appear -- unlike the AGENT_COORD_LOCAL=1 remedy the
+      # refusal message itself suggests.
+      refute_includes err, "notice: local mode"
+    end
+  end
+
   def test_write_command_hard_stops_when_consumer_env_file_points_remote
     with_split_brain_config do |_root, env_file|
       code, out, err = run_cli(claim_args, {})
