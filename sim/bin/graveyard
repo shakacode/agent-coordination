@@ -24,8 +24,21 @@ begin
     File.write(full_path, "#{JSON.pretty_generate(payload)}\n")
   end
 
+  # Open3 tags captured output with Encoding.default_external, which is US-ASCII
+  # under LC_ALL=C or LANG=C. agent-coord emits UTF-8, so that tag is wrong and
+  # JSON.parse below raises Encoding::InvalidByteSequenceError on output that is
+  # perfectly valid. Re-tag stdout so the parse sees the bytes as written, and
+  # scrub stderr, which only ever becomes the abort message, so a failing gc
+  # cannot crash this script while it describes the failure. STATE_PATH_PATTERN
+  # confines state paths to ASCII, so gc --json cannot actually emit a non-ASCII
+  # byte today; this matches verify-batch rather than fixing a reachable crash.
+  def capture3_utf8(*)
+    stdout, stderr, status = Open3.capture3(*)
+    [stdout.dup.force_encoding(Encoding::UTF_8), stderr.dup.force_encoding(Encoding::UTF_8).scrub, status]
+  end
+
   def run_gc(state_root, mode)
-    stdout, stderr, status = Open3.capture3(
+    stdout, stderr, status = capture3_utf8(
       "ruby", CLI, "gc", mode, "--json", "--state-root", state_root
     )
     abort "graveyard gc failed: #{stderr}" unless status.success?

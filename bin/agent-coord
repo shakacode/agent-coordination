@@ -280,12 +280,13 @@ module AgentCoord
   # Records the long-option declaration shapes used by this CLI so pre-parse
   # token detection can share its registered option names.
   class OptionRegistry
-    attr_reader :value_options, :flag_options
+    attr_reader :value_options, :flag_options, :path_options
 
     def initialize(parser)
       @parser = parser
       @value_options = []
       @flag_options = []
+      @path_options = []
     end
 
     def on(*declarations, &)
@@ -298,6 +299,18 @@ module AgentCoord
         option_name, argument = long_declaration.split(/\s+/, 2)
         target = argument ? @value_options : @flag_options
         target << option_name
+        # A PATH placeholder is the declaration saying this value addresses the
+        # filesystem. Those values are handed to syscalls rather than serialized,
+        # so argv normalization has to leave their bytes alone.
+        #
+        # DECLARING A NEW PATH-VALUED OPTION: its placeholder must start with
+        # PATH (`--archive-dir PATH`), because this match is on the placeholder
+        # spelling, not on a type. `--archive-dir DIR`, `FILE`, `ROOT`, or
+        # `[PATH]` is silently NOT exempted and its value is transcoded, which
+        # changes which file it names; `--archive-dir=PATH` is not even seen as
+        # a value option by the grammar above. Nothing fails loudly if you get
+        # this wrong, so match the spelling.
+        @path_options << option_name if argument.to_s.start_with?("PATH")
       end
       @parser
     end
@@ -337,7 +350,6 @@ module AgentCoord
 
   class Runner # rubocop:disable Metrics/ClassLength
     def initialize(argv, stdout: $stdout, stderr: $stderr, clock: Time, backend_conflict_warnings: true)
-      @argv = argv
       @stdout = stdout
       @stderr = stderr
       @clock = clock
@@ -345,6 +357,9 @@ module AgentCoord
       # Set on the first degraded listing; read by both the --sync guard and the
       # --json trail state, so it must exist before either runs.
       @log_incomplete = nil
+      # Last: rejecting an argument builds an option registry to resolve its
+      # exit code, and nothing above depends on argv.
+      @argv = normalized_argv(argv)
     end
 
     def run # rubocop:disable Metrics/CyclomaticComplexity
@@ -402,6 +417,52 @@ module AgentCoord
       raise unless stack_json && e.exit_code == EXIT_USAGE
 
       raise Error.new(e.message, exit_code: STACK_EXIT_USAGE)
+    end
+
+    # Argument normalization has to run before anything reads argv, which is
+    # earlier than run_doctor_command's EXIT_USAGE -> STACK_EXIT_USAGE mapping
+    # above, so a rejected argument would otherwise exit 1 where
+    # `doctor --stack-json` promises 64 for every usage error -- and a stack
+    # aggregator reads 1 as degraded and then finds no report to parse. The
+    # exit code is therefore resolved here instead.
+    def normalized_argv(argv)
+      raw = argv.map { |argument| argument.to_s.b }
+      AgentCoord.normalize_argv(argv, raw_indexes: path_argument_indexes(raw))
+    rescue Error => e
+      raise unless e.exit_code == EXIT_USAGE && stack_json_argv?(raw)
+
+      raise Error.new(e.message, exit_code: STACK_EXIT_USAGE)
+    end
+
+    # A path is a byte string on its way to a syscall; every other argument is
+    # text on its way to JSON. Transcoding a path changes which file it names --
+    # a latin-1 `/tmp/café` becomes a different, probably nonexistent directory,
+    # and `status --state-root` would report empty coordination state for a root
+    # that is not empty -- so those values keep the bytes the operator typed.
+    # The set comes from the option declarations' PATH placeholder rather than a
+    # second list that could drift away from them.
+    def path_argument_indexes(raw)
+      # The command decides which options are registered, and it is still raw
+      # here. A non-ASCII one cannot name a real command, and interpolating it
+      # into the parser banner would raise, so it falls back to the global set.
+      command = raw.first.to_s
+      command = "" unless command.ascii_only?
+      paths = registered_options(command).path_options
+      indexes = []
+      scan_raw_options(raw, command:) do |index, option, value_of, _awaits_value|
+        indexes << index if paths.include?(value_of || option)
+      end
+      indexes
+    end
+
+    # Takes the BINARY copy built above, because standalone_option_token_count
+    # splits each argument on "=" and String#split raises on a UTF-8-tagged
+    # string holding invalid bytes -- exactly the input that got us here. Option
+    # names are ASCII, and an ASCII-only string compares equal to its BINARY
+    # copy, so the match is unaffected. The command token is dropped to match
+    # what run_doctor_command inspects.
+    def stack_json_argv?(raw)
+      raw.first == "doctor" && stack_json_option_token?(raw.drop(1))
     end
 
     def print_help
@@ -1581,26 +1642,36 @@ module AgentCoord
       standalone_option_token_count(argv, [token], command:).positive?
     end
 
-    def standalone_option_token_count(argv, tokens, command:)
+    # One walk over raw argv, shared by every pre-parse scan. Yields each
+    # argument as (index, the long option it names, the option it is the value
+    # of, whether it is an option still awaiting a separate value). Arguments
+    # are expected to be BINARY copies: String#split raises on a UTF-8-tagged
+    # string holding invalid bytes, which is reachable from every caller.
+    def scan_raw_options(argv, command:)
       command_options = registered_options(command)
       doctor_options = command == "doctor" ? command_options : registered_options("doctor")
       value_options = command_options.value_options
-      skip_next = false
-      argv.count do |arg|
-        if skip_next
-          skip_next = false
-          next false
+      awaiting = nil
+      argv.each_with_index do |argument, index|
+        if awaiting
+          yield(index, nil, awaiting, false)
+          awaiting = nil
+          next
         end
 
-        option_name, option_value = arg.split("=", 2)
-        resolved_option = resolve_standalone_option(option_name, command_options, doctor_options)
-        if option_value.nil? && value_options.include?(resolved_option)
-          skip_next = true
-          false
-        else
-          tokens.include?(resolved_option)
-        end
+        option_name, inline_value = argument.split("=", 2)
+        option = resolve_standalone_option(option_name, command_options, doctor_options)
+        awaiting = option if inline_value.nil? && value_options.include?(option)
+        yield(index, option, nil, !awaiting.nil?)
       end
+    end
+
+    def standalone_option_token_count(argv, tokens, command:)
+      count = 0
+      scan_raw_options(argv, command:) do |_index, option, value_of, awaits_value|
+        count += 1 if value_of.nil? && !awaits_value && tokens.include?(option)
+      end
+      count
     end
 
     def resolve_standalone_option(option_name, command_options, target_options)
@@ -5576,6 +5647,7 @@ module AgentCoord
       path = AgentCoord.heartbeat_path(agent_id)
       entry = store.read_json(path)
       return nil unless entry
+      return :invalid unless entry.data.is_a?(Hash)
 
       payload_agent_id = entry.data.fetch("agent_id", AgentCoord.target_from_path(entry.path)).to_s
       return :mismatched unless payload_agent_id == agent_id
@@ -5987,10 +6059,10 @@ module AgentCoord
     end
 
     def check_command!(*args)
-      stdout, stderr, status = Open3.capture3(*args)
+      stdout, stderr, status = AgentCoord.capture3_utf8(*args)
       return if status.success?
 
-      message = [stderr, stdout].reject(&:empty?).join("\n")
+      message = [stderr, stdout].reject(&:empty?).map { |stream| AgentCoord.utf8_diagnostic(stream) }.join("\n")
       raise OperationalError, "#{args.join(' ')} failed: #{message}"
     rescue SystemCallError => e
       raise OperationalError, "#{args.join(' ')} failed: #{e.message}"
@@ -6067,10 +6139,34 @@ module AgentCoord
       shell == "zsh" ? File.join(Dir.home, ".zshrc") : File.join(Dir.home, ".bashrc")
     end
 
+    # This only reads the profile to check whether `line` is already present, and
+    # never writes the read result back, so the comparison is done in bytes
+    # rather than as text. A shell rc file is not guaranteed valid UTF-8 the way
+    # state JSON is, so a plain text read can fail on invalid bytes -- but `line`
+    # is not guaranteed to be a clean UTF-8 string either: Shellwords.escape on a
+    # non-ASCII install_dir (from ARGV, itself ASCII-8BIT-tagged under some
+    # locales) yields an ASCII-8BIT `line`, and comparing that against a
+    # UTF-8-tagged `existing` never matches even when the bytes are identical --
+    # so bootstrap would silently duplicate the PATH line on every rerun instead
+    # of detecting it was already there. Reading with File.binread and comparing
+    # against `line.b` puts both sides in ASCII-8BIT, which has no invalid byte
+    # sequences, so #strip/#lines can never raise regardless of locale, and the
+    # match is a plain byte comparison regardless of what encoding `line`
+    # happened to end up in. Nothing is written back, and the appended line is
+    # still the original `line`, so the user's profile bytes are untouched.
     def ensure_profile_path(profile, install_dir)
       FileUtils.mkdir_p(File.dirname(profile))
-      line = "export PATH=#{Shellwords.escape(install_dir)}:\"$PATH\""
-      existing = File.exist?(profile) ? File.read(profile) : ""
+      # Shellwords.escape emits one backslash per character for a UTF-8-tagged
+      # string but one per byte for a binary one, and install_dir comes from
+      # ARGV, which Ruby tags with the locale encoding. Pin the encoding first
+      # so the generated line is the same bytes under every locale.
+      canonical_dir = install_dir.dup.force_encoding(Encoding::UTF_8)
+      canonical_dir = install_dir.b unless canonical_dir.valid_encoding?
+      line = "export PATH=#{Shellwords.escape(canonical_dir)}:\"$PATH\"".b
+      # Read and compare as bytes: ASCII-8BIT has no invalid byte sequences, so
+      # #strip and #lines cannot raise however the profile is encoded, and the
+      # match does not depend on either side carrying a usable encoding tag.
+      existing = File.exist?(profile) ? File.binread(profile) : ""
       return if existing.lines.any? { |existing_line| existing_line.strip == line }
 
       File.open(profile, "a") do |file|
@@ -6462,7 +6558,7 @@ module AgentCoord
     end
 
     def gh_api(*args)
-      stdout, stderr, status = Open3.capture3("gh", "api", *args)
+      stdout, stderr, status = AgentCoord.capture3_utf8("gh", "api", *args)
       GhResult.new(stdout: stdout, stderr: stderr, status: status)
     rescue SystemCallError => e
       raise OperationalError, "gh api #{args.join(' ')} failed: #{e.message}"
@@ -6743,9 +6839,45 @@ module AgentCoord
       !success? && error_message.match?(/409|422|sha|already exists|conflict/i)
     end
 
+    # Diagnostic text, not payload: scrubbed per stream so that neither the
+    # predicates below nor a --json reporter can raise while describing a
+    # failure. See AgentCoord.utf8_diagnostic.
     def error_message
-      [stderr, stdout].reject(&:empty?).join("\n")
+      [stderr, stdout].reject(&:empty?).map { |stream| AgentCoord.utf8_diagnostic(stream) }.join("\n")
     end
+  end
+
+  # Open3 tags captured output with Encoding.default_external, which is US-ASCII
+  # under LC_ALL=C or LANG=C. Every subprocess captured here emits UTF-8, so that
+  # tag is simply wrong, and correctly formed bytes then raise
+  # Encoding::InvalidByteSequenceError from JSON.parse and ArgumentError from
+  # Regexp#match?. Re-tagging both streams at the capture seam stops the locale
+  # deciding how captured bytes are read; it covers stderr as well as stdout
+  # because an error path that crashes while formatting its own message is worse
+  # than the failure it was reporting.
+  #
+  # Caller contract: this re-tags but deliberately does not scrub, so the payload
+  # stream reaches JSON.parse as the subprocess wrote it. Genuinely malformed
+  # bytes therefore survive here and still raise from Regexp#match? and
+  # JSON.generate. Anything that interpolates either stream into a message must
+  # route it through utf8_diagnostic rather than using it raw.
+  def self.capture3_utf8(*)
+    stdout, stderr, status = Open3.capture3(*)
+    [force_utf8(stdout), force_utf8(stderr), status]
+  end
+
+  def self.force_utf8(text)
+    text.dup.force_encoding(Encoding::UTF_8)
+  end
+
+  # Re-tagging fixes a wrong label but cannot repair genuinely malformed bytes,
+  # and an invalid UTF-8 string still raises from Regexp#match? and from
+  # JSON.generate in the --json reporters. Message paths therefore substitute
+  # U+FFFD for undecodable bytes, because diagnostics are prose and a readable
+  # approximation beats a second crash; payload paths deliberately do not,
+  # because silently rewriting a state record is worse than failing to read it.
+  def self.utf8_diagnostic(text)
+    force_utf8(text).scrub
   end
 
   def self.safe_path!(path)
@@ -6794,6 +6926,65 @@ module AgentCoord
 
   def self.state_directory_prefix?(path)
     path.to_s.match?(STATE_DIRECTORY_PREFIX_PATTERN)
+  end
+
+  # Ruby tags ARGV with the locale encoding, and everything downstream assumes
+  # UTF-8: JSON.generate warns on a non-UTF-8 string today and raises under json
+  # 3.0, and a differently tagged argument does not compare equal to the same
+  # text read back from state, which is why under LC_ALL=C a non-ASCII agent
+  # could neither renew nor release its own claim. Doing this once at the Runner
+  # boundary covers the command token, every option value, the `log` positional,
+  # and demo's passthrough argv together, so an option added later cannot forget
+  # it. raw_indexes carries the exceptions: values that address the filesystem
+  # rather than coordination state keep their bytes, because normalizing a path
+  # changes which file it names. Returns a new array rather than normalizing in
+  # place: Runner#run and parse_options consume the array they are given, and
+  # that must not reach back into an ARGV or a caller's array they do not own.
+  def self.normalize_argv(argv, raw_indexes: [])
+    argv.each_with_index.map do |argument, index|
+      raw_indexes.include?(index) ? argument.to_s : normalize_argument(argument.to_s)
+    end
+  end
+
+  # How Ruby tagged the argument decides what normalizing it means, and argv is
+  # the one boundary where both cases occur. BINARY is the absence of a tag --
+  # what LANG=C/LC_ALL=C produces for an argument holding a non-ASCII byte -- so
+  # there is no source encoding to convert from and force_utf8 retags it as the
+  # UTF-8 it was meant to be, which is the same correction capture3_utf8 applies
+  # to a mislabeled subprocess stream. Any other tag is a real claim about what
+  # those bytes mean, so the argument is transcoded instead: retagging an
+  # ISO-8859-1 terminal's `café` would either reject valid input or, when the
+  # latin-1 bytes happen to form UTF-8, silently store different text than the
+  # operator typed.
+  #
+  # This is a payload path, so it does not scrub, for the reason utf8_diagnostic
+  # documents: rewriting a state record is worse than refusing to write it, and
+  # these values are state keys, so a scrubbed agent-id or repo would be stored
+  # as a silently different identity. load_launch_prompt refuses the same way.
+  def self.normalize_argument(argument)
+    normalized =
+      if argument.encoding == Encoding::ASCII_8BIT
+        force_utf8(argument)
+      else
+        argument.encode(Encoding::UTF_8)
+      end
+    # UTF-8 to UTF-8 is a no-op that does not validate, so a UTF-8-tagged
+    # argument holding invalid bytes is still only caught here.
+    return normalized if normalized.valid_encoding?
+
+    raise Error, invalid_argument_message(argument)
+  rescue EncodingError
+    # Every transcoding failure: undefined conversion, invalid byte sequence in
+    # the declared encoding, or an encoding with no converter to UTF-8.
+    raise Error, invalid_argument_message(argument)
+  end
+
+  # The message half of the same policy: the rejected value is echoed through
+  # utf8_diagnostic, so reporting an argument cannot itself raise on the bytes it
+  # is reporting. force_encoding overrides whatever tag was there, so this
+  # re-derives the value from its bytes whatever encoding it arrived claiming.
+  def self.invalid_argument_message(argument)
+    "command-line argument must be valid UTF-8: #{utf8_diagnostic(argument)}"
   end
 
   def self.validate_repo!(repo, field)
