@@ -23,7 +23,8 @@ ISSUE_TITLE="$("$GH_BIN" issue view "$ISSUE" --repo "$REPO" --json title --jq .t
 ISSUE_KEY="$(
   ruby -rjson -e '
     manifest = JSON.parse(File.read(ARGV.fetch(0), encoding: "UTF-8")).fetch("issues")
-    title = ARGV.fetch(1)
+    title = ARGV.fetch(1).dup.force_encoding(Encoding::UTF_8)
+    abort "issue title is not valid UTF-8" unless title.valid_encoding?
     issue = manifest.find { |candidate| candidate.fetch("title") == title }
     abort "no sim issue key for issue title: #{title}" unless issue
     puts issue.fetch("key")

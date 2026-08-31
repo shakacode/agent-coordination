@@ -4,6 +4,7 @@ require "fileutils"
 require "json"
 require "minitest/autorun"
 require "open3"
+require "rbconfig"
 require "tmpdir"
 
 class LlmWorkerTest < Minitest::Test
@@ -42,12 +43,11 @@ class LlmWorkerTest < Minitest::Test
     end
   end
 
-  def test_non_ascii_manifest_title_is_read_under_ascii_and_utf8_locales
-    issue_title = "positive_sum must exclude negative numbers"
-    extra_issues = [{ "key" => "task_cafe", "title" => "land the fix — café" }]
+  def test_non_ascii_selected_title_matches_under_ascii_and_utf8_locales
+    issue_title = "land the fix — café"
 
     with_fake_tools(issue_title: issue_title) do |env, prompt_path|
-      with_llm_worker_fixture(issue_title: issue_title, extra_issues: extra_issues) do |llm_worker|
+      with_llm_worker_fixture(issue_title: issue_title) do |llm_worker|
         %w[C C.UTF-8].each do |locale|
           stdout, stderr, status = Open3.capture3(
             env.merge("LC_ALL" => locale, "LANG" => locale),
@@ -60,6 +60,23 @@ class LlmWorkerTest < Minitest::Test
           assert_includes stdout, "LLM_WORKER_EXIT host=codex issue=7 issue_key=task_one", locale
           cleanup_workdir(stdout)
         end
+      end
+    end
+  end
+
+  def test_invalid_utf8_selected_title_fails_closed_before_worker
+    issue_title = "positive_sum must exclude negative numbers"
+    invalid_title = "land the fix \xFF".b
+
+    with_fake_tools(issue_title_bytes: invalid_title) do |env, prompt_path|
+      with_llm_worker_fixture(issue_title: issue_title) do |llm_worker|
+        _stdout, stderr, status = Open3.capture3(
+          env.merge("LC_ALL" => "C", "LANG" => "C"),
+          llm_worker, "codex", "shakacode/agent-coord-sim-alpha", "7", "batch-42"
+        )
+        assert_equal 1, status.exitstatus, stderr
+        assert_includes stderr, "issue title is not valid UTF-8"
+        refute_path_exists prompt_path
       end
     end
   end
@@ -133,12 +150,14 @@ class LlmWorkerTest < Minitest::Test
   private
 
   def with_fake_tools(codex_exit: 0, issue_title: "positive_sum must exclude negative numbers",
-                      validate_prompt_utf8: false)
+                      issue_title_bytes: nil, validate_prompt_utf8: false)
     Dir.mktmpdir do |dir|
       prompt_path = File.join(dir, "prompt.md")
+      FileUtils.ln_s(RbConfig.ruby, File.join(dir, "ruby"))
       write_fake_gh(File.join(dir, "gh"))
       write_fake_codex(File.join(dir, "codex"))
       env = {
+        "BASH_ENV" => nil,
         "PATH" => "#{dir}:#{ENV.fetch('PATH')}",
         "GH_BIN" => File.join(dir, "gh"),
         "CODEX_BIN" => File.join(dir, "codex"),
@@ -147,6 +166,7 @@ class LlmWorkerTest < Minitest::Test
         "GH_ISSUE_TITLE" => issue_title,
         "VALIDATE_PROMPT_UTF8" => validate_prompt_utf8 ? "1" : "0"
       }
+      env["GH_ISSUE_TITLE_HEX"] = issue_title_bytes.unpack1("H*") if issue_title_bytes
       yield env, prompt_path
     end
   end
@@ -196,7 +216,13 @@ class LlmWorkerTest < Minitest::Test
       #!/usr/bin/env ruby
 
       if ARGV[0, 2] == ["issue", "view"]
-        puts ENV.fetch("GH_ISSUE_TITLE")
+        if (title_hex = ENV["GH_ISSUE_TITLE_HEX"])
+          STDOUT.binmode
+          STDOUT.write([title_hex].pack("H*"))
+          STDOUT.write("\n")
+        else
+          puts ENV.fetch("GH_ISSUE_TITLE")
+        end
       else
         warn "unexpected gh args: #{ARGV.join(' ')}"
         exit 2
