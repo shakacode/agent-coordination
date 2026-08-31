@@ -4,6 +4,7 @@ require "fileutils"
 require "minitest/autorun"
 require "open3"
 require "tmpdir"
+require "yaml"
 
 class AgentTestRunnerTest < Minitest::Test
   ROOT = File.expand_path("..", __dir__)
@@ -26,6 +27,17 @@ class AgentTestRunnerTest < Minitest::Test
       _stdout, _stderr, status = Open3.capture3(fixture.fetch(:env), RUNNER, chdir: ROOT)
       assert_equal 76, status.exitstatus
       assert_isolated_state(fixture)
+    end
+  end
+
+  def test_ci_ruby_jobs_use_the_hermetic_test_runner
+    workflow = YAML.safe_load_file(File.join(ROOT, ".github/workflows/ci.yml"), aliases: true)
+
+    %w[test test-ruby-floor].each do |job_name|
+      job = workflow.fetch("jobs").fetch(job_name)
+      test_step = job.fetch("steps").find { |step| step.fetch("name", "") == "Run tests" }
+
+      assert_equal ".agents/bin/test", test_step.fetch("run").strip, "#{job_name} bypasses the shared test seam"
     end
   end
 
