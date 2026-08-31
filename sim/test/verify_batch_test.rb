@@ -23,7 +23,8 @@ class VerifyBatchTest < Minitest::Test
     "AGENT_COORD_REF" => nil,
     "AGENT_COORD_SESSION_ID" => nil,
     "AGENT_COORD_STATE_ROOT" => nil,
-    "AGENT_COORD_STATUS_STATE_ROOT" => nil
+    "AGENT_COORD_STATUS_STATE_ROOT" => nil,
+    "CODEX_THREAD_ID" => nil
   }.freeze
 
   def write(state, path, data)

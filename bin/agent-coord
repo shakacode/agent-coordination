@@ -420,12 +420,18 @@ module AgentCoord
     # which is far worse than failing on a config that cannot be read. Do not add
     # an entry without tracing the command's whole dispatch path.
     CONFIG_INDEPENDENT_COMMANDS = %w[version bootstrap demo].freeze
+    KNOWN_COMMANDS = %w[
+      claim release heartbeat register-batch record-event status log batch-audit
+      gc version config doctor bootstrap demo
+    ].freeze
 
     def run # rubocop:disable Metrics/CyclomaticComplexity
       return print_help if @argv.empty? || help_request?(@argv.first)
 
       command = @argv.shift
       config_action = command == "config" && %w[show set].include?(@argv.first) ? @argv.shift : nil
+      raise Error, "unknown command: #{command}" unless KNOWN_COMMANDS.include?(command)
+
       load_user_configuration_unless_exempt!(command, config_action)
       case command
       when "claim"
@@ -475,6 +481,7 @@ module AgentCoord
     # it is `set` decides whether a missing explicit config file is tolerated.
     def load_user_configuration_unless_exempt!(command, config_action)
       return if CONFIG_INDEPENDENT_COMMANDS.include?(command)
+      return if help_request?(@argv.first)
 
       load_user_configuration!(creating_user_config: config_action == "set")
     end
@@ -658,7 +665,7 @@ module AgentCoord
     def validate_user_config_paths!(values, path)
       ABSOLUTE_USER_CONFIG_PATH_KEYS.each do |key|
         value = values.fetch(key, nil)
-        next if value.to_s.empty?
+        next unless AgentCoord.config_value_set?(value)
         next if Pathname.new(value).absolute?
 
         raise OperationalError, "#{key} in #{path} must be an absolute path"
@@ -1260,6 +1267,8 @@ module AgentCoord
       message =
         if cli_api
           "warning: --api-url and --state-root are both set; using the local backend."
+        elsif options[:backend_cli]
+          "warning: --backend and --state-root are both set; using the local backend."
         elsif configured_selector?(configured, :api_url)
           "warning: AGENT_COORD_API_URL and --state-root are both set; using the local backend."
         elsif configured_selector?(configured, :backend)
@@ -1270,7 +1279,9 @@ module AgentCoord
 
     def warn_cli_api_url_override(options, configured)
       message =
-        if configured_selector?(configured, :state_root)
+        if options[:backend_cli]
+          "warning: --backend and --api-url are both set; using the HTTP backend."
+        elsif configured_selector?(configured, :state_root)
           "warning: --api-url and AGENT_COORD_STATE_ROOT are both set; " \
             "using the HTTP backend. Pass --state-root to force local."
         elsif configured_selector?(configured, :backend)
@@ -1365,7 +1376,7 @@ module AgentCoord
       # doctor reports the enforcing condition itself; do not say it twice.
       return if command == "doctor" && consumer_split_brain_env_file(options)
       return unless options[:state_root] && !options[:api_url]
-      return if AgentCoord.config_value_set?(ENV.fetch("AGENT_COORD_API_URL", ""))
+      return if process_api_url_configured?
 
       env_file = consumer_env_files.find { |path| consumer_api_url_configured?(path) }
       return unless env_file
@@ -1409,13 +1420,17 @@ module AgentCoord
     def consumer_split_brain_env_file(options)
       return nil if options[:stack_json]
       return nil unless split_brain_eligible_local?(options)
-      return nil if AgentCoord.config_value_set?(ENV.fetch("AGENT_COORD_API_URL", ""))
+      return nil if process_api_url_configured?
       return nil if local_mode_opt_in?
       # Consulted from the notice, the refusal and the doctor payload in one run;
       # compute it once rather than re-reading the file at each site.
       return options[:split_brain_env_file] if options.key?(:split_brain_env_file)
 
       options[:split_brain_env_file] = consumer_env_files.find { |path| consumer_api_url_configured?(path) }
+    end
+
+    def process_api_url_configured?
+      AgentCoord.config_value_set?(@process_config&.fetch("AGENT_COORD_API_URL", nil))
     end
 
     def consumer_split_brain_message(env_file)
@@ -1510,7 +1525,7 @@ module AgentCoord
 
       status_command = status_read_command?(command)
       configured_status_root = ENV.fetch(STATUS_STATE_ROOT_ENV, nil)
-      if status_command && !configured_status_root.to_s.empty?
+      if status_command && AgentCoord.config_value_set?(configured_status_root)
         options[:state_root] = configured_status_root
         options[:status_root_local] = true
         return
@@ -6750,7 +6765,7 @@ module AgentCoord
 
     def default_status_state_root
       configured_root = ENV.fetch(STATUS_STATE_ROOT_ENV, nil)
-      return configured_root unless configured_root.to_s.empty?
+      return configured_root if AgentCoord.config_value_set?(configured_root)
 
       source_root = AgentCoord.source_root
       AgentCoord.state_root?(source_root) ? source_root : nil
@@ -7723,8 +7738,11 @@ module AgentCoord
       end
 
       uri
-    rescue URI::InvalidURIError => e
-      raise OperationalError, "invalid HTTP backend URL: #{AgentCoord.redact_userinfo_in_text(e.message)}"
+    rescue URI::InvalidURIError
+      # URI's exception embeds the rejected input. That value is untrusted and
+      # may contain malformed userinfo that no finite URL-shaped regex can
+      # reliably redact, so diagnostics describe the failure without echoing it.
+      raise OperationalError, "invalid HTTP backend URL: malformed URL"
     end
 
     def state_path(path)

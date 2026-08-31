@@ -146,6 +146,29 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     assert_includes result.stdout, "demo"
   end
 
+  # Help and command-name validation are argv-only operations. They must remain
+  # available when the configuration the operator is trying to repair cannot
+  # be parsed, just like the top-level help path already is.
+  def test_subcommand_help_and_unknown_commands_do_not_load_user_configuration
+    with_private_user_config("not a valid assignment\n") do |config_home|
+      env = { "XDG_CONFIG_HOME" => config_home }
+
+      [%w[status --help], %w[config show --help]].each do |argv|
+        result = run_command(env, RbConfig.ruby, BIN, *argv)
+
+        assert_equal 0, result.status.exitstatus, "#{argv.join(' ')}: #{result.stderr}"
+        assert_includes result.stdout, "Usage: agent-coord #{argv.first}"
+        refute_includes result.stderr, "unsafe user config syntax"
+      end
+
+      unknown = run_command(env, RbConfig.ruby, BIN, "not-a-command")
+
+      assert_equal 1, unknown.status.exitstatus
+      assert_equal "unknown command: not-a-command\n", unknown.stderr
+      refute_includes unknown.stderr, "unsafe user config syntax"
+    end
+  end
+
   def test_gc_requires_an_explicit_mode
     result = run_agent_coord("gc")
 
@@ -1557,6 +1580,29 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     end
   end
 
+  def test_cli_selector_conflicts_warn_when_backend_is_another_cli_flag
+    with_private_config_tmpdir("agent-coord-cli-selector-conflicts") do |root|
+      state_root = File.join(root, "state")
+      FileUtils.mkdir_p(state_root)
+      local_stderr = StringIO.new
+      http_stderr = StringIO.new
+
+      local = AgentCoord::Runner.new([], stdout: StringIO.new, stderr: local_stderr).send(
+        :parse_options, "status", ["--backend", "acme/legacy-repo", "--state-root", state_root]
+      )
+      http = AgentCoord::Runner.new([], stdout: StringIO.new, stderr: http_stderr).send(
+        :parse_options, "status", ["--backend", "acme/legacy-repo", "--api-url", "https://fleet.example"]
+      )
+
+      assert_equal state_root, local.fetch(:state_root)
+      assert_includes local_stderr.string,
+                      "warning: --backend and --state-root are both set; using the local backend."
+      assert_equal "https://fleet.example", http.fetch(:api_url)
+      assert_includes http_stderr.string,
+                      "warning: --backend and --api-url are both set; using the HTTP backend."
+    end
+  end
+
   # Replacing a configured selector with the same kind of backend is not a
   # backend override, so it must stay quiet.
   def test_cli_state_root_does_not_warn_about_a_configured_state_root
@@ -1678,6 +1724,22 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
       refute coordination.fetch("configured"),
              "a whitespace-only configured selector is not a configured backend"
       assert_equal "default", coordination.fetch("source").fetch("backend")
+    end
+  end
+
+  def test_whitespace_only_canonical_path_selectors_are_unset
+    %w[AGENT_COORD_STATE_ROOT AGENT_COORD_STATUS_STATE_ROOT].each do |key|
+      with_private_user_config("#{key}='   '\n") do |config_home|
+        result = run_command(
+          { "XDG_CONFIG_HOME" => config_home },
+          RbConfig.ruby, BIN, "config", "show", "--json"
+        )
+
+        assert_equal 0, result.status.exitstatus, "#{key}: #{result.stderr}"
+        coordination = JSON.parse(result.stdout).fetch("coordination")
+        assert_equal "local", coordination.fetch("backend"), key
+        refute coordination.fetch("configured"), key
+      end
     end
   end
 

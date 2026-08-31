@@ -795,10 +795,32 @@ class HttpBackendSelectionTest < HttpEnvTestCase # rubocop:disable Metrics/Class
   end
 
   def test_malformed_api_url_is_operational_error
-    with_env("AGENT_COORD_API_URL" => "http://[bad", "AGENT_COORD_API_TOKEN" => "tok") do
+    secret = "malformed secret"
+    with_env("AGENT_COORD_API_URL" => "https://#{secret}@bad host", "AGENT_COORD_API_TOKEN" => "tok") do
       code, _, err = run_cli(["status"], {})
       assert_equal 2, code
       assert_includes err, "invalid HTTP backend URL"
+      refute_includes err, secret
+    end
+  end
+
+  def test_whitespace_only_status_root_uses_the_implicit_local_default
+    Dir.mktmpdir("agent-coord-blank-status-root") do |state_home|
+      with_env("AGENT_COORD_API_TOKEN" => nil,
+               "AGENT_COORD_API_URL" => nil,
+               "AGENT_COORD_BACKEND" => nil,
+               "AGENT_COORD_STATE_ROOT" => nil,
+               "AGENT_COORD_STATUS_STATE_ROOT" => "   ",
+               "XDG_STATE_HOME" => state_home) do
+        runner = AgentCoord::Runner.new([], stdout: StringIO.new, stderr: StringIO.new)
+        assert_nil runner.send(:default_status_state_root)
+
+        code, _, err = run_cli(["status", "--json"], {})
+
+        assert_equal 0, code
+        assert_includes err, "local mode — single-machine only"
+        assert_includes err, File.join(state_home, "agent-coordination")
+      end
     end
   end
 
@@ -997,6 +1019,24 @@ class HttpBackendSelectionTest < HttpEnvTestCase # rubocop:disable Metrics/Class
         assert_includes err, env_file
         assert_includes err, "CLI is using the local backend"
       end
+    end
+  end
+
+  def test_saved_api_url_does_not_mask_split_brain_advisory_for_a_cli_local_read
+    with_split_brain_config do |root, env_file|
+      canonical = File.join(File.dirname(env_file), "env")
+      File.chmod(0o700, File.dirname(canonical))
+      File.write(canonical, "AGENT_COORD_API_URL=https://saved.example\n")
+      File.chmod(0o600, canonical)
+      state_root = File.join(root, "explicit-state")
+      FileUtils.mkdir_p(state_root)
+
+      code, _, err = run_cli(["status", "--state-root", state_root, "--json"], {})
+
+      assert_equal 0, code
+      assert_includes err, "warning: AGENT_COORD_API_URL and --state-root are both set"
+      assert_includes err, "split-brain configuration"
+      assert_includes err, canonical
     end
   end
 
