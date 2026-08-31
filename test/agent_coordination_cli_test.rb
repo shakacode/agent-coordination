@@ -5336,6 +5336,76 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     assert_match(/worker-dead .* dead /, status.stdout)
   end
 
+  # A listed heartbeat can be valid JSON without being a heartbeat object. The
+  # broad audit should preserve the healthy rows and report the bad sibling as
+  # degraded, just as the target and batch scopes do, instead of exposing the
+  # field projection's raw TypeError.
+  def test_status_broad_scope_degrades_when_a_heartbeat_is_not_an_object
+    now = Time.now.utc
+    write_heartbeat("worker-healthy", updated_at: now - 60, expires_at: now + 600)
+    write_batch(
+      "batch-b",
+      lanes: [{ "name" => "invalid", "owner" => "worker-invalid", "targets" => ["3972"] }]
+    )
+    write_state_file("heartbeats/worker-invalid.json", "[]")
+
+    status = run_agent_coord("status", "--json")
+
+    assert_equal 0, status.status.exitstatus, status.stderr
+    payload = JSON.parse(status.stdout)
+    heartbeat_ids = payload.fetch("heartbeats").map { |entry| entry.fetch("agent_id") }
+    assert_equal ["worker-healthy"], heartbeat_ids
+    assert_equal "unreadable", payload.fetch("batches").first.fetch("lanes").first.fetch("liveness")
+    assert_equal "heartbeat records unreadable: worker-invalid",
+                 payload.fetch("section_notes").fetch("heartbeats")
+    assert_includes payload.fetch("degraded"), "heartbeat records unreadable: worker-invalid"
+    refute_includes status.stderr, "TypeError"
+  end
+
+  def test_status_broad_scope_preserves_readable_heartbeats_when_unreadable_filenames_collide
+    now = Time.now.utc
+    write_batch(
+      "batch-collisions",
+      lanes: [
+        { "name" => "invalid-first", "owner" => "worker-b", "targets" => ["3973"] },
+        { "name" => "invalid-last", "owner" => "worker-z", "targets" => ["3974"] }
+      ]
+    )
+    write_state_file(
+      "heartbeats/worker-a-source.json",
+      JSON.generate(
+        "agent_id" => "worker-z",
+        "status" => "in_progress",
+        "updated_at" => (now - 60).iso8601,
+        "expires_at" => (now + 600).iso8601
+      )
+    )
+    write_state_file("heartbeats/worker-b.json", "[]")
+    write_state_file(
+      "heartbeats/worker-y-source.json",
+      JSON.generate(
+        "agent_id" => "worker-b",
+        "status" => "in_progress",
+        "updated_at" => (now - 60).iso8601,
+        "expires_at" => (now + 600).iso8601
+      )
+    )
+    write_state_file("heartbeats/worker-z.json", "[]")
+
+    status = run_agent_coord("status", "--json")
+
+    assert_equal 0, status.status.exitstatus, status.stderr
+    payload = JSON.parse(status.stdout)
+    assert_equal %w[worker-b worker-z], payload.fetch("heartbeats").map { |entry| entry.fetch("agent_id") }.sort
+    lane_liveness = payload.fetch("batches").first.fetch("lanes").to_h do |lane|
+      [lane.fetch("owner"), lane.fetch("liveness")]
+    end
+    assert_equal({ "worker-b" => "live", "worker-z" => "live" }, lane_liveness)
+    assert_equal "heartbeat records unreadable: worker-b, worker-z",
+                 payload.fetch("section_notes").fetch("heartbeats")
+    assert_includes payload.fetch("degraded"), "heartbeat records unreadable: worker-b, worker-z"
+  end
+
   def test_status_defaults_to_status_state_root_without_global_state_root
     now = Time.now.utc
     write_heartbeat(
@@ -10303,6 +10373,28 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     lane = payload.fetch("batches").first.fetch("lanes").first
     assert_equal "unreadable", lane.fetch("liveness")
     assert_empty payload.fetch("heartbeats")
+    assert_includes payload.fetch("degraded"), "lane-owner heartbeats unreadable: worker-docs"
+  end
+
+  # Non-object JSON follows the same intentionally degraded path as malformed
+  # JSON. Pin this shared-helper behavior so batch scope cannot silently return
+  # to the crash that broad status is being brought into line with.
+  def test_status_batch_scope_reports_non_object_lane_owner_heartbeat_as_unreadable
+    write_batch(
+      "batch-b",
+      lanes: [{ "name" => "docs", "owner" => "worker-docs", "targets" => ["3972"] }]
+    )
+    write_state_file("heartbeats/worker-docs.json", "[]")
+
+    status = run_agent_coord("status", "--batch-id", "batch-b", "--json")
+
+    assert_equal 0, status.status.exitstatus, status.stderr
+    payload = JSON.parse(status.stdout)
+    lane = payload.fetch("batches").first.fetch("lanes").first
+    assert_equal "unreadable", lane.fetch("liveness")
+    assert_empty payload.fetch("heartbeats")
+    assert_equal "lane-owner heartbeats unreadable: worker-docs",
+                 payload.fetch("section_notes").fetch("heartbeats")
     assert_includes payload.fetch("degraded"), "lane-owner heartbeats unreadable: worker-docs"
   end
 

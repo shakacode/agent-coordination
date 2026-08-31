@@ -821,6 +821,13 @@ Scoped status is the preferred batch-workflow path:
   lane-owner heartbeats, and dependency batch files plus referenced lane-owner
   heartbeats needed to compute `blocked_on`.
 
+A heartbeat record that is valid JSON but is not an object is unreadable state,
+not a heartbeat. All three status scopes degrade consistently for that record:
+target and batch scopes report their existing holder/lane-owner notes, while the
+broad audit omits the invalid heartbeat row, preserves healthy rows, and reports
+`heartbeat records unreadable`. The command still exits 0 because the degraded
+note makes the incomplete section explicit; this does not make the record valid.
+
 Scoped JSON payloads include `scope` and `degraded` fields. A scoped command can
 show `degraded` notes for intentionally omitted unrelated state, such as claims
 not checked in batch scope; that is different from exit 2. Exit 2 means the
