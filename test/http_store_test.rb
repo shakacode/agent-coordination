@@ -74,12 +74,25 @@ class HttpStoreTestCase < Minitest::Test
 end
 
 class HttpStoreReadTest < HttpStoreTestCase
-  def test_constructor_accepts_plain_http_ipv6_loopback_base_url
+  def test_plain_http_ipv6_loopback_uses_unbracketed_network_host
+    network_host = nil
+    response = Struct.new(:code, :body).new("200", JSON.generate("entries" => []))
+    fake_http = Object.new
+    fake_http.define_singleton_method(:active?) { true }
+    fake_http.define_singleton_method(:finish) { nil }
+    fake_http.define_singleton_method(:request) { |_request| response }
+    original_start = Net::HTTP.method(:start)
+    Net::HTTP.define_singleton_method(:start) do |host, *|
+      network_host = host
+      fake_http
+    end
     store = AgentCoord::HttpStore.new(base_url: "http://[::1]:8787", token: "tok")
 
-    assert_instance_of AgentCoord::HttpStore, store
+    assert_empty store.list_json("claims")
+    assert_equal "::1", network_host
   ensure
     store&.close
+    Net::HTTP.define_singleton_method(:start, original_start) if original_start
   end
 
   def test_constructor_accepts_mixed_case_plain_http_loopback_base_url

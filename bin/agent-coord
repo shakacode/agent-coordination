@@ -7903,7 +7903,7 @@ module AgentCoord
 
       close_http_session
       @http = Net::HTTP.start(
-        uri.host,
+        uri.hostname,
         uri.port,
         use_ssl: uri.scheme == "https",
         open_timeout: OPEN_TIMEOUT,
