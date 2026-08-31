@@ -1221,6 +1221,12 @@ module AgentCoord
           return unless argument
 
           @value_options << option_name
+          # DECLARING A NEW PATH-VALUED OPTION: its placeholder must start with
+          # PATH (`--archive-dir PATH`), because this match is on the placeholder
+          # spelling, not on a type. `--archive-dir DIR`, `FILE`, `ROOT`, or
+          # `[PATH]` is silently NOT exempted and its value is transcoded, which
+          # changes which file it names. Nothing fails loudly if you get this
+          # wrong, so match the spelling.
           @path_options << option_name if argument.start_with?("PATH")
         end
 
