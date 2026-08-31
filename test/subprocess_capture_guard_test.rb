@@ -50,6 +50,7 @@ end
 
 class SubprocessCaptureGuardTest < Minitest::Test
   ROOT = File.expand_path("..", __dir__)
+  RUBY_SHEBANG = /\A\#!.*\bruby(?:\s|$)/n
   REVIEWED_HELPERS = {
     "bin/agent-coord" => "capture3_utf8",
     "sim/bin/graveyard" => "capture3_utf8",
@@ -60,17 +61,32 @@ class SubprocessCaptureGuardTest < Minitest::Test
     sites = production_capture3_sites
 
     assert_empty unreviewed_sites(sites), failure_message(sites)
-    assert_equal REVIEWED_HELPERS.sort, sites.map { |site| [site.path, site.method_name] }.sort, failure_message(sites)
+    assert_equal REVIEWED_HELPERS.sort, sorted_site_identities(sites), failure_message(sites)
   end
 
   def test_guard_reports_an_inserted_raw_capture3_call
-    path = "bin/agent-coord"
-    source = "#{read(path)}\nOpen3\n  .capture3(\n    \"ruby\", \"-v\"\n  )\n"
+    path = "bin/new-tool"
+    source = "#!/usr/bin/env ruby\n\nOpen3\n  .capture3(\n    \"ruby\", \"-v\"\n  )\n"
 
     offenders = unreviewed_sites(Capture3SourceScanner.new.scan(path, source))
 
     assert_equal 1, offenders.length
-    assert_match %r{\Abin/agent-coord:\d+: Open3\.capture3 in <top-level>\z}, format_site(offenders.first)
+    assert_match %r{\Abin/new-tool:\d+: Open3\.capture3 in <top-level>\z}, format_site(offenders.first)
+  end
+
+  def test_guard_reports_a_top_level_call_in_a_reviewed_file_without_a_sorting_error
+    path = "sim/bin/graveyard"
+    source = "#{read(path)}\nOpen3.capture3(\"ruby\", \"-v\")\n"
+    sites = Capture3SourceScanner.new.scan(path, source)
+
+    assert_equal [[path, nil], [path, "capture3_utf8"]], sorted_site_identities(sites)
+    assert_equal 1, unreviewed_sites(sites).length
+  end
+
+  def test_non_ruby_binary_file_is_skipped_before_utf8_parsing
+    invalid_utf8 = "\xFFOpen3.capture3\n".b.force_encoding(Encoding::UTF_8)
+
+    refute ruby_source?("bin/binary-tool", invalid_utf8)
   end
 
   private
@@ -78,9 +94,10 @@ class SubprocessCaptureGuardTest < Minitest::Test
   def production_capture3_sites
     production_paths.flat_map do |path|
       relative_path = path.delete_prefix("#{ROOT}/")
-      source = File.read(path, encoding: "UTF-8")
-      next [] unless ruby_source?(relative_path, source)
+      first_line = File.open(path, "rb", &:gets)
+      next [] unless ruby_source?(relative_path, first_line)
 
+      source = File.read(path, encoding: "UTF-8")
       Capture3SourceScanner.new.scan(relative_path, source)
     end
   end
@@ -89,12 +106,19 @@ class SubprocessCaptureGuardTest < Minitest::Test
     Dir.glob(File.join(ROOT, "{bin,sim/bin}", "**", "*")).select { |path| File.file?(path) }
   end
 
-  def ruby_source?(path, source)
-    path.end_with?(".rb") || source.lines.first&.match?(/\A\#!.*\bruby(?:\s|$)/)
+  def ruby_source?(path, first_line)
+    path.end_with?(".rb") || first_line&.b&.match?(RUBY_SHEBANG)
   end
 
   def unreviewed_sites(sites)
-    sites.reject { |site| REVIEWED_HELPERS[site.path] == site.method_name }
+    sites.reject do |site|
+      REVIEWED_HELPERS.key?(site.path) && REVIEWED_HELPERS.fetch(site.path) == site.method_name
+    end
+  end
+
+  def sorted_site_identities(sites)
+    identities = sites.map { |site| [site.path, site.method_name] }
+    identities.sort_by { |path, method_name| [path, method_name.to_s] }
   end
 
   def failure_message(sites)
