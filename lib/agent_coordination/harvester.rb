@@ -6,6 +6,7 @@ require "json"
 require "optparse"
 require "time"
 
+require_relative "argv_encoding"
 require_relative "ledger"
 require_relative "host_adapters"
 require_relative "pricing"
@@ -1200,23 +1201,42 @@ module AgentCoord
     end
 
     class CLI
-      def self.run(argv, stdout: $stdout, stderr: $stderr) # rubocop:disable Metrics/AbcSize
+      class OptionRegistry
+        attr_reader :value_options, :path_options
+
+        def initialize
+          @parser = OptionParser.new
+          @value_options = []
+          @path_options = []
+        end
+
+        def on(*declarations, &)
+          @parser.on(*declarations, &)
+          long_declaration = declarations.find do |declaration|
+            declaration.is_a?(String) && declaration.start_with?("--")
+          end
+          return unless long_declaration
+
+          option_name, argument = long_declaration.split(/\s+/, 2)
+          return unless argument
+
+          @value_options << option_name
+          @path_options << option_name if argument.start_with?("PATH")
+        end
+
+        def parse!(argv)
+          @parser.parse!(argv)
+        end
+      end
+
+      def self.run(argv, stdout: $stdout, stderr: $stderr)
+        argv = normalized_argv(argv)
         command = argv.shift
         return run_scorecard(argv, stdout:) if command == "scorecard"
         raise Error, "usage: agent-coord-harvest harvest|scorecard [options]" unless command == "harvest"
 
         options = {}
-        OptionParser.new do |parser|
-          parser.on("--ledger PATH") { |value| options[:ledger] = value }
-          parser.on("--coordination-json PATH") { |value| options[:coordination_json] = value }
-          parser.on("--github-json PATH") { |value| options[:github_json] = value }
-          parser.on("--codex-root PATH") { |value| options[:codex_root] = value }
-          parser.on("--claude-root PATH") { |value| options[:claude_root] = value }
-          parser.on("--pricing PATH") { |value| options[:pricing] = value }
-          parser.on("--batch-id ID") { |value| options[:batch_id] = value }
-          parser.on("--from DATE") { |value| options[:from] = value }
-          parser.on("--to DATE") { |value| options[:to] = value }
-        end.parse!(argv)
+        option_parser(command, options).parse!(argv)
         raise Error, "missing required option" if options.values_at(:ledger, :coordination_json).any?(&:nil?)
         raise Error, "unexpected argument" unless argv.empty?
 
@@ -1246,12 +1266,68 @@ module AgentCoord
         2
       end
 
+      def self.normalized_argv(argv)
+        raw = argv.map { |argument| argument.to_s.b }
+        registry = option_parser(raw.first.to_s, {})
+        ArgvEncoding.normalize_argv(argv, raw_indexes: path_argument_indexes(raw, registry))
+      rescue ArgvEncoding::InvalidArgumentError => e
+        raise Error, e.message
+      end
+
+      def self.path_argument_indexes(raw, registry)
+        indexes = []
+        awaiting = nil
+        raw.each_with_index do |argument, index|
+          if awaiting
+            indexes << index if registry.path_options.include?(awaiting)
+            awaiting = nil
+            next
+          end
+
+          option_name, inline_value = argument.split("=", 2)
+          option = resolve_value_option(option_name, registry.value_options)
+          next unless option
+
+          if inline_value
+            indexes << index if registry.path_options.include?(option)
+          else
+            awaiting = option
+          end
+        end
+        indexes
+      end
+
+      def self.resolve_value_option(option_name, value_options)
+        return unless option_name&.start_with?("--")
+        return option_name if value_options.include?(option_name)
+
+        matches = value_options.select { |candidate| candidate.start_with?(option_name) }
+        matches.one? ? matches.first : nil
+      end
+
+      def self.option_parser(command, options)
+        registry = OptionRegistry.new
+        case command
+        when "harvest"
+          registry.on("--ledger PATH") { |value| options[:ledger] = value }
+          registry.on("--coordination-json PATH") { |value| options[:coordination_json] = value }
+          registry.on("--github-json PATH") { |value| options[:github_json] = value }
+          registry.on("--codex-root PATH") { |value| options[:codex_root] = value }
+          registry.on("--claude-root PATH") { |value| options[:claude_root] = value }
+          registry.on("--pricing PATH") { |value| options[:pricing] = value }
+          registry.on("--batch-id ID") { |value| options[:batch_id] = value }
+          registry.on("--from DATE") { |value| options[:from] = value }
+          registry.on("--to DATE") { |value| options[:to] = value }
+        when "scorecard"
+          registry.on("--ledger PATH") { |value| options[:ledger] = value }
+          registry.on("--batch-id ID") { |value| options[:batch_id] = value }
+        end
+        registry
+      end
+
       def self.run_scorecard(argv, stdout:)
         options = {}
-        OptionParser.new do |parser|
-          parser.on("--ledger PATH") { |value| options[:ledger] = value }
-          parser.on("--batch-id ID") { |value| options[:batch_id] = value }
-        end.parse!(argv)
+        option_parser("scorecard", options).parse!(argv)
         raise Error, "missing required option" if options.values_at(:ledger, :batch_id).any?(&:nil?)
         raise Error, "unexpected argument" unless argv.empty?
 
