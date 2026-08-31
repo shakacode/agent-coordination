@@ -178,6 +178,22 @@ class TelemetryHarvesterTest < Minitest::Test # rubocop:disable Metrics/ClassLen
     end
   end
 
+  def test_ambiguous_path_option_precedes_invalid_path_encoding
+    Dir.mktmpdir("agent-coordination-ambiguous-path-argv") do |dir|
+      stdout, stderr, status = Open3.capture3(
+        { "LC_ALL" => "C", "LANG" => "C" },
+        CLI, "harvest", "--ledger", File.join(dir, "telemetry.sqlite3"),
+        "--co", "/tmp/coordination-\xE9.json".b, "--batch-id", "batch-fixture"
+      )
+
+      refute status.success?
+      assert_empty stdout
+      assert_includes stderr, "agent-coord-harvest: ambiguous option: --co"
+      refute_includes stderr, "command-line argument must be valid UTF-8"
+      refute_includes stderr, "lib/agent_coordination/harvester.rb:"
+    end
+  end
+
   def test_harvester_cli_transcodes_declared_batch_encoding_and_retags_binary
     Dir.mktmpdir("agent-coordination-harvester-argv-encodings") do |dir|
       batch_id = "batch-café"
