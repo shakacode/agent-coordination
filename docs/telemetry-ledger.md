@@ -132,9 +132,9 @@ Tab, LF, and CR are trimmed at the ends (layout noise) but stripped and
 digest-marked in the interior (content corruption).
 
 The trim class and the control class are single definitions across the ingest
-boundary, not per-column copies. `AgentCoord::HostAdapters` owns them because the
-harvester loads that parser first; the harvester aliases the same objects for
-its two sanitizers. `bounded_signal` strips and digest-marks free-form columns,
+boundary, not per-column copies. `AgentCoord::Telemetry::HostAdapters` owns them
+because the harvester loads that parser first; the harvester aliases the same
+objects for its two sanitizers. `bounded_signal` strips and digest-marks free-form columns,
 while both `known` implementations reject identity and enum columns. They may
 disagree about what to do with a control character; they cannot disagree about
 what one is.

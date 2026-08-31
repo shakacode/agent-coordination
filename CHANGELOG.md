@@ -490,11 +490,12 @@ when releases begin.
 - Telemetry ingest no longer accepts a control-bearing value into the identity
   and enum columns fed by the coordination and GitHub documents, and no longer
   promotes one past a closed allowlist there (issue #171, the residual deferred from
-  #155). Host-session ingest is a separate path and is deliberately NOT covered:
-  `HostAdapters#known` still trims with `String#strip` and applies no control
-  check, so `high<NUL>` is still promoted to the allowlisted `high` in
-  `host_sessions` and flows into `usage_calls`. That is pre-existing, unchanged
-  here, and tracked in issue #200. `Harvester#known` -- the guard on `batch_id`,
+  #155). Host-session ingest now rejects C0, DEL, and C1 control characters before
+  allowlist checks too (issue #200), while still trimming surrounding space, tab,
+  LF, and CR. Missing metadata continues to inherit, but a present rejected value
+  clears stale session metadata before the usage row is built. `HostAdapters` owns
+  the shared control and trim definitions, and `Harvester` aliases them so the two
+  ingest paths cannot drift again. `Harvester#known` -- the guard on `batch_id`,
   `repo`, `target`, `lane_id`, `owner_ref`, `session_ref`, `status`, `terminal`,
   `host_family`, the PR and review-finding fields, `model` and `effort` on review
   receipts (the same two on a host session go through `HostAdapters`, not this

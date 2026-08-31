@@ -21,6 +21,7 @@ module AgentCoord
         ].freeze
         EFFORTS = %w[low medium high xhigh max ultra].freeze
         PRICING_PROFILES = %w[standard].freeze
+        MISSING = Object.new.freeze
 
         def initialize(host_family)
           @host_family = host_family
@@ -53,17 +54,20 @@ module AgentCoord
           when "session_meta"
             @current_session_ref = session_ref(payload["id"] || "#{source_ref}:#{ordinal}")
             session = fetch_session(@current_session_ref)
-            merge_known!(session, cwd_fields(payload["cwd"]))
-            merge_known!(session, "pricing_profile" => pricing_profile(payload["pricing_profile"]))
+            merge_known!(session, cwd_fields(present_value(payload, "cwd")))
+            merge_known!(
+              session,
+              "pricing_profile" => pricing_profile(present_value(payload, "pricing_profile"))
+            )
           when "turn_context"
             return unless @current_session_ref
 
             session = fetch_session(@current_session_ref)
             merge_known!(
               session,
-              "model" => model(payload["model"]),
-              "effort" => effort(payload["effort"] || payload["reasoning_effort"]),
-              "pricing_profile" => pricing_profile(payload["pricing_profile"])
+              "model" => model(present_value(payload, "model")),
+              "effort" => effort(present_value(payload, "effort", "reasoning_effort")),
+              "pricing_profile" => pricing_profile(present_value(payload, "pricing_profile"))
             )
           when "event_msg"
             return unless @current_session_ref && payload["type"] == "token_count"
@@ -89,13 +93,13 @@ module AgentCoord
 
           reference = session_ref(record["sessionId"] || "claude-record-#{ordinal}")
           session = fetch_session(reference)
-          merge_known!(session, cwd_fields(record["cwd"]))
+          merge_known!(session, cwd_fields(present_value(record, "cwd")))
+          pricing_value = present_value(record, "pricing_profile")
+          pricing_value = present_value(message.fetch("usage"), "pricing_profile") if pricing_value.equal?(MISSING)
           record_metadata = {
-            "model" => model(message["model"]),
-            "effort" => effort(message["effort"]),
-            "pricing_profile" => pricing_profile(
-              record["pricing_profile"] || message.dig("usage", "pricing_profile")
-            )
+            "model" => model(present_value(message, "model")),
+            "effort" => effort(present_value(message, "effort")),
+            "pricing_profile" => pricing_profile(pricing_value)
           }
           merge_known!(session, record_metadata)
           session.fetch("usage") << usage_row(
@@ -144,6 +148,8 @@ module AgentCoord
         end
 
         def cwd_fields(value)
+          return {} if value.equal?(MISSING)
+
           value = known(value)
           return { "cwd_basename" => nil, "cwd_sha256" => nil } unless value
 
@@ -155,7 +161,7 @@ module AgentCoord
         end
 
         def merge_known!(session, values)
-          values.each { |key, value| session[key] = value unless value.nil? }
+          values.each { |key, value| session[key] = value unless value.equal?(MISSING) }
         end
 
         def session_ref(value)
@@ -163,6 +169,8 @@ module AgentCoord
         end
 
         def known(value)
+          return MISSING if value.equal?(MISSING)
+
           string = value.to_s.gsub(INGEST_SURROUNDING_WHITESPACE, "")
           return if string.empty? || string.casecmp?("UNKNOWN")
           return if string.match?(INGEST_CONTROL_CHARACTERS)
@@ -189,7 +197,14 @@ module AgentCoord
 
         def enum(value, allowed)
           string = known(value)
+          return MISSING if string.equal?(MISSING)
+
           string if allowed.include?(string)
+        end
+
+        def present_value(record, *keys)
+          key = keys.find { |candidate| record.key?(candidate) }
+          key ? record[key] : MISSING
         end
       end
     end
