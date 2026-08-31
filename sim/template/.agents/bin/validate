@@ -35,7 +35,10 @@ if [ -n "$base_ref" ]; then
     abort "Changed simulation paths must be valid UTF-8." unless changed.valid_encoding?
 
     paths = changed.split("\0")
-    exec File.join(root, ".agents/bin/test") if paths.empty?
+    if paths.empty?
+      test_runner = File.join(root, ".agents/bin/test")
+      exec [test_runner, test_runner]
+    end
 
     task_path = %r{\Alib/task_[[:alnum:]_]+\.rb\z}
     invalid = paths.reject { |path| path.match?(task_path) }

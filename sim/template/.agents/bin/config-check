@@ -33,7 +33,7 @@ allowed_paths = %w[
 task_path = %r{\Alib/task_[[:alnum:]_]+\.rb\z}
 # Regenerate after a reviewed validator update with:
 # ruby -rdigest -e 'puts Digest::SHA256.file(".agents/bin/validate").hexdigest'
-expected_validator_sha256 = "35287dba71b6030f1cd0825db1c7ce11c0a7a7f4d36f4c2db28a4bfc5a53f3cc"
+expected_validator_sha256 = "d4ebfc2137dd4811f90159a6053db530f4f0fa328d48ac2af883d6e9ca025e2d"
 
 base_commit, base_status = Open3.capture2("git", "-C", root, "rev-parse", "--verify", "#{base_ref}^{commit}")
 abort "Could not resolve config-check base ref." unless base_status.success?

@@ -343,6 +343,21 @@ class SimulationTemplateTest < Minitest::Test
     assert_equal "Changed simulation paths must be valid UTF-8.\n", err
   end
 
+  def test_validate_runs_no_change_suite_when_repo_path_contains_spaces
+    test_runner = File.join(@repo, ".agents/bin/test")
+    File.write(test_runner, "#!/usr/bin/env bash\nexit 0\n")
+    git("add", ".agents/bin/test")
+    git("commit", "-qm", "make full suite deterministic")
+
+    spaced_repo = File.join(@dir, "repo with spaces")
+    FileUtils.mv(@repo, spaced_repo)
+    @repo = spaced_repo
+
+    _out, err, status = validate
+
+    assert status.success?, err
+  end
+
   def test_config_check_rejects_invalid_filename_bytes_without_a_backtrace
     env = fake_git_env("lib/task_\xFF.rb\0".b)
     env.merge!("LC_ALL" => "C", "LANG" => "C")
@@ -527,9 +542,10 @@ class SimulationTemplateTest < Minitest::Test
   end
 
   def validate(base_ref = "HEAD", env = {})
+    validator = File.join(@repo, ".agents/bin/validate")
     Open3.capture3(
       env.merge("AGENT_SIM_BASE_REF" => base_ref),
-      File.join(@repo, ".agents/bin/validate"),
+      [validator, validator],
       chdir: @repo
     )
   end
