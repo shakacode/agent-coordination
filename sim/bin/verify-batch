@@ -41,7 +41,7 @@ end
 
 sim_root = File.expand_path("..", __dir__)
 cli = File.join(sim_root, "..", "bin", "agent-coord")
-manifest = JSON.parse(File.read(File.join(sim_root, "issues.json"))).fetch("issues")
+manifest = JSON.parse(File.read(File.join(sim_root, "issues.json"), encoding: "UTF-8")).fetch("issues")
 
 stdout, stderr, status = capture3_utf8("ruby", cli, "status", "--json")
 abort "agent-coord status failed: #{stderr}" unless status.success?
