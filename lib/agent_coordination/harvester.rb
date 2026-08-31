@@ -317,15 +317,15 @@ module AgentCoord
 
       def reconciliation_ids(source_artifact_id, date_range:, named_batch_id:)
         return reconcile_date_range(source_artifact_id, date_range) if date_range
-        return reconcile_named_batch(source_artifact_id, named_batch_id) if named_batch_id
+        return reconcile_named_batch(named_batch_id) if named_batch_id
 
         []
       end
 
-      def reconcile_named_batch(source_artifact_id, batch_id)
+      def reconcile_named_batch(batch_id)
         @ledger.rows(
-          "SELECT batch_id FROM batches WHERE source_artifact_id = ? AND batch_id = ?",
-          [source_artifact_id, batch_id]
+          "SELECT batch_id FROM batches WHERE batch_id = ?",
+          [batch_id]
         ).map { |row| row.fetch("batch_id") }
       end
 

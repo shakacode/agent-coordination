@@ -369,7 +369,7 @@ class TelemetryHarvesterTest < Minitest::Test # rubocop:disable Metrics/ClassLen
     end
   end
 
-  def test_named_harvest_purges_preexisting_batch_whose_raw_id_is_rejected # rubocop:disable Metrics/MethodLength
+  def test_named_harvest_purges_preexisting_batch_whose_raw_id_is_rejected # rubocop:disable Metrics/AbcSize, Metrics/MethodLength
     Dir.mktmpdir("agent-coordination-ledger-named-rejected-batch") do |dir| # rubocop:disable Metrics/BlockLength
       source_path = File.join(dir, "coordination.json")
       ledger_path = File.join(dir, "telemetry.sqlite3")
@@ -419,18 +419,20 @@ class TelemetryHarvesterTest < Minitest::Test # rubocop:disable Metrics/ClassLen
       legacy_batch["batch_id"] = rejected_id
       source.fetch("claims").first["batch_id"] = rejected_id
       source.fetch("events").first["batch_id"] = rejected_id
-      File.write(source_path, JSON.generate(source))
+      named_source_path = File.join(dir, "named-coordination.json")
+      File.write(named_source_path, JSON.generate(source))
 
       2.times do
         stdout, stderr, status = Open3.capture3(
           CLI, "harvest", "--ledger", ledger_path,
-          "--coordination-json", source_path, "--batch-id", rejected_id
+          "--coordination-json", named_source_path, "--batch-id", rejected_id
         )
         assert status.success?, "named harvest failed:\n#{stdout}\n#{stderr}"
         assert_equal "harvested batches=0 targets=0 usage=0\n", stdout
         assert_empty stderr
       end
 
+      assert_equal ["2"], sqlite_query(ledger_path, "SELECT COUNT(*) FROM source_artifacts")
       %w[batches lanes target_observations target_units claims events].each do |table|
         assert_equal ["batch-neighbor"], sqlite_query(
           ledger_path, "SELECT DISTINCT batch_id FROM #{table} ORDER BY batch_id"
