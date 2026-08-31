@@ -1857,9 +1857,15 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     assert_equal 0, result.status.exitstatus, result.stderr
     assert_includes result.stdout, "installed agent-coord"
     assert_includes result.stdout, "removed legacy agent_coord"
-    assert File.exist?(File.join(install_dir, "agent-coord"))
+    installed_command = File.join(install_dir, "agent-coord")
+    assert File.symlink?(installed_command)
     refute File.exist?(legacy_alias)
     refute File.symlink?(legacy_alias)
+
+    version = run_command(installed_command, "version", "--json")
+    assert_equal 0, version.status.exitstatus, version.stderr
+    assert_equal "0.1.0", JSON.parse(version.stdout).fetch("version")
+    assert_empty version.stderr
   ensure
     FileUtils.remove_entry(install_dir) if install_dir && Dir.exist?(install_dir)
   end
