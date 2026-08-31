@@ -215,7 +215,7 @@ module AgentCoord
         end
         raise Error, "named batch was not found" unless batches.one?
 
-        harvest_batches(source, batches)
+        harvest_batches(source, batches, named_batch_id: batch_id)
       end
 
       def harvest_range(from_date, to_date)
@@ -234,7 +234,7 @@ module AgentCoord
 
       private
 
-      def harvest_batches(source, batches, date_range: nil)
+      def harvest_batches(source, batches, date_range: nil, named_batch_id: nil)
         selected_ids = batches.filter_map { |batch| known(batch["batch_id"]) }
         observations = []
         github = @github_path ? read_json(@github_path, "github") : nil
@@ -243,7 +243,7 @@ module AgentCoord
           @pricing.persist(@ledger)
           coordination_artifact_id = upsert_artifact(source)
           replace_invalid_batch_errors(source.fetch("document"), coordination_artifact_id)
-          reconciled_ids = date_range ? reconcile_date_range(coordination_artifact_id, date_range) : []
+          reconciled_ids = reconciliation_ids(coordination_artifact_id, date_range:, named_batch_id:)
           refreshed_ids = (reconciled_ids + selected_ids).uniq
           preserved_pr_links = github ? [] : snapshot_target_pr_links(refreshed_ids)
           delete_coordination_rows(refreshed_ids)
@@ -312,6 +312,20 @@ module AgentCoord
             WHERE source_artifact_id = ?
               AND date(registered_at) BETWEEN ? AND ?
           SQL
+        ).map { |row| row.fetch("batch_id") }
+      end
+
+      def reconciliation_ids(source_artifact_id, date_range:, named_batch_id:)
+        return reconcile_date_range(source_artifact_id, date_range) if date_range
+        return reconcile_named_batch(source_artifact_id, named_batch_id) if named_batch_id
+
+        []
+      end
+
+      def reconcile_named_batch(source_artifact_id, batch_id)
+        @ledger.rows(
+          "SELECT batch_id FROM batches WHERE source_artifact_id = ? AND batch_id = ?",
+          [source_artifact_id, batch_id]
         ).map { |row| row.fetch("batch_id") }
       end
 
