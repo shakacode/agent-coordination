@@ -369,6 +369,81 @@ class TelemetryHarvesterTest < Minitest::Test # rubocop:disable Metrics/ClassLen
     end
   end
 
+  def test_named_harvest_purges_preexisting_batch_whose_raw_id_is_rejected # rubocop:disable Metrics/AbcSize, Metrics/MethodLength
+    Dir.mktmpdir("agent-coordination-ledger-named-rejected-batch") do |dir| # rubocop:disable Metrics/BlockLength
+      source_path = File.join(dir, "coordination.json")
+      ledger_path = File.join(dir, "telemetry.sqlite3")
+      source = coordination_fixture
+      legacy_batch = source.fetch("batches").first
+      legacy_batch["batch_id"] = "batch-legacy"
+      neighbor_batch = Marshal.load(Marshal.dump(legacy_batch))
+      neighbor_batch["batch_id"] = "batch-neighbor"
+      neighbor_batch.fetch("lanes").first["targets"] = ["79"]
+      source.fetch("batches") << neighbor_batch
+      {
+        "batch-legacy" => "78",
+        "batch-neighbor" => "79"
+      }.each do |batch_id, target|
+        source.fetch("claims") << {
+          "batch_id" => batch_id, "repo" => "shakacode/agent-coordination",
+          "target" => target, "status" => "released", "terminal" => "done"
+        }
+        source.fetch("events") << {
+          "id" => "event-#{batch_id}", "batch_id" => batch_id,
+          "repo" => "shakacode/agent-coordination", "target" => target,
+          "type" => "lane_closed", "at" => "2026-07-18T01:30:00Z"
+        }
+      end
+      File.write(source_path, JSON.generate(source))
+
+      stdout, stderr, status = Open3.capture3(
+        CLI, "harvest", "--ledger", ledger_path,
+        "--coordination-json", source_path,
+        "--from", "2026-07-18", "--to", "2026-07-18"
+      )
+      assert status.success?, "initial harvest failed:\n#{stdout}\n#{stderr}"
+      assert_equal "harvested batches=2 targets=2 usage=0\n", stdout
+      assert_empty stderr
+
+      rejected_id = "batch\u009Blegacy"
+      legacy_ledger = AgentCoord::Telemetry::Ledger.new(ledger_path)
+      legacy_ledger.execute("PRAGMA foreign_keys = OFF")
+      %w[lanes target_observations target_units claims events batches].each do |table|
+        legacy_ledger.execute(
+          "UPDATE #{table} SET batch_id = ? WHERE batch_id = ?",
+          [rejected_id, "batch-legacy"]
+        )
+      end
+      legacy_ledger.execute("PRAGMA foreign_keys = ON")
+
+      legacy_batch["batch_id"] = rejected_id
+      source.fetch("claims").first["batch_id"] = rejected_id
+      source.fetch("events").first["batch_id"] = rejected_id
+      named_source_path = File.join(dir, "named-coordination.json")
+      File.write(named_source_path, JSON.generate(source))
+
+      2.times do
+        stdout, stderr, status = Open3.capture3(
+          CLI, "harvest", "--ledger", ledger_path,
+          "--coordination-json", named_source_path, "--batch-id", rejected_id
+        )
+        assert status.success?, "named harvest failed:\n#{stdout}\n#{stderr}"
+        assert_equal "harvested batches=0 targets=0 usage=0\n", stdout
+        assert_empty stderr
+      end
+
+      assert_equal ["2"], sqlite_query(ledger_path, "SELECT COUNT(*) FROM source_artifacts")
+      %w[batches lanes target_observations target_units claims events].each do |table|
+        assert_equal ["batch-neighbor"], sqlite_query(
+          ledger_path, "SELECT DISTINCT batch_id FROM #{table} ORDER BY batch_id"
+        ), table
+      end
+      assert_equal ["1|invalid_record"], sqlite_query(
+        ledger_path, "SELECT record_ordinal, reason FROM ingestion_errors"
+      )
+    end
+  end
+
   def test_rejected_batch_records_an_idempotent_ingestion_error_and_refresh_clears_it # rubocop:disable Metrics/AbcSize, Metrics/MethodLength
     Dir.mktmpdir("agent-coordination-ledger-invalid-batch") do |dir| # rubocop:disable Metrics/BlockLength
       source_path = File.join(dir, "coordination.json")
