@@ -1201,6 +1201,8 @@ module AgentCoord
     end
 
     class CLI
+      AMBIGUOUS_VALUE_OPTION = Object.new.freeze
+
       class OptionRegistry
         attr_reader :value_options, :path_options
 
@@ -1285,7 +1287,7 @@ module AgentCoord
         awaiting = nil
         raw.each_with_index do |argument, index|
           if awaiting
-            indexes << index if registry.path_options.include?(awaiting)
+            indexes << index if awaiting.equal?(AMBIGUOUS_VALUE_OPTION) || registry.path_options.include?(awaiting)
             awaiting = nil
             next
           end
@@ -1295,7 +1297,7 @@ module AgentCoord
           next unless option
 
           if inline_value
-            indexes << index if registry.path_options.include?(option)
+            indexes << index if option.equal?(AMBIGUOUS_VALUE_OPTION) || registry.path_options.include?(option)
           else
             awaiting = option
           end
@@ -1305,10 +1307,13 @@ module AgentCoord
 
       def self.resolve_value_option(option_name, value_options)
         return unless option_name&.start_with?("--")
+        return if option_name == "--"
         return option_name if value_options.include?(option_name)
 
         matches = value_options.select { |candidate| candidate.start_with?(option_name) }
-        matches.one? ? matches.first : nil
+        return matches.first if matches.one?
+
+        AMBIGUOUS_VALUE_OPTION if matches.length > 1
       end
 
       def self.option_parser(command, options)
