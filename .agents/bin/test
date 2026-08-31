@@ -3,7 +3,7 @@
 set -euo pipefail
 cd "$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
 
-unset AGENT_COORD_API_URL AGENT_COORD_API_TOKEN AGENT_COORD_STATE_ROOT
+unset AGENT_COORD_API_URL AGENT_COORD_API_TOKEN AGENT_COORD_BACKEND AGENT_COORD_STATE_ROOT AGENT_COORD_STATUS_STATE_ROOT
 test_tmp_base="${TMPDIR:-/tmp}"
 test_state_root="$(mktemp -d "${test_tmp_base%/}/agent-coordination-test.XXXXXX")"
 trap 'rm -rf -- "$test_state_root"' EXIT
