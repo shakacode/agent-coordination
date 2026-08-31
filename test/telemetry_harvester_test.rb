@@ -369,7 +369,7 @@ class TelemetryHarvesterTest < Minitest::Test # rubocop:disable Metrics/ClassLen
     end
   end
 
-  def test_rejected_batch_records_an_idempotent_ingestion_error_and_refresh_clears_it # rubocop:disable Metrics/MethodLength
+  def test_rejected_batch_records_an_idempotent_ingestion_error_and_refresh_clears_it # rubocop:disable Metrics/AbcSize, Metrics/MethodLength
     Dir.mktmpdir("agent-coordination-ledger-invalid-batch") do |dir| # rubocop:disable Metrics/BlockLength
       source_path = File.join(dir, "coordination.json")
       ledger_path = File.join(dir, "telemetry.sqlite3")
@@ -413,6 +413,16 @@ class TelemetryHarvesterTest < Minitest::Test # rubocop:disable Metrics/ClassLen
       assert_equal 1, errors.length
       assert_match(/\Acoordination:[0-9a-f]{16}\|2\|invalid_record\z/, errors.first)
 
+      source.fetch("batches").delete(rejected_batch)
+      File.write(source_path, JSON.generate(source))
+      _stdout, stderr, status = Open3.capture3(
+        CLI, "harvest", "--ledger", ledger_path,
+        "--coordination-json", source_path, "--batch-id", "batch-fixture"
+      )
+      assert status.success?, stderr
+      assert_empty sqlite_query(ledger_path, "SELECT id FROM ingestion_errors")
+
+      source.fetch("batches") << rejected_batch
       rejected_batch["batch_id"] = "batch-refreshed"
       source.fetch("claims").first["batch_id"] = "batch-refreshed"
       source.fetch("events").first["batch_id"] = "batch-refreshed"
@@ -424,7 +434,7 @@ class TelemetryHarvesterTest < Minitest::Test # rubocop:disable Metrics/ClassLen
       assert status.success?, "harvest failed:\n#{stdout}\n#{stderr}"
       assert_equal "harvested batches=1 targets=1 usage=0\n", stdout
       assert_empty stderr
-      assert_equal ["1|1|1|1|1|0"], sqlite_query(
+      assert_equal ["2|2|2|1|1|0"], sqlite_query(
         ledger_path,
         "SELECT (SELECT COUNT(*) FROM batches), (SELECT COUNT(*) FROM lanes), " \
         "(SELECT COUNT(*) FROM target_units), (SELECT COUNT(*) FROM claims), " \

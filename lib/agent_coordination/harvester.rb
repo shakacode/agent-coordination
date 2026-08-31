@@ -210,12 +210,12 @@ module AgentCoord
 
       def harvest_batch(batch_id)
         source = read_json(@source_path, "coordination")
-        batch_records = Array(source.fetch("document")["batches"]).each_with_index.filter_map do |batch, index|
-          [batch, index + 1] if batch.is_a?(Hash) && batch["batch_id"] == batch_id
+        batches = Array(source.fetch("document")["batches"]).select do |batch|
+          batch.is_a?(Hash) && batch["batch_id"] == batch_id
         end
-        raise Error, "named batch was not found" unless batch_records.one?
+        raise Error, "named batch was not found" unless batches.one?
 
-        harvest_batches(source, batch_records)
+        harvest_batches(source, batches)
       end
 
       def harvest_range(from_date, to_date)
@@ -224,33 +224,31 @@ module AgentCoord
         raise Error, "date range is reversed" if from > to
 
         source = read_json(@source_path, "coordination")
-        batch_records = Array(source.fetch("document")["batches"]).each_with_index.filter_map do |batch, index|
-          next unless batch.is_a?(Hash) && timestamp_date(batch["registered_at"])&.between?(from, to)
-
-          [batch, index + 1]
+        batches = Array(source.fetch("document")["batches"]).select do |batch|
+          batch.is_a?(Hash) && timestamp_date(batch["registered_at"])&.between?(from, to)
         end
-        harvest_batches(source, batch_records, date_range: [from.iso8601, to.iso8601])
+        harvest_batches(source, batches, date_range: [from.iso8601, to.iso8601])
       rescue Date::Error
         raise Error, "date range must use YYYY-MM-DD"
       end
 
       private
 
-      def harvest_batches(source, batch_records, date_range: nil)
-        selected_ids = batch_records.filter_map { |batch, _ordinal| known(batch["batch_id"]) }
+      def harvest_batches(source, batches, date_range: nil)
+        selected_ids = batches.filter_map { |batch| known(batch["batch_id"]) }
         observations = []
         github = @github_path ? read_json(@github_path, "github") : nil
         usage_count = 0
         @ledger.transaction do
           @pricing.persist(@ledger)
           coordination_artifact_id = upsert_artifact(source)
-          clear_invalid_record_errors(coordination_artifact_id, batch_records.map(&:last))
+          replace_invalid_batch_errors(source.fetch("document"), coordination_artifact_id)
           reconciled_ids = date_range ? reconcile_date_range(coordination_artifact_id, date_range) : []
           refreshed_ids = (reconciled_ids + selected_ids).uniq
           preserved_pr_links = github ? [] : snapshot_target_pr_links(refreshed_ids)
           delete_coordination_rows(refreshed_ids)
           refreshed_ids.each { |batch_id| @ledger.delete_batch(batch_id) }
-          observations.concat(insert_coordination_batches(batch_records, coordination_artifact_id))
+          observations.concat(insert_coordination_batches(batches, coordination_artifact_id))
           insert_coordination_rows(source.fetch("document"), coordination_artifact_id, selected_ids)
           create_target_units(observations)
           restore_target_pr_links(preserved_pr_links)
@@ -271,37 +269,37 @@ module AgentCoord
         }
       end
 
-      def insert_coordination_batches(batch_records, source_artifact_id)
-        batch_records.flat_map do |batch, record_ordinal|
+      def insert_coordination_batches(batches, source_artifact_id)
+        batches.flat_map do |batch|
           next insert_batch(batch, source_artifact_id) if known(batch["batch_id"])
 
-          record_invalid_record(source_artifact_id, record_ordinal)
           []
         end
       end
 
-      def clear_invalid_record_errors(source_artifact_id, record_ordinals = nil)
-        unless record_ordinals
-          @ledger.execute(
-            "DELETE FROM ingestion_errors WHERE source_artifact_id = ? AND reason = 'invalid_record'",
-            [source_artifact_id]
-          )
-          return
-        end
+      def replace_invalid_batch_errors(document, source_artifact_id)
+        clear_ingestion_errors(source_artifact_id, reason: "invalid_record")
+        Array(document["batches"]).each_with_index do |batch, index|
+          next unless batch.is_a?(Hash) && !known(batch["batch_id"])
 
-        record_ordinals.each do |record_ordinal|
-          @ledger.execute(
-            "DELETE FROM ingestion_errors " \
-            "WHERE source_artifact_id = ? AND record_ordinal = ? AND reason = 'invalid_record'",
-            [source_artifact_id, record_ordinal]
-          )
+          record_ingestion_error(source_artifact_id, index + 1, "invalid_record")
         end
       end
 
-      def record_invalid_record(source_artifact_id, record_ordinal)
+      def clear_ingestion_errors(source_artifact_id, reason: nil)
+        sql = "DELETE FROM ingestion_errors WHERE source_artifact_id = ?"
+        parameters = [source_artifact_id]
+        if reason
+          sql += " AND reason = ?"
+          parameters << reason
+        end
+        @ledger.execute(sql, parameters)
+      end
+
+      def record_ingestion_error(source_artifact_id, record_ordinal, reason)
         @ledger.execute(
-          "INSERT INTO ingestion_errors (source_artifact_id, record_ordinal, reason) VALUES (?, ?, 'invalid_record')",
-          [source_artifact_id, record_ordinal]
+          "INSERT INTO ingestion_errors (source_artifact_id, record_ordinal, reason) VALUES (?, ?, ?)",
+          [source_artifact_id, record_ordinal, reason]
         )
       end
 
@@ -387,16 +385,13 @@ module AgentCoord
         delete_stale_host_artifacts(host_family, sources.map { |source| source.fetch("source_key") })
         sources.sum do |source|
           artifact_id = upsert_artifact(source)
-          @ledger.execute("DELETE FROM ingestion_errors WHERE source_artifact_id = ?", [artifact_id])
+          clear_ingestion_errors(artifact_id)
           @ledger.execute("DELETE FROM host_sessions WHERE source_artifact_id = ?", [artifact_id])
           parsed = HostAdapters::Parser.new(host_family).parse(
             source.fetch("bytes"), source.fetch("source_ref")
           )
           parsed.fetch("errors").each do |error|
-            @ledger.execute(
-              "INSERT INTO ingestion_errors (source_artifact_id, record_ordinal, reason) VALUES (?, ?, ?)",
-              [artifact_id, error.fetch("record_ordinal"), error.fetch("reason")]
-            )
+            record_ingestion_error(artifact_id, error.fetch("record_ordinal"), error.fetch("reason"))
           end
           parsed.fetch("sessions").sum do |session|
             insert_host_session(session, artifact_id)
@@ -769,7 +764,7 @@ module AgentCoord
 
       def ingest_github(source)
         source_artifact_id = upsert_artifact(source)
-        clear_invalid_record_errors(source_artifact_id)
+        clear_ingestion_errors(source_artifact_id, reason: "invalid_record")
         @ledger.delete_github_prs(source_artifact_id)
         Array(source.fetch("document")["pull_requests"]).each_with_index do |pull_request, index|
           insert_pull_request(pull_request, index, source_artifact_id) if pull_request.is_a?(Hash)
@@ -782,7 +777,7 @@ module AgentCoord
         state = enum(pull_request["state"], PR_STATES)
         url = github_url(pull_request["url"])
         unless pr_repo && number && state && url
-          record_invalid_record(source_artifact_id, index + 1)
+          record_ingestion_error(source_artifact_id, index + 1, "invalid_record")
           return
         end
 
