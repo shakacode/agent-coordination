@@ -330,6 +330,13 @@ when releases begin.
 
 ### Fixed
 
+- `agent-coord doctor --stack-json` now preserves its parseable-report contract
+  when canonical user-configuration loading fails before command dispatch. It
+  emits a structured failed component report with the safe configuration
+  diagnostic and exit `2`, while invalid usage still emits no JSON and exits
+  `64`; ordinary commands keep the same fail-closed configuration behavior
+  (issue #232).
+
 - CLI-sourced strings are now normalized to UTF-8 at the argument boundary, so
   writing coordination state no longer depends on the ambient locale (issue
   #169). Ruby tags `ARGV` with the locale encoding the same way it tags the

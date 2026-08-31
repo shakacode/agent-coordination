@@ -456,9 +456,12 @@ environment-versus-token machine mismatch and is skipped when unverifiable).
 Exit codes are `0` for healthy, `1` for degraded, `2` for failed, and
 `64` for invalid usage. Usage errors emit no JSON. `--stack-json` is strictly
 read-only: it never creates a missing explicit local state root, and reports
-that missing root as a failed component rather than falling back. Omit `--deep`
-only when a shallow report with skipped resource evidence is intentional.
-Legacy text and `doctor --json` output remain unchanged.
+that missing root as a failed component rather than falling back. If the saved
+user configuration cannot be loaded, it likewise emits a failed component
+report with the configuration diagnostic instead of breaking the JSON boundary;
+configuration permissions, parsing, and validation still fail closed. Omit
+`--deep` only when a shallow report with skipped resource evidence is
+intentional. Legacy text and `doctor --json` output remain unchanged.
 
 For `LocalStore`, the explicitly selected top-level state root is an
 operator-owned trust boundary and may itself be a symlink. Deep reads fail

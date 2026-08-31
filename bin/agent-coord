@@ -440,11 +440,9 @@ module AgentCoord
     def run # rubocop:disable Metrics/CyclomaticComplexity
       return print_help if @argv.empty? || help_request?(@argv.first)
 
-      command = @argv.shift
-      config_action = command == "config" && %w[show set].include?(@argv.first) ? @argv.shift : nil
-      raise Error, "unknown command: #{command}" unless KNOWN_COMMANDS.include?(command)
+      command, config_action, configuration_result = prepare_command
+      return configuration_result if configuration_result
 
-      load_user_configuration_unless_exempt!(command, config_action)
       case command
       when "claim"
         claim(parse_options(command, @argv))
@@ -488,6 +486,23 @@ module AgentCoord
     end
 
     private
+
+    def prepare_command
+      command = @argv.shift
+      config_action = command == "config" && %w[show set].include?(@argv.first) ? @argv.shift : nil
+      raise Error, "unknown command: #{command}" unless KNOWN_COMMANDS.include?(command)
+
+      [command, config_action, load_config_or_render_stack_failure(command, config_action)]
+    end
+
+    def load_config_or_render_stack_failure(command, config_action)
+      load_user_configuration_unless_exempt!(command, config_action)
+      nil
+    rescue OperationalError => e
+      raise unless command == "doctor" && stack_json_option_token?(@argv)
+
+      run_doctor_command(command, configuration_error: e)
+    end
 
     # `config`'s subcommand has to be resolved before the load, because whether
     # it is `set` decides whether a missing explicit config file is tolerated.
@@ -865,10 +880,13 @@ module AgentCoord
       %w[optional default]
     end
 
-    def run_doctor_command(command)
+    def run_doctor_command(command, configuration_error: nil)
       doctor_argv = @argv.dup
       parse_state = { stack_json: false, backend_selector_count: 0 }
-      doctor(parse_options(command, @argv, parse_state: parse_state))
+      options = parse_options(command, @argv, parse_state: parse_state)
+      return emit_failed_stack_configuration_report(options, configuration_error.message) if configuration_error
+
+      doctor(options)
     rescue OptionParser::ParseError => e
       stack_json = parse_state[:stack_json] || stack_json_option_token?(doctor_argv)
       raise Error.new(e.message, exit_code: stack_json ? STACK_EXIT_USAGE : EXIT_USAGE)
@@ -3006,6 +3024,33 @@ module AgentCoord
         { "mode" => options[:deep] ? "deep" : "shallow", "reason" => "backend_unavailable" }
       )
       checks << stack_identity_check(nil)
+      emit_stack_report(checks)
+    end
+
+    def emit_failed_stack_configuration_report(options, error)
+      backend_kind = doctor_backend_kind(options)
+      checks = [
+        stack_check(
+          "cli.version",
+          "healthy",
+          "agent-coord CLI is ready",
+          { "version" => VERSION }
+        ),
+        stack_check(
+          "backend.readability",
+          "failed",
+          "Coordination configuration could not be loaded",
+          stack_backend_details(options, backend_kind).merge("error" => AgentCoord.utf8_diagnostic(error)),
+          "Repair the user coordination configuration, then rerun the doctor."
+        ),
+        stack_check(
+          "resources.deep",
+          "skipped",
+          "Resource evidence was not collected because coordination configuration is unavailable",
+          { "mode" => options[:deep] ? "deep" : "shallow", "reason" => "configuration_unavailable" }
+        ),
+        stack_identity_check(nil)
+      ]
       emit_stack_report(checks)
     end
 

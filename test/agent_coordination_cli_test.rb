@@ -4444,6 +4444,77 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     end
   end
 
+  def test_stack_doctor_reports_pre_dispatch_user_config_failure_as_structured_failure
+    secret = "pre-dispatch-config-secret"
+    with_private_user_config("AGENT_COORD_API_TOKEN=#{secret}\n") do |config_home|
+      File.chmod(0o644, File.join(config_home, "agent-coord", "env"))
+
+      result = run_command(
+        { "XDG_CONFIG_HOME" => config_home },
+        RbConfig.ruby,
+        BIN,
+        "doctor",
+        "--stack-json",
+        "--deep",
+        "--state-root",
+        @state_root
+      )
+
+      assert_equal 2, result.status.exitstatus
+      assert_empty result.stderr
+      report = JSON.parse(result.stdout)
+      backend_check = report.fetch("checks").find { |check| check.fetch("id") == "backend.readability" }
+      resource_check = report.fetch("checks").find { |check| check.fetch("id") == "resources.deep" }
+      assert_equal "failed", report.fetch("status")
+      assert_equal "failed", backend_check.fetch("status")
+      assert_equal "Coordination configuration could not be loaded", backend_check.fetch("summary")
+      assert_includes backend_check.dig("details", "error"), "permissions are insecure"
+      assert_equal "configuration_unavailable", resource_check.dig("details", "reason")
+      refute_includes result.stdout, secret
+      refute_includes result.stdout, "#{BIN}:"
+    end
+  end
+
+  def test_stack_doctor_with_valid_user_config_preserves_healthy_report
+    with_private_user_config("AGENT_COORD_POLICY=optional\n") do |config_home|
+      result = run_command(
+        { "XDG_CONFIG_HOME" => config_home },
+        RbConfig.ruby,
+        BIN,
+        "doctor",
+        "--stack-json",
+        "--state-root",
+        @state_root
+      )
+
+      assert_equal 0, result.status.exitstatus, result.stderr
+      assert_empty result.stderr
+      report = JSON.parse(result.stdout)
+      backend_check = report.fetch("checks").find { |check| check.fetch("id") == "backend.readability" }
+      assert_equal "healthy", report.fetch("status")
+      assert_equal "healthy", backend_check.fetch("status")
+    end
+  end
+
+  def test_stack_doctor_pre_dispatch_config_failure_preserves_usage_errors
+    with_private_user_config("AGENT_COORD_POLICY=optional\n") do |config_home|
+      File.chmod(0o644, File.join(config_home, "agent-coord", "env"))
+
+      result = run_command(
+        { "XDG_CONFIG_HOME" => config_home },
+        RbConfig.ruby,
+        BIN,
+        "doctor",
+        "--stack-json"
+      )
+
+      assert_equal AgentCoord::STACK_EXIT_USAGE, result.status.exitstatus
+      assert_empty result.stdout
+      assert_equal "doctor --stack-json requires exactly one of --state-root, --api-url, or --backend\n",
+                   result.stderr
+    end
+  end
+
   def test_stack_doctor_contains_unexpected_resource_failure_without_leaking_details
     secret = "resource-secret-value"
     store = Class.new do
