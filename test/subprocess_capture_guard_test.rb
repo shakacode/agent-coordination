@@ -50,7 +50,7 @@ end
 
 class SubprocessCaptureGuardTest < Minitest::Test
   ROOT = File.expand_path("..", __dir__)
-  RUBY_SHEBANG = /\A\#!.*\bruby(?:\s|$)/n
+  RUBY_SHEBANG = /\A\#!.*\bruby(?:\d+(?:\.\d+)*)?(?:\s|$)/n
   REVIEWED_HELPERS = {
     "bin/agent-coord" => "capture3_utf8",
     "sim/bin/graveyard" => "capture3_utf8",
@@ -87,6 +87,14 @@ class SubprocessCaptureGuardTest < Minitest::Test
     invalid_utf8 = "\xFFOpen3.capture3\n".b.force_encoding(Encoding::UTF_8)
 
     refute ruby_source?("bin/binary-tool", invalid_utf8)
+  end
+
+  def test_versioned_ruby_shebang_does_not_hide_a_raw_call
+    path = "bin/new-tool"
+    source = "#!/usr/bin/env ruby3.3\nOpen3.capture3(\"ruby\", \"-v\")\n"
+
+    assert ruby_source?(path, source.lines.first), "expected the versioned Ruby shebang to be scanned"
+    assert_equal 1, unreviewed_sites(Capture3SourceScanner.new.scan(path, source)).length
   end
 
   private
