@@ -11,35 +11,58 @@ class AgentTestRunnerTest < Minitest::Test
 
   def test_runner_discards_backend_credentials_and_uses_ephemeral_local_state
     Dir.mktmpdir("agent-test-runner") do |tmpdir|
-      fake_bin = File.join(tmpdir, "bin")
-      capture_path = File.join(tmpdir, "state-roots")
-      caller_state_root = File.join(tmpdir, "caller-state")
-      FileUtils.mkdir_p([fake_bin, caller_state_root])
-      install_fake_bundle(fake_bin)
+      fixture = prepare_runner(tmpdir)
+      stdout, stderr, status = Open3.capture3(fixture.fetch(:env), RUNNER, chdir: ROOT)
+      assert status.success?, "runner failed:\n#{stdout}\n#{stderr}"
+      assert_isolated_state(fixture)
+    end
+  end
 
-      env = {
+  def test_runner_removes_ephemeral_state_after_test_failure
+    Dir.mktmpdir("agent-test-runner") do |tmpdir|
+      fixture = prepare_runner(tmpdir)
+      fixture.fetch(:env)["AGENT_TEST_RUNNER_FAIL"] = "1"
+
+      _stdout, _stderr, status = Open3.capture3(fixture.fetch(:env), RUNNER, chdir: ROOT)
+      assert_equal 76, status.exitstatus
+      assert_isolated_state(fixture)
+    end
+  end
+
+  private
+
+  def prepare_runner(tmpdir)
+    fake_bin = File.join(tmpdir, "bin")
+    capture_path = File.join(tmpdir, "state-roots")
+    caller_state_root = File.join(tmpdir, "caller-state")
+    FileUtils.mkdir_p([fake_bin, caller_state_root])
+    install_fake_bundle(fake_bin)
+
+    {
+      capture_path: capture_path,
+      caller_state_root: caller_state_root,
+      env: {
         "PATH" => [fake_bin, ENV.fetch("PATH")].join(File::PATH_SEPARATOR),
         "BASH_ENV" => File::NULL,
         "ENV" => File::NULL,
         "AGENT_COORD_API_URL" => "https://backend.invalid",
         "AGENT_COORD_API_TOKEN" => "not-a-real-token",
+        "AGENT_COORD_BACKEND" => "shared/legacy-backend",
         "AGENT_COORD_STATE_ROOT" => caller_state_root,
+        "AGENT_COORD_STATUS_STATE_ROOT" => caller_state_root,
         "AGENT_TEST_RUNNER_CALLER_STATE_ROOT" => caller_state_root,
         "AGENT_TEST_RUNNER_CAPTURE" => capture_path
       }
-
-      stdout, stderr, status = Open3.capture3(env, RUNNER, chdir: ROOT)
-      assert status.success?, "runner failed:\n#{stdout}\n#{stderr}"
-
-      state_roots = File.readlines(capture_path, chomp: true)
-      refute_empty state_roots
-      assert_equal 1, state_roots.uniq.length
-      refute_equal caller_state_root, state_roots.first
-      refute Dir.exist?(state_roots.first), "runner left its temporary state root behind"
-    end
+    }
   end
 
-  private
+  def assert_isolated_state(fixture)
+    state_roots = File.readlines(fixture.fetch(:capture_path), chomp: true)
+    refute_empty state_roots
+    assert_equal 1, state_roots.uniq.length
+    refute_equal fixture.fetch(:caller_state_root), state_roots.first
+    refute Dir.exist?(state_roots.first), "runner left its temporary state root behind"
+  end
 
   def install_fake_bundle(fake_bin)
     bundle = File.join(fake_bin, "bundle")
@@ -55,6 +78,14 @@ class AgentTestRunnerTest < Minitest::Test
         echo "AGENT_COORD_API_TOKEN leaked into a test command" >&2
         exit 72
       fi
+      if [ "${AGENT_COORD_BACKEND+x}" = x ]; then
+        echo "AGENT_COORD_BACKEND leaked into a test command" >&2
+        exit 77
+      fi
+      if [ "${AGENT_COORD_STATUS_STATE_ROOT+x}" = x ]; then
+        echo "AGENT_COORD_STATUS_STATE_ROOT leaked into a test command" >&2
+        exit 75
+      fi
       if [ ! -d "${AGENT_COORD_STATE_ROOT:-}" ]; then
         echo "AGENT_COORD_STATE_ROOT is not an isolated directory" >&2
         exit 73
@@ -65,6 +96,9 @@ class AgentTestRunnerTest < Minitest::Test
       fi
 
       printf '%s\n' "$AGENT_COORD_STATE_ROOT" >> "$AGENT_TEST_RUNNER_CAPTURE"
+      if [ "${AGENT_TEST_RUNNER_FAIL:-}" = 1 ]; then
+        exit 76
+      fi
     SH
     FileUtils.chmod(0o755, bundle)
   end
