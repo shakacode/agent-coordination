@@ -72,6 +72,7 @@ module AgentCoord
     AGENT_COORD_LOCAL
     AGENT_COORD_POLICY
   ].freeze
+  TOKEN_ONE_LINE_VIOLATIONS = /[\r\n\0]/
   ABSOLUTE_USER_CONFIG_PATH_KEYS = %w[
     AGENT_COORD_STATE_ROOT
     AGENT_COORD_STATUS_STATE_ROOT
@@ -666,6 +667,9 @@ module AgentCoord
           raise OperationalError, "unsupported agent-coord key at #{path}:#{index + 1}: #{key}"
         end
         raise OperationalError, "duplicate user config key at #{path}:#{index + 1}: #{key}" if values.key?(key)
+        if key == "AGENT_COORD_API_TOKEN" && match[2].match?(TOKEN_ONE_LINE_VIOLATIONS)
+          raise OperationalError, "AGENT_COORD_API_TOKEN in #{path}:#{index + 1} must be one line"
+        end
 
         values[key] = parse_env_assignment_value(match[2], path, index + 1)
       end
@@ -2489,7 +2493,7 @@ module AgentCoord
       # Reject blank input, but persist the unstripped value: internal and
       # trailing whitespace inside a real token is significant.
       raise Error, "--token-stdin requires a non-empty token" unless AgentCoord.config_value_set?(token)
-      raise Error, "--token-stdin token must be one line" if token.match?(/[\r\n\0]/)
+      raise Error, "--token-stdin token must be one line" if token.match?(TOKEN_ONE_LINE_VIOLATIONS)
 
       token
     rescue IOError, SystemCallError => e

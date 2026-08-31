@@ -1406,6 +1406,14 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     end
   end
 
+  def test_config_show_rejects_quoted_carriage_return_in_canonical_token
+    assert_canonical_config_rejects_token_control("\r", "cr")
+  end
+
+  def test_config_show_rejects_quoted_nul_in_canonical_token
+    assert_canonical_config_rejects_token_control("\0", "nul")
+  end
+
   def test_config_show_process_backend_overrides_user_config_backend
     with_private_user_config(
       "AGENT_COORD_API_URL=https://file.example\nAGENT_COORD_API_TOKEN=file-token\n"
@@ -12392,6 +12400,33 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
       File.write(env_file, contents)
       File.chmod(0o600, env_file)
       yield config_home
+    end
+  end
+
+  def assert_canonical_config_rejects_token_control(control, label)
+    secret_prefix = "#{label}-secret-prefix"
+    secret_suffix = "#{label}-secret-suffix"
+    with_private_user_config(
+      "AGENT_COORD_API_URL=https://coordination.example\n" \
+      "AGENT_COORD_API_TOKEN='#{secret_prefix}#{control}#{secret_suffix}'\n"
+    ) do |config_home|
+      result = run_command(
+        { "XDG_CONFIG_HOME" => config_home },
+        RbConfig.ruby,
+        BIN,
+        "config",
+        "show",
+        "--json"
+      )
+
+      assert_equal 2, result.status.exitstatus
+      assert_empty result.stdout
+      assert_includes result.stderr, "AGENT_COORD_API_TOKEN"
+      assert_includes result.stderr, "must be one line"
+      refute_includes result.stderr, secret_prefix
+      refute_includes result.stderr, secret_suffix
+      refute_includes result.stderr, "ArgumentError"
+      refute_includes result.stderr, "#{BIN}:"
     end
   end
 
