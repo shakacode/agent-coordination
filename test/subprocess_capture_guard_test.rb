@@ -2,6 +2,7 @@
 
 require "minitest/autorun"
 require "ripper"
+require "tmpdir"
 
 class Capture3SourceScanner
   Site = Struct.new(:path, :method_name, :line, keyword_init: true)
@@ -38,6 +39,7 @@ class Capture3SourceScanner
   end
 
   def open3_receiver?(node)
+    node = node.dig(1, 0) while node.is_a?(Array) && node.first == :paren && node[1].is_a?(Array) && node[1].one?
     return false unless node.is_a?(Array) && %i[var_ref top_const_ref].include?(node.first)
 
     node.dig(1, 0) == :@const && node.dig(1, 1) == "Open3"
@@ -74,6 +76,16 @@ class SubprocessCaptureGuardTest < Minitest::Test
     assert_match %r{\Abin/new-tool:\d+: Open3\.capture3 in <top-level>\z}, format_site(offenders.first)
   end
 
+  def test_guard_reports_a_parenthesized_open3_receiver
+    path = "bin/new-tool"
+    source = "#!/usr/bin/env ruby\n(Open3).capture3(\"ruby\", \"-v\")\n"
+
+    offenders = unreviewed_sites(Capture3SourceScanner.new.scan(path, source))
+
+    assert_equal 1, offenders.length
+    assert_match %r{\Abin/new-tool:\d+: Open3\.capture3 in <top-level>\z}, format_site(offenders.first)
+  end
+
   def test_guard_reports_a_top_level_call_in_a_reviewed_file_without_a_sorting_error
     path = "sim/bin/graveyard"
     source = "#{read(path)}\nOpen3.capture3(\"ruby\", \"-v\")\n"
@@ -97,6 +109,17 @@ class SubprocessCaptureGuardTest < Minitest::Test
     assert_equal 1, unreviewed_sites(Capture3SourceScanner.new.scan(path, source)).length
   end
 
+  def test_production_paths_include_hidden_files
+    Dir.mktmpdir do |root|
+      bin_dir = File.join(root, "bin")
+      Dir.mkdir(bin_dir)
+      hidden_script = File.join(bin_dir, ".capture-guard-test")
+      File.write(hidden_script, "#!/usr/bin/env ruby\n")
+
+      assert_includes production_paths(root), hidden_script
+    end
+  end
+
   private
 
   def production_capture3_sites
@@ -110,8 +133,8 @@ class SubprocessCaptureGuardTest < Minitest::Test
     end
   end
 
-  def production_paths
-    Dir.glob(File.join(ROOT, "{bin,sim/bin}", "**", "*")).select { |path| File.file?(path) }
+  def production_paths(root = ROOT)
+    Dir.glob(File.join(root, "{bin,sim/bin}", "**", "*"), File::FNM_DOTMATCH).select { |path| File.file?(path) }
   end
 
   def ruby_source?(path, first_line)
