@@ -657,7 +657,8 @@ module AgentCoord
 
         values[key] = parse_env_assignment_value(match[2], path, index + 1)
       end
-      validate_policy!(values[POLICY_ENV], "#{path}:AGENT_COORD_POLICY") if values.key?(POLICY_ENV)
+      user_policy = values.fetch(POLICY_ENV, nil)
+      validate_policy!(user_policy, "#{path}:AGENT_COORD_POLICY") if policy_supplied?(user_policy)
       validate_user_config_paths!(values, path)
       values
     end

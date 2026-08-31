@@ -2365,6 +2365,35 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     end
   end
 
+  def test_blank_canonical_policy_is_unset_but_invalid_nonblank_still_fails
+    with_private_user_config("AGENT_COORD_POLICY=\n") do |config_home|
+      env_file = File.join(config_home, "agent-coord", "env")
+      policy_file = File.join(config_home, "agent-coord", "policy")
+      File.write(policy_file, "required\n")
+      File.chmod(0o600, policy_file)
+      show = -> { run_command({ "XDG_CONFIG_HOME" => config_home }, RbConfig.ruby, BIN, "config", "show", "--json") }
+
+      empty = show.call
+      assert_equal 0, empty.status.exitstatus, empty.stderr
+      empty_policy = JSON.parse(empty.stdout).fetch("coordination")
+      assert_equal "required", empty_policy.fetch("policy")
+      assert_equal "policy_file", empty_policy.dig("source", "policy")
+
+      File.write(env_file, "AGENT_COORD_POLICY='   '\n")
+      FileUtils.rm_f(policy_file)
+      whitespace = show.call
+      assert_equal 0, whitespace.status.exitstatus, whitespace.stderr
+      whitespace_policy = JSON.parse(whitespace.stdout).fetch("coordination")
+      assert_equal "optional", whitespace_policy.fetch("policy")
+      assert_equal "default", whitespace_policy.dig("source", "policy")
+
+      File.write(env_file, "AGENT_COORD_POLICY=invalid\n")
+      invalid = show.call
+      assert_equal 2, invalid.status.exitstatus
+      assert_includes invalid.stderr, "invalid coordination policy"
+    end
+  end
+
   # An explicit AGENT_COORD_ENV_FILE can live in a shared directory. Deriving the
   # legacy fallback as the generic sibling named "policy" there parsed an
   # unrelated file and subjected it to the 0600 checks, failing every command
