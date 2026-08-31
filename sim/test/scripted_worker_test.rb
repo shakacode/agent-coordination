@@ -6,26 +6,12 @@ require "minitest/autorun"
 require "open3"
 require "rbconfig"
 require "tmpdir"
+require_relative "../lib/local_coordination_env"
 
 SIM_ROOT = File.expand_path("..", __dir__) unless defined?(SIM_ROOT)
 WORKER = File.join(SIM_ROOT, "bin", "scripted-worker") unless defined?(WORKER)
 
 class ScriptedWorkerTest < Minitest::Test
-  LOCAL_COORDINATION_ENV = {
-    "AGENT_COORD_API_URL" => nil,
-    "AGENT_COORD_API_TOKEN" => nil,
-    "AGENT_COORD_BACKEND" => nil,
-    "AGENT_COORD_ENV_FILE" => nil,
-    "AGENT_COORD_LOCAL" => nil,
-    "AGENT_COORD_MACHINE_ID" => nil,
-    "AGENT_COORD_POLICY" => nil,
-    "AGENT_COORD_REF" => nil,
-    "AGENT_COORD_SESSION_ID" => nil,
-    "AGENT_COORD_STATE_ROOT" => nil,
-    "AGENT_COORD_STATUS_STATE_ROOT" => nil,
-    "CODEX_THREAD_ID" => nil
-  }.freeze
-
   def setup
     @dir = Dir.mktmpdir
     @state = File.join(@dir, "state")
@@ -102,7 +88,7 @@ class ScriptedWorkerTest < Minitest::Test
   end
 
   def local_coordination_env
-    LOCAL_COORDINATION_ENV.merge(
+    LocalCoordinationEnv::SCRUBBED_VARIABLES.merge(
       "AGENT_COORD_STATE_ROOT" => @state,
       "XDG_CONFIG_HOME" => File.join(@dir, "xdg-config"),
       "PATH" => [File.dirname(RbConfig.ruby), ENV.fetch("PATH")].join(File::PATH_SEPARATOR)

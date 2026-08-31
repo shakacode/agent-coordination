@@ -6,26 +6,13 @@ require "minitest/autorun"
 require "open3"
 require "rbconfig"
 require "tmpdir"
+require_relative "../lib/local_coordination_env"
 
 class VerifyBatchTest < Minitest::Test
   VERIFY = File.expand_path("../bin/verify-batch", __dir__)
   ROOT = File.expand_path("../..", __dir__)
   HARVEST = File.join(ROOT, "bin", "agent-coord-harvest")
   TELEMETRY_FIXTURE = File.join(ROOT, "test", "fixtures", "telemetry", "coordination.json")
-  LOCAL_COORDINATION_ENV = {
-    "AGENT_COORD_API_URL" => nil,
-    "AGENT_COORD_API_TOKEN" => nil,
-    "AGENT_COORD_BACKEND" => nil,
-    "AGENT_COORD_ENV_FILE" => nil,
-    "AGENT_COORD_LOCAL" => nil,
-    "AGENT_COORD_MACHINE_ID" => nil,
-    "AGENT_COORD_POLICY" => nil,
-    "AGENT_COORD_REF" => nil,
-    "AGENT_COORD_SESSION_ID" => nil,
-    "AGENT_COORD_STATE_ROOT" => nil,
-    "AGENT_COORD_STATUS_STATE_ROOT" => nil,
-    "CODEX_THREAD_ID" => nil
-  }.freeze
 
   def write(state, path, data)
     full = File.join(state, path)
@@ -314,7 +301,7 @@ class VerifyBatchTest < Minitest::Test
   # (agent-coord only reads config) and is outside every coordination state
   # prefix, so it cannot be mistaken for state.
   def local_coordination_env(state)
-    LOCAL_COORDINATION_ENV.merge(
+    LocalCoordinationEnv::SCRUBBED_VARIABLES.merge(
       "AGENT_COORD_STATE_ROOT" => state,
       "XDG_CONFIG_HOME" => config_home_for(state),
       "PATH" => [File.dirname(RbConfig.ruby), ENV.fetch("PATH")].join(File::PATH_SEPARATOR)
