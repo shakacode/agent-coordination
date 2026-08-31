@@ -10089,23 +10089,27 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
 
   def with_agent_coord_without_source_state
     Dir.mktmpdir("agent-coord-source") do |root|
-      bin_dir = File.join(root, "bin")
-      FileUtils.mkdir_p(bin_dir)
-      copied_bin = File.join(bin_dir, "agent-coord")
-      FileUtils.cp(BIN, copied_bin)
-      yield copied_bin
+      yield copy_agent_coord_runtime(root)
     end
   end
 
   def with_agent_coord_source_state
     Dir.mktmpdir("agent-coord-source-state") do |root|
-      bin_dir = File.join(root, "bin")
-      FileUtils.mkdir_p(bin_dir)
-      copied_bin = File.join(bin_dir, "agent-coord")
-      FileUtils.cp(BIN, copied_bin)
+      copied_bin = copy_agent_coord_runtime(root)
       %w[claims heartbeats batches].each { |prefix| FileUtils.mkdir_p(File.join(root, prefix)) }
       yield copied_bin, root
     end
+  end
+
+  def copy_agent_coord_runtime(root)
+    bin_dir = File.join(root, "bin")
+    lib_dir = File.join(root, "lib", "agent_coordination")
+    FileUtils.mkdir_p(bin_dir)
+    FileUtils.mkdir_p(lib_dir)
+    copied_bin = File.join(bin_dir, "agent-coord")
+    FileUtils.cp(BIN, copied_bin)
+    FileUtils.cp(File.join(ROOT, "lib", "agent_coordination", "argv_encoding.rb"), lib_dir)
+    copied_bin
   end
 
   def assert_demo_left_no_state(tmpdir, xdg_state_home)
