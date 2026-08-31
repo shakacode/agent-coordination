@@ -4704,6 +4704,20 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     assert_equal "invalid batch-id: bad..batch", error.message
   end
 
+  def test_segment_validation_rejects_invalidly_encoded_backend_payload_with_a_domain_error
+    payload = "{\"agent_id\":\"worker-\xE2\"}".b
+    agent_id = JSON.parse(Base64.decode64(Base64.strict_encode64(payload))).fetch("agent_id")
+
+    refute_predicate agent_id, :valid_encoding?
+    error = assert_raises(AgentCoord::PathValidationError) do
+      AgentCoord.heartbeat_path(agent_id)
+    end
+
+    assert_equal "invalid agent-id: worker-\uFFFD", error.message
+    assert_predicate error.message, :valid_encoding?
+    assert_equal "worker-\xE2".b.bytes, agent_id.bytes
+  end
+
   def test_claim_cas_conflict_is_operational_not_claim_refused
     runner = AgentCoord::Runner.new([])
     store = Class.new do
