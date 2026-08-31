@@ -5,7 +5,7 @@ cd "$root"
 
 # Local drift check only; the base-trusted seam-guard is the security boundary.
 # Regenerate with: ruby -rdigest -e 'puts Digest::SHA256.file(".agents/bin/config-check").hexdigest'
-expected_config_check_sha256="27b9dd917e1b0e3a8a01d01201fafbda085e3d0b9141ec2a90502b8cf0d29fa4"
+expected_config_check_sha256="dcfa9a5ae6c532aa485e31afa5ca71ee3e0c54206b4135baaefeaa6320dd1059"
 actual_config_check_sha256="$(ruby -rdigest -e 'print Digest::SHA256.file(ARGV.fetch(0)).hexdigest' \
   "$root/.agents/bin/config-check")"
 if [ "$actual_config_check_sha256" != "$expected_config_check_sha256" ]; then

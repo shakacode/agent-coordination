@@ -10,6 +10,8 @@ AllCops:
     - "**/*.rb"
     - bin/agent-coord
     - Gemfile
+    - sim/template/.agents/bin/config-check
+    - sim/template/.agents/bin/seam-guard
 
 Layout/LineLength:
   Max: 120

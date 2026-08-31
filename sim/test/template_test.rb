@@ -8,6 +8,7 @@ require "yaml"
 
 SIM_ROOT = File.expand_path("..", __dir__)
 TEMPLATE = File.join(SIM_ROOT, "template")
+PROJECT_ROOT = File.expand_path("..", SIM_ROOT)
 
 class SimulationTemplateTest < Minitest::Test
   POINTER = <<~MARKDOWN.chomp
@@ -59,6 +60,18 @@ class SimulationTemplateTest < Minitest::Test
     policy = YAML.safe_load_file(File.join(TEMPLATE, ".agents/agent-workflow.yml"), aliases: false)
 
     assert_equal ["actions/checkout", "ruby/setup-ruby"], policy.fetch("trusted_actions")
+  end
+
+  def test_rubocop_explicitly_includes_template_guard_scripts
+    output, status = Open3.capture2e(
+      "bundle", "exec", "rubocop", "--list-target-files",
+      chdir: PROJECT_ROOT
+    )
+
+    assert status.success?, output
+    targets = output.lines(chomp: true)
+    assert_includes targets, "sim/template/.agents/bin/config-check"
+    assert_includes targets, "sim/template/.agents/bin/seam-guard"
   end
 
   def test_validate_allows_policy_only_configuration_change
@@ -279,6 +292,51 @@ class SimulationTemplateTest < Minitest::Test
     refute_includes err, "IndexError"
   end
 
+  def test_config_check_handles_utf8_task_filename_under_c_locale
+    task = "lib/task_café.rb"
+    File.write(File.join(@repo, task), "TASK = :café\n")
+    git("add", task)
+
+    out, err, status = config_check("HEAD", { "LC_ALL" => "C", "LANG" => "C" })
+
+    assert status.success?, err
+    assert_includes out, "TASK_ONLY"
+  end
+
+  def test_seam_guard_handles_utf8_task_filename_under_c_locale
+    task = "lib/task_café.rb"
+    File.write(File.join(@repo, task), "TASK = :café\n")
+    git("add", task)
+    git("commit", "-qm", "unicode task")
+
+    out, err, status = seam_guard(
+      "HEAD^", "HEAD", { "LC_ALL" => "C", "LANG" => "C" }
+    )
+
+    assert status.success?, err
+    assert_includes out, "TASK_ONLY"
+  end
+
+  def test_config_check_rejects_invalid_filename_bytes_without_a_backtrace
+    env = fake_git_env("lib/task_\xFF.rb\0".b)
+    env.merge!("LC_ALL" => "C", "LANG" => "C")
+
+    _out, err, status = config_check("HEAD", env)
+
+    refute status.success?
+    assert_equal "Changed simulation paths must be valid UTF-8.\n", err
+  end
+
+  def test_seam_guard_rejects_invalid_filename_bytes_without_a_backtrace
+    env = fake_git_env("lib/task_\xFF.rb\0".b)
+    env.merge!("LC_ALL" => "C", "LANG" => "C")
+
+    _out, err, status = seam_guard("HEAD", "HEAD", env)
+
+    refute status.success?
+    assert_equal "Changed simulation paths must be valid UTF-8.\n", err
+  end
+
   def test_config_check_rejects_invalid_ci_script_syntax
     File.open(File.join(@repo, ".agents/bin/ci"), "a") { |file| file << "\nif\n" }
 
@@ -407,6 +465,33 @@ class SimulationTemplateTest < Minitest::Test
     output.strip
   end
 
+  def fake_git_env(diff_output)
+    fake_bin = File.join(@dir, "fake-bin")
+    FileUtils.mkdir_p(fake_bin)
+    fake_git = File.join(fake_bin, "git")
+    File.write(fake_git, <<~RUBY)
+      #!/usr/bin/env ruby
+      if ARGV.include?("diff") && ARGV.include?("-z")
+        STDOUT.binmode
+        STDOUT.write(#{diff_output.dump}.b)
+        exit 0
+      end
+      exec(ENV.fetch("REAL_GIT"), *ARGV)
+    RUBY
+    File.chmod(0o755, fake_git)
+
+    real_git = ENV.fetch("PATH").split(File::PATH_SEPARATOR).filter_map do |directory|
+      candidate = File.join(directory, "git")
+      candidate if File.file?(candidate) && File.executable?(candidate)
+    end.first
+    raise "git executable not found" unless real_git
+
+    {
+      "PATH" => [fake_bin, ENV.fetch("PATH")].join(File::PATH_SEPARATOR),
+      "REAL_GIT" => real_git
+    }
+  end
+
   def run_ci_gate(base_ref = "HEAD")
     Open3.capture3(
       { "AGENT_SIM_BASE_REF" => base_ref },
@@ -415,16 +500,18 @@ class SimulationTemplateTest < Minitest::Test
     )
   end
 
-  def config_check(base_ref = "HEAD")
+  def config_check(base_ref = "HEAD", env = {})
     Open3.capture3(
+      env,
       File.join(@repo, ".agents/bin/config-check"),
       base_ref,
       chdir: @repo
     )
   end
 
-  def seam_guard(base_ref, head_ref)
+  def seam_guard(base_ref, head_ref, env = {})
     Open3.capture3(
+      env,
       File.join(TEMPLATE, ".agents/bin/seam-guard"),
       @repo,
       base_ref,

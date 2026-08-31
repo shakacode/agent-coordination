@@ -6,6 +6,15 @@ require "open3"
 require "rbconfig"
 require "yaml"
 
+def changed_paths(output)
+  # Git emits raw filename bytes. Preserve valid UTF-8 exactly for policy
+  # matching, but reject invalid bytes instead of conflating paths via scrub.
+  utf8 = output.dup.force_encoding(Encoding::UTF_8)
+  abort "Changed simulation paths must be valid UTF-8." unless utf8.valid_encoding?
+
+  utf8.split("\0")
+end
+
 root = File.expand_path("../..", __dir__)
 base_ref = ARGV[0] or abort "usage: config-check <base_ref>"
 allowed_paths = %w[
@@ -36,8 +45,8 @@ changed_output, changed_status = Open3.capture2(
 )
 abort "Could not inspect simulation changes." unless changed_status.success?
 
-changed_paths = changed_output.split("\0")
-task_paths, non_task_paths = changed_paths.partition { |path| path.match?(task_path) }
+paths = changed_paths(changed_output)
+task_paths, non_task_paths = paths.partition { |path| path.match?(task_path) }
 
 validator = File.join(root, ".agents/bin/validate")
 abort "Simulation validator does not match the checked contract." unless File.file?(validator)
@@ -45,7 +54,9 @@ validator_sha256 = Digest::SHA256.file(validator).hexdigest
 abort "Simulation validator does not match the checked contract." unless validator_sha256 == expected_validator_sha256
 
 unless task_paths.empty?
-  abort "Task changes cannot be combined with config or unrelated paths: #{non_task_paths.join(', ')}" unless non_task_paths.empty?
+  unless non_task_paths.empty?
+    abort "Task changes cannot be combined with config or unrelated paths: #{non_task_paths.join(', ')}"
+  end
 
   puts "TASK_ONLY"
   exit 0
@@ -60,7 +71,8 @@ scripts = [
   File.join(root, ".agents/bin/test")
 ]
 abort "Simulation command scripts must remain executable." unless scripts.all? { |script| File.executable?(script) }
-abort "Invalid shell syntax in simulation command scripts." unless scripts.all? { |script| system("bash", "-n", script) }
+shell_syntax_valid = scripts.all? { |script| system("bash", "-n", script) }
+abort "Invalid shell syntax in simulation command scripts." unless shell_syntax_valid
 ruby_scripts = [__FILE__, File.join(root, ".agents/bin/seam-guard")]
 abort "Simulation guard scripts must remain executable." unless ruby_scripts.all? { |script| File.executable?(script) }
 abort "Invalid Ruby syntax in simulation guard scripts." unless ruby_scripts.all? do |script|
@@ -84,14 +96,16 @@ MARKDOWN
 actual_pointer = agents[section_start..].rstrip
 abort "Agent Workflow Configuration pointer is not canonical." unless actual_pointer == expected_pointer
 
-policy = YAML.safe_load(File.read(File.join(root, ".agents/agent-workflow.yml")), aliases: false)
+policy = YAML.safe_load_file(File.join(root, ".agents/agent-workflow.yml"), aliases: false)
 abort "Agent workflow policy must be a YAML mapping." unless policy.is_a?(Hash)
 
 readme = File.read(File.join(root, ".agents/bin/README.md"))
 required_readme_rows = [
-  "| `validate` | Sim-aware gate: one task file runs its matching test; task/config mixes and unrelated diffs are rejected. |",
+  "| `validate` | Sim-aware gate: one task file runs its matching test; " \
+  "task/config mixes and unrelated diffs are rejected. |",
   "| `config-check` | Validate allowed config-only paths, canonical seam content, policy YAML, and script syntax. |",
-  "| `seam-guard` | Base-trusted pull-request guard; rejects changes to CI and validator entrypoints before head code runs. |"
+  "| `seam-guard` | Base-trusted pull-request guard; rejects changes to CI and " \
+  "validator entrypoints before head code runs. |"
 ]
 required_readme_texts = [
   "`Seam Guard / guard` as a required status check",
@@ -102,4 +116,4 @@ unless required_readme_rows.all? { |row| readme.include?(row) } &&
   abort "Simulation command README does not document config-only validation."
 end
 
-puts changed_paths.empty? ? "NO_CHANGES" : "CONFIG_ONLY"
+puts paths.empty? ? "NO_CHANGES" : "CONFIG_ONLY"
