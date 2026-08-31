@@ -317,6 +317,32 @@ class SimulationTemplateTest < Minitest::Test
     assert_includes out, "TASK_ONLY"
   end
 
+  def test_ci_handles_utf8_task_filename_under_c_locale
+    task = "lib/task_café.rb"
+    test = "test/task_café_test.rb"
+    File.write(File.join(@repo, task), "TASK = :original\n")
+    File.write(File.join(@repo, test), "exit 0\n")
+    git("add", task, test)
+    git("commit", "-qm", "seed unicode task")
+    File.write(File.join(@repo, task), "TASK = :updated\n")
+
+    _out, err, status = run_ci_gate(
+      "HEAD", { "LC_ALL" => "C", "LANG" => "C" }
+    )
+
+    assert status.success?, err
+  end
+
+  def test_validate_rejects_invalid_filename_bytes_without_a_backtrace
+    env = fake_git_env("lib/task_\xFF.rb\0".b)
+    env.merge!("BASH_ENV" => File::NULL, "LC_ALL" => "C", "LANG" => "C")
+
+    _out, err, status = validate("HEAD", env)
+
+    refute status.success?
+    assert_equal "Changed simulation paths must be valid UTF-8.\n", err
+  end
+
   def test_config_check_rejects_invalid_filename_bytes_without_a_backtrace
     env = fake_git_env("lib/task_\xFF.rb\0".b)
     env.merge!("LC_ALL" => "C", "LANG" => "C")
@@ -492,10 +518,18 @@ class SimulationTemplateTest < Minitest::Test
     }
   end
 
-  def run_ci_gate(base_ref = "HEAD")
+  def run_ci_gate(base_ref = "HEAD", env = {})
     Open3.capture3(
-      { "AGENT_SIM_BASE_REF" => base_ref },
+      env.merge("AGENT_SIM_BASE_REF" => base_ref),
       File.join(@repo, ".agents/bin/ci"),
+      chdir: @repo
+    )
+  end
+
+  def validate(base_ref = "HEAD", env = {})
+    Open3.capture3(
+      env.merge("AGENT_SIM_BASE_REF" => base_ref),
+      File.join(@repo, ".agents/bin/validate"),
       chdir: @repo
     )
   end

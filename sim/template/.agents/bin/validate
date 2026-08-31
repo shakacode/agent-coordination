@@ -21,34 +21,39 @@ if [ -n "$base_ref" ]; then
     printf 'Could not resolve simulation merge base.\n' >&2
     exit 1
   }
-  changed="$(git diff --no-renames --name-only "$merge_base")"
-  changed_count="$(printf '%s\n' "$changed" | sed '/^$/d' | wc -l | tr -d ' ')"
-  tests="$(printf '%s\n' "$changed" |
-    sed -n 's#^lib/\(task_.*\)\.rb$#test/\1_test.rb#p' |
-    sort -u)"
-  test_count="$(printf '%s\n' "$tests" | sed '/^$/d' | wc -l | tr -d ' ')"
+  ruby -ropen3 -rrbconfig -e '
+    root, merge_base = ARGV
+    output, error, status = Open3.capture3(
+      "git", "-C", root, "diff", "--no-renames", "--name-only", "-z", merge_base
+    )
+    unless status.success?
+      warn error unless error.empty?
+      abort "Could not inspect simulation changes."
+    end
 
-  if [ "$changed_count" -gt 0 ]; then
-    invalid="$(printf '%s\n' "$changed" |
-      sed '/^$/d' |
-      grep -Ev '^lib/task_[[:alnum:]_]+\.rb$' || true)"
-    if [ -n "$invalid" ]; then
-      printf 'Unexpected changed files for single-task validation:\n%s\n' "$invalid" >&2
+    changed = output.dup.force_encoding(Encoding::UTF_8)
+    abort "Changed simulation paths must be valid UTF-8." unless changed.valid_encoding?
+
+    paths = changed.split("\0")
+    exec File.join(root, ".agents/bin/test") if paths.empty?
+
+    task_path = %r{\Alib/task_[[:alnum:]_]+\.rb\z}
+    invalid = paths.reject { |path| path.match?(task_path) }
+    unless invalid.empty?
+      warn "Unexpected changed files for single-task validation:"
+      invalid.each { |path| warn path }
       exit 1
-    fi
-    if [ "$test_count" -ne 1 ]; then
-      printf 'Expected exactly one changed task file, found %s.\n' "$test_count" >&2
-      exit 1
-    fi
-    for test_file in $tests; do
-      if [ ! -f "$test_file" ]; then
-        printf 'Expected matching test file for changed task: %s\n' "$test_file" >&2
-        exit 1
-      fi
-      ruby "$test_file"
-    done
-    exit 0
-  fi
+    end
+
+    abort "Expected exactly one changed task file, found #{paths.length}." unless paths.one?
+
+    task_name = paths.fetch(0).delete_prefix("lib/").delete_suffix(".rb")
+    test_file = File.join("test", "#{task_name}_test.rb")
+    abort "Expected matching test file for changed task: #{test_file}" unless File.file?(test_file)
+
+    exec RbConfig.ruby, test_file
+  ' "$root" "$merge_base"
+  exit 0
 fi
 
 "$root/.agents/bin/test"
