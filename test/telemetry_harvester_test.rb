@@ -988,6 +988,78 @@ class TelemetryHarvesterTest < Minitest::Test # rubocop:disable Metrics/ClassLen
     assert_same HOST_ADAPTERS::INGEST_SURROUNDING_WHITESPACE, HARVESTER::INGEST_SURROUNDING_WHITESPACE
   end
 
+  def test_rejected_present_metadata_clears_last_known_session_values # rubocop:disable Metrics/MethodLength
+    nul = "\u0000"
+    usage = { "input_tokens" => 1, "output_tokens" => 1, "total_tokens" => 2 }
+    codex_records = [
+      {
+        "type" => "session_meta",
+        "payload" => {
+          "id" => "metadata-clear", "cwd" => "/redacted/work", "pricing_profile" => "standard"
+        }
+      },
+      { "type" => "turn_context", "payload" => { "model" => "gpt-5.6-sol", "effort" => "high" } },
+      { "type" => "event_msg", "payload" => {
+        "type" => "token_count", "info" => { "last_token_usage" => usage }
+      } },
+      { "type" => "turn_context", "payload" => {} },
+      { "type" => "event_msg", "payload" => {
+        "type" => "token_count", "info" => { "last_token_usage" => usage }
+      } },
+      {
+        "type" => "session_meta",
+        "payload" => {
+          "id" => "metadata-clear", "cwd" => "/redacted/work#{nul}",
+          "pricing_profile" => "standard#{nul}"
+        }
+      },
+      {
+        "type" => "turn_context",
+        "payload" => { "model" => "gpt-5.6-sol#{nul}", "effort" => "high#{nul}" }
+      },
+      { "type" => "event_msg", "payload" => {
+        "type" => "token_count", "info" => { "last_token_usage" => usage }
+      } }
+    ]
+    claude_records = [
+      {
+        "type" => "assistant", "sessionId" => "metadata-clear", "cwd" => "/redacted/work",
+        "pricing_profile" => "standard",
+        "message" => { "model" => "claude-opus-4-6", "effort" => "high", "usage" => usage }
+      },
+      {
+        "type" => "assistant", "sessionId" => "metadata-clear", "message" => { "usage" => usage }
+      },
+      {
+        "type" => "assistant", "sessionId" => "metadata-clear", "cwd" => "/redacted/work#{nul}",
+        "pricing_profile" => "standard#{nul}",
+        "message" => {
+          "model" => "claude-opus-4-6#{nul}", "effort" => "high#{nul}", "usage" => usage
+        }
+      }
+    ]
+
+    { "codex" => codex_records, "claude" => claude_records }.each do |host_family, records|
+      parsed = HOST_ADAPTERS::Parser.new(host_family).parse(
+        records.map { |record| JSON.generate(record) }.join("\n"), "#{host_family}:metadata-clear"
+      )
+      assert_empty parsed.fetch("errors"), "#{host_family} control metadata should remain valid JSON"
+      session = parsed.fetch("sessions").fetch(0)
+      clean_usage, inherited_usage, rejected_usage = session.fetch("usage")
+      expected_model = host_family == "codex" ? "gpt-5.6-sol" : "claude-opus-4-6"
+
+      assert_equal [expected_model, "high", "standard"],
+                   clean_usage.values_at("model", "effort", "pricing_profile")
+      assert_equal [expected_model, "high", "standard"],
+                   inherited_usage.values_at("model", "effort", "pricing_profile"),
+                   "#{host_family} should inherit metadata when a field is absent"
+      assert_equal [nil, nil, nil], rejected_usage.values_at("model", "effort", "pricing_profile"),
+                   "#{host_family} reused metadata from before a rejected present value"
+      assert_equal [nil, nil, nil, nil, nil],
+                   session.values_at("cwd_basename", "cwd_sha256", "model", "effort", "pricing_profile")
+    end
+  end
+
   def test_pricing_catalog_rejects_wrong_unit_and_duplicate_lookup_keys
     document = JSON.parse(File.read(File.join(ROOT, "config", "telemetry-pricing-v1.json")))
     bad_unit = Marshal.load(Marshal.dump(document))
