@@ -5362,6 +5362,50 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     refute_includes status.stderr, "TypeError"
   end
 
+  def test_status_broad_scope_preserves_readable_heartbeats_when_unreadable_filenames_collide
+    now = Time.now.utc
+    write_batch(
+      "batch-collisions",
+      lanes: [
+        { "name" => "invalid-first", "owner" => "worker-b", "targets" => ["3973"] },
+        { "name" => "invalid-last", "owner" => "worker-z", "targets" => ["3974"] }
+      ]
+    )
+    write_state_file(
+      "heartbeats/worker-a-source.json",
+      JSON.generate(
+        "agent_id" => "worker-z",
+        "status" => "in_progress",
+        "updated_at" => (now - 60).iso8601,
+        "expires_at" => (now + 600).iso8601
+      )
+    )
+    write_state_file("heartbeats/worker-b.json", "[]")
+    write_state_file(
+      "heartbeats/worker-y-source.json",
+      JSON.generate(
+        "agent_id" => "worker-b",
+        "status" => "in_progress",
+        "updated_at" => (now - 60).iso8601,
+        "expires_at" => (now + 600).iso8601
+      )
+    )
+    write_state_file("heartbeats/worker-z.json", "[]")
+
+    status = run_agent_coord("status", "--json")
+
+    assert_equal 0, status.status.exitstatus, status.stderr
+    payload = JSON.parse(status.stdout)
+    assert_equal %w[worker-b worker-z], payload.fetch("heartbeats").map { |entry| entry.fetch("agent_id") }.sort
+    lane_liveness = payload.fetch("batches").first.fetch("lanes").to_h do |lane|
+      [lane.fetch("owner"), lane.fetch("liveness")]
+    end
+    assert_equal({ "worker-b" => "live", "worker-z" => "live" }, lane_liveness)
+    assert_equal "heartbeat records unreadable: worker-b, worker-z",
+                 payload.fetch("section_notes").fetch("heartbeats")
+    assert_includes payload.fetch("degraded"), "heartbeat records unreadable: worker-b, worker-z"
+  end
+
   def test_status_defaults_to_status_state_root_without_global_state_root
     now = Time.now.utc
     write_heartbeat(

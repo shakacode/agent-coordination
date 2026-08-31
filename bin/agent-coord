@@ -5903,8 +5903,9 @@ module AgentCoord
     def broad_status_payload(store, now)
       section_notes = {}
       grouped = JSON_PREFIXES.to_h { |prefix| [prefix, status_list_entries(store, prefix, section_notes)] }
-      heartbeats_by_id = heartbeats_by_agent(grouped.fetch("heartbeats"))
-      unreadable_heartbeat_ids = heartbeats_by_id.select { |_, heartbeat| heartbeat == :invalid }.keys
+      heartbeat_index = index_heartbeat_entries(grouped.fetch("heartbeats"))
+      heartbeats_by_id = heartbeat_index.fetch(:by_agent)
+      unreadable_heartbeat_ids = heartbeat_index.fetch(:unreadable_ids).sort
       unless unreadable_heartbeat_ids.empty?
         notes = [section_notes["heartbeats"],
                  "heartbeat records unreadable: #{unreadable_heartbeat_ids.join(', ')}"].compact
@@ -5919,7 +5920,7 @@ module AgentCoord
         scope: { "kind" => "all" },
         section_notes: section_notes,
         claim_entries: grouped.fetch("claims"),
-        heartbeat_entries: grouped.fetch("heartbeats").select { |entry| entry.data.is_a?(Hash) },
+        heartbeat_entries: heartbeat_index.fetch(:readable_entries),
         batch_entries: grouped.fetch("batches"),
         event_entries: event_entries,
         heartbeats_by_agent: heartbeats_by_id,
@@ -6696,14 +6697,26 @@ module AgentCoord
     end
 
     def heartbeats_by_agent(entries)
-      entries.to_h do |entry|
+      index_heartbeat_entries(entries).fetch(:by_agent)
+    end
+
+    def index_heartbeat_entries(entries)
+      entries.each_with_object({ by_agent: {}, unreadable_ids: [], readable_entries: [] }) do |entry, index|
         data = entry.data
         agent_id = if data.is_a?(Hash)
                      data.fetch("agent_id", AgentCoord.target_from_path(entry.path))
                    else
                      AgentCoord.target_from_path(entry.path)
                    end
-        [agent_id, data.is_a?(Hash) ? data : :invalid]
+
+        if data.is_a?(Hash)
+          index.fetch(:readable_entries) << entry
+          index.fetch(:by_agent)[agent_id] = data
+        else
+          index.fetch(:unreadable_ids) << agent_id unless index.fetch(:unreadable_ids).include?(agent_id)
+          # A corrupt filename must not mask a usable heartbeat that declares the same agent id.
+          index.fetch(:by_agent)[agent_id] = :invalid unless index.fetch(:by_agent)[agent_id].is_a?(Hash)
+        end
       end
     end
 
