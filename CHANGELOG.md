@@ -330,6 +330,11 @@ when releases begin.
 
 ### Fixed
 
+- Status now treats a heartbeat record containing valid JSON that is not an
+  object as unreadable in all three scopes. Target and batch status keep their
+  scope-specific degraded notes, and broad status now omits only the invalid
+  heartbeat, preserves healthy rows, and reports the degraded section instead
+  of exposing an `Array#fetch` `TypeError` (issue #230).
 - CLI-sourced strings are now normalized to UTF-8 at the argument boundary, so
   writing coordination state no longer depends on the ambient locale (issue
   #169). Ruby tags `ARGV` with the locale encoding the same way it tags the

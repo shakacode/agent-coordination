@@ -5904,6 +5904,12 @@ module AgentCoord
       section_notes = {}
       grouped = JSON_PREFIXES.to_h { |prefix| [prefix, status_list_entries(store, prefix, section_notes)] }
       heartbeats_by_id = heartbeats_by_agent(grouped.fetch("heartbeats"))
+      unreadable_heartbeat_ids = heartbeats_by_id.select { |_, heartbeat| heartbeat == :invalid }.keys
+      unless unreadable_heartbeat_ids.empty?
+        notes = [section_notes["heartbeats"],
+                 "heartbeat records unreadable: #{unreadable_heartbeat_ids.join(', ')}"].compact
+        section_notes["heartbeats"] = notes.join("; ")
+      end
       lane_states = build_lane_states(grouped.fetch("batches"), heartbeats_by_id)
       malformed_names = malformed_batch_lane_names(grouped.fetch("batches"))
       section_notes["lanes"] = "malformed lane names: #{malformed_names.join(', ')}" unless malformed_names.empty?
@@ -5913,7 +5919,7 @@ module AgentCoord
         scope: { "kind" => "all" },
         section_notes: section_notes,
         claim_entries: grouped.fetch("claims"),
-        heartbeat_entries: grouped.fetch("heartbeats"),
+        heartbeat_entries: grouped.fetch("heartbeats").select { |entry| entry.data.is_a?(Hash) },
         batch_entries: grouped.fetch("batches"),
         event_entries: event_entries,
         heartbeats_by_agent: heartbeats_by_id,
@@ -6692,7 +6698,12 @@ module AgentCoord
     def heartbeats_by_agent(entries)
       entries.to_h do |entry|
         data = entry.data
-        [data.fetch("agent_id", AgentCoord.target_from_path(entry.path)), data]
+        agent_id = if data.is_a?(Hash)
+                     data.fetch("agent_id", AgentCoord.target_from_path(entry.path))
+                   else
+                     AgentCoord.target_from_path(entry.path)
+                   end
+        [agent_id, data.is_a?(Hash) ? data : :invalid]
       end
     end
 
@@ -6706,7 +6717,7 @@ module AgentCoord
 
           owner = lane_owner(lane)
           heartbeat = heartbeats_by_agent[owner]
-          states["#{batch_id}:#{name}"] = lane_status(lane, heartbeat)
+          states["#{batch_id}:#{name}"] = lane_status(lane, status_heartbeat_data(heartbeat))
         end
       end
     end
