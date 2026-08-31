@@ -153,7 +153,14 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     with_private_user_config("not a valid assignment\n") do |config_home|
       env = { "XDG_CONFIG_HOME" => config_home }
 
-      [%w[status --help], %w[config show --help]].each do |argv|
+      [
+        %w[status --help],
+        %w[status --json --help],
+        %w[status --json -h],
+        %w[config show --help],
+        %w[config show --json --help],
+        %w[config set --machine-id machine-a --help]
+      ].each do |argv|
         result = run_command(env, RbConfig.ruby, BIN, *argv)
 
         assert_equal 0, result.status.exitstatus, "#{argv.join(' ')}: #{result.stderr}"
@@ -166,6 +173,18 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
       assert_equal 1, unknown.status.exitstatus
       assert_equal "unknown command: not-a-command\n", unknown.stderr
       refute_includes unknown.stderr, "unsafe user config syntax"
+    end
+  end
+
+  def test_help_like_arguments_do_not_bypass_user_configuration
+    with_private_user_config("not a valid assignment\n") do |config_home|
+      env = { "XDG_CONFIG_HOME" => config_home }
+      [%w[log help --json], %w[status --branch --help --json], %w[log -- --help]].each do |argv|
+        result = run_command(env, RbConfig.ruby, BIN, *argv)
+
+        assert_equal 2, result.status.exitstatus, argv.join(" ")
+        assert_includes result.stderr, "unsafe user config syntax"
+      end
     end
   end
 
@@ -2069,6 +2088,20 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     end
   end
 
+  def test_config_set_reports_an_unreadable_token_stdin_cleanly
+    closed_input = StringIO.new("private-token\n")
+    closed_input.close
+    bad_descriptor = Object.new
+    bad_descriptor.define_singleton_method(:read) { |_limit| raise Errno::EBADF }
+
+    [closed_input, bad_descriptor].each do |input|
+      runner = AgentCoord::Runner.new([], stdin: input, stdout: StringIO.new, stderr: StringIO.new)
+      error = assert_raises(AgentCoord::Error) { runner.send(:read_token_from_stdin) }
+
+      assert_includes error.message, "--token-stdin could not read from stdin"
+    end
+  end
+
   # A blank token used to persist verbatim and then latch: the saved URL could no
   # longer be changed without a replacement --token-stdin.
   def test_config_set_rejects_a_whitespace_only_token_stdin
@@ -2391,6 +2424,20 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
       invalid = show.call
       assert_equal 2, invalid.status.exitstatus
       assert_includes invalid.stderr, "invalid coordination policy"
+    end
+  end
+
+  def test_canonical_config_accepts_a_trailing_comment_after_an_empty_value
+    with_private_user_config("AGENT_COORD_API_URL= # remote disabled\n") do |config_home|
+      result = run_command(
+        { "XDG_CONFIG_HOME" => config_home },
+        RbConfig.ruby, BIN, "config", "show", "--json"
+      )
+
+      assert_equal 0, result.status.exitstatus, result.stderr
+      coordination = JSON.parse(result.stdout).fetch("coordination")
+      assert_equal "local", coordination.fetch("backend")
+      refute coordination.fetch("configured")
     end
   end
 
@@ -2933,6 +2980,35 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
       assert_equal 2, result.status.exitstatus
       assert_includes result.stderr, "invalid UTF-8"
       refute_includes result.stderr, "bin/agent-coord:"
+    end
+  end
+
+  def test_user_config_fifo_is_rejected_without_blocking
+    with_private_config_tmpdir("agent-coord-config-fifo") do |root|
+      config_home = File.join(root, "config")
+      env_file = File.join(config_home, "agent-coord", "env")
+      FileUtils.mkdir_p(File.dirname(env_file))
+      File.chmod(0o700, File.dirname(env_file))
+      File.mkfifo(env_file, 0o600)
+      stdin, stdout, stderr, wait_thread = Open3.popen3(
+        COMMAND_ENV.merge("XDG_CONFIG_HOME" => config_home),
+        RbConfig.ruby, BIN, "config", "show", "--json"
+      )
+      stdin.close
+
+      unless wait_thread.join(1)
+        Process.kill("KILL", wait_thread.pid)
+        wait_thread.join
+        flunk "config read blocked while opening a FIFO"
+      end
+
+      captured_stdout = stdout.read
+      captured_stderr = stderr.read
+      assert_equal 2, wait_thread.value.exitstatus, captured_stderr
+      assert_empty captured_stdout
+      assert_includes captured_stderr, "must be a regular file"
+    ensure
+      [stdin, stdout, stderr].compact.each { |io| io.close unless io.closed? }
     end
   end
 

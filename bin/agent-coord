@@ -481,9 +481,21 @@ module AgentCoord
     # it is `set` decides whether a missing explicit config file is tolerated.
     def load_user_configuration_unless_exempt!(command, config_action)
       return if CONFIG_INDEPENDENT_COMMANDS.include?(command)
-      return if help_request?(@argv.first)
+      return if subcommand_help_request?(command, config_action)
 
       load_user_configuration!(creating_user_config: config_action == "set")
+    end
+
+    # OptionParser accepts help flags anywhere in the option stream. Detect the
+    # same standalone tokens before loading configuration, without confusing a
+    # positional "help", an option value, or a post-`--` literal for help.
+    def subcommand_help_request?(command, config_action)
+      parser_command = config_action == "set" ? "config-set" : command
+      requested = false
+      scan_raw_options(@argv, command: parser_command) do |_index, option, value_of, awaits_value, inline_value|
+        requested ||= value_of.nil? && !awaits_value && inline_value.nil? && %w[-h --help].include?(option)
+      end
+      requested
     end
 
     # Runner#run temporarily injects canonical user settings into process-wide
@@ -605,7 +617,7 @@ module AgentCoord
     end
 
     def read_private_config_file(path, required:)
-      File.open(path, File::RDONLY | File::NOFOLLOW) do |file|
+      File.open(path, File::RDONLY | File::NOFOLLOW | File::NONBLOCK) do |file|
         validate_private_config_file!(file, path)
         contents = file.read.dup.force_encoding(Encoding::UTF_8)
         raise OperationalError, "user config contains invalid UTF-8: #{path}" unless contents.valid_encoding?
@@ -678,12 +690,60 @@ module AgentCoord
     def parse_env_assignment_value(raw, path, line_number)
       return "" if raw.empty?
 
-      words = Shellwords.shellsplit(raw)
+      uncommented = strip_env_assignment_comment(raw)
+      words = Shellwords.shellsplit(uncommented)
+      return "" if words.empty? && uncommented != raw
+
       raise OperationalError, "ambiguous user config value at #{path}:#{line_number}" unless words.length == 1
 
       words.first
     rescue ArgumentError
       raise OperationalError, "unsafe user config value at #{path}:#{line_number}"
+    end
+
+    # Shellwords deliberately does not interpret comments. Remove only an
+    # unquoted, unescaped `#` that begins after whitespace, preserving literal
+    # fragments such as `=#value`, quoted hashes, and escaped spaces/hashes.
+    def strip_env_assignment_comment(raw)
+      quote = nil
+      escaped = false
+      word_boundary = false
+      # rubocop:disable Metrics/BlockLength -- explicit shell-lexing states are clearer kept together
+      raw.each_char.with_index do |character, index|
+        if escaped
+          escaped = false
+          word_boundary = false
+          next
+        end
+
+        if quote
+          if character == "\\" && quote == '"'
+            escaped = true
+          elsif character == quote
+            quote = nil
+          end
+          next
+        end
+
+        case character
+        when "\\"
+          escaped = true
+          word_boundary = false
+        when '"', "'"
+          quote = character
+          word_boundary = false
+        when /\s/
+          word_boundary = true
+        when "#"
+          return raw[0...index] if word_boundary
+
+          word_boundary = false
+        else
+          word_boundary = false
+        end
+      end
+      # rubocop:enable Metrics/BlockLength
+      raw
     end
 
     def read_policy_file(path)
@@ -2151,8 +2211,8 @@ module AgentCoord
     end
 
     # One walk over raw argv, shared by every pre-parse scan. Yields each
-    # argument as (index, the long option it names, the option it is the value
-    # of, whether it is an option still awaiting a separate value). Arguments
+    # argument as (index, its resolved option, the option it is the value of,
+    # whether it is awaiting a separate value, its inline value). Arguments
     # are expected to be BINARY copies: String#split raises on a UTF-8-tagged
     # string holding invalid bytes, which is reachable from every caller.
     def scan_raw_options(argv, command:)
@@ -2162,15 +2222,17 @@ module AgentCoord
       awaiting = nil
       argv.each_with_index do |argument, index|
         if awaiting
-          yield(index, nil, awaiting, false)
+          yield(index, nil, awaiting, false, nil)
           awaiting = nil
           next
         end
 
+        break if argument == "--"
+
         option_name, inline_value = argument.split("=", 2)
         option = resolve_standalone_option(option_name, command_options, doctor_options)
         awaiting = option if inline_value.nil? && value_options.include?(option)
-        yield(index, option, nil, !awaiting.nil?)
+        yield(index, option, nil, !awaiting.nil?, inline_value)
       end
     end
 
@@ -2183,6 +2245,7 @@ module AgentCoord
     end
 
     def resolve_standalone_option(option_name, command_options, target_options)
+      return "-h" if option_name == "-h"
       return unless option_name&.start_with?("--")
 
       all_options = command_options.long_options | target_options.long_options
@@ -2429,6 +2492,8 @@ module AgentCoord
       raise Error, "--token-stdin token must be one line" if token.match?(/[\r\n\0]/)
 
       token
+    rescue IOError, SystemCallError => e
+      raise Error, "--token-stdin could not read from stdin: #{e.message}"
     end
 
     def render_user_env(values)
@@ -2452,7 +2517,7 @@ module AgentCoord
 
       lock_path = user_config_lock_path(directory)
       lock = begin
-        File.open(lock_path, File::RDONLY | File::NOFOLLOW)
+        File.open(lock_path, File::RDONLY | File::NOFOLLOW | File::NONBLOCK)
       rescue Errno::ENOENT
         nil
       rescue Errno::ELOOP
