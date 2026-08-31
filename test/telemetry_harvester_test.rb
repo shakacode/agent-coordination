@@ -369,6 +369,139 @@ class TelemetryHarvesterTest < Minitest::Test # rubocop:disable Metrics/ClassLen
     end
   end
 
+  def test_rejected_batch_records_an_idempotent_ingestion_error_and_refresh_clears_it # rubocop:disable Metrics/AbcSize, Metrics/MethodLength
+    Dir.mktmpdir("agent-coordination-ledger-invalid-batch") do |dir| # rubocop:disable Metrics/BlockLength
+      source_path = File.join(dir, "coordination.json")
+      ledger_path = File.join(dir, "telemetry.sqlite3")
+      rejected_id = "batch\u009Bfixture"
+      source = coordination_fixture
+      rejected_batch = Marshal.load(Marshal.dump(source.fetch("batches").first))
+      rejected_batch["batch_id"] = rejected_id
+      source.fetch("batches") << rejected_batch
+      source.fetch("claims") << {
+        "batch_id" => rejected_id, "repo" => "shakacode/agent-coordination",
+        "target" => "78", "status" => "released", "terminal" => "done"
+      }
+      source.fetch("events") << {
+        "id" => "event-invalid-batch", "batch_id" => rejected_id,
+        "repo" => "shakacode/agent-coordination", "target" => "78",
+        "type" => "lane_closed", "at" => "2026-07-18T01:30:00Z"
+      }
+      File.write(source_path, JSON.generate(source))
+
+      2.times do
+        stdout, stderr, status = Open3.capture3(
+          CLI, "harvest", "--ledger", ledger_path,
+          "--coordination-json", source_path, "--batch-id", rejected_id
+        )
+        assert status.success?, "harvest failed:\n#{stdout}\n#{stderr}"
+        assert_equal "harvested batches=0 targets=0 usage=0\n", stdout
+        assert_empty stderr
+      end
+
+      assert_equal ["0|0|0|0|0"], sqlite_query(
+        ledger_path,
+        "SELECT (SELECT COUNT(*) FROM batches), (SELECT COUNT(*) FROM lanes), " \
+        "(SELECT COUNT(*) FROM target_units), (SELECT COUNT(*) FROM claims), " \
+        "(SELECT COUNT(*) FROM events)"
+      )
+      errors = sqlite_query(
+        ledger_path,
+        "SELECT source_artifacts.source_ref, ingestion_errors.record_ordinal, ingestion_errors.reason " \
+        "FROM ingestion_errors JOIN source_artifacts ON source_artifacts.id = ingestion_errors.source_artifact_id"
+      )
+      assert_equal 1, errors.length
+      assert_match(/\Acoordination:[0-9a-f]{16}\|2\|invalid_record\z/, errors.first)
+
+      source.fetch("batches").delete(rejected_batch)
+      File.write(source_path, JSON.generate(source))
+      _stdout, stderr, status = Open3.capture3(
+        CLI, "harvest", "--ledger", ledger_path,
+        "--coordination-json", source_path, "--batch-id", "batch-fixture"
+      )
+      assert status.success?, stderr
+      assert_empty sqlite_query(ledger_path, "SELECT id FROM ingestion_errors")
+
+      source.fetch("batches") << rejected_batch
+      rejected_batch["batch_id"] = "batch-refreshed"
+      source.fetch("claims").first["batch_id"] = "batch-refreshed"
+      source.fetch("events").first["batch_id"] = "batch-refreshed"
+      File.write(source_path, JSON.generate(source))
+      stdout, stderr, status = Open3.capture3(
+        CLI, "harvest", "--ledger", ledger_path,
+        "--coordination-json", source_path, "--batch-id", "batch-refreshed"
+      )
+      assert status.success?, "harvest failed:\n#{stdout}\n#{stderr}"
+      assert_equal "harvested batches=1 targets=1 usage=0\n", stdout
+      assert_empty stderr
+      assert_equal ["2|2|2|1|1|0"], sqlite_query(
+        ledger_path,
+        "SELECT (SELECT COUNT(*) FROM batches), (SELECT COUNT(*) FROM lanes), " \
+        "(SELECT COUNT(*) FROM target_units), (SELECT COUNT(*) FROM claims), " \
+        "(SELECT COUNT(*) FROM events), (SELECT COUNT(*) FROM ingestion_errors)"
+      )
+    end
+  end
+
+  def test_rejected_pull_request_records_an_idempotent_ingestion_error_and_refresh_clears_it # rubocop:disable Metrics/MethodLength
+    Dir.mktmpdir("agent-coordination-ledger-invalid-pr") do |dir| # rubocop:disable Metrics/BlockLength
+      source_path = File.join(dir, "coordination.json")
+      github_path = File.join(dir, "github.json")
+      ledger_path = File.join(dir, "telemetry.sqlite3")
+      File.write(source_path, JSON.generate(coordination_fixture))
+      github = {
+        "pull_requests" => [
+          {
+            "batch_id" => "batch-fixture", "repo" => "shakacode/agent-coordination", "target" => "78",
+            "number" => 178, "url" => "https://github.com/shakacode/agent-coordination/pull/178",
+            "state" => "open", "reviews" => [{ "id" => "review-retained", "findings" => [] }]
+          },
+          {
+            "batch_id" => "batch-fixture", "repo" => "shakacode/agent-coordination", "target" => "78",
+            "number" => 179, "url" => "https://github.com/shakacode/agent-coordination/pull/179",
+            "state" => "open\u009B", "reviews" => [{ "id" => "review-rejected", "findings" => [] }]
+          }
+        ]
+      }
+      File.write(github_path, JSON.generate(github))
+
+      2.times do
+        stdout, stderr, status = Open3.capture3(
+          CLI, "harvest", "--ledger", ledger_path,
+          "--coordination-json", source_path, "--github-json", github_path,
+          "--batch-id", "batch-fixture"
+        )
+        assert status.success?, "harvest failed:\n#{stdout}\n#{stderr}"
+        assert_equal "harvested batches=1 targets=1 usage=0\n", stdout
+        assert_empty stderr
+      end
+
+      assert_equal ["178"], sqlite_query(ledger_path, "SELECT number FROM github_prs")
+      assert_equal ["1"], sqlite_query(ledger_path, "SELECT COUNT(*) FROM review_receipts")
+      errors = sqlite_query(
+        ledger_path,
+        "SELECT source_artifacts.source_ref, ingestion_errors.record_ordinal, ingestion_errors.reason " \
+        "FROM ingestion_errors JOIN source_artifacts ON source_artifacts.id = ingestion_errors.source_artifact_id"
+      )
+      assert_equal 1, errors.length
+      assert_match(/\Agithub:[0-9a-f]{16}\|2\|invalid_record\z/, errors.first)
+
+      github.fetch("pull_requests").last["state"] = "open"
+      File.write(github_path, JSON.generate(github))
+      stdout, stderr, status = Open3.capture3(
+        CLI, "harvest", "--ledger", ledger_path,
+        "--coordination-json", source_path, "--github-json", github_path,
+        "--batch-id", "batch-fixture"
+      )
+      assert status.success?, "harvest failed:\n#{stdout}\n#{stderr}"
+      assert_equal "harvested batches=1 targets=1 usage=0\n", stdout
+      assert_empty stderr
+      assert_equal %w[178 179], sqlite_query(ledger_path, "SELECT number FROM github_prs ORDER BY number")
+      assert_equal ["2"], sqlite_query(ledger_path, "SELECT COUNT(*) FROM review_receipts")
+      assert_empty sqlite_query(ledger_path, "SELECT id FROM ingestion_errors")
+    end
+  end
+
   def test_coordination_refresh_without_github_input_preserves_pr_links_and_review_attribution
     Dir.mktmpdir("agent-coordination-ledger-optional-github-refresh") do |dir| # rubocop:disable Metrics/BlockLength
       source_path = File.join(dir, "coordination.json")

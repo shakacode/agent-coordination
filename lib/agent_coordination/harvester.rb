@@ -242,17 +242,13 @@ module AgentCoord
         @ledger.transaction do
           @pricing.persist(@ledger)
           coordination_artifact_id = upsert_artifact(source)
+          replace_invalid_batch_errors(source.fetch("document"), coordination_artifact_id)
           reconciled_ids = date_range ? reconcile_date_range(coordination_artifact_id, date_range) : []
           refreshed_ids = (reconciled_ids + selected_ids).uniq
           preserved_pr_links = github ? [] : snapshot_target_pr_links(refreshed_ids)
           delete_coordination_rows(refreshed_ids)
           refreshed_ids.each { |batch_id| @ledger.delete_batch(batch_id) }
-          batches.each do |batch|
-            batch_id = known(batch["batch_id"])
-            next unless batch_id
-
-            observations.concat(insert_batch(batch, coordination_artifact_id))
-          end
+          observations.concat(insert_coordination_batches(batches, coordination_artifact_id))
           insert_coordination_rows(source.fetch("document"), coordination_artifact_id, selected_ids)
           create_target_units(observations)
           restore_target_pr_links(preserved_pr_links)
@@ -271,6 +267,40 @@ module AgentCoord
           "targets" => observations.filter_map { |row| exact_key(row) }.uniq.length,
           "usage" => usage_count
         }
+      end
+
+      def insert_coordination_batches(batches, source_artifact_id)
+        batches.flat_map do |batch|
+          next insert_batch(batch, source_artifact_id) if known(batch["batch_id"])
+
+          []
+        end
+      end
+
+      def replace_invalid_batch_errors(document, source_artifact_id)
+        clear_ingestion_errors(source_artifact_id, reason: "invalid_record")
+        Array(document["batches"]).each_with_index do |batch, index|
+          next unless batch.is_a?(Hash) && !known(batch["batch_id"])
+
+          record_ingestion_error(source_artifact_id, index + 1, "invalid_record")
+        end
+      end
+
+      def clear_ingestion_errors(source_artifact_id, reason: nil)
+        sql = "DELETE FROM ingestion_errors WHERE source_artifact_id = ?"
+        parameters = [source_artifact_id]
+        if reason
+          sql += " AND reason = ?"
+          parameters << reason
+        end
+        @ledger.execute(sql, parameters)
+      end
+
+      def record_ingestion_error(source_artifact_id, record_ordinal, reason)
+        @ledger.execute(
+          "INSERT INTO ingestion_errors (source_artifact_id, record_ordinal, reason) VALUES (?, ?, ?)",
+          [source_artifact_id, record_ordinal, reason]
+        )
       end
 
       def reconcile_date_range(source_artifact_id, date_range)
@@ -355,16 +385,13 @@ module AgentCoord
         delete_stale_host_artifacts(host_family, sources.map { |source| source.fetch("source_key") })
         sources.sum do |source|
           artifact_id = upsert_artifact(source)
-          @ledger.execute("DELETE FROM ingestion_errors WHERE source_artifact_id = ?", [artifact_id])
+          clear_ingestion_errors(artifact_id)
           @ledger.execute("DELETE FROM host_sessions WHERE source_artifact_id = ?", [artifact_id])
           parsed = HostAdapters::Parser.new(host_family).parse(
             source.fetch("bytes"), source.fetch("source_ref")
           )
           parsed.fetch("errors").each do |error|
-            @ledger.execute(
-              "INSERT INTO ingestion_errors (source_artifact_id, record_ordinal, reason) VALUES (?, ?, ?)",
-              [artifact_id, error.fetch("record_ordinal"), error.fetch("reason")]
-            )
+            record_ingestion_error(artifact_id, error.fetch("record_ordinal"), error.fetch("reason"))
           end
           parsed.fetch("sessions").sum do |session|
             insert_host_session(session, artifact_id)
@@ -737,6 +764,7 @@ module AgentCoord
 
       def ingest_github(source)
         source_artifact_id = upsert_artifact(source)
+        clear_ingestion_errors(source_artifact_id, reason: "invalid_record")
         @ledger.delete_github_prs(source_artifact_id)
         Array(source.fetch("document")["pull_requests"]).each_with_index do |pull_request, index|
           insert_pull_request(pull_request, index, source_artifact_id) if pull_request.is_a?(Hash)
@@ -748,7 +776,10 @@ module AgentCoord
         number = positive_integer(pull_request["number"])
         state = enum(pull_request["state"], PR_STATES)
         url = github_url(pull_request["url"])
-        return unless pr_repo && number && state && url
+        unless pr_repo && number && state && url
+          record_ingestion_error(source_artifact_id, index + 1, "invalid_record")
+          return
+        end
 
         row = {
           "repo" => pr_repo,
