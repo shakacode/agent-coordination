@@ -521,7 +521,7 @@ class HttpBackendSelectionTest < HttpEnvTestCase # rubocop:disable Metrics/Class
   # paths under it. Nesting a second with_env inside the block would re-apply
   # CLEAN_ENV and silently drop the consumer env file this sets up.
   def with_split_brain_config(extra_env = {})
-    Dir.mktmpdir("agent-coord-consumer-env") do |root|
+    Dir.mktmpdir("agent-coord-consumer-env", PRIVATE_CONFIG_TMP_PARENT) do |root|
       config_home = File.join(root, "config")
       env_file = File.join(config_home, "agent-coord", "http-env.sh")
       state_home = File.join(root, "state")
@@ -1033,7 +1033,7 @@ class HttpBackendSelectionTest < HttpEnvTestCase # rubocop:disable Metrics/Class
 
       code, _, err = run_cli(["status", "--state-root", state_root, "--json"], {})
 
-      assert_equal 0, code
+      assert_equal 0, code, err
       assert_includes err, "warning: AGENT_COORD_API_URL and --state-root are both set"
       assert_includes err, "split-brain configuration"
       assert_includes err, canonical
