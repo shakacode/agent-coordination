@@ -964,6 +964,9 @@ module AgentCoord
 
       def read_json(path, kind)
         bytes = File.binread(path)
+        bytes.force_encoding(Encoding::UTF_8)
+        raise Error, "#{kind} JSON contains invalid UTF-8: #{path}" unless bytes.valid_encoding?
+
         parsed = JSON.parse(bytes)
         raise Error, "#{kind} JSON must be an object" unless parsed.is_a?(Hash)
 
