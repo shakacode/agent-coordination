@@ -75,24 +75,17 @@ module AgentCoord
         event_ref batch_id repo target event_type event_type_raw observed_at terminal
         severity category kind reason join_status source_artifact_id
       ].freeze
-      # The ingest boundary's definition of "control character", shared by both
-      # sanitizers in THIS FILE: `bounded_signal`, which strips and digest-marks the
-      # free-form signal columns (`event_type_raw`, `category`), and `known`, which
-      # rejects outright for the identity and enum columns it guards. The
-      # two disagree about what to *do* with a control character; they must not
-      # disagree about what one *is*. A copy that can silently drift is itself the
-      # bug -- `known` carried its own C0-and-DEL-only literal until issue #171, and
-      # so missed the entire C1 range.
+      # The ingest boundary's definition of "control character", shared by
+      # HostAdapters::Parser and both sanitizers in this file: `bounded_signal`,
+      # which strips and digest-marks free-form signal columns, and `known`, which
+      # rejects identity and enum columns. They disagree about what to *do* with a
+      # control character; they must not disagree about what one *is*. Copies that
+      # can silently drift were the bugs in issues #171 and #200.
       #
-      # Scoped to this file deliberately, because this file is not the whole ingest
-      # path. `AgentCoord::HostAdapters` carries a THIRD `known()` that this constant
-      # does not reach and does not share: it trims with `String#strip` and applies
-      # no control check at all, so a host session's `model`, `effort`, and
-      # `pricing_profile` are still laundered past their closed allowlists --
-      # "high<NUL>" parses as "high". Pre-existing, unchanged by #171, out of scope
-      # here because that file has its own consumers and needs its own regression
-      # pass, and tracked on its own issue. Named here so this comment is not read as
-      # claiming more coverage than it has.
+      # HostAdapters owns the definitions because Harvester loads that parser before
+      # defining this class. These aliases preserve Harvester's public constants while
+      # making all three sanitizers read the same objects. Do not replace them with
+      # byte-equivalent private patterns: structural reuse is the drift prevention.
       #
       # Named for the boundary that owns it, deliberately parallel to
       # `AgentCoord::LOG_CONTROL_CHARACTERS` in bin/agent-coord: that one is the
@@ -115,17 +108,12 @@ module AgentCoord
       # merely asserted here. See
       # test_ingest_control_characters_cover_the_cli_terminal_sanitizer, which
       # compares the two by codepoint: widening the CLI's set without widening this
-      # one fails the suite. Reuse itself is pinned separately, by
-      # test_known_control_range_agrees_with_the_shared_ingest_definition -- that one
-      # probes `known` behaviourally, so a private literal there that DIVERGES from
-      # this constant fails even though it would leave the constant untouched. A
-      # byte-equivalent private copy passes, which is the honest limit of a
-      # behavioural probe: it catches drift, not duplication. That is still the bug
-      # class that matters, since an equivalent copy is harmless until it drifts and
-      # the drift is exactly what fails.
-      INGEST_CONTROL_CHARACTERS = /[\u0000-\u001F\u007F-\u009F]/
-      # Characters trimmed from the ends of an ingested value, by both
-      # `bounded_signal` and `known`.
+      # one fails the suite. Harvester behaviour is pinned by
+      # test_known_control_range_agrees_with_the_shared_ingest_definition; exact
+      # HostAdapters reuse is pinned by the host-session control regression.
+      INGEST_CONTROL_CHARACTERS = HostAdapters::INGEST_CONTROL_CHARACTERS
+      # Characters trimmed from the ends of an ingested value by
+      # HostAdapters::Parser#known, `bounded_signal`, and Harvester#known.
       #
       # The trim runs before control detection, so ANY character that is both
       # trimmable and control gets laundered: it is silently removed, and the value is
@@ -153,7 +141,7 @@ module AgentCoord
       # Note the overlap with INGEST_CONTROL_CHARACTERS on exactly tab/LF/CR is
       # intended: trimmed at the ends (layout noise, the T3 decision), treated as
       # control in the interior (content corruption).
-      INGEST_SURROUNDING_WHITESPACE = /\A[\u0009\u000A\u000D\u0020]+|[\u0009\u000A\u000D\u0020]+\z/
+      INGEST_SURROUNDING_WHITESPACE = HostAdapters::INGEST_SURROUNDING_WHITESPACE
       SIGNAL_MAX_BYTES = 256
       SIGNAL_DIGEST_LENGTH = 12
       SIGNAL_TRUNCATION_MARKER = "~"
@@ -1097,11 +1085,9 @@ module AgentCoord
       # `terminal`, `host_family`, the PR and review-finding fields, and the
       # `event["id"]` input to `opaque_value`.
       #
-      # It also guards `model`, `effort`, and `pricing_profile` -- but only on review
-      # receipts. The same three columns on a host session are parsed by
-      # `AgentCoord::HostAdapters`, which has its own unshared `known()` with no
-      # control check, so this guard is not the only thing standing behind those
-      # three. See the note on INGEST_CONTROL_CHARACTERS.
+      # It also guards `model`, `effort`, and `pricing_profile` on review receipts.
+      # Host-session copies of those columns are parsed by AgentCoord::HostAdapters,
+      # whose `known` now shares the same trim and control definitions.
       #
       # Rejects rather than sanitizes -- the deliberate opposite of
       # `bounded_signal` -- because an out-of-bounds identity value has no useful

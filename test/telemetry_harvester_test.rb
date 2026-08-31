@@ -17,6 +17,7 @@ class TelemetryHarvesterTest < Minitest::Test # rubocop:disable Metrics/ClassLen
   COORD_CLI = File.join(ROOT, "bin", "agent-coord")
   FIXTURES = File.join(ROOT, "test", "fixtures", "telemetry")
   HARVESTER = AgentCoord::Telemetry::Harvester
+  HOST_ADAPTERS = AgentCoord::Telemetry::HostAdapters
   # The codepoint window the control-character pins compare over: C0, DEL, and
   # C1, which together cover every range any of the sanitizers targets.
   CONTROL_CODEPOINTS = (0x00..0x9F).to_a.freeze
@@ -931,6 +932,62 @@ class TelemetryHarvesterTest < Minitest::Test # rubocop:disable Metrics/ClassLen
     assert_equal %w[standard standard], profiles
   end
 
+  def test_host_adapter_controls_cannot_launder_session_metadata # rubocop:disable Metrics/MethodLength
+    controls = {
+      "NUL" => 0x00,
+      "TAB in the interior" => 0x09,
+      "VT" => 0x0B,
+      "FF" => 0x0C,
+      "DEL" => 0x7F
+    }
+    (0x80..0x9F).each { |codepoint| controls[format("C1 0x%02X", codepoint)] = codepoint }
+
+    controls.each do |label, codepoint|
+      character = [codepoint].pack("U")
+      dirty = lambda do |value|
+        if codepoint == 0x09
+          midpoint = value.length / 2
+          "#{value[0...midpoint]}#{character}#{value[midpoint..]}"
+        else
+          "#{value}#{character}"
+        end
+      end
+      parsed = parse_codex_host_session(
+        cwd: dirty.call("/redacted/work"),
+        model: dirty.call("gpt-5.6-sol"),
+        effort: dirty.call("high"),
+        pricing_profile: dirty.call("standard")
+      )
+      assert_empty parsed.fetch("errors"), "#{label} should be valid JSON input"
+      session = parsed.fetch("sessions").fetch(0)
+      usage = session.fetch("usage").fetch(0)
+
+      %w[cwd_basename cwd_sha256 model effort pricing_profile].each do |field|
+        assert_nil session.fetch(field), "#{label} was laundered into host_sessions.#{field}"
+      end
+      %w[model effort pricing_profile].each do |field|
+        assert_nil usage.fetch(field), "#{label} was laundered into usage_calls.#{field}"
+      end
+    end
+
+    surrounding_whitespace = "\t \r\n"
+    parsed = parse_codex_host_session(
+      cwd: "#{surrounding_whitespace}/redacted/work#{surrounding_whitespace}",
+      model: "#{surrounding_whitespace}gpt-5.6-sol#{surrounding_whitespace}",
+      effort: "#{surrounding_whitespace}high#{surrounding_whitespace}",
+      pricing_profile: "#{surrounding_whitespace}standard#{surrounding_whitespace}"
+    )
+    session = parsed.fetch("sessions").fetch(0)
+    assert_equal ["work", "gpt-5.6-sol", "high", "standard"],
+                 session.values_at("cwd_basename", "model", "effort", "pricing_profile")
+    assert_equal 64, session.fetch("cwd_sha256").length
+    assert_equal ["gpt-5.6-sol", "high", "standard"],
+                 session.fetch("usage").fetch(0).values_at("model", "effort", "pricing_profile")
+
+    assert_same HOST_ADAPTERS::INGEST_CONTROL_CHARACTERS, HARVESTER::INGEST_CONTROL_CHARACTERS
+    assert_same HOST_ADAPTERS::INGEST_SURROUNDING_WHITESPACE, HARVESTER::INGEST_SURROUNDING_WHITESPACE
+  end
+
   def test_pricing_catalog_rejects_wrong_unit_and_duplicate_lookup_keys
     document = JSON.parse(File.read(File.join(ROOT, "config", "telemetry-pricing-v1.json")))
     bad_unit = Marshal.load(Marshal.dump(document))
@@ -1752,6 +1809,29 @@ class TelemetryHarvesterTest < Minitest::Test # rubocop:disable Metrics/ClassLen
   end
 
   private
+
+  def parse_codex_host_session(cwd:, model:, effort:, pricing_profile:)
+    records = [
+      {
+        "type" => "session_meta",
+        "payload" => { "id" => "control-test", "cwd" => cwd, "pricing_profile" => pricing_profile }
+      },
+      {
+        "type" => "turn_context",
+        "payload" => { "model" => model, "effort" => effort, "pricing_profile" => pricing_profile }
+      },
+      {
+        "type" => "event_msg",
+        "payload" => {
+          "type" => "token_count",
+          "info" => { "last_token_usage" => { "input_tokens" => 1, "output_tokens" => 1, "total_tokens" => 2 } }
+        }
+      }
+    ]
+    HOST_ADAPTERS::Parser.new("codex").parse(
+      records.map { |record| JSON.generate(record) }.join("\n"), "codex:control-test"
+    )
+  end
 
   # bin/agent-coord guards execution with a $PROGRAM_NAME check and keeps the
   # event vocabulary in module-level constants, so loading it here is side-effect

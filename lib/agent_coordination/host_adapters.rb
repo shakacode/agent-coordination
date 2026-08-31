@@ -6,6 +6,13 @@ require "json"
 module AgentCoord
   module Telemetry
     module HostAdapters
+      # Shared with Harvester so host-session metadata and ledger metadata cannot
+      # drift on what counts as a control character or surrounding whitespace.
+      # Tab, LF, and CR are intentional layout noise only at the ends; every C0,
+      # DEL, and C1 character is rejected when it remains in the value.
+      INGEST_CONTROL_CHARACTERS = /[\u0000-\u001F\u007F-\u009F]/
+      INGEST_SURROUNDING_WHITESPACE = /\A[\u0009\u000A\u000D\u0020]+|[\u0009\u000A\u000D\u0020]+\z/
+
       class Parser
         METADATA_TOKEN = %r{\A[A-Za-z0-9][A-Za-z0-9._:+/-]{0,127}\z}
         MODELS = %w[
@@ -156,8 +163,11 @@ module AgentCoord
         end
 
         def known(value)
-          string = value.to_s.strip
-          string.empty? || string.casecmp?("UNKNOWN") ? nil : string
+          string = value.to_s.gsub(INGEST_SURROUNDING_WHITESPACE, "")
+          return if string.empty? || string.casecmp?("UNKNOWN")
+          return if string.match?(INGEST_CONTROL_CHARACTERS)
+
+          string
         end
 
         def metadata_token(value)
