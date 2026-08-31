@@ -5,6 +5,7 @@ require "fileutils"
 require "minitest/autorun"
 require "open3"
 require "rbconfig"
+require "stringio"
 require "tmpdir"
 
 require_relative "../lib/agent_coordination/ledger"
@@ -66,6 +67,205 @@ class TelemetryHarvesterTest < Minitest::Test # rubocop:disable Metrics/ClassLen
 
       batches = sqlite_query(ledger_path, "SELECT batch_id, repo, source_kind FROM batches")
       assert_equal ["batch-fixture|shakacode/agent-coordination|coordination"], batches
+    end
+  end
+
+  def test_named_batch_harvest_matches_non_ascii_id_under_an_ascii_locale
+    Dir.mktmpdir("agent-coordination-ledger-non-ascii-batch") do |dir|
+      batch_id = "batch-café"
+      source_path = File.join(dir, "coordination.json")
+      ledger_path = File.join(dir, "telemetry.sqlite3")
+      source = coordination_fixture.tap { |document| document.fetch("batches").first["batch_id"] = batch_id }
+      File.write(source_path, JSON.generate(source))
+
+      ["C.UTF-8", "C"].each do |locale|
+        stdout, stderr, status = Open3.capture3(
+          { "LC_ALL" => locale, "LANG" => locale },
+          CLI, "harvest", "--ledger", ledger_path,
+          "--coordination-json", source_path, "--batch-id", batch_id
+        )
+
+        assert status.success?, "#{locale} harvest failed:\n#{stdout}\n#{stderr}"
+        assert_equal "harvested batches=1 targets=1 usage=0\n", stdout, locale
+        assert_empty stderr, locale
+        assert_equal [batch_id], sqlite_query(ledger_path, "SELECT batch_id FROM batches"), locale
+      end
+    end
+  end
+
+  def test_scorecard_matches_non_ascii_batch_id_under_an_ascii_locale
+    Dir.mktmpdir("agent-coordination-scorecard-non-ascii-batch") do |dir|
+      batch_id = "batch-café"
+      source_path = File.join(dir, "coordination.json")
+      ledger_path = File.join(dir, "telemetry.sqlite3")
+      source = coordination_fixture.tap { |document| document.fetch("batches").first["batch_id"] = batch_id }
+      File.write(source_path, JSON.generate(source))
+
+      _stdout, stderr, status = Open3.capture3(
+        { "LC_ALL" => "C.UTF-8", "LANG" => "C.UTF-8" },
+        CLI, "harvest", "--ledger", ledger_path,
+        "--coordination-json", source_path, "--batch-id", batch_id
+      )
+      assert status.success?, stderr
+
+      control_out, control_err, control_status = Open3.capture3(
+        { "LC_ALL" => "C.UTF-8", "LANG" => "C.UTF-8" },
+        CLI, "scorecard", "--ledger", ledger_path, "--batch-id", batch_id
+      )
+      assert control_status.success?, control_err
+      assert_empty control_err
+      assert_equal batch_id, JSON.parse(control_out).fetch("batch_id")
+
+      stdout, stderr, status = Open3.capture3(
+        { "LC_ALL" => "C", "LANG" => "C" },
+        CLI, "scorecard", "--ledger", ledger_path, "--batch-id", batch_id
+      )
+
+      assert status.success?, "scorecard failed:\n#{stdout}\n#{stderr}"
+      assert_empty stderr
+      assert_equal batch_id, JSON.parse(stdout).fetch("batch_id")
+    end
+  end
+
+  def test_date_options_reject_invalid_utf8_before_date_parsing
+    Dir.mktmpdir("agent-coordination-invalid-date-argv") do |dir|
+      source_path = File.join(dir, "coordination.json")
+      ledger_path = File.join(dir, "telemetry.sqlite3")
+      File.write(source_path, JSON.generate(coordination_fixture))
+
+      stdout, stderr, status = Open3.capture3(
+        { "LC_ALL" => "C", "LANG" => "C" },
+        CLI, "harvest", "--ledger", ledger_path,
+        "--coordination-json", source_path,
+        "--from", "2026-07-\xFF".b, "--to", "2026-07-18"
+      )
+
+      refute status.success?
+      assert_empty stdout
+      assert_includes stderr, "command-line argument must be valid UTF-8"
+      refute_includes stderr, "date range must use YYYY-MM-DD"
+      refute_includes stderr, "lib/agent_coordination/harvester.rb:"
+    end
+  end
+
+  def test_invalid_command_token_is_rejected_as_text_without_a_backtrace
+    stdout, stderr, status = Open3.capture3(
+      { "LC_ALL" => "C", "LANG" => "C" }, CLI, "\xFFharvest".b
+    )
+
+    refute status.success?
+    assert_empty stdout
+    assert_includes stderr, "command-line argument must be valid UTF-8"
+    refute_includes stderr, "bin/agent-coord-harvest:"
+    refute_includes stderr, "lib/agent_coordination/argv_encoding.rb:"
+  end
+
+  def test_invalid_batch_id_is_rejected_cleanly_by_both_commands
+    invalid = "batch-\xFF".b
+    {
+      "harvest" => ["harvest", "--batch-id", invalid],
+      "scorecard" => ["scorecard", "--batch-id", invalid]
+    }.each do |command, argv|
+      stdout, stderr, status = Open3.capture3(
+        { "LC_ALL" => "C", "LANG" => "C" }, CLI, *argv
+      )
+
+      refute status.success?, command
+      assert_empty stdout, command
+      assert_includes stderr, "agent-coord-harvest: command-line argument must be valid UTF-8", command
+      refute_includes stderr, "bin/agent-coord-harvest:", command
+      refute_includes stderr, "lib/agent_coordination/argv_encoding.rb:", command
+    end
+  end
+
+  def test_ambiguous_path_option_precedes_invalid_path_encoding
+    Dir.mktmpdir("agent-coordination-ambiguous-path-argv") do |dir|
+      stdout, stderr, status = Open3.capture3(
+        { "LC_ALL" => "C", "LANG" => "C" },
+        CLI, "harvest", "--ledger", File.join(dir, "telemetry.sqlite3"),
+        "--co", "/tmp/coordination-\xE9.json".b, "--batch-id", "batch-fixture"
+      )
+
+      refute status.success?
+      assert_empty stdout
+      assert_includes stderr, "agent-coord-harvest: ambiguous option: --co"
+      refute_includes stderr, "command-line argument must be valid UTF-8"
+      refute_includes stderr, "lib/agent_coordination/harvester.rb:"
+    end
+  end
+
+  def test_harvester_cli_transcodes_declared_batch_encoding_and_retags_binary
+    Dir.mktmpdir("agent-coordination-harvester-argv-encodings") do |dir|
+      batch_id = "batch-café"
+      source_path = File.join(dir, "coordination.json")
+      source = coordination_fixture
+      source.fetch("batches").first["batch_id"] = batch_id
+      File.write(source_path, JSON.generate(source))
+
+      {
+        "declared latin-1" => "batch-caf\xE9".b.force_encoding(Encoding::ISO_8859_1),
+        "binary" => batch_id.b
+      }.each_with_index do |(label, argument), index|
+        stdout = StringIO.new
+        stderr = StringIO.new
+        code = AgentCoord::Telemetry::CLI.run(
+          ["harvest", "--ledger", File.join(dir, "telemetry-#{index}.sqlite3"),
+           "--coordination-json", source_path, "--batch-id", argument],
+          stdout:, stderr:
+        )
+
+        assert_equal 0, code, "#{label}: #{stderr.string}"
+        assert_equal "harvested batches=1 targets=1 usage=0\n", stdout.string, label
+        assert_empty stderr.string, label
+      end
+    end
+  end
+
+  def test_harvester_path_options_keep_their_original_bytes
+    typed = "/tmp/caf\xE9".b.force_encoding(Encoding::ISO_8859_1)
+    cases = {
+      "harvest separate" => ["harvest", "--ledger", typed],
+      "harvest equals" => ["harvest", "--ledger=#{typed}".b.force_encoding(typed.encoding)],
+      "harvest abbreviated" => ["harvest", "--led", typed],
+      "scorecard separate" => ["scorecard", "--ledger", typed],
+      "scorecard equals" => ["scorecard", "--ledger=#{typed}".b.force_encoding(typed.encoding)]
+    }
+
+    cases.each do |label, argv|
+      normalized = AgentCoord::Telemetry::CLI.normalized_argv(argv)
+
+      assert_equal argv.last.b, normalized.last.b, label
+      assert_equal argv.last.encoding, normalized.last.encoding, label
+    end
+
+    batch_id = "batch-caf\xE9".b.force_encoding(Encoding::ISO_8859_1)
+    normalized = AgentCoord::Telemetry::CLI.normalized_argv(["scorecard", "--batch-id", batch_id])
+    assert_equal "batch-café", normalized.last
+    assert_equal Encoding::UTF_8, normalized.last.encoding
+  end
+
+  def test_non_utf8_path_bytes_reach_the_filesystem_unchanged
+    Dir.mktmpdir("agent-coordination-harvester-path-argv") do |dir|
+      source_path = "#{dir}/coordination-café.json".b.force_encoding(Encoding::ISO_8859_1)
+      File.binwrite(source_path, JSON.generate(coordination_fixture))
+
+      {
+        "separate" => ["--coordination-json", source_path],
+        "equals" => ["--coordination-json=#{source_path}".b.force_encoding(source_path.encoding)]
+      }.each_with_index do |(label, path_argv), index|
+        ledger_path = File.join(dir, "telemetry-#{index}.sqlite3")
+        stdout = StringIO.new
+        stderr = StringIO.new
+        code = AgentCoord::Telemetry::CLI.run(
+          ["harvest", "--ledger", ledger_path, *path_argv, "--batch-id", "batch-fixture"],
+          stdout:, stderr:
+        )
+
+        assert_equal 0, code, "#{label}: #{stderr.string}"
+        assert_equal "harvested batches=1 targets=1 usage=0\n", stdout.string, label
+        assert_empty stderr.string, label
+        assert File.file?(ledger_path), label
+      end
     end
   end
 

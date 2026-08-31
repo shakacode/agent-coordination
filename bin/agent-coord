@@ -18,6 +18,10 @@ require "time"
 require "tmpdir"
 require "uri"
 
+# Bootstrap installs this executable through a symlink, so resolve the source
+# file before locating its library rather than trusting the symlink directory.
+require File.expand_path("../lib/agent_coordination/argv_encoding", File.dirname(File.realpath(__FILE__))) # rubocop:disable Style/Dir
+
 module AgentCoord
   VERSION = "0.1.0"
   SCHEMA_VERSION = 1
@@ -6896,7 +6900,7 @@ module AgentCoord
   end
 
   def self.force_utf8(text)
-    text.dup.force_encoding(Encoding::UTF_8)
+    ArgvEncoding.force_utf8(text)
   end
 
   # Re-tagging fixes a wrong label but cannot repair genuinely malformed bytes,
@@ -6906,7 +6910,7 @@ module AgentCoord
   # approximation beats a second crash; payload paths deliberately do not,
   # because silently rewriting a state record is worse than failing to read it.
   def self.utf8_diagnostic(text)
-    force_utf8(text).scrub
+    ArgvEncoding.utf8_diagnostic(text)
   end
 
   def self.safe_path!(path)
@@ -6970,9 +6974,9 @@ module AgentCoord
   # place: Runner#run and parse_options consume the array they are given, and
   # that must not reach back into an ARGV or a caller's array they do not own.
   def self.normalize_argv(argv, raw_indexes: [])
-    argv.each_with_index.map do |argument, index|
-      raw_indexes.include?(index) ? argument.to_s : normalize_argument(argument.to_s)
-    end
+    ArgvEncoding.normalize_argv(argv, raw_indexes: raw_indexes)
+  rescue ArgvEncoding::InvalidArgumentError => e
+    raise Error, e.message
   end
 
   # How Ruby tagged the argument decides what normalizing it means, and argv is
@@ -6991,21 +6995,9 @@ module AgentCoord
   # these values are state keys, so a scrubbed agent-id or repo would be stored
   # as a silently different identity. load_launch_prompt refuses the same way.
   def self.normalize_argument(argument)
-    normalized =
-      if argument.encoding == Encoding::ASCII_8BIT
-        force_utf8(argument)
-      else
-        argument.encode(Encoding::UTF_8)
-      end
-    # UTF-8 to UTF-8 is a no-op that does not validate, so a UTF-8-tagged
-    # argument holding invalid bytes is still only caught here.
-    return normalized if normalized.valid_encoding?
-
-    raise Error, invalid_argument_message(argument)
-  rescue EncodingError
-    # Every transcoding failure: undefined conversion, invalid byte sequence in
-    # the declared encoding, or an encoding with no converter to UTF-8.
-    raise Error, invalid_argument_message(argument)
+    ArgvEncoding.normalize_argument(argument)
+  rescue ArgvEncoding::InvalidArgumentError => e
+    raise Error, e.message
   end
 
   # The message half of the same policy: the rejected value is echoed through
@@ -7013,7 +7005,7 @@ module AgentCoord
   # is reporting. force_encoding overrides whatever tag was there, so this
   # re-derives the value from its bytes whatever encoding it arrived claiming.
   def self.invalid_argument_message(argument)
-    "command-line argument must be valid UTF-8: #{utf8_diagnostic(argument)}"
+    ArgvEncoding.invalid_argument_message(argument)
   end
 
   def self.validate_repo!(repo, field)

@@ -28,6 +28,7 @@ class PackagingTest < Minitest::Test
     docs/adr/0013-batch-blocker-state-contract.md
     docs/protocol-curl.md
     docs/telemetry-ledger.md
+    lib/agent_coordination/argv_encoding.rb
     lib/agent_coordination/harvester.rb
     lib/agent_coordination/host_adapters.rb
     lib/agent_coordination/ledger.rb
