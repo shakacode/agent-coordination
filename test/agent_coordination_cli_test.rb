@@ -1188,6 +1188,24 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     end
   end
 
+  def test_demo_isolates_ambient_session_identity_and_restores_it
+    runner = AgentCoord::Runner.new([], stdout: StringIO.new, stderr: StringIO.new)
+    with_process_env(
+      "AGENT_COORD_SESSION_ID" => "ambient-agent-session",
+      "CODEX_THREAD_ID" => "ambient-codex-thread"
+    ) do
+      runner.send(:with_demo_isolated_env, @state_root) do
+        assert_equal(
+          [nil, AgentCoord::SESSION_SOURCE_UNSET],
+          AgentCoord.environment_session_identity
+        )
+      end
+
+      assert_equal "ambient-agent-session", ENV.fetch("AGENT_COORD_SESSION_ID")
+      assert_equal "ambient-codex-thread", ENV.fetch("CODEX_THREAD_ID")
+    end
+  end
+
   def test_global_help_omits_doctor_only_deep_option
     result = run_agent_coord("--help", state_root: nil)
     doctor = run_agent_coord("doctor", "--help", state_root: nil)

@@ -681,10 +681,11 @@ class HttpBackendSelectionTest < HttpEnvTestCase # rubocop:disable Metrics/Class
     # The first value needs shell quoting: a bare space makes the assignment
     # ambiguous and the loader rejects it before any URL parsing happens.
     cases = [
-      ["'https://svc:leak-pw-quoted@bad host'", "invalid HTTP backend URL"],
-      ["fleet-user:leak-pw-schemeless@127.0.0.1:9", "AGENT_COORD_API_TOKEN"]
+      ["'https://svc:leak-pw-quoted@bad host'", "leak-pw-quoted", "invalid HTTP backend URL"],
+      ["fleet-user:leak-pw-schemeless@127.0.0.1:9", "leak-pw-schemeless", "AGENT_COORD_API_TOKEN"],
+      ["'https://leak-userinfo-only@bad host'", "leak-userinfo-only", "invalid HTTP backend URL"]
     ]
-    cases.each do |url, expected_fragment|
+    cases.each do |url, secret, expected_fragment|
       with_private_config_tmpdir("agent-coord-redact-configured-url") do |root|
         config_home = File.join(root, "config")
         env_file = File.join(config_home, "agent-coord", "env")
@@ -699,8 +700,7 @@ class HttpBackendSelectionTest < HttpEnvTestCase # rubocop:disable Metrics/Class
         _code, out, err = with_env(env) { run_cli(%w[status --json], env) }
 
         combined = out.to_s + err.to_s
-        refute_includes combined, "leak-pw-quoted"
-        refute_includes combined, "leak-pw-schemeless"
+        refute_includes combined, secret
         assert_includes combined, "***@"
         assert_includes combined, expected_fragment
       end
@@ -715,6 +715,10 @@ class HttpBackendSelectionTest < HttpEnvTestCase # rubocop:disable Metrics/Class
     assert_equal "***@127.0.0.1:9", AgentCoord.redact_url_userinfo("u:p@127.0.0.1:9")
     assert_equal 'bad URI: "https://***@bad host"',
                  AgentCoord.redact_userinfo_in_text('bad URI: "https://svc:pw@bad host"')
+    assert_equal 'bad URI: "https://***@bad host"',
+                 AgentCoord.redact_userinfo_in_text('bad URI: "https://secret-token@bad host"')
+    assert_equal "contact operator@example.com",
+                 AgentCoord.redact_userinfo_in_text("contact operator@example.com")
   end
 
   def test_whitespace_only_process_token_falls_through_to_the_saved_token
