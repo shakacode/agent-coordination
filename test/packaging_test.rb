@@ -15,6 +15,7 @@ class PackagingTest < Minitest::Test
     CHANGELOG.md
     LICENSE
     README.md
+    SECURITY.md
     bin/agent-coord
     bin/agent-coord-harvest
     config/telemetry-pricing-v1.json
