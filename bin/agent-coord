@@ -57,10 +57,12 @@ module AgentCoord
   BYPASSED_PROCESS_SELECTOR_ENV_KEYS = (
     BACKEND_SELECTOR_ENV_KEYS + ["AGENT_COORD_REF", STATUS_STATE_ROOT_ENV]
   ).freeze
-  # `scheme://` followed by an authority that ends in `@`. The authority stops
-  # at the first `/`, `?`, or `#`, so an `@` in a path or query is never
-  # mistaken for credentials.
-  URL_USERINFO_PREFIX = %r{\A((?:[a-zA-Z][a-zA-Z0-9+.-]*://)?)[^/?\#\s]*@}
+  # Whole-value URL redaction fails closed before validation. A malformed or
+  # scheme-less authority can contain whitespace before `@`; consume it through
+  # the last authority `@`, but stop before `/`, `?`, or `#` so those characters
+  # in a path or query are never mistaken for credentials.
+  URL_SCHEME_USERINFO_PREFIX = %r{\A\s*([a-zA-Z][a-zA-Z0-9+.-]*://)[^/?\#]*@}
+  URL_USERINFO_PREFIX = %r{\A[^/?\#]*@}
   # Unanchored twin for prose. URI::InvalidURIError embeds the offending URL in
   # its message, so a malformed configured value would otherwise reach stderr
   # with its userinfo intact -- the anchored form cannot match mid-sentence.
@@ -502,21 +504,11 @@ module AgentCoord
       raise unless command == "doctor" && stack_json_option_token?(@argv)
 
       run_doctor_command(command, configuration_error: e)
-    rescue EncodingError, ArgumentError => e
-      raise unless configuration_encoding_failure?(e)
-
+    rescue EncodingError
       error = OperationalError.new("coordination configuration contains invalid text encoding")
       raise error unless command == "doctor" && stack_json_option_token?(@argv)
 
       run_doctor_command(command, configuration_error: error)
-    end
-
-    def configuration_encoding_failure?(error)
-      return true if error.is_a?(EncodingError)
-
-      message = error.message.to_s.b.downcase
-      message.include?("invalid byte sequence".b) ||
-        (message.include?("incompatible".b) && message.include?("encoding".b))
     end
 
     # `config`'s subcommand has to be resolved before the load, because whether
@@ -625,10 +617,11 @@ module AgentCoord
 
       @user_config.each do |key, value|
         next if key == "AGENT_COORD_API_TOKEN"
-        # A whitespace-only process value is not a selection: the downstream
-        # readers strip before testing for empty, so treating it as present here
-        # would drop the saved value without anything taking its place.
-        next unless AgentCoord.environment_identity_value(key, env: @process_config).nil?
+        # Presence is the only question here. Re-reading the value through the
+        # payload-oriented identity helper can raise on invalidly tagged bytes,
+        # even when an explicit CLI backend means this ambient selector will not
+        # be used. Keep the raw process value and inject only when it is absent.
+        next if AgentCoord.config_value_set?(@process_config.fetch(key, nil))
 
         ENV[key] = value
         @injected_user_config_keys << key
@@ -687,6 +680,7 @@ module AgentCoord
     def selected_user_config_path
       configured = ENV.fetch("AGENT_COORD_ENV_FILE", "")
       if AgentCoord.config_value_set?(configured)
+        validate_configuration_path_encoding!(configured)
         unless Pathname.new(configured).absolute?
           raise OperationalError, "AGENT_COORD_ENV_FILE must be an absolute path"
         end
@@ -698,13 +692,22 @@ module AgentCoord
       if config_home.empty?
         home = ENV.fetch("HOME", "")
         return [nil, false] if home.empty?
+
+        validate_configuration_path_encoding!(home)
         raise OperationalError, "HOME must be an absolute path" unless Pathname.new(home).absolute?
 
         config_home = File.join(home, ".config")
       end
+      validate_configuration_path_encoding!(config_home)
       raise OperationalError, "XDG_CONFIG_HOME must be an absolute path" unless Pathname.new(config_home).absolute?
 
       [File.join(File.expand_path(config_home), "agent-coord", "env"), false]
+    end
+
+    def validate_configuration_path_encoding!(value)
+      return if value.to_s.valid_encoding?
+
+      raise OperationalError, "coordination configuration contains invalid text encoding"
     end
 
     def read_user_env_file(path, required:)
@@ -1003,6 +1006,7 @@ module AgentCoord
       parser, = build_option_parser(command, options, parse_state)
       raise Error, "--deep is only valid for doctor" if command != "doctor" && deep_option_token?(argv, command:)
 
+      shield_invalid_path_options!(argv, command:)
       parser.parse!(argv)
       raise Error, "doctor --json and --stack-json are mutually exclusive" if options[:json] && options[:stack_json]
 
@@ -1013,6 +1017,21 @@ module AgentCoord
       raise Error, "unexpected arguments: #{argv.join(' ')}" unless argv.empty?
 
       finalize_options(command, options)
+    end
+
+    # OptionParser matches path values with a regexp. Under a UTF-8 locale, a
+    # path containing arbitrary filesystem bytes can therefore raise before the
+    # PATH callback receives either the inline or separate form. Retag only
+    # encoding-invalid path arguments as BINARY: valid declared encodings must
+    # survive so diagnostic rendering can transcode them correctly.
+    def shield_invalid_path_options!(argv, command:)
+      path_options = registered_options(command).path_options
+      scan_raw_options(argv, command:) do |index, option, value_of, _awaits_value, inline_value|
+        next unless path_options.include?(value_of || (option if inline_value))
+
+        argument = argv[index].to_s
+        argv[index] = argument.b unless argument.valid_encoding?
+      end
     end
 
     def build_option_parser(command, options, parse_state)
@@ -2343,15 +2362,17 @@ module AgentCoord
 
     # One walk over raw argv, shared by every pre-parse scan. Yields each
     # argument as (index, its resolved option, the option it is the value of,
-    # whether it is awaiting a separate value, its inline value). Arguments
-    # are expected to be BINARY copies: String#split raises on a UTF-8-tagged
-    # string holding invalid bytes, which is reachable from every caller.
+    # whether it is awaiting a separate value, its inline value). Scan a BINARY
+    # copy: path arguments deliberately retain their original bytes and can carry
+    # an invalid UTF-8 tag under a UTF-8 locale. String#split would otherwise
+    # raise before option parsing and before stack-json error handling.
     def scan_raw_options(argv, command:)
       command_options = registered_options(command)
       doctor_options = command == "doctor" ? command_options : registered_options("doctor")
       value_options = command_options.value_options
       awaiting = nil
       argv.each_with_index do |argument, index|
+        argument = argument.to_s.b
         if awaiting
           yield(index, nil, awaiting, false, nil)
           awaiting = nil
@@ -2999,7 +3020,27 @@ module AgentCoord
     def machine_match_status(machine_id, token_machine)
       return MACHINE_MATCH_UNVERIFIED unless machine_id && token_machine
 
-      machine_id == token_machine ? MACHINE_MATCH_MATCH : MACHINE_MATCH_MISMATCH
+      return MACHINE_MATCH_MATCH if machine_identity_comparison_bytes(machine_id) ==
+                                    machine_identity_comparison_bytes(token_machine)
+
+      MACHINE_MATCH_MISMATCH
+    end
+
+    # Compare identity meaning without comparing the scrubbed diagnostic copies.
+    # A declared source encoding can be transcoded losslessly; BINARY has no
+    # declared source and is treated as the UTF-8 bytes supplied by the process.
+    # Invalid input falls back to its original bytes so distinct invalid
+    # identities cannot collapse to the same U+FFFD display value and match.
+    def machine_identity_comparison_bytes(value)
+      text = value.to_s
+      normalized = if text.encoding == Encoding::ASCII_8BIT
+                     AgentCoord.force_utf8(text)
+                   else
+                     text.encode(Encoding::UTF_8)
+                   end
+      normalized.valid_encoding? ? normalized.b : text.b
+    rescue EncodingError
+      text.b
     end
 
     def machine_identity_mismatch?(environment_identity)
@@ -8224,14 +8265,19 @@ module AgentCoord
     text.dup.force_encoding(Encoding::UTF_8)
   end
 
-  # Re-tagging fixes a wrong label but cannot repair genuinely malformed bytes,
-  # and an invalid UTF-8 string still raises from Regexp#match? and from
-  # JSON.generate in the --json reporters. Message paths therefore substitute
-  # U+FFFD for undecodable bytes, because diagnostics are prose and a readable
-  # approximation beats a second crash; payload paths deliberately do not,
-  # because silently rewriting a state record is worse than failing to read it.
+  # BINARY has no declared source encoding, so diagnostics treat those bytes as
+  # UTF-8 and repair malformed sequences. Other encodings are a real declaration
+  # of what the bytes mean and are transcoded before invalid sequences are
+  # replaced. This keeps a valid ISO-8859-1 `café` readable instead of reporting
+  # `caf�`. Payload paths deliberately do neither, because silently rewriting a
+  # state record is worse than failing to read it.
   def self.utf8_diagnostic(text)
-    force_utf8(text).scrub
+    source = text.to_s
+    return force_utf8(source).scrub if source.encoding == Encoding::ASCII_8BIT
+
+    source.encode(Encoding::UTF_8, invalid: :replace, undef: :replace, replace: "�")
+  rescue EncodingError
+    force_utf8(source).scrub
   end
 
   def self.safe_path!(path)
@@ -8298,7 +8344,10 @@ module AgentCoord
   def self.redact_url_userinfo(value)
     return value if value.nil?
 
-    value.to_s.sub(URL_USERINFO_PREFIX) { "#{Regexp.last_match(1)}***@" }
+    text = value.to_s.dup
+    return text if text.sub!(URL_SCHEME_USERINFO_PREFIX) { "#{Regexp.last_match(1)}***@" }
+
+    text.sub(URL_USERINFO_PREFIX, "***@")
   end
 
   # Prose form: redact every credential-bearing URL embedded in a message.
@@ -8378,8 +8427,8 @@ module AgentCoord
 
   # The message half of the same policy: the rejected value is echoed through
   # utf8_diagnostic, so reporting an argument cannot itself raise on the bytes it
-  # is reporting. force_encoding overrides whatever tag was there, so this
-  # re-derives the value from its bytes whatever encoding it arrived claiming.
+  # is reporting. A valid declared encoding is preserved through transcoding;
+  # malformed or untagged bytes are shown with replacement characters.
   def self.invalid_argument_message(argument)
     "command-line argument must be valid UTF-8: #{utf8_diagnostic(argument)}"
   end

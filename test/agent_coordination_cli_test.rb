@@ -4475,6 +4475,63 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     end
   end
 
+  def test_stack_doctor_redacts_malformed_backend_url_credentials_during_config_failure
+    secret = "diagnostic-password"
+    cases = {
+      "explicit scheme" => [
+        "https://operator:#{secret} with-space@example.invalid",
+        "https://***@example.invalid"
+      ],
+      "scheme-less" => ["operator:#{secret} with-space@example.invalid", "***@example.invalid"],
+      "leading whitespace" => [
+        " https://operator:#{secret}@example.invalid",
+        "https://***@example.invalid"
+      ]
+    }
+
+    cases.each do |label, (api_url, expected)|
+      result = run_command(
+        { "AGENT_COORD_POLICY" => "bogus" },
+        RbConfig.ruby,
+        BIN,
+        "doctor",
+        "--stack-json",
+        "--api-url",
+        api_url
+      )
+
+      assert_equal 2, result.status.exitstatus, label
+      assert_empty result.stderr, label
+      report = JSON.parse(result.stdout)
+      backend_check = report.fetch("checks").find { |check| check.fetch("id") == "backend.readability" }
+      assert_equal expected, backend_check.dig("details", "backend_url"), label
+      refute_includes result.stdout, secret, label
+      refute_includes result.stdout, "operator:", label
+    end
+  end
+
+  def test_stack_doctor_contains_nul_in_saved_non_token_config
+    with_private_user_config("AGENT_COORD_BACKEND=owner/repo\0suffix\n") do |config_home|
+      result = run_command(
+        { "XDG_CONFIG_HOME" => config_home },
+        RbConfig.ruby,
+        BIN,
+        "doctor",
+        "--stack-json",
+        "--state-root",
+        @state_root
+      )
+
+      assert_equal 2, result.status.exitstatus
+      assert_empty result.stderr
+      report = JSON.parse(result.stdout)
+      backend_check = report.fetch("checks").find { |check| check.fetch("id") == "backend.readability" }
+      assert_equal "failed", report.fetch("status")
+      assert_equal "Coordination configuration could not be loaded", backend_check.fetch("summary")
+      assert_includes backend_check.dig("details", "error"), "unsafe user config value"
+    end
+  end
+
   def test_stack_doctor_config_failure_normalizes_identity_metadata_in_c_locale
     identity_cases = {
       "AGENT_COORD_MACHINE_ID" => ["machine_id", nil],
@@ -4532,6 +4589,73 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     end
   end
 
+  def test_stack_doctor_config_failure_handles_invalid_inline_state_root_bytes
+    raw_state_root = "#{@state_root}/state-\xFF".b
+    with_private_user_config("AGENT_COORD_POLICY=optional\n") do |config_home|
+      File.chmod(0o644, File.join(config_home, "agent-coord", "env"))
+
+      result = run_command(
+        { "XDG_CONFIG_HOME" => config_home, "LC_ALL" => "C.UTF-8" },
+        RbConfig.ruby,
+        BIN,
+        "doctor",
+        "--state-root=#{raw_state_root}",
+        "--stack-json"
+      )
+
+      assert_equal 2, result.status.exitstatus, "#{result.stdout}\n#{result.stderr}"
+      assert_empty result.stderr
+      report = JSON.parse(result.stdout)
+      backend_check = report.fetch("checks").find { |check| check.fetch("id") == "backend.readability" }
+      assert_equal "failed", report.fetch("status")
+      assert_equal "#{@state_root}/state-�", backend_check.dig("details", "state_root")
+    end
+  end
+
+  def test_stack_doctor_config_failure_handles_invalid_separate_state_root_bytes
+    raw_state_root = "#{@state_root}/state-\xFF".force_encoding(Encoding::UTF_8)
+    with_private_user_config("AGENT_COORD_POLICY=optional\n") do |config_home|
+      File.chmod(0o644, File.join(config_home, "agent-coord", "env"))
+
+      result = run_command(
+        { "XDG_CONFIG_HOME" => config_home, "LC_ALL" => "C.UTF-8" },
+        RbConfig.ruby,
+        BIN,
+        "doctor",
+        "--state-root",
+        raw_state_root,
+        "--stack-json"
+      )
+
+      assert_equal 2, result.status.exitstatus, "#{result.stdout}\n#{result.stderr}"
+      assert_empty result.stderr
+      report = JSON.parse(result.stdout)
+      backend_check = report.fetch("checks").find { |check| check.fetch("id") == "backend.readability" }
+      assert_equal "failed", report.fetch("status")
+      assert_equal "#{@state_root}/state-�", backend_check.dig("details", "state_root")
+    end
+  end
+
+  def test_stack_doctor_config_failure_transcodes_declared_inline_state_root_encoding
+    state_root = "/tmp/caf\xE9".dup.force_encoding(Encoding::ISO_8859_1)
+    stdout = StringIO.new
+    stderr = StringIO.new
+    runner = AgentCoord::Runner.new(
+      ["doctor", "--stack-json", "--state-root=#{state_root}".encode(Encoding::ISO_8859_1)],
+      stdout:,
+      stderr:
+    )
+    runner.define_singleton_method(:load_user_configuration_unless_exempt!) do |_command, _config_action|
+      raise AgentCoord::OperationalError, "broken configuration"
+    end
+
+    assert_equal 2, runner.run
+    assert_empty stderr.string
+    report = JSON.parse(stdout.string)
+    backend_check = report.fetch("checks").find { |check| check.fetch("id") == "backend.readability" }
+    assert_equal "/tmp/café", backend_check.dig("details", "state_root")
+  end
+
   def test_stack_doctor_config_failure_scrubs_invalid_utf8_environment_identity
     identity_cases = {
       "AGENT_COORD_MACHINE_ID" => ["machine_id", nil],
@@ -4582,6 +4706,25 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     assert_includes backend_check.dig("details", "error"), "invalid coordination policy"
   end
 
+  def test_stack_doctor_contains_invalid_explicit_config_path_encoding
+    result = run_command(
+      { "AGENT_COORD_ENV_FILE" => "\xFF".b, "LC_ALL" => "C.UTF-8" },
+      RbConfig.ruby,
+      BIN,
+      "doctor",
+      "--stack-json",
+      "--state-root",
+      @state_root
+    )
+
+    assert_equal 2, result.status.exitstatus
+    assert_empty result.stderr
+    report = JSON.parse(result.stdout)
+    backend_check = report.fetch("checks").find { |check| check.fetch("id") == "backend.readability" }
+    assert_equal "failed", report.fetch("status")
+    assert_includes backend_check.dig("details", "error"), "invalid text encoding"
+  end
+
   def test_stack_doctor_contains_invalid_process_backend_selector_encoding
     %w[AGENT_COORD_STATE_ROOT AGENT_COORD_API_URL AGENT_COORD_BACKEND].each do |key|
       result = run_command(
@@ -4600,6 +4743,31 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
       backend_check = report.fetch("checks").find { |check| check.fetch("id") == "backend.readability" }
       assert_equal "healthy", report.fetch("status"), key
       assert_equal "local", backend_check.dig("details", "backend"), key
+    end
+  end
+
+  def test_stack_doctor_does_not_reinspect_invalid_process_selector_while_injecting_saved_config
+    with_private_user_config("AGENT_COORD_BACKEND=owner/saved\n") do |config_home|
+      result = run_command(
+        {
+          "XDG_CONFIG_HOME" => config_home,
+          "AGENT_COORD_BACKEND" => "\xFF".b,
+          "LC_ALL" => "C.UTF-8"
+        },
+        RbConfig.ruby,
+        BIN,
+        "doctor",
+        "--stack-json",
+        "--state-root",
+        @state_root
+      )
+
+      assert_equal 0, result.status.exitstatus
+      assert_empty result.stderr
+      report = JSON.parse(result.stdout)
+      backend_check = report.fetch("checks").find { |check| check.fetch("id") == "backend.readability" }
+      assert_equal "healthy", report.fetch("status")
+      assert_equal "local", backend_check.dig("details", "backend")
     end
   end
 
@@ -4845,6 +5013,18 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     assert_equal "https://***@example.invalid/�", http_details.fetch("backend_url")
     JSON.generate(github_details)
     JSON.generate(http_details)
+  end
+
+  def test_stack_backend_details_transcode_declared_state_root_encoding
+    runner = AgentCoord::Runner.new([])
+    state_root = "/tmp/caf\xE9".dup.force_encoding(Encoding::ISO_8859_1)
+    options = { backend: "", api_url: nil, state_root: }
+
+    details = runner.send(:stack_backend_details, options, "local")
+
+    assert_equal "/tmp/café", details.fetch("state_root")
+    assert_equal Encoding::UTF_8, details.fetch("state_root").encoding
+    JSON.generate(details)
   end
 
   def test_stack_doctor_preserves_escaping_operational_error_contract
@@ -6331,6 +6511,21 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
       assert_equal "�", identity.fetch("token_machine")
       assert_equal "mismatch", identity.fetch("machine_match")
     end
+  end
+
+  def test_doctor_deep_http_transcodes_declared_machine_encoding_before_comparison
+    stdout = StringIO.new
+    runner = doctor_identity_runner(stdout, token_machine: "café")
+    latin1_machine = "caf\xE9".dup.force_encoding(Encoding::ISO_8859_1)
+    runner.define_singleton_method(:diagnostic_environment_identity_value) do |name|
+      name == AgentCoord::MACHINE_ID_ENV ? latin1_machine : nil
+    end
+
+    assert_equal 0, runner.run
+    identity = JSON.parse(stdout.string).fetch("environment_identity")
+    assert_equal "café", identity.fetch("machine_id")
+    assert_equal "café", identity.fetch("token_machine")
+    assert_equal "match", identity.fetch("machine_match")
   end
 
   def test_doctor_deep_http_without_environment_machine_reports_unverified
