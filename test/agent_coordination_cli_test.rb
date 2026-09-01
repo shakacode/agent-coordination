@@ -75,6 +75,16 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
       index && ARGV.fetch(index + 1)
     end
 
+    def respond_once(server, status, body)
+      socket = server.accept
+      while (line = socket.gets)
+        break if line.chomp.empty?
+      end
+      socket.write "HTTP/1.1 \#{status}\r\nContent-Length: \#{body.bytesize}\r\nConnection: close\r\n\r\n\#{body}"
+    ensure
+      socket&.close
+    end
+
     if ARGV[0, 5] == %w[wrangler d1 migrations apply agent-coord] &&
         ARGV.include?("--local") &&
         persist_to_arg
@@ -93,6 +103,15 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
       puts "Ready on \#{ready_url}"
       STDOUT.flush
       exit 1 if ENV["FAKE_WRANGLER_EXIT_AFTER_READY"] == "1"
+      if ENV["FAKE_WRANGLER_REBIND_AFTER_HEALTH"] == "1"
+        respond_once(server, "503 Service Unavailable", "no")
+        server.close
+        server = TCPServer.new("127.0.0.1", 0)
+        ready_port = server.addr[1]
+        write_event("ready_port" => ready_port)
+        puts "Ready on http://localhost:\#{ready_port}"
+        STDOUT.flush
+      end
       trap("TERM") do
         write_event("signal" => "TERM")
         File.write(ENV.fetch("FAKE_WRANGLER_STOPPED"), "1")
@@ -101,12 +120,7 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
       end
 
       loop do
-        socket = server.accept
-        while (line = socket.gets)
-          break if line.chomp.empty?
-        end
-        socket.write "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok"
-        socket.close
+        respond_once(server, "200 OK", "ok")
       end
     elsif ARGV[0, 5] == %w[wrangler d1 execute agent-coord --local] &&
         persist_to_arg &&
@@ -1308,6 +1322,22 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
                    "default allocation must stay atomic inside Wrangler"
       assert_equal "http://127.0.0.1:#{ready.fetch('ready_port')}",
                    File.read(paths.fetch(:bundle_api_url_log))
+    end
+  end
+
+  def test_http_integration_harness_follows_the_latest_valid_ready_address
+    with_fake_http_harness do |env, paths|
+      result = run_command(
+        env.merge("FAKE_WRANGLER_REBIND_AFTER_HEALTH" => "1"),
+        "bash",
+        HTTP_INTEGRATION_BIN
+      )
+
+      assert_fake_http_harness_run(result, paths)
+      ready_ports = fake_harness_events(paths).filter_map { |event| event["ready_port"] }
+      assert_equal 2, ready_ports.size, "fake Wrangler must report the initial and rebound ports"
+      refute_equal ready_ports.first, ready_ports.last
+      assert_equal "http://127.0.0.1:#{ready_ports.last}", File.read(paths.fetch(:bundle_api_url_log))
     end
   end
 

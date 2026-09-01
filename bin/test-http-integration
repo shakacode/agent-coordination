@@ -81,25 +81,31 @@ discover_wrangler_port() {
     path = ARGV.fetch(0)
     exit 1 unless File.file?(path)
 
-    ports = File.foreach(path).filter_map do |line|
+    port = File.foreach(path).filter_map do |line|
       match = line.match(%r{Ready on http://(?:localhost|127[.]0[.]0[.]1):([0-9]{1,5})(?:/|[[:space:]]|$)})
       next unless match
 
-      port = Integer(match[1], 10)
-      port if (1..65_535).cover?(port)
-    end.uniq
+      candidate = Integer(match[1], 10)
+      candidate if (1..65_535).cover?(candidate)
+    end.last
 
-    exit 1 unless ports.one?
+    exit 1 unless port
 
-    puts ports.first
+    puts port
   ' "$WRANGLER_OUTPUT_LOG"
 }
 
-# Let Wrangler bind port 0 atomically by default. After it reports the concrete
-# ready address, reuse that port for the health check and AGENT_COORD_API_URL.
+# Let Wrangler bind port 0 atomically by default. During startup, follow the
+# latest valid ready port for the health check and AGENT_COORD_API_URL.
 # Operators can still pin an explicit port for deterministic debugging.
-WRANGLER_PORT="${AGENT_COORD_TEST_HTTP_PORT:-0}"
-HTTP_PORT="${AGENT_COORD_TEST_HTTP_PORT:-}"
+DYNAMIC_HTTP_PORT=1
+WRANGLER_PORT=0
+HTTP_PORT=""
+if [ -n "${AGENT_COORD_TEST_HTTP_PORT:-}" ]; then
+  DYNAMIC_HTTP_PORT=0
+  WRANGLER_PORT="$AGENT_COORD_TEST_HTTP_PORT"
+  HTTP_PORT="$AGENT_COORD_TEST_HTTP_PORT"
+fi
 
 TOKEN=$(ruby -rsecurerandom -e 'print SecureRandom.hex(24)')
 HASH=$(ruby -rdigest -e 'print Digest::SHA256.hexdigest(ARGV.fetch(0))' "$TOKEN")
@@ -151,7 +157,7 @@ WRANGLER_PID=$!
 set +m 2>/dev/null || true
 for _ in $(seq 1 60); do
   process_alive "$WRANGLER_PID" || fail_wrangler_exit
-  if [ -z "$HTTP_PORT" ] && discovered_port="$(discover_wrangler_port 2>/dev/null)"; then
+  if [ "$DYNAMIC_HTTP_PORT" -eq 1 ] && discovered_port="$(discover_wrangler_port 2>/dev/null)"; then
     HTTP_PORT="$discovered_port"
   fi
   [ -n "$HTTP_PORT" ] && health_ready && break
