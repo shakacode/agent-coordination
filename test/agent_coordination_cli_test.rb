@@ -5281,6 +5281,19 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     assert_equal utf8_path_lines, File.binread(profile).lines.grep(/\Aexport PATH=/)
   end
 
+  def test_bootstrap_profile_idempotence_preserves_nul_padding_compatibility
+    install_dir = File.join(@state_root, "bin")
+    profile = File.join(@state_root, "profile")
+    path_line = "export PATH=#{Shellwords.escape(install_dir)}:\"$PATH\"".b
+    original_profile = "\0#{path_line}\0\n".b
+    File.binwrite(profile, original_profile)
+
+    result = run_agent_coord("bootstrap", "--install-dir", install_dir, "--profile", profile, state_root: nil)
+
+    assert_equal 0, result.status.exitstatus, result.stderr
+    assert_equal original_profile, File.binread(profile)
+  end
+
   def test_bootstrap_profile_is_byte_idempotent_with_a_newline_in_install_dir
     install_dir = File.join(@state_root, "bin\nwith-newline")
     profile = File.join(@state_root, "profile")

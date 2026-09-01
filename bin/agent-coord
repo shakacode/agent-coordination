@@ -7568,7 +7568,7 @@ module AgentCoord
       # matching cannot raise however the profile is encoded, and the
       # match does not depend on either side carrying a usable encoding tag.
       existing = File.exist?(profile) ? File.binread(profile) : ""
-      entry_pattern = /(?:\A|\n)[\t\v\f\r ]*#{Regexp.escape(line)}[\t\v\f\r ]*(?:\n|\z)/n
+      entry_pattern = /(?:\A|\n)[\0\t\v\f\r ]*#{Regexp.escape(line)}[\0\t\v\f\r ]*(?:\n|\z)/n
       return if existing.match?(entry_pattern)
 
       File.open(profile, "a") do |file|
