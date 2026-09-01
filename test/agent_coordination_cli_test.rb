@@ -871,6 +871,15 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     assert_empty JSON.parse(stdout.string).fetch("actions")
   end
 
+  def test_gc_skips_invalidly_encoded_terminal_repositories_and_continues_healthy_groups
+    terminal = gc_invalid_repo_records.fetch("events/corrupt-terminal/lane_closed-corrupt.json").first
+    terminal = terminal.merge("repo" => gc_invalid_repo)
+    refute AgentCoord::Runner.new([]).send(:gc_terminal_identity_valid?, terminal)
+    %w[C C.UTF-8].product({ "dry-run" => "--dry-run", "execute" => "--execute" }.to_a).each do |locale, (mode, flag)|
+      assert_gc_invalid_repo_mode(locale, mode, flag)
+    end
+  end
+
   def test_gc_compaction_retry_accepts_consumed_renewal_paths_without_positional_records
     at = "2026-07-01T00:00:00Z"
     entries = [
@@ -9060,6 +9069,34 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     end
   end
 
+  def test_register_batch_rejects_invalidly_encoded_repo_with_a_domain_error
+    manifest_path = File.join(@state_root, "batch-invalid-repo.json")
+    valid_repo = "shakacode/invalid"
+    invalid_repo = "shakacode/\xFF".b
+    manifest = JSON.generate(
+      "batch_id" => "batch-invalid-repo",
+      "repo" => valid_repo,
+      "lanes" => [{ "name" => "docs", "owner" => "worker-docs", "targets" => ["3972"] }]
+    ).b.sub(valid_repo.b, invalid_repo)
+    File.binwrite(manifest_path, manifest)
+
+    %w[C C.UTF-8].each do |locale|
+      result = run_agent_coord(
+        "register-batch", "--file", manifest_path,
+        env: { "LC_ALL" => locale, "LANG" => locale }
+      )
+      stderr = result.stderr.dup.force_encoding(Encoding::UTF_8)
+
+      assert_equal 1, result.status.exitstatus, locale
+      assert_predicate stderr, :valid_encoding?, locale
+      assert_includes stderr, "invalid batch repo: shakacode/�", locale
+      refute_includes stderr, "invalid byte sequence in UTF-8", locale
+      refute_includes stderr, "ArgumentError", locale
+      assert_equal manifest, File.binread(manifest_path), locale
+      refute_path_exists File.join(@state_root, "batches", "batch-invalid-repo.json"), locale
+    end
+  end
+
   # State JSON is UTF-8 by definition, but the store used to read it through
   # Encoding.default_external, which is US-ASCII under a non-UTF-8 locale. One
   # record holding a non-ASCII byte then crashed JSON.parse with
@@ -11430,6 +11467,99 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     assert_equal 0, status.status.exitstatus, status.stderr
     assert_includes status.stdout, "lane docs owner worker-docs targets 3972 status blocked live"
     assert_includes status.stdout, "deps batch-a:backend blocked_on batch-a:backend"
+  end
+
+  def assert_gc_invalid_repo_mode(locale, mode, flag)
+    state_root = File.join(@state_root, "invalid-repo-#{locale.tr('.', '-')}-#{mode}")
+    records = gc_invalid_repo_records
+    original_corrupt_bytes = write_gc_invalid_repo_records(state_root, records)
+    result = run_agent_coord(
+      "gc", flag, "--json", state_root: state_root,
+                            env: { "LC_ALL" => locale, "LANG" => locale }
+    )
+
+    assert_equal 0, result.status.exitstatus, "#{locale} #{mode}: #{result.stderr}"
+    assert_gc_stderr_has_no_encoding_exception(result.stderr)
+    actions = JSON.parse(result.stdout).fetch("actions").select { |action| action["action"] == "compact" }
+    source_paths = actions.flat_map { |action| action.fetch("source_paths") }.sort
+    assert_equal gc_record_paths(records, corrupt: false), source_paths
+    assert_gc_corrupt_records_unchanged(state_root, original_corrupt_bytes)
+    assert_gc_mode_paths(mode, state_root, actions, gc_record_paths(records, corrupt: false))
+  end
+
+  def assert_gc_stderr_has_no_encoding_exception(stderr)
+    refute_includes stderr, "invalid byte sequence"
+    refute_includes stderr, "ArgumentError"
+    refute_includes stderr, "JSON::GeneratorError"
+  end
+
+  def assert_gc_corrupt_records_unchanged(state_root, original_bytes)
+    original_bytes.each do |path, bytes|
+      assert_equal bytes, File.binread(File.join(state_root, path))
+    end
+  end
+
+  def assert_gc_mode_paths(mode, state_root, actions, healthy_paths)
+    execute = mode == "execute"
+    actions.each do |action|
+      archive_path = File.join(state_root, action.fetch("archive_path"))
+      execute ? assert_path_exists(archive_path) : refute_path_exists(archive_path)
+    end
+    healthy_paths.each do |path|
+      source_path = File.join(state_root, path)
+      execute ? refute_path_exists(source_path) : assert_path_exists(source_path)
+    end
+  end
+
+  def gc_invalid_repo_records
+    placeholder = "shakacode/corrupt-byte"
+    old = "2020-01-01T00:00:00Z"
+    {
+      "events/corrupt-terminal/lane_closed-corrupt.json" => [
+        valid_gc_lane_closed(
+          event_id: "lane_closed-corrupt", batch_id: "corrupt-terminal", target: "corrupt", at: old,
+          extra: { "repo" => placeholder }
+        ), true
+      ],
+      "events/corrupt-synthetic/orphan-corrupt.json" => [
+        gc_synthetic_orphan("orphan-corrupt", "corrupt-synthetic", "corrupt-orphan", placeholder, old), true
+      ],
+      "events/healthy-terminal/lane_closed-healthy.json" => [
+        valid_gc_lane_closed(
+          event_id: "lane_closed-healthy", batch_id: "healthy-terminal", target: "healthy", at: old
+        ), false
+      ],
+      "events/healthy-synthetic/orphan-healthy.json" => [
+        gc_synthetic_orphan("orphan-healthy", "healthy-synthetic", "healthy-orphan", "shakacode/example", old), false
+      ]
+    }
+  end
+
+  def gc_synthetic_orphan(event_id, batch_id, target, repo, at)
+    {
+      "schema_version" => 1, "event_id" => event_id, "batch_id" => batch_id,
+      "type" => "phase", "repo" => repo, "target" => target, "phase" => "qa",
+      "synthetic" => true, "at" => at
+    }
+  end
+
+  def write_gc_invalid_repo_records(state_root, records)
+    records.each_with_object({}) do |(path, (payload, corrupt)), originals|
+      full_path = File.join(state_root, path)
+      FileUtils.mkdir_p(File.dirname(full_path))
+      bytes = "#{JSON.pretty_generate(payload)}\n".b
+      bytes.sub!("shakacode/corrupt-byte".b, gc_invalid_repo.b) if corrupt
+      File.binwrite(full_path, bytes)
+      originals[path] = bytes if corrupt
+    end
+  end
+
+  def gc_record_paths(records, corrupt:)
+    records.filter_map { |path, (_, record_corrupt)| path if record_corrupt == corrupt }.sort
+  end
+
+  def gc_invalid_repo
+    "shakacode/\xFF".b.force_encoding(Encoding::UTF_8)
   end
 
   def valid_gc_lane_closed(event_id:, batch_id:, target:, at:, extra: {})

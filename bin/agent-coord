@@ -1932,7 +1932,9 @@ module AgentCoord
     end
 
     def gc_compaction_candidates(store, now, hot_days, synthetic_hot_days)
-      entries = store.list_json("events")
+      entries = store.list_json("events").reject do |entry|
+        gc_invalid_repo_encoding?(entry.data["repo"])
+      end
       terminal_lanes = gc_terminal_lanes_by_provenance(entries)
       groups = entries.group_by do |entry|
         data = entry.data
@@ -1945,6 +1947,10 @@ module AgentCoord
       groups.filter_map do |group, entries|
         gc_compaction_candidate(group, entries, now, hot_days, synthetic_hot_days)
       end
+    end
+
+    def gc_invalid_repo_encoding?(repo)
+      repo.is_a?(String) && !repo.valid_encoding?
     end
 
     def gc_compaction_candidate(group, entries, now, hot_days, synthetic_hot_days)
@@ -2023,7 +2029,8 @@ module AgentCoord
       return false unless gc_nonempty_string?(data["event_id"])
       return false unless gc_nonempty_string?(data["target"])
 
-      data["repo"].is_a?(String) && data["repo"].match?(%r{\A[^/]+/[^/]+\z})
+      repo = data["repo"]
+      repo.is_a?(String) && repo.valid_encoding? && repo.match?(%r{\A[^/]+/[^/]+\z})
     end
 
     def gc_terminal_context_valid?(data)
@@ -8284,9 +8291,11 @@ module AgentCoord
 
   def self.validate_repo!(repo, field)
     value = repo.to_s
+    raise Error, "invalid #{field} repo: #{utf8_diagnostic(value)}" unless value.valid_encoding?
+
     return if value.match?(%r{\A[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+\z})
 
-    raise Error, "invalid #{field} repo: #{repo}"
+    raise Error, "invalid #{field} repo: #{value}"
   end
 
   def self.validate_segment!(segment, field)
