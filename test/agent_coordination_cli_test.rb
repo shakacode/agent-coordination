@@ -3324,7 +3324,7 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
 
       cases.each do |label, backend, selector_argv|
         result = run_command(
-          { "XDG_CONFIG_HOME" => config_home },
+          { "XDG_CONFIG_HOME" => config_home, "AGENT_COORD_POLICY" => "required" },
           RbConfig.ruby,
           BIN,
           "config",
@@ -3338,6 +3338,8 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
         payload = JSON.parse(result.stdout)
         assert_equal backend, payload.dig("coordination", "backend")
         assert_equal "cli", payload.dig("coordination", "source", "backend")
+        assert_equal "required", payload.dig("coordination", "policy")
+        assert_equal "process_env", payload.dig("coordination", "source", "policy")
         selector = selector_argv.first.split("=", 2).first
         assert_includes result.stderr, "backend selected explicitly by #{selector}."
         refute_includes result.stdout, "private-token"
@@ -3348,6 +3350,34 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     end
   end
   # rubocop:enable Metrics/BlockLength
+
+  # `config show --json` is the workflow policy-enforcement seam. Bypassing a
+  # canonical file that says `required` or `disabled` must not silently report
+  # the default `optional`; the caller has to supply the policy it wants the
+  # recovery invocation to advertise without reopening the broken file.
+  def test_ignore_user_config_config_show_requires_an_explicit_process_policy
+    with_private_user_config("AGENT_COORD_POLICY=required\n") do |config_home|
+      result = run_command(
+        { "XDG_CONFIG_HOME" => config_home },
+        RbConfig.ruby,
+        BIN,
+        "config",
+        "show",
+        "--ignore-user-config",
+        "--state-root",
+        @state_root,
+        "--json"
+      )
+
+      assert_equal AgentCoord::EXIT_USAGE, result.status.exitstatus, result.stderr
+      assert_empty result.stdout
+      assert_equal(
+        "config show with --ignore-user-config requires an explicit process AGENT_COORD_POLICY " \
+        "(required, optional, or disabled)\n",
+        result.stderr
+      )
+    end
+  end
 
   # The matrix and its shared no-mutation assertion are one behavioral case.
   # rubocop:disable Metrics/BlockLength
@@ -3425,6 +3455,36 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     assert_equal AgentCoord::EXIT_USAGE, ordinary.status.exitstatus, ordinary.stderr
     assert_empty ordinary.stdout
     assert_equal expected, ordinary.stderr
+  end
+
+  def test_doctor_stack_json_config_bypass_success_keeps_stdout_json_only
+    with_private_user_config("not a valid assignment\n") do |config_home|
+      result = run_command(
+        { "XDG_CONFIG_HOME" => config_home },
+        RbConfig.ruby,
+        BIN,
+        "doctor",
+        "--stack-json",
+        "--ignore-user-config",
+        "--state-root",
+        @state_root
+      )
+
+      assert_equal 0, result.status.exitstatus, result.stderr
+      payload = JSON.parse(result.stdout)
+      assert_equal 1, payload.fetch("schema_version")
+      assert_equal "agent-coordination", payload.fetch("component")
+      assert_equal "healthy", payload.fetch("status")
+      readability = payload.fetch("checks").find do |check|
+        check.fetch("id") == "backend.readability"
+      end
+      assert_equal "local", readability.dig("details", "backend")
+      assert_equal(
+        "warning: canonical user configuration bypassed by --ignore-user-config; " \
+        "backend selected explicitly by --state-root.\n",
+        result.stderr
+      )
+    end
   end
 
   # PATH arguments retain their original bytes. An invalid UTF-8 byte in the

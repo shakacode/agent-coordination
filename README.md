@@ -345,6 +345,13 @@ selects an implicit local backend. Process-scoped credentials and machine or
 session identity remain available to authenticate and attribute the explicitly
 named backend.
 
+Because `config show --json` is the workflow policy-enforcement seam, its
+recovery form also requires a valid process `AGENT_COORD_POLICY` (`required`,
+`optional`, or `disabled`). The command reports that explicit process policy
+instead of silently downgrading a bypassed canonical `required` or `disabled`
+policy to the default `optional`. Other recovery commands keep their existing
+policy behavior.
+
 Every accepted invocation writes a warning to stderr that says the canonical
 file was bypassed and names the selector flag, never its value or a secret.
 Claim refusal, ambiguous-result handling, and ownership and dependency checks

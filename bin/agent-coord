@@ -1265,9 +1265,17 @@ module AgentCoord
 
     def validate_user_config_bypass_option_usage!(command, options)
       return unless options[:ignore_user_config]
-      return if @user_config_bypass_selector && (backend_command?(command) || command == "config")
+      unless @user_config_bypass_selector && (backend_command?(command) || command == "config")
+        raise Error, "--ignore-user-config is only valid for commands that select or report a coordination backend"
+      end
+      return unless command == "config"
 
-      raise Error, "--ignore-user-config is only valid for commands that select or report a coordination backend"
+      process_policy = @process_config&.fetch(POLICY_ENV, nil)
+      return if policy_supplied?(process_policy)
+
+      raise Error,
+            "config show with --ignore-user-config requires an explicit process AGENT_COORD_POLICY " \
+            "(required, optional, or disabled)"
     end
 
     def emit_user_config_bypass_notice(options)
