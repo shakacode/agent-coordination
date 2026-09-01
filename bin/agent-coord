@@ -526,6 +526,13 @@ module AgentCoord
       @user_config_bypass_selector = selectors.first
       initialize_bypassed_user_configuration!
       true
+    rescue Error => e
+      # This guard intentionally runs before run_doctor_command can apply its
+      # stack-report usage mapping. Preserve that public exit-code contract even
+      # though a rejected bypass never reaches the doctor parser.
+      raise unless command == "doctor" && e.exit_code == EXIT_USAGE && stack_json_option_token?(@argv)
+
+      raise Error.new(e.message, exit_code: STACK_EXIT_USAGE)
     end
 
     # Preserve process-scoped credentials and identity for an explicitly named
@@ -1508,6 +1515,7 @@ module AgentCoord
     def warn_consumer_split_brain(command, options)
       return unless status_read_command?(command)
       return if options[:stack_json]
+      return if options[:ignore_user_config]
       return if local_mode_opt_in?
       # doctor reports the enforcing condition itself; do not say it twice.
       return if command == "doctor" && consumer_split_brain_env_file(options)
@@ -1555,6 +1563,7 @@ module AgentCoord
 
     def consumer_split_brain_env_file(options)
       return nil if options[:stack_json]
+      return nil if options[:ignore_user_config]
       return nil unless split_brain_eligible_local?(options)
       return nil if process_api_url_configured?
       return nil if local_mode_opt_in?
@@ -4438,6 +4447,10 @@ module AgentCoord
     # drop the rest for good once gc pruned the events behind it.
     def validate_log_sync_scope!(options)
       return unless options[:sync]
+      if options[:ignore_user_config] && @user_config_bypass_selector != "--state-root"
+        raise Error,
+              "--sync with --ignore-user-config requires --state-root as its explicit backend selector"
+      end
 
       # An empty flag value is unset on the read path, so it is unset here too.
       # --limit is the exception in the other direction: any limit narrows the

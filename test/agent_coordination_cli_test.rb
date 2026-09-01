@@ -3263,6 +3263,50 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     end
   end
 
+  # The FIFO setup, bounded subprocess lifecycle, and result assertions are one
+  # behavioral case: bypass must not open the canonical path at any later phase.
+  # rubocop:disable Metrics/BlockLength
+  def test_ignore_user_config_does_not_reopen_canonical_config_for_split_brain_checks
+    with_private_config_tmpdir("agent-coord-config-bypass-fifo") do |root|
+      config_home = File.join(root, "config")
+      env_file = File.join(config_home, "agent-coord", "env")
+      recovery_root = File.join(root, "recovery")
+      FileUtils.mkdir_p(File.dirname(env_file))
+      File.chmod(0o700, File.dirname(env_file))
+      File.mkfifo(env_file, 0o600)
+      FileUtils.mkdir_p(recovery_root)
+      stdin, stdout, stderr, wait_thread = Open3.popen3(
+        COMMAND_ENV.merge("XDG_CONFIG_HOME" => config_home),
+        RbConfig.ruby,
+        BIN,
+        "status",
+        "--ignore-user-config",
+        "--state-root",
+        recovery_root,
+        "--json"
+      )
+      stdin.close
+
+      unless wait_thread.join(1)
+        Process.kill("KILL", wait_thread.pid)
+        wait_thread.join
+        flunk "config bypass reopened the canonical FIFO during split-brain checks"
+      end
+
+      captured_stdout = stdout.read
+      captured_stderr = stderr.read
+      assert_equal 0, wait_thread.value.exitstatus, captured_stderr
+      assert_equal "all", JSON.parse(captured_stdout).dig("scope", "kind")
+      assert_includes captured_stderr,
+                      "warning: canonical user configuration bypassed by --ignore-user-config; " \
+                      "backend selected explicitly by --state-root."
+      refute_includes captured_stderr, "split-brain configuration"
+    ensure
+      [stdin, stdout, stderr].compact.each { |io| io.close unless io.closed? }
+    end
+  end
+  # rubocop:enable Metrics/BlockLength
+
   # Each selector is one row of the same provenance and secret-redaction contract.
   # rubocop:disable Metrics/BlockLength
   def test_ignore_user_config_accepts_each_explicit_backend_selector_and_reports_its_flag
@@ -3350,6 +3394,100 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     end
   end
   # rubocop:enable Metrics/BlockLength
+
+  def test_doctor_stack_json_config_bypass_selector_errors_use_stack_usage_exit
+    cases = {
+      "missing selector" => [],
+      "duplicate selector" => ["--state-root", @state_root, "--state-root", File.join(@state_root, "other")],
+      "conflicting selectors" => ["--state-root", @state_root, "--backend", "acme/coordination-state"]
+    }
+    expected = "--ignore-user-config requires exactly one explicit backend selector: " \
+               "--state-root, --api-url, or --backend\n"
+
+    cases.each do |label, selector_argv|
+      result = run_command(
+        {},
+        RbConfig.ruby,
+        BIN,
+        "doctor",
+        "--stack-json",
+        "--ignore-user-config",
+        *selector_argv
+      )
+
+      assert_equal AgentCoord::STACK_EXIT_USAGE, result.status.exitstatus, "#{label}: #{result.stderr}"
+      assert_empty result.stdout, label
+      assert_equal expected, result.stderr, label
+    end
+
+    ordinary = run_command({}, RbConfig.ruby, BIN, "status", "--ignore-user-config")
+
+    assert_equal AgentCoord::EXIT_USAGE, ordinary.status.exitstatus, ordinary.stderr
+    assert_empty ordinary.stdout
+    assert_equal expected, ordinary.stderr
+  end
+
+  # Remote recovery backends have no explicit local mirror destination. A fake
+  # empty GitHub tree lets the old path reach --sync and expose its ambient-root
+  # fallback; the HTTP case proves the guard runs before credentials/backend IO.
+  # rubocop:disable Metrics/BlockLength, Metrics/MethodLength
+  def test_ignore_user_config_requires_an_explicit_state_root_for_log_sync
+    with_private_config_tmpdir("agent-coord-config-bypass-sync") do |root|
+      mirror_root = File.join(root, "ambient-status-root")
+      fake_bin = File.join(root, "bin")
+      FileUtils.mkdir_p([mirror_root, fake_bin])
+      File.write(
+        File.join(fake_bin, "gh"),
+        <<~RUBY
+          #!/usr/bin/env ruby
+          require "json"
+          if ARGV.join(" ").match?(%r{^api repos/[^/]+/[^/]+/git/trees/[^?]+\\?recursive=1$})
+            puts JSON.generate("tree" => [])
+            exit 0
+          end
+          warn "unexpected gh command: #{ARGV.join(' ')}"
+          exit 1
+        RUBY
+      )
+      FileUtils.chmod(0o755, File.join(fake_bin, "gh"))
+      env = {
+        "AGENT_COORD_STATUS_STATE_ROOT" => mirror_root,
+        "PATH" => [fake_bin, File.dirname(RbConfig.ruby), "/usr/bin", "/bin"].join(File::PATH_SEPARATOR)
+      }
+      cases = {
+        "--backend" => ["--backend", "acme/coordination-state"],
+        "--api-url" => ["--api-url", "http://127.0.0.1:9"]
+      }
+
+      cases.each do |selector, selector_argv|
+        result = run_command(
+          env,
+          RbConfig.ruby,
+          BIN,
+          "log",
+          "--ignore-user-config",
+          *selector_argv,
+          "--sync"
+        )
+
+        assert_equal AgentCoord::EXIT_USAGE, result.status.exitstatus, "#{selector}: #{result.stderr}"
+        assert_empty result.stdout, selector
+        assert_includes result.stderr,
+                        "--sync with --ignore-user-config requires --state-root as its explicit backend selector"
+        assert_includes result.stderr, "backend selected explicitly by #{selector}."
+      end
+      refute_path_exists File.join(mirror_root, "log.tsv.lock")
+
+      local = run_command(
+        {}, RbConfig.ruby, BIN, "log", "--ignore-user-config", "--state-root", @state_root, "--sync"
+      )
+
+      assert_equal 0, local.status.exitstatus, local.stderr
+      assert_includes local.stdout, File.join(@state_root, "log.tsv")
+      assert_includes local.stderr, "backend selected explicitly by --state-root."
+    end
+  end
+  # rubocop:enable Metrics/BlockLength, Metrics/MethodLength
 
   def test_ignore_user_config_ignores_process_ref_unless_ref_is_explicit
     with_process_env(
