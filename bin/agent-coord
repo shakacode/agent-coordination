@@ -2933,9 +2933,10 @@ module AgentCoord
     # token_machine comes from /v1/whoami when the deep HTTP doctor ran; the
     # environment tuple is metadata only and never carries token values.
     def environment_identity_report(token_identity)
-      session_id, session_source = AgentCoord.environment_session_identity
-      session_id = diagnostic_environment_identity(session_id)
-      machine_id = diagnostic_environment_identity(AgentCoord.environment_machine_id)
+      raw_session_id, session_source = diagnostic_environment_session_identity
+      raw_machine_id = diagnostic_environment_identity_value(MACHINE_ID_ENV)
+      session_id = diagnostic_environment_identity(raw_session_id)
+      machine_id = diagnostic_environment_identity(raw_machine_id)
       token_machine = token_identity && token_identity["machine"].to_s
       token_machine = nil if token_machine.to_s.empty?
       {
@@ -2944,8 +2945,32 @@ module AgentCoord
         "session_id" => session_id,
         "session_source" => session_source,
         "token_machine" => token_machine,
-        "machine_match" => machine_match_status(machine_id, token_machine)
+        "machine_match" => machine_match_status(raw_machine_id, token_machine)
       }
+    end
+
+    def diagnostic_environment_session_identity
+      explicit = diagnostic_environment_identity_value(SESSION_ID_ENV)
+      return [explicit, SESSION_SOURCE_AGENT_COORD] if explicit
+
+      codex = diagnostic_environment_identity_value(CODEX_THREAD_ID_ENV)
+      return [codex, SESSION_SOURCE_CODEX] if codex
+
+      [nil, SESSION_SOURCE_UNSET]
+    end
+
+    # Mirror the state-path presence and whitespace rules without letting an
+    # invalid UTF-8 encoding tag make the diagnostic path raise before it can
+    # report the bad bytes. The binary copy retains the original bytes for the
+    # machine comparison; only the emitted diagnostic value is scrubbed.
+    def diagnostic_environment_identity_value(name)
+      value = ENV.fetch(name, nil)
+      return nil unless value
+
+      value = value.to_s
+      value = value.b unless value.valid_encoding?
+      value = value.strip
+      value.empty? ? nil : value
     end
 
     # Environment identity is state payload data in claim/heartbeat paths, but
@@ -3111,8 +3136,14 @@ module AgentCoord
         "backend" => backend_kind,
         "backend_repo" => backend_kind == "github" ? options.fetch(:backend) : nil,
         "backend_url" => active_backend_url(options, backend_kind),
-        "state_root" => backend_kind == "local" ? options[:state_root] : nil
+        "state_root" => diagnostic_stack_state_root(options, backend_kind)
       }
+    end
+
+    def diagnostic_stack_state_root(options, backend_kind)
+      return unless backend_kind == "local" && options[:state_root]
+
+      AgentCoord.utf8_diagnostic(options[:state_root])
     end
 
     def stack_resource_check(store, backend_kind, options)

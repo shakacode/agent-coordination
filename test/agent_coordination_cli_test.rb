@@ -4507,6 +4507,114 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     end
   end
 
+  def test_stack_doctor_config_failure_normalizes_state_root_in_c_locale
+    state_root = File.join(@state_root, "state-café")
+
+    with_private_user_config("AGENT_COORD_POLICY=optional\n") do |config_home|
+      File.chmod(0o644, File.join(config_home, "agent-coord", "env"))
+
+      result = run_command(
+        { "XDG_CONFIG_HOME" => config_home, "LC_ALL" => "C" },
+        RbConfig.ruby,
+        BIN,
+        "doctor",
+        "--stack-json",
+        "--state-root",
+        state_root
+      )
+
+      assert_equal 2, result.status.exitstatus
+      assert_empty result.stderr
+      report = JSON.parse(result.stdout)
+      backend_check = report.fetch("checks").find { |check| check.fetch("id") == "backend.readability" }
+      assert_equal state_root, backend_check.dig("details", "state_root")
+      refute_path_exists state_root
+    end
+  end
+
+  def test_stack_doctor_config_failure_scrubs_invalid_utf8_environment_identity
+    identity_cases = {
+      "AGENT_COORD_MACHINE_ID" => ["machine_id", nil],
+      "AGENT_COORD_SESSION_ID" => %w[session_id agent_coord_session_id],
+      "CODEX_THREAD_ID" => %w[session_id codex_thread_id]
+    }
+
+    with_private_user_config("AGENT_COORD_POLICY=optional\n") do |config_home|
+      File.chmod(0o644, File.join(config_home, "agent-coord", "env"))
+
+      identity_cases.each do |environment_key, (field, session_source)|
+        result = run_command(
+          { "XDG_CONFIG_HOME" => config_home, "LC_ALL" => "C.UTF-8", environment_key => "\xFF".b },
+          RbConfig.ruby,
+          BIN,
+          "doctor",
+          "--stack-json",
+          "--state-root",
+          @state_root
+        )
+
+        assert_equal 2, result.status.exitstatus, "#{environment_key}: #{result.stderr}"
+        assert_empty result.stderr, environment_key
+        report = JSON.parse(result.stdout)
+        identity = report.fetch("checks").find { |check| check.fetch("id") == "identity.machine" }.fetch("details")
+        assert_equal "�", identity.fetch(field), environment_key
+        assert_equal session_source, identity.fetch("session_source"), environment_key if session_source
+      end
+    end
+  end
+
+  def test_stack_doctor_healthy_report_normalizes_state_root_in_c_locale
+    state_root = File.join(@state_root, "state-café")
+    FileUtils.mkdir_p(state_root)
+
+    with_private_user_config("AGENT_COORD_POLICY=optional\n") do |config_home|
+      result = run_command(
+        { "XDG_CONFIG_HOME" => config_home, "LC_ALL" => "C" },
+        RbConfig.ruby,
+        BIN,
+        "doctor",
+        "--stack-json",
+        "--state-root",
+        state_root
+      )
+
+      assert_equal 0, result.status.exitstatus, result.stderr
+      assert_empty result.stderr
+      report = JSON.parse(result.stdout)
+      backend_check = report.fetch("checks").find { |check| check.fetch("id") == "backend.readability" }
+      assert_equal state_root, backend_check.dig("details", "state_root")
+    end
+  end
+
+  def test_stack_doctor_healthy_report_scrubs_invalid_utf8_environment_identity
+    identity_cases = {
+      "AGENT_COORD_MACHINE_ID" => ["machine_id", nil],
+      "AGENT_COORD_SESSION_ID" => %w[session_id agent_coord_session_id],
+      "CODEX_THREAD_ID" => %w[session_id codex_thread_id]
+    }
+
+    with_private_user_config("AGENT_COORD_POLICY=optional\n") do |config_home|
+      identity_cases.each do |environment_key, (field, session_source)|
+        result = run_command(
+          { "XDG_CONFIG_HOME" => config_home, "LC_ALL" => "C.UTF-8", environment_key => "\xFF".b },
+          RbConfig.ruby,
+          BIN,
+          "doctor",
+          "--stack-json",
+          "--state-root",
+          @state_root
+        )
+
+        assert_equal 0, result.status.exitstatus, "#{environment_key}: #{result.stderr}"
+        assert_empty result.stderr, environment_key
+        report = JSON.parse(result.stdout)
+        identity = report.fetch("checks").find { |check| check.fetch("id") == "identity.machine" }.fetch("details")
+        assert_equal "�", identity.fetch(field), environment_key
+        assert_equal session_source, identity.fetch("session_source"), environment_key if session_source
+      end
+    end
+  end
+
   def test_stack_doctor_with_valid_user_config_preserves_healthy_report
     with_private_user_config("AGENT_COORD_POLICY=optional\n") do |config_home|
       result = run_command(
@@ -6063,6 +6171,24 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     end
   end
 
+  def test_doctor_deep_http_preserves_identity_whitespace_and_session_precedence
+    with_identity_env(
+      "AGENT_COORD_MACHINE_ID" => "  m5  ",
+      "AGENT_COORD_SESSION_ID" => " \t ",
+      "CODEX_THREAD_ID" => "  codex-thread-42  "
+    ) do
+      stdout = StringIO.new
+      runner = doctor_identity_runner(stdout, token_machine: "m5")
+
+      assert_equal 0, runner.run
+      identity = JSON.parse(stdout.string).fetch("environment_identity")
+      assert_equal "m5", identity.fetch("machine_id")
+      assert_equal "codex-thread-42", identity.fetch("session_id")
+      assert_equal "codex_thread_id", identity.fetch("session_source")
+      assert_equal "match", identity.fetch("machine_match")
+    end
+  end
+
   def test_doctor_deep_http_fails_on_machine_identity_mismatch
     with_identity_env("AGENT_COORD_MACHINE_ID" => "m5") do
       stdout = StringIO.new
@@ -6079,6 +6205,23 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
       identity = payload.fetch("environment_identity")
       assert_equal "mismatch", identity.fetch("machine_match")
       assert_equal "m1-codex", identity.fetch("token_machine")
+    end
+  end
+
+  def test_doctor_deep_http_compares_raw_machine_identity_before_scrubbing_diagnostics
+    with_identity_env("AGENT_COORD_MACHINE_ID" => "\xFF".b) do
+      stdout = StringIO.new
+      runner = doctor_identity_runner(stdout, token_machine: "�")
+
+      error = assert_raises(AgentCoord::OperationalError) { runner.run }
+
+      assert_equal AgentCoord::EXIT_OPERATIONAL, error.exit_code
+      payload = JSON.parse(stdout.string)
+      assert_equal "error", payload.fetch("status")
+      identity = payload.fetch("environment_identity")
+      assert_equal "�", identity.fetch("machine_id")
+      assert_equal "�", identity.fetch("token_machine")
+      assert_equal "mismatch", identity.fetch("machine_match")
     end
   end
 
