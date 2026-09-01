@@ -5436,14 +5436,14 @@ module AgentCoord
       (entry.data["target"] || AgentCoord.target_from_path(entry.path)).to_s.strip
     end
 
-    # Repo, target, and holder do not move under renewal. A record without enough
-    # identity to prove that two reads name one lease falls back to its path, so
-    # uncertain legacy records stay visible rather than hiding a possible holder.
+    # Repo, target, and holder do not move under renewal. Supported legacy claims
+    # derive their exact repository from the path. A record still missing target
+    # or holder falls back to its whole path so uncertain records stay visible.
     def claim_lease_key(entry)
       data = entry.data
       return entry.path if data["target"].to_s.empty? || data["agent_id"].to_s.empty?
 
-      [data["repo"], data["target"], data["agent_id"]]
+      [log_claim_repo(entry), data["target"], data["agent_id"]]
     end
 
     # Built from claim fields directly rather than through log_row, whose "phase"

@@ -98,8 +98,9 @@ when releases begin.
   rows are new. Text columns are scrubbed of tabs and newlines like the tsv ones,
   so agent-supplied text cannot split one printed event across two lines. A
   filtered claims listing warns as well, so a hidden claim does not read as an
-  absent one, and when a repository is recorded under two casings the newest of
-  the matching claims is the one reported. The mirror is kept in timestamp order
+  absent one. Repository case variants stay distinct, so every matching literal
+  claim lease is reported; only repeated snapshots of the same record-named
+  lease collapse to the newest. The mirror is kept in timestamp order
   rather than appended blindly, since a later sync can still discover an older
   event and the file's last line has to stay the current state. `--sync` honors
   `--json`. The claim note is built from claim fields directly rather than through
@@ -550,16 +551,18 @@ when releases begin.
   the item (`issue:319:qa`): asking for the item covers its lanes, asking for a
   lane stays narrow. Claim keys are unchanged — this is a read-path identity only,
   because a lane holds its own lease and merging keys would break exclusion. The
-  reported claim follows that same rule: it folds casing and kind prefixes, which
-  name one lease, but matches the lane exactly, so a parent and a lane that are
-  live at the same time are each reported under their own query instead of the
-  newer one hiding the other. `claim` writes raw target paths, so `9832` and
+  reported claim uses the folded work-item identity only to discover candidates,
+  with lanes matched exactly; it groups candidates by exact record-named lease
+  rather than by casing or kind prefix. A parent and lane that are live at the
+  same time are therefore each reported under their own query. `claim` writes raw
+  target paths, so `9832` and
   `pr:9832` are independently claimable and the fleet holds such pairs live under
   different agents; `--json` therefore gained a `claims` array carrying every
   holder, with the singular `claim` still the newest for existing consumers, and
-  text output prints one line per holder. One key recorded under two casings is
-  still a single lease written twice, so those collapse to the newest as before —
-  the grouping is on the exact claim key, not on the work-item identity. Whether a claim is still the latest
+  text output prints one line per holder. Literal repository or target keys that
+  differ only by case remain separate leases; only repeated reads naming the same
+  exact repository, target, and holder collapse to the newest snapshot. Supported
+  legacy records derive their exact repository from the claim path. Whether a claim is still the latest
   thing known is judged against events recorded under that claim's own key, since
   a separate lease — whether a lane like `issue:319:qa` or an alias like `pr:319` —
   says nothing about whether this one still stands. That is also what the literal

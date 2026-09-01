@@ -1594,6 +1594,31 @@ class AgentCoordLogClaimKeyTest < AgentCoordLogTestCase
     assert_equal %w[worker-lower worker-upper], holders.sort
   end
 
+  def test_legacy_records_without_payload_repo_keep_case_distinct_path_repositories
+    entries = [
+      log_claim_entry(
+        path: "claims/shakacode/example/319.json",
+        repo: nil,
+        target: "319",
+        agent_id: "worker-shared",
+        updated_at: "2026-08-01T00:00:00Z"
+      ),
+      log_claim_entry(
+        path: "claims/ShakaCode/example/319.json",
+        repo: nil,
+        target: "319",
+        agent_id: "worker-shared",
+        updated_at: "2026-08-02T00:00:00Z"
+      )
+    ]
+
+    claims = log_payload_from_claim_entries(entries).fetch("claims")
+    updated_at = claims.map { |claim| claim.fetch("updated_at") }
+
+    assert_equal 2, claims.length
+    assert_equal ["2026-08-01T00:00:00Z", "2026-08-02T00:00:00Z"], updated_at
+  end
+
   def test_same_record_identity_deduplicates_renewals_without_hiding_a_different_holder
     entries = [
       log_claim_entry(

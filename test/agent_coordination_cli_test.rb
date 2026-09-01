@@ -8145,11 +8145,11 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     assert_equal "ISSUE:4150", payload.fetch("scope").fetch("target")
   end
 
-  # One key written under two casings is a single lease recorded twice, and on a
-  # case-insensitive checkout the two candidates are literally one file. Collapse
-  # on the case-folded claim key the way `log_claim_lookup` does -- newest wins --
-  # while two genuinely distinct keys stay two leases. The superseded record's
-  # holder is never read, because the collapse happens before heartbeats.
+  # On a case-insensitive checkout two case-spelled candidates can be one file and
+  # return the same record-named lease. Collapse on the shared exact lease identity
+  # used by `log_claim_lookup` -- newest wins -- while records that name distinct
+  # literal keys stay separate. The superseded record's holder is never read,
+  # because the collapse happens before heartbeats.
   def test_status_target_scope_collapses_one_lease_recorded_under_two_casings
     now = Time.utc(2026, 6, 20, 12, 0, 0)
     expected = [
