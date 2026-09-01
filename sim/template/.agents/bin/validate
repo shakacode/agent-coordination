@@ -3,6 +3,15 @@ set -euo pipefail
 root="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
 cd "$root"
 
+# Use an explicit internal argument so inherited environment state cannot turn
+# ordinary validation into a syntax-probe result. The probe intentionally exits
+# nonzero; only config-check interprets its reserved status as a successful parse.
+syntax_probe=false
+if [ "${1:-}" = "--config-check-ruby-syntax-probe" ]; then
+  syntax_probe=true
+  shift
+fi
+
 # Keep this base-ref resolution aligned with .agents/bin/ci.
 base_ref="${AGENT_SIM_BASE_REF:-}"
 if [ -z "$base_ref" ] && [ -n "${GITHUB_BASE_REF:-}" ]; then
@@ -22,8 +31,10 @@ if [ -n "$base_ref" ]; then
     exit 1
   }
   ruby -ropen3 -rrbconfig -e '
+    root, merge_base, syntax_probe = ARGV
+    exit 42 if syntax_probe == "true"
+
     $stderr.set_encoding(Encoding::UTF_8)
-    root, merge_base = ARGV
     output, error, status = Open3.capture3(
       "git", "-C", root, "diff", "--no-renames", "--name-only", "-z", merge_base
     )
@@ -59,7 +70,7 @@ if [ -n "$base_ref" ]; then
     abort "Expected matching test file for changed task: #{test_file}" unless File.file?(test_file)
 
     exec RbConfig.ruby, test_file
-  ' "$root" "$merge_base"
+  ' "$root" "$merge_base" "$syntax_probe"
   exit 0
 fi
 

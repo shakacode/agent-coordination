@@ -1,6 +1,7 @@
 # frozen_string_literal: true
 
 require "fileutils"
+require "digest"
 require "minitest/autorun"
 require "open3"
 require "tmpdir"
@@ -391,6 +392,17 @@ class SimulationTemplateTest < Minitest::Test
     assert_equal "Simulation test runner must remain executable.\n", err
   end
 
+  def test_validate_does_not_honor_inherited_syntax_only_environment
+    FileUtils.rm(File.join(@repo, ".agents/bin/test"))
+    git("add", "-A")
+    git("commit", "-qm", "remove test runner")
+
+    _out, err, status = validate("HEAD", { "AGENT_SIM_VALIDATE_SYNTAX_ONLY" => "1" })
+
+    refute status.success?
+    assert_equal "Simulation test runner must remain executable.\n", err
+  end
+
   def test_config_check_rejects_invalid_filename_bytes_without_a_backtrace
     env = fake_git_env("lib/task_\xFF.rb\0".b)
     env.merge!("LC_ALL" => "C", "LANG" => "C")
@@ -483,6 +495,21 @@ class SimulationTemplateTest < Minitest::Test
 
     refute status.success?
     assert_includes err, "Invalid shell syntax in simulation command scripts."
+  end
+
+  def test_config_check_rejects_invalid_embedded_validate_ruby_syntax
+    validator = File.join(@repo, ".agents/bin/validate")
+    File.write(validator, File.read(validator).sub('changed.split("\\0")', 'changed.split("\\0"'))
+    validator_sha256 = Digest::SHA256.file(validator).hexdigest
+    guard = File.join(@repo, ".agents/bin/config-check")
+    guard_contents = File.read(guard).sub(/expected_validator_sha256 = "[0-9a-f]+"/,
+                                          "expected_validator_sha256 = \"#{validator_sha256}\"")
+    File.write(guard, guard_contents)
+
+    _out, err, status = config_check
+
+    refute status.success?
+    assert_includes err, "Invalid embedded Ruby syntax in simulation validator."
   end
 
   def test_config_check_ignores_base_only_changes_for_stale_task_branch

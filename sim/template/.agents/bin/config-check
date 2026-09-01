@@ -2,6 +2,7 @@
 # frozen_string_literal: true
 
 require "digest"
+require "English"
 require "open3"
 require "rbconfig"
 require "yaml"
@@ -37,7 +38,7 @@ allowed_paths = %w[
 task_path = %r{\Alib/task_[[:alnum:]_]+\.rb\z}
 # Regenerate after a reviewed validator update with:
 # ruby -rdigest -e 'puts Digest::SHA256.file(".agents/bin/validate").hexdigest'
-expected_validator_sha256 = "3d51221b08a47886f38939405d59b443af35b3082c7bd4b2e2b1f418c76b66de"
+expected_validator_sha256 = "83885ff9c97ea5c056a42781c024e4c7c26b1ff2b0fb086a0fb10c6d06bc6cee"
 
 base_commit, base_status = Open3.capture2("git", "-C", root, "rev-parse", "--verify", "#{base_ref}^{commit}")
 abort "Could not resolve config-check base ref." unless base_status.success?
@@ -77,6 +78,16 @@ scripts = [
 abort "Simulation command scripts must remain executable." unless scripts.all? { |script| File.executable?(script) }
 shell_syntax_valid = scripts.all? { |script| system("bash", "-n", script) }
 abort "Invalid shell syntax in simulation command scripts." unless shell_syntax_valid
+validator_syntax_env = {
+  "AGENT_SIM_BASE_REF" => merge_base.strip,
+  "BASH_ENV" => File::NULL
+}
+system(
+  validator_syntax_env, validator, "--config-check-ruby-syntax-probe",
+  out: File::NULL, err: File::NULL
+)
+validator_syntax_status = $CHILD_STATUS
+abort "Invalid embedded Ruby syntax in simulation validator." unless validator_syntax_status&.exitstatus == 42
 ruby_scripts = [__FILE__, File.join(root, ".agents/bin/seam-guard")]
 abort "Simulation guard scripts must remain executable." unless ruby_scripts.all? { |script| File.executable?(script) }
 abort "Invalid Ruby syntax in simulation guard scripts." unless ruby_scripts.all? do |script|
