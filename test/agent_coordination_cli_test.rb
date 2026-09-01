@@ -4563,6 +4563,46 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     end
   end
 
+  def test_stack_doctor_contains_invalid_process_config_encoding
+    result = run_command(
+      { "AGENT_COORD_POLICY" => "\xFF".b, "LC_ALL" => "C.UTF-8" },
+      RbConfig.ruby,
+      BIN,
+      "doctor",
+      "--stack-json",
+      "--state-root",
+      @state_root
+    )
+
+    assert_equal 2, result.status.exitstatus
+    assert_empty result.stderr
+    report = JSON.parse(result.stdout)
+    backend_check = report.fetch("checks").find { |check| check.fetch("id") == "backend.readability" }
+    assert_equal "failed", report.fetch("status")
+    assert_includes backend_check.dig("details", "error"), "invalid coordination policy"
+  end
+
+  def test_stack_doctor_contains_invalid_process_backend_selector_encoding
+    %w[AGENT_COORD_STATE_ROOT AGENT_COORD_API_URL AGENT_COORD_BACKEND].each do |key|
+      result = run_command(
+        { key => "\xFF".b, "LC_ALL" => "C.UTF-8" },
+        RbConfig.ruby,
+        BIN,
+        "doctor",
+        "--stack-json",
+        "--state-root",
+        @state_root
+      )
+
+      assert_equal 0, result.status.exitstatus, "#{key}: #{result.stderr}"
+      assert_empty result.stderr, key
+      report = JSON.parse(result.stdout)
+      backend_check = report.fetch("checks").find { |check| check.fetch("id") == "backend.readability" }
+      assert_equal "healthy", report.fetch("status"), key
+      assert_equal "local", backend_check.dig("details", "backend"), key
+    end
+  end
+
   def test_stack_doctor_healthy_report_normalizes_state_root_in_c_locale
     state_root = File.join(@state_root, "state-café")
     FileUtils.mkdir_p(state_root)
@@ -4783,6 +4823,28 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
 
       assert_nil details.fetch("state_root"), backend_kind
     end
+  end
+
+  def test_stack_backend_details_normalize_backend_diagnostics
+    runner = AgentCoord::Runner.new([])
+    github_options = {
+      backend: "owner/repo-\xFF".b,
+      api_url: nil,
+      state_root: nil
+    }
+    http_options = {
+      backend: "",
+      api_url: "https://user:secret@example.invalid/\xFF".b,
+      state_root: nil
+    }
+
+    github_details = runner.send(:stack_backend_details, github_options, "github")
+    http_details = runner.send(:stack_backend_details, http_options, "http")
+
+    assert_equal "owner/repo-�", github_details.fetch("backend_repo")
+    assert_equal "https://***@example.invalid/�", http_details.fetch("backend_url")
+    JSON.generate(github_details)
+    JSON.generate(http_details)
   end
 
   def test_stack_doctor_preserves_escaping_operational_error_contract

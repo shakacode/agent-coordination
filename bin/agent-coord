@@ -502,6 +502,21 @@ module AgentCoord
       raise unless command == "doctor" && stack_json_option_token?(@argv)
 
       run_doctor_command(command, configuration_error: e)
+    rescue EncodingError, ArgumentError => e
+      raise unless configuration_encoding_failure?(e)
+
+      error = OperationalError.new("coordination configuration contains invalid text encoding")
+      raise error unless command == "doctor" && stack_json_option_token?(@argv)
+
+      run_doctor_command(command, configuration_error: error)
+    end
+
+    def configuration_encoding_failure?(error)
+      return true if error.is_a?(EncodingError)
+
+      message = error.message.to_s.b.downcase
+      message.include?("invalid byte sequence".b) ||
+        (message.include?("incompatible".b) && message.include?("encoding".b))
     end
 
     # `config`'s subcommand has to be resolved before the load, because whether
@@ -3134,10 +3149,16 @@ module AgentCoord
     def stack_backend_details(options, backend_kind)
       {
         "backend" => backend_kind,
-        "backend_repo" => backend_kind == "github" ? options.fetch(:backend) : nil,
-        "backend_url" => active_backend_url(options, backend_kind),
+        "backend_repo" => backend_kind == "github" ? AgentCoord.utf8_diagnostic(options.fetch(:backend)) : nil,
+        "backend_url" => diagnostic_stack_backend_url(options, backend_kind),
         "state_root" => diagnostic_stack_state_root(options, backend_kind)
       }
+    end
+
+    def diagnostic_stack_backend_url(options, backend_kind)
+      return unless backend_kind == "http" && options[:api_url]
+
+      redact_url_userinfo(AgentCoord.utf8_diagnostic(options[:api_url]))
     end
 
     def diagnostic_stack_state_root(options, backend_kind)
@@ -8268,7 +8289,9 @@ module AgentCoord
   # that keep a value keep it verbatim, because internal and trailing
   # whitespace inside a real token or path is significant.
   def self.config_value_set?(value)
-    !value.to_s.strip.empty?
+    text = value.to_s
+    text = text.b unless text.valid_encoding?
+    !text.strip.empty?
   end
 
   # Whole-value form: redact a URL that is itself the string being reported.
