@@ -5281,6 +5281,30 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     assert_equal utf8_path_lines, File.binread(profile).lines.grep(/\Aexport PATH=/)
   end
 
+  def test_bootstrap_profile_is_byte_idempotent_with_a_newline_in_install_dir
+    install_dir = File.join(@state_root, "bin\nwith-newline")
+    profile = File.join(@state_root, "profile")
+    original_path = "/usr/bin:/bin"
+
+    first = run_agent_coord("bootstrap", "--install-dir", install_dir, "--profile", profile, state_root: nil)
+
+    assert_equal 0, first.status.exitstatus, first.stderr
+    first_profile = File.binread(profile)
+
+    second = run_agent_coord("bootstrap", "--install-dir", install_dir, "--profile", profile, state_root: nil)
+
+    assert_equal 0, second.status.exitstatus, second.stderr
+    assert_equal first_profile, File.binread(profile)
+
+    sourced = run_command(
+      { "PATH" => original_path },
+      "/bin/sh", "-c", '. "$1" && printf %s "$PATH"', "agent-coord-profile", profile
+    )
+
+    assert_equal 0, sourced.status.exitstatus, sourced.stderr
+    assert_equal "#{install_dir}:#{original_path}", sourced.stdout
+  end
+
   def test_systemd_template_leaves_status_default_for_shell_expansion
     template = File.read(SYSTEMD_TEMPLATE)
 

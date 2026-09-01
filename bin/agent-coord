@@ -7551,7 +7551,7 @@ module AgentCoord
     # so bootstrap would silently duplicate the PATH line on every rerun instead
     # of detecting it was already there. Reading with File.binread and comparing
     # against `line.b` puts both sides in ASCII-8BIT, which has no invalid byte
-    # sequences, so #strip/#lines can never raise regardless of locale, and the
+    # sequences, so matching can never raise regardless of locale, and the
     # match is a plain byte comparison regardless of what encoding `line`
     # happened to end up in. Nothing is written back, and the appended line is
     # still the original `line`, so the user's profile bytes are untouched.
@@ -7565,10 +7565,11 @@ module AgentCoord
       canonical_dir = install_dir.b unless canonical_dir.valid_encoding?
       line = "export PATH=#{Shellwords.escape(canonical_dir)}:\"$PATH\"".b
       # Read and compare as bytes: ASCII-8BIT has no invalid byte sequences, so
-      # #strip and #lines cannot raise however the profile is encoded, and the
+      # matching cannot raise however the profile is encoded, and the
       # match does not depend on either side carrying a usable encoding tag.
       existing = File.exist?(profile) ? File.binread(profile) : ""
-      return if existing.lines.any? { |existing_line| existing_line.strip == line }
+      entry_pattern = /(?:\A|\n)[\t\v\f\r ]*#{Regexp.escape(line)}[\t\v\f\r ]*(?:\n|\z)/n
+      return if existing.match?(entry_pattern)
 
       File.open(profile, "a") do |file|
         file.puts
