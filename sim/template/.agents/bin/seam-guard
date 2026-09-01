@@ -4,7 +4,11 @@
 require "open3"
 require "yaml"
 
+$stderr.set_encoding(Encoding::UTF_8)
+
 def changed_paths(output)
+  # Keep this UTF-8 path parser aligned with config-check and the embedded Ruby
+  # parser in validate.
   # Git emits raw filename bytes. Preserve valid UTF-8 exactly for policy
   # matching, but reject invalid bytes instead of conflating paths via scrub.
   utf8 = output.dup.force_encoding(Encoding::UTF_8)

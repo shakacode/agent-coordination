@@ -343,6 +343,17 @@ class SimulationTemplateTest < Minitest::Test
     assert_equal "Changed simulation paths must be valid UTF-8.\n", err
   end
 
+  def test_validate_reports_valid_utf8_unexpected_path_under_c_locale
+    env = fake_git_env("docs/café.md\0".b)
+    env.merge!(utf8_stderr_contract_env)
+    env.merge!("BASH_ENV" => File::NULL, "LC_ALL" => "C", "LANG" => "C")
+
+    _out, err, status = validate("HEAD", env)
+
+    refute status.success?
+    assert_equal "Unexpected changed files for single-task validation:\ndocs/café.md\n", err
+  end
+
   def test_validate_runs_no_change_suite_when_repo_path_contains_spaces
     test_runner = File.join(@repo, ".agents/bin/test")
     File.write(test_runner, "#!/usr/bin/env bash\nexit 0\n")
@@ -358,6 +369,28 @@ class SimulationTemplateTest < Minitest::Test
     assert status.success?, err
   end
 
+  def test_validate_reports_missing_no_change_test_runner_without_backtrace
+    FileUtils.rm(File.join(@repo, ".agents/bin/test"))
+    git("add", "-A")
+    git("commit", "-qm", "remove test runner")
+
+    _out, err, status = validate
+
+    refute status.success?
+    assert_equal "Simulation test runner must remain executable.\n", err
+  end
+
+  def test_validate_reports_non_executable_no_change_test_runner_without_backtrace
+    File.chmod(0o644, File.join(@repo, ".agents/bin/test"))
+    git("add", ".agents/bin/test")
+    git("commit", "-qm", "make test runner non-executable")
+
+    _out, err, status = validate
+
+    refute status.success?
+    assert_equal "Simulation test runner must remain executable.\n", err
+  end
+
   def test_config_check_rejects_invalid_filename_bytes_without_a_backtrace
     env = fake_git_env("lib/task_\xFF.rb\0".b)
     env.merge!("LC_ALL" => "C", "LANG" => "C")
@@ -368,6 +401,28 @@ class SimulationTemplateTest < Minitest::Test
     assert_equal "Changed simulation paths must be valid UTF-8.\n", err
   end
 
+  def test_config_check_reports_valid_utf8_task_mix_under_c_locale
+    env = fake_git_env("lib/task_one.rb\0docs/café.md\0".b)
+    env.merge!(utf8_stderr_contract_env)
+    env.merge!("LC_ALL" => "C", "LANG" => "C")
+
+    _out, err, status = config_check("HEAD", env)
+
+    refute status.success?
+    assert_equal "Task changes cannot be combined with config or unrelated paths: docs/café.md\n", err
+  end
+
+  def test_config_check_reports_valid_utf8_unexpected_path_under_c_locale
+    env = fake_git_env("docs/café.md\0".b)
+    env.merge!(utf8_stderr_contract_env)
+    env.merge!("LC_ALL" => "C", "LANG" => "C")
+
+    _out, err, status = config_check("HEAD", env)
+
+    refute status.success?
+    assert_equal "Unexpected config-only paths: docs/café.md\n", err
+  end
+
   def test_seam_guard_rejects_invalid_filename_bytes_without_a_backtrace
     env = fake_git_env("lib/task_\xFF.rb\0".b)
     env.merge!("LC_ALL" => "C", "LANG" => "C")
@@ -376,6 +431,28 @@ class SimulationTemplateTest < Minitest::Test
 
     refute status.success?
     assert_equal "Changed simulation paths must be valid UTF-8.\n", err
+  end
+
+  def test_seam_guard_reports_valid_utf8_task_mix_under_c_locale
+    env = fake_git_env("lib/task_one.rb\0docs/café.md\0".b)
+    env.merge!(utf8_stderr_contract_env)
+    env.merge!("LC_ALL" => "C", "LANG" => "C")
+
+    _out, err, status = seam_guard("HEAD", "HEAD", env)
+
+    refute status.success?
+    assert_equal "Task changes cannot be combined with config or unrelated paths: docs/café.md\n", err
+  end
+
+  def test_seam_guard_reports_valid_utf8_unexpected_path_under_c_locale
+    env = fake_git_env("docs/café.md\0".b)
+    env.merge!(utf8_stderr_contract_env)
+    env.merge!("LC_ALL" => "C", "LANG" => "C")
+
+    _out, err, status = seam_guard("HEAD", "HEAD", env)
+
+    refute status.success?
+    assert_equal "Unexpected guarded paths: docs/café.md\n", err
   end
 
   def test_config_check_rejects_invalid_ci_script_syntax
@@ -531,6 +608,21 @@ class SimulationTemplateTest < Minitest::Test
       "PATH" => [fake_bin, ENV.fetch("PATH")].join(File::PATH_SEPARATOR),
       "REAL_GIT" => real_git
     }
+  end
+
+  def utf8_stderr_contract_env
+    assertion = File.join(@dir, "assert-utf8-stderr.rb")
+    File.write(assertion, <<~RUBY)
+      relevant_program = $PROGRAM_NAME == "-e" || %w[config-check seam-guard].include?(File.basename($PROGRAM_NAME))
+      if relevant_program
+        at_exit do
+          warn "Expected explicit UTF-8 stderr." unless $stderr.external_encoding == Encoding::UTF_8
+        end
+      end
+    RUBY
+
+    rubyopt = [ENV.fetch("RUBYOPT", nil), "-r#{assertion}"].compact.join(" ")
+    { "RUBYOPT" => rubyopt }
   end
 
   def run_ci_gate(base_ref = "HEAD", env = {})

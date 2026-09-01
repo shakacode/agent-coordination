@@ -6,7 +6,11 @@ require "open3"
 require "rbconfig"
 require "yaml"
 
+$stderr.set_encoding(Encoding::UTF_8)
+
 def changed_paths(output)
+  # Keep this UTF-8 path parser aligned with seam-guard and the embedded Ruby
+  # parser in validate.
   # Git emits raw filename bytes. Preserve valid UTF-8 exactly for policy
   # matching, but reject invalid bytes instead of conflating paths via scrub.
   utf8 = output.dup.force_encoding(Encoding::UTF_8)
@@ -33,7 +37,7 @@ allowed_paths = %w[
 task_path = %r{\Alib/task_[[:alnum:]_]+\.rb\z}
 # Regenerate after a reviewed validator update with:
 # ruby -rdigest -e 'puts Digest::SHA256.file(".agents/bin/validate").hexdigest'
-expected_validator_sha256 = "d4ebfc2137dd4811f90159a6053db530f4f0fa328d48ac2af883d6e9ca025e2d"
+expected_validator_sha256 = "3d51221b08a47886f38939405d59b443af35b3082c7bd4b2e2b1f418c76b66de"
 
 base_commit, base_status = Open3.capture2("git", "-C", root, "rev-parse", "--verify", "#{base_ref}^{commit}")
 abort "Could not resolve config-check base ref." unless base_status.success?

@@ -22,6 +22,7 @@ if [ -n "$base_ref" ]; then
     exit 1
   }
   ruby -ropen3 -rrbconfig -e '
+    $stderr.set_encoding(Encoding::UTF_8)
     root, merge_base = ARGV
     output, error, status = Open3.capture3(
       "git", "-C", root, "diff", "--no-renames", "--name-only", "-z", merge_base
@@ -31,12 +32,15 @@ if [ -n "$base_ref" ]; then
       abort "Could not inspect simulation changes."
     end
 
+    # Keep this UTF-8 path parser aligned with config-check and seam-guard.
     changed = output.dup.force_encoding(Encoding::UTF_8)
     abort "Changed simulation paths must be valid UTF-8." unless changed.valid_encoding?
 
     paths = changed.split("\0")
     if paths.empty?
       test_runner = File.join(root, ".agents/bin/test")
+      abort "Simulation test runner must remain executable." unless File.executable?(test_runner)
+
       exec [test_runner, test_runner]
     end
 
