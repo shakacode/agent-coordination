@@ -600,16 +600,20 @@ class ExplicitBackendPrecedenceStackDoctorTest < Minitest::Test
     end
   end
 
-  def test_explicit_github_stack_selector_uses_configured_process_ref
-    Dir.mktmpdir("agent-coord-stack-doctor") do |root|
+  def test_explicit_github_stack_selector_prefers_process_ref_over_saved_ref
+    Dir.mktmpdir("agent-coord-stack-doctor", StackDoctorCliTestHarness::ROOT) do |root|
       fake_bin = File.join(root, "bin")
       log_path = File.join(root, "gh.log")
+      env_file = File.join(root, "agent-coord.env")
       FileUtils.mkdir_p(fake_bin)
       StackDoctorTestFixtures.write_fake_github(fake_bin)
+      File.write(env_file, "AGENT_COORD_REF=saved-ref\n")
+      File.chmod(0o600, env_file)
 
       result = run_doctor(
         "--stack-json", "--deep", "--backend", "example/coordination",
         env: {
+          "AGENT_COORD_ENV_FILE" => env_file,
           "AGENT_COORD_REF" => "configured-ref",
           "GH_LOG" => log_path,
           "PATH" => [fake_bin, File.dirname(RbConfig.ruby), "/usr/bin", "/bin"].join(File::PATH_SEPARATOR)
