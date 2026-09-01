@@ -2816,6 +2816,29 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     assert_equal "process_env", options.fetch(:backend_source)
   end
 
+  def test_explicit_cli_backend_preserves_ref_precedence
+    cases = [
+      ["cli ref", "process-ref", "saved-ref", { ref: "cli-ref", ref_cli: true }, "cli-ref"],
+      ["process ref", "process-ref", "saved-ref", {}, "process-ref"],
+      ["saved ref", "   ", "saved-ref", {}, "saved-ref"],
+      ["default ref", nil, "   ", {}, AgentCoord::DEFAULT_REF]
+    ]
+
+    cases.each do |label, process_ref, saved_ref, overrides, expected_ref|
+      runner = AgentCoord::Runner.new([])
+      runner.instance_variable_set(
+        :@process_config,
+        AgentCoord::USER_CONFIG_ENV_KEYS.to_h { |key| [key, nil] }.merge("AGENT_COORD_REF" => process_ref)
+      )
+      runner.instance_variable_set(:@user_config, { "AGENT_COORD_REF" => saved_ref })
+      options = runner.send(:default_options).merge({ backend_cli: true }.merge(overrides))
+
+      runner.send(:resolve_backend_env, options)
+
+      assert_equal expected_ref, options.fetch(:ref), label
+    end
+  end
+
   def test_backend_resolution_normalizes_a_blank_ref
     runner = AgentCoord::Runner.new([])
     runner.instance_variable_set(

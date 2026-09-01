@@ -1285,13 +1285,24 @@ module AgentCoord
       resolve_configured_backend(options, env_api, env_root, env_backend)
     end
 
-    # The ref is part of the selected GitHub backend identity, so it follows the
-    # same atomic process-vs-user tier lock as the backend selector group. Both
-    # tiers can still be blank, in which case the normal default applies.
+    # An explicit GitHub backend keeps the historical ref precedence because
+    # the CLI selector deliberately displaces either configured backend tier:
+    # --ref, then a process ref, then a saved ref, then the default. Otherwise
+    # the ref is part of the configured GitHub backend identity and follows the
+    # same atomic process-vs-user tier lock as the backend selector group.
     def resolve_effective_ref!(options)
       return if options[:ref_cli]
 
-      configured_ref = effective_backend_env_value("AGENT_COORD_REF")
+      configured_ref = if options[:backend_cli]
+                         process_ref = @process_config&.fetch("AGENT_COORD_REF", nil)
+                         if AgentCoord.config_value_set?(process_ref)
+                           process_ref
+                         else
+                           @user_config&.fetch("AGENT_COORD_REF", nil)
+                         end
+                       else
+                         effective_backend_env_value("AGENT_COORD_REF")
+                       end
       options[:ref] = AgentCoord.config_value_set?(configured_ref) ? configured_ref : DEFAULT_REF
     end
 
