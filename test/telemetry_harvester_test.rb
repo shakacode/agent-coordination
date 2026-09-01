@@ -932,6 +932,48 @@ class TelemetryHarvesterTest < Minitest::Test # rubocop:disable Metrics/ClassLen
     assert_equal %w[standard standard], profiles
   end
 
+  def test_host_adapter_records_invalid_utf8_metadata_and_continues
+    bad_records = {
+      "cwd" => { "type" => "session_meta", "payload" => { "id" => "invalid-utf8", "cwd" => "BAD_BYTE" } },
+      "model" => { "type" => "turn_context", "payload" => { "model" => "BAD_BYTE" } },
+      "effort" => { "type" => "turn_context", "payload" => { "effort" => "BAD_BYTE" } },
+      "pricing_profile" => {
+        "type" => "session_meta",
+        "payload" => { "id" => "invalid-utf8", "pricing_profile" => "BAD_BYTE" }
+      }
+    }
+
+    bad_records.each do |field, bad_record|
+      bad_line = JSON.generate(bad_record).b
+      bad_line.sub!("BAD_BYTE", "\xFF".b)
+      records = [
+        JSON.generate("type" => "session_meta", "payload" => { "id" => "invalid-utf8" }),
+        bad_line,
+        JSON.generate(
+          "type" => "turn_context",
+          "payload" => { "model" => "gpt-5.6-sol", "effort" => "high" }
+        ),
+        JSON.generate(
+          "type" => "event_msg",
+          "payload" => {
+            "type" => "token_count",
+            "info" => {
+              "last_token_usage" => { "input_tokens" => 1, "output_tokens" => 1, "total_tokens" => 2 }
+            }
+          }
+        )
+      ]
+      bytes = records.join("\n").b.force_encoding(Encoding::UTF_8)
+
+      parsed = HOST_ADAPTERS::Parser.new("codex").parse(bytes, "codex:invalid-utf8:#{field}")
+
+      assert_equal [{ "record_ordinal" => 2, "reason" => "invalid_json" }], parsed.fetch("errors"), field
+      usage = parsed.fetch("sessions").fetch(0).fetch("usage")
+      assert_equal 1, usage.length, field
+      assert_equal ["gpt-5.6-sol", "high"], usage.fetch(0).values_at("model", "effort"), field
+    end
+  end
+
   def test_host_adapter_alias_fallbacks_respect_primary_field_presence
     usage = { "input_tokens" => 1, "output_tokens" => 1, "total_tokens" => 2 }
     codex_records = [

@@ -171,7 +171,10 @@ module AgentCoord
         def known(value)
           return MISSING if value.equal?(MISSING)
 
-          string = value.to_s.gsub(INGEST_SURROUNDING_WHITESPACE, "")
+          string = value.to_s
+          raise Encoding::InvalidByteSequenceError, "invalid UTF-8 metadata" unless string.valid_encoding?
+
+          string = string.gsub(INGEST_SURROUNDING_WHITESPACE, "")
           return if string.empty? || string.casecmp?("UNKNOWN")
           return if string.match?(INGEST_CONTROL_CHARACTERS)
 
