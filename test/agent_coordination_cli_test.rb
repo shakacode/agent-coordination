@@ -2706,7 +2706,7 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     # rubocop:enable Metrics/BlockLength
   end
 
-  def test_secure_directory_lstat_accepts_a_concurrent_creator
+  def test_secure_directory_lstat_does_not_chmod_a_concurrent_creator
     with_private_config_tmpdir("agent-coord-concurrent-config-parent") do |root|
       path = File.join(root, "new-config")
       runner = AgentCoord::Runner.new([])
@@ -2715,6 +2715,7 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
       Dir.define_singleton_method(:mkdir) do |candidate, mode = 0o777|
         if candidate == path
           original_mkdir.call(candidate, mode)
+          File.chmod(0o770, candidate)
           raise Errno::EEXIST, candidate
         end
 
@@ -2723,7 +2724,7 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
 
       stat = runner.send(:secure_directory_lstat, path, create: true)
       assert stat.directory?
-      assert_equal 0o700, stat.mode & 0o777
+      assert_equal 0o770, stat.mode & 0o777
     ensure
       Dir.define_singleton_method(:mkdir, original_mkdir) if original_mkdir
     end
@@ -3368,16 +3369,13 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     end
   end
 
-  # open(2) filters its mode argument through the caller's umask, so a hostile
-  # umask stripped owner-read from the staged config file and the config write
-  # lock. config set still reported success, and every later invocation then
-  # failed to read the configuration that run had just written.
+  # mkdir(2) and open(2) filter their mode arguments through the caller's
+  # umask. A hostile umask stripped owner-read from newly created config
+  # directories, the staged config file, and the config write lock.
   def test_config_set_under_a_hostile_umask_keeps_private_files_owner_readable
     with_private_config_tmpdir("agent-coord-config-set-umask") do |root|
       config_home = File.join(root, "config")
       config_dir = File.join(config_home, "agent-coord")
-      FileUtils.mkdir_p(config_dir)
-      [config_home, config_dir].each { |path| File.chmod(0o700, path) }
 
       saved_umask = File.umask(0o477)
       set_result = run_command(
@@ -3388,6 +3386,7 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
 
       assert_equal 0, set_result.status.exitstatus, set_result.stderr
       env_file = File.join(config_dir, "env")
+      [config_home, config_dir].each { |path| assert_equal 0o700, File.stat(path).mode & 0o777 }
       assert_equal 0o600, File.stat(env_file).mode & 0o777
       locks = Dir.glob(File.join(config_dir, ".agent-coord-config-*.lock"))
       refute_empty locks
@@ -3401,6 +3400,67 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
       assert_equal "required", JSON.parse(show_result.stdout).dig("coordination", "policy")
     ensure
       File.umask(saved_umask) if saved_umask
+      [config_home, config_dir].compact.each { |path| File.chmod(0o700, path) if File.exist?(path) }
+    end
+  end
+
+  def test_config_show_reads_a_private_config_directory_without_owner_write
+    with_private_config_tmpdir("agent-coord-config-show-read-only-directory") do |root|
+      config_home = File.join(root, "config")
+      config_dir = File.join(config_home, "agent-coord")
+      env_file = File.join(config_dir, "env")
+      FileUtils.mkdir_p(config_dir)
+      File.chmod(0o700, config_home, config_dir)
+      File.write(env_file, "AGENT_COORD_POLICY=required\n")
+      File.chmod(0o600, env_file)
+      lock_digest = Digest::SHA256.hexdigest(env_file)[0, 16]
+      lock_file = File.join(config_dir, ".agent-coord-config-#{lock_digest}.lock")
+      File.write(lock_file, "")
+      File.chmod(0o600, lock_file)
+      File.chmod(0o500, config_dir)
+
+      result = run_command(
+        { "XDG_CONFIG_HOME" => config_home },
+        RbConfig.ruby, BIN, "config", "show", "--json"
+      )
+
+      assert_equal 0, result.status.exitstatus, result.stderr
+      assert_equal "required", JSON.parse(result.stdout).dig("coordination", "policy")
+      assert_equal 0o500, File.stat(config_dir).mode & 0o777
+    ensure
+      File.chmod(0o700, config_dir) if config_dir && File.exist?(config_dir)
+    end
+  end
+
+  def test_config_set_rejects_a_preexisting_config_directory_missing_owner_rwx_before_mutation
+    with_private_config_tmpdir("agent-coord-config-directory-owner-mode") do |root|
+      config_home = File.join(root, "config")
+      config_dir = File.join(config_home, "agent-coord")
+      env_file = File.join(config_dir, "env")
+      sentinel = File.join(config_dir, "sentinel")
+      lock_digest = Digest::SHA256.hexdigest(env_file)[0, 16]
+      lock_file = File.join(config_dir, ".agent-coord-config-#{lock_digest}.lock")
+      FileUtils.mkdir_p(config_dir)
+      File.chmod(0o700, config_home, config_dir)
+      File.write(sentinel, "preserve me\n")
+      File.chmod(0o600, sentinel)
+      original_entries = Dir.children(config_dir).sort
+      File.chmod(0o300, config_dir)
+
+      result = run_command(
+        { "XDG_CONFIG_HOME" => config_home },
+        RbConfig.ruby, BIN, "config", "set", "--policy", "required"
+      )
+
+      assert_equal 2, result.status.exitstatus
+      assert_equal 0o300, File.stat(config_dir).mode & 0o777
+      assert_equal "preserve me\n", File.read(sentinel)
+      File.chmod(0o700, config_dir)
+      assert_equal original_entries, Dir.children(config_dir).sort
+      assert_empty([env_file, lock_file].select { |path| File.exist?(path) })
+      assert_includes result.stderr, "config parent leaf permissions are unsafe (expected 0700): #{config_dir}"
+    ensure
+      File.chmod(0o700, config_dir) if config_dir && File.exist?(config_dir)
     end
   end
 
@@ -3479,6 +3539,7 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
 
       assert_equal 2, result.status.exitstatus
       assert_includes result.stderr, "permissions are unsafe"
+      assert_equal 0o770, File.stat(unsafe).mode & 0o777
       refute_path_exists File.join(config_home, "agent-coord", "env")
     end
   end
