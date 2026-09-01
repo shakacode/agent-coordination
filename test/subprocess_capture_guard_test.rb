@@ -5,7 +5,7 @@ require "ripper"
 require "tmpdir"
 
 class Capture3SourceScanner
-  Site = Struct.new(:path, :method_name, :line, keyword_init: true)
+  Site = Struct.new(:path, :definition_identity, :line, keyword_init: true)
 
   def scan(path, source)
     syntax_tree = Ripper.sexp(source)
@@ -13,25 +13,55 @@ class Capture3SourceScanner
 
     @path = path
     @sites = []
-    walk(syntax_tree, nil)
+    walk(syntax_tree, nil, nil)
     @sites
   end
 
   private
 
-  def walk(node, method_name)
+  def walk(node, definition_identity, lexical_owner)
     return unless node.is_a?(Array)
 
-    method_name = definition_name(node) || method_name
-    @sites << capture_site(node, method_name) if capture3_call?(node)
+    nested_owner = lexical_owner_name(node)
+    if nested_owner
+      lexical_owner = [lexical_owner, nested_owner].compact.join("::")
+      definition_identity = nil
+    end
+    definition_identity = definition_identity_for(node, lexical_owner) || definition_identity
+    @sites << capture_site(node, definition_identity) if capture3_call?(node)
     children = node.first.is_a?(Symbol) ? node.drop(1) : node
-    children.each { |child| walk(child, method_name) }
+    children.each { |child| walk(child, definition_identity, lexical_owner) }
   end
 
-  def definition_name(node)
-    token = node[1] if node.first == :def
-    token = node[3] if node.first == :defs
-    token[1] if token.is_a?(Array)
+  def lexical_owner_name(node)
+    constant_name(node[1]) if %i[class module].include?(node.first)
+  end
+
+  def definition_identity_for(node, lexical_owner)
+    case node.first
+    when :def
+      "#{lexical_owner || '<top-level>'}##{node.dig(1, 1)}"
+    when :defs
+      owner = self_receiver?(node[1]) ? lexical_owner || "<top-level>" : constant_name(node[1])
+      "#{owner || '<dynamic>'}.#{node.dig(3, 1)}"
+    end
+  end
+
+  def self_receiver?(node)
+    node.is_a?(Array) && node.first == :var_ref && node.dig(1, 0) == :@kw && node.dig(1, 1) == "self"
+  end
+
+  def constant_name(node)
+    return unless node.is_a?(Array)
+
+    case node.first
+    when :@const
+      node[1]
+    when :const_ref, :top_const_ref, :var_ref
+      constant_name(node[1])
+    when :const_path_ref
+      [constant_name(node[1]), constant_name(node[2])].compact.join("::")
+    end
   end
 
   def capture3_call?(node)
@@ -45,8 +75,8 @@ class Capture3SourceScanner
     node.dig(1, 0) == :@const && node.dig(1, 1) == "Open3"
   end
 
-  def capture_site(node, method_name)
-    Site.new(path: @path, method_name: method_name, line: node.dig(3, 2, 0))
+  def capture_site(node, definition_identity)
+    Site.new(path: @path, definition_identity: definition_identity, line: node.dig(3, 2, 0))
   end
 end
 
@@ -54,9 +84,9 @@ class SubprocessCaptureGuardTest < Minitest::Test
   ROOT = File.expand_path("..", __dir__)
   RUBY_SHEBANG = /\A\#!.*\bruby(?:\d+(?:\.\d+)*)?(?:\s|$)/n
   REVIEWED_HELPERS = {
-    "bin/agent-coord" => "capture3_utf8",
-    "sim/bin/graveyard" => "capture3_utf8",
-    "sim/bin/verify-batch" => "capture3_utf8"
+    "bin/agent-coord" => "AgentCoord.capture3_utf8",
+    "sim/bin/graveyard" => "<top-level>#capture3_utf8",
+    "sim/bin/verify-batch" => "<top-level>#capture3_utf8"
   }.freeze
 
   def test_only_the_reviewed_utf8_helpers_call_open3_capture3
@@ -91,8 +121,24 @@ class SubprocessCaptureGuardTest < Minitest::Test
     source = "#{read(path)}\nOpen3.capture3(\"ruby\", \"-v\")\n"
     sites = Capture3SourceScanner.new.scan(path, source)
 
-    assert_equal [[path, nil], [path, "capture3_utf8"]], sorted_site_identities(sites)
+    assert_equal [[path, nil], [path, "<top-level>#capture3_utf8"]], sorted_site_identities(sites)
     assert_equal 1, unreviewed_sites(sites).length
+  end
+
+  def test_guard_reports_a_same_named_helper_owned_by_another_class
+    path = "sim/bin/verify-batch"
+    source = <<~RUBY
+      class OtherRunner
+        def capture3_utf8(*)
+          Open3.capture3(*)
+        end
+      end
+    RUBY
+
+    offenders = unreviewed_sites(Capture3SourceScanner.new.scan(path, source))
+
+    assert_equal 1, offenders.length
+    assert_match(/OtherRunner#capture3_utf8/, format_site(offenders.first))
   end
 
   def test_non_ruby_binary_file_is_skipped_before_utf8_parsing
@@ -143,13 +189,13 @@ class SubprocessCaptureGuardTest < Minitest::Test
 
   def unreviewed_sites(sites)
     sites.reject do |site|
-      REVIEWED_HELPERS.key?(site.path) && REVIEWED_HELPERS.fetch(site.path) == site.method_name
+      REVIEWED_HELPERS.key?(site.path) && REVIEWED_HELPERS.fetch(site.path) == site.definition_identity
     end
   end
 
   def sorted_site_identities(sites)
-    identities = sites.map { |site| [site.path, site.method_name] }
-    identities.sort_by { |path, method_name| [path, method_name.to_s] }
+    identities = sites.map { |site| [site.path, site.definition_identity] }
+    identities.sort_by { |path, definition_identity| [path, definition_identity.to_s] }
   end
 
   def failure_message(sites)
@@ -158,7 +204,7 @@ class SubprocessCaptureGuardTest < Minitest::Test
   end
 
   def format_site(site)
-    "#{site.path}:#{site.line}: Open3.capture3 in #{site.method_name || '<top-level>'}"
+    "#{site.path}:#{site.line}: Open3.capture3 in #{site.definition_identity || '<top-level>'}"
   end
 
   def read(path)
