@@ -144,6 +144,7 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     assert_includes result.stdout, "doctor"
     assert_includes result.stdout, "bootstrap"
     assert_includes result.stdout, "demo"
+    assert_includes result.stdout, "--ignore-user-config"
   end
 
   # Help and command-name validation are argv-only operations. They must remain
@@ -3223,7 +3224,7 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
       File.chmod(0o644, File.join(config_home, "agent-coord", "env"))
       env = { "XDG_CONFIG_HOME" => config_home }
 
-      %w[status doctor claim gc].each do |command|
+      %w[status log doctor claim gc].each do |command|
         result = run_command(env, RbConfig.ruby, BIN, command, "--state-root", @state_root)
 
         assert_equal 2, result.status.exitstatus, "#{command}: #{result.stderr}"
@@ -3234,6 +3235,502 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
 
       assert_equal 2, show.status.exitstatus, show.stderr
       assert_includes show.stderr, "permissions are insecure"
+    end
+  end
+
+  def test_ignore_user_config_allows_explicit_state_root_status_for_malformed_config
+    with_private_user_config("not a valid assignment\n") do |config_home|
+      recovery_root = File.join(@state_root, "recovery")
+      FileUtils.mkdir_p(recovery_root)
+
+      result = run_command(
+        { "XDG_CONFIG_HOME" => config_home },
+        RbConfig.ruby,
+        BIN,
+        "status",
+        "--ignore-user-config",
+        "--state-root",
+        recovery_root,
+        "--json"
+      )
+
+      assert_equal 0, result.status.exitstatus, result.stderr
+      assert_equal "all", JSON.parse(result.stdout).dig("scope", "kind")
+      assert_includes result.stderr,
+                      "warning: canonical user configuration bypassed by --ignore-user-config; " \
+                      "backend selected explicitly by --state-root."
+      refute_includes result.stderr, "unsafe user config syntax"
+    end
+  end
+
+  # The FIFO setup, bounded subprocess lifecycle, and result assertions are one
+  # behavioral case: bypass must not open the canonical path at any later phase.
+  # rubocop:disable Metrics/BlockLength
+  def test_ignore_user_config_does_not_reopen_canonical_config_for_split_brain_checks
+    with_private_config_tmpdir("agent-coord-config-bypass-fifo") do |root|
+      config_home = File.join(root, "config")
+      env_file = File.join(config_home, "agent-coord", "env")
+      recovery_root = File.join(root, "recovery")
+      FileUtils.mkdir_p(File.dirname(env_file))
+      File.chmod(0o700, File.dirname(env_file))
+      File.mkfifo(env_file, 0o600)
+      FileUtils.mkdir_p(recovery_root)
+      stdin, stdout, stderr, wait_thread = Open3.popen3(
+        COMMAND_ENV.merge("XDG_CONFIG_HOME" => config_home),
+        RbConfig.ruby,
+        BIN,
+        "status",
+        "--ignore-user-config",
+        "--state-root",
+        recovery_root,
+        "--json"
+      )
+      stdin.close
+
+      unless wait_thread.join(1)
+        Process.kill("KILL", wait_thread.pid)
+        wait_thread.join
+        flunk "config bypass reopened the canonical FIFO during split-brain checks"
+      end
+
+      captured_stdout = stdout.read
+      captured_stderr = stderr.read
+      assert_equal 0, wait_thread.value.exitstatus, captured_stderr
+      assert_equal "all", JSON.parse(captured_stdout).dig("scope", "kind")
+      assert_includes captured_stderr,
+                      "warning: canonical user configuration bypassed by --ignore-user-config; " \
+                      "backend selected explicitly by --state-root."
+      refute_includes captured_stderr, "split-brain configuration"
+    ensure
+      [stdin, stdout, stderr].compact.each { |io| io.close unless io.closed? }
+    end
+  end
+  # rubocop:enable Metrics/BlockLength
+
+  # Each selector is one row of the same provenance and secret-redaction contract.
+  # rubocop:disable Metrics/BlockLength
+  def test_ignore_user_config_accepts_each_explicit_backend_selector_and_reports_its_flag
+    with_private_user_config("AGENT_COORD_API_TOKEN=private-token\n") do |config_home|
+      File.chmod(0o644, File.join(config_home, "agent-coord", "env"))
+      secret_url = "http://user:selector-secret@127.0.0.1:9"
+      cases = [
+        ["local separate", "local", ["--state-root", @state_root]],
+        ["local equals", "local", ["--state-root=#{@state_root}"]],
+        ["http separate", "http", ["--api-url", secret_url]],
+        ["http equals", "http", ["--api-url=#{secret_url}"]],
+        ["github separate", "github", ["--backend", "acme/coordination-state"]],
+        ["github equals", "github", ["--backend=acme/coordination-state"]]
+      ]
+
+      cases.each do |label, backend, selector_argv|
+        result = run_command(
+          { "XDG_CONFIG_HOME" => config_home, "AGENT_COORD_POLICY" => "required" },
+          RbConfig.ruby,
+          BIN,
+          "config",
+          "show",
+          "--ignore-user-config",
+          *selector_argv,
+          "--json"
+        )
+
+        assert_equal 0, result.status.exitstatus, "#{label}: #{result.stderr}"
+        payload = JSON.parse(result.stdout)
+        assert_equal backend, payload.dig("coordination", "backend")
+        assert_equal "cli", payload.dig("coordination", "source", "backend")
+        assert_equal "required", payload.dig("coordination", "policy")
+        assert_equal "process_env", payload.dig("coordination", "source", "policy")
+        selector = selector_argv.first.split("=", 2).first
+        assert_includes result.stderr, "backend selected explicitly by #{selector}."
+        refute_includes result.stdout, "private-token"
+        refute_includes result.stderr, "private-token"
+        refute_includes result.stdout, "selector-secret"
+        refute_includes result.stderr, "selector-secret"
+      end
+    end
+  end
+  # rubocop:enable Metrics/BlockLength
+
+  # `config show --json` is the workflow policy-enforcement seam. Bypassing a
+  # canonical file that says `required` or `disabled` must not silently report
+  # the default `optional`; the caller has to supply the policy it wants the
+  # recovery invocation to advertise without reopening the broken file.
+  def test_ignore_user_config_config_show_requires_an_explicit_process_policy
+    with_private_user_config("AGENT_COORD_POLICY=required\n") do |config_home|
+      result = run_command(
+        { "XDG_CONFIG_HOME" => config_home },
+        RbConfig.ruby,
+        BIN,
+        "config",
+        "show",
+        "--ignore-user-config",
+        "--state-root",
+        @state_root,
+        "--json"
+      )
+
+      assert_equal AgentCoord::EXIT_USAGE, result.status.exitstatus, result.stderr
+      assert_empty result.stdout
+      assert_equal(
+        "config show with --ignore-user-config requires an explicit process AGENT_COORD_POLICY " \
+        "(required, optional, or disabled)\n",
+        result.stderr
+      )
+    end
+  end
+
+  # The matrix and its shared no-mutation assertion are one behavioral case.
+  # rubocop:disable Metrics/BlockLength
+  def test_ignore_user_config_rejects_non_explicit_or_ambiguous_backend_selection_before_claim
+    with_private_config_tmpdir("agent-coord-config-bypass-guard") do |root|
+      config_home = File.join(root, "config")
+      configured_root = File.join(root, "configured-state")
+      process_root = File.join(root, "process-state")
+      first_cli_root = File.join(root, "first-cli-state")
+      second_cli_root = File.join(root, "second-cli-state")
+      env_file = File.join(config_home, "agent-coord", "env")
+      FileUtils.mkdir_p(File.dirname(env_file))
+      File.chmod(0o700, File.dirname(env_file))
+      File.write(env_file, "AGENT_COORD_STATE_ROOT=#{configured_root}\n")
+      File.chmod(0o600, env_file)
+      base_argv = %w[claim --ignore-user-config --agent-id recovery --repo acme/example --target 257]
+      cases = {
+        "user selector only" => [{ "XDG_CONFIG_HOME" => config_home }, []],
+        "process selector only" => [
+          { "XDG_CONFIG_HOME" => config_home, "AGENT_COORD_STATE_ROOT" => process_root }, []
+        ],
+        "conflicting selectors" => [
+          { "XDG_CONFIG_HOME" => config_home },
+          ["--state-root", first_cli_root, "--backend", "acme/coordination-state"]
+        ],
+        "duplicate selector" => [
+          { "XDG_CONFIG_HOME" => config_home },
+          ["--state-root", first_cli_root, "--state-root", second_cli_root]
+        ]
+      }
+      expected = "--ignore-user-config requires exactly one explicit backend selector: " \
+                 "--state-root, --api-url, or --backend\n"
+
+      cases.each do |label, (env, selector_argv)|
+        result = run_command(env, RbConfig.ruby, BIN, *base_argv, *selector_argv)
+
+        assert_equal 1, result.status.exitstatus, "#{label}: #{result.stderr}"
+        assert_equal expected, result.stderr, label
+        assert_empty result.stdout, label
+      end
+      [configured_root, process_root, first_cli_root, second_cli_root].each do |path|
+        refute_path_exists path
+      end
+    end
+  end
+  # rubocop:enable Metrics/BlockLength
+
+  def test_doctor_stack_json_config_bypass_selector_errors_use_stack_usage_exit
+    cases = {
+      "missing selector" => [],
+      "duplicate selector" => ["--state-root", @state_root, "--state-root", File.join(@state_root, "other")],
+      "conflicting selectors" => ["--state-root", @state_root, "--backend", "acme/coordination-state"]
+    }
+    expected = "--ignore-user-config requires exactly one explicit backend selector: " \
+               "--state-root, --api-url, or --backend\n"
+
+    cases.each do |label, selector_argv|
+      result = run_command(
+        {},
+        RbConfig.ruby,
+        BIN,
+        "doctor",
+        "--stack-json",
+        "--ignore-user-config",
+        *selector_argv
+      )
+
+      assert_equal AgentCoord::STACK_EXIT_USAGE, result.status.exitstatus, "#{label}: #{result.stderr}"
+      assert_empty result.stdout, label
+      assert_equal expected, result.stderr, label
+    end
+
+    ordinary = run_command({}, RbConfig.ruby, BIN, "status", "--ignore-user-config")
+
+    assert_equal AgentCoord::EXIT_USAGE, ordinary.status.exitstatus, ordinary.stderr
+    assert_empty ordinary.stdout
+    assert_equal expected, ordinary.stderr
+  end
+
+  def test_doctor_stack_json_config_bypass_success_keeps_stdout_json_only
+    with_private_user_config("not a valid assignment\n") do |config_home|
+      result = run_command(
+        { "XDG_CONFIG_HOME" => config_home },
+        RbConfig.ruby,
+        BIN,
+        "doctor",
+        "--stack-json",
+        "--ignore-user-config",
+        "--state-root",
+        @state_root
+      )
+
+      assert_equal 0, result.status.exitstatus, result.stderr
+      payload = JSON.parse(result.stdout)
+      assert_equal 1, payload.fetch("schema_version")
+      assert_equal "agent-coordination", payload.fetch("component")
+      assert_equal "healthy", payload.fetch("status")
+      readability = payload.fetch("checks").find do |check|
+        check.fetch("id") == "backend.readability"
+      end
+      assert_equal "local", readability.dig("details", "backend")
+      assert_equal(
+        "warning: canonical user configuration bypassed by --ignore-user-config; " \
+        "backend selected explicitly by --state-root.\n",
+        result.stderr
+      )
+    end
+  end
+
+  # PATH arguments retain their original bytes. An invalid UTF-8 byte in the
+  # equals form therefore reaches this early bypass guard, whose error rescue
+  # must still detect --stack-json without re-scanning the raw text encoding.
+  # Exercise the guard directly so the regression remains pinned to its
+  # pre-OptionParser exit-code mapping rather than to a later parser outcome.
+  def test_stack_json_config_bypass_error_is_binary_safe_for_invalid_path_bytes
+    invalid_root = "--state-root=/tmp/invalid-\xFF".b.force_encoding(Encoding::UTF_8)
+    stdout = StringIO.new
+    stderr = StringIO.new
+    runner = AgentCoord::Runner.new(
+      ["doctor", "--stack-json", "--ignore-user-config", invalid_root, "--state-root", @state_root],
+      stdout:,
+      stderr:
+    )
+    argv = runner.instance_variable_get(:@argv)
+    command = argv.shift
+
+    refute_predicate invalid_root, :valid_encoding?
+    error = assert_raises(AgentCoord::Error) do
+      runner.send(:bypass_user_configuration?, command, nil)
+    end
+    assert_equal AgentCoord::STACK_EXIT_USAGE, error.exit_code
+    assert_equal(
+      "--ignore-user-config requires exactly one explicit backend selector: " \
+      "--state-root, --api-url, or --backend",
+      error.message
+    )
+    assert_empty stdout.string
+    assert_empty stderr.string
+  end
+
+  # Remote recovery backends have no explicit local mirror destination. A fake
+  # empty GitHub tree lets the old path reach --sync and expose its ambient-root
+  # fallback; the HTTP case proves the guard runs before credentials/backend IO.
+  # rubocop:disable Metrics/BlockLength, Metrics/MethodLength
+  def test_ignore_user_config_requires_an_explicit_state_root_for_log_sync
+    with_private_config_tmpdir("agent-coord-config-bypass-sync") do |root|
+      mirror_root = File.join(root, "ambient-status-root")
+      fake_bin = File.join(root, "bin")
+      FileUtils.mkdir_p([mirror_root, fake_bin])
+      File.write(
+        File.join(fake_bin, "gh"),
+        <<~RUBY
+          #!/usr/bin/env ruby
+          require "json"
+          if ARGV.join(" ").match?(%r{^api repos/[^/]+/[^/]+/git/trees/[^?]+\\?recursive=1$})
+            puts JSON.generate("tree" => [])
+            exit 0
+          end
+          warn "unexpected gh command: #{ARGV.join(' ')}"
+          exit 1
+        RUBY
+      )
+      FileUtils.chmod(0o755, File.join(fake_bin, "gh"))
+      env = {
+        "AGENT_COORD_STATUS_STATE_ROOT" => mirror_root,
+        "PATH" => [fake_bin, File.dirname(RbConfig.ruby), "/usr/bin", "/bin"].join(File::PATH_SEPARATOR)
+      }
+      cases = {
+        "--backend" => ["--backend", "acme/coordination-state"],
+        "--api-url" => ["--api-url", "http://127.0.0.1:9"]
+      }
+
+      cases.each do |selector, selector_argv|
+        result = run_command(
+          env,
+          RbConfig.ruby,
+          BIN,
+          "log",
+          "--ignore-user-config",
+          *selector_argv,
+          "--sync"
+        )
+
+        assert_equal AgentCoord::EXIT_USAGE, result.status.exitstatus, "#{selector}: #{result.stderr}"
+        assert_empty result.stdout, selector
+        assert_includes result.stderr,
+                        "--sync with --ignore-user-config requires --state-root as its explicit backend selector"
+        assert_includes result.stderr, "backend selected explicitly by #{selector}."
+      end
+      refute_path_exists File.join(mirror_root, "log.tsv.lock")
+
+      local = run_command(
+        {}, RbConfig.ruby, BIN, "log", "--ignore-user-config", "--state-root", @state_root, "--sync"
+      )
+
+      assert_equal 0, local.status.exitstatus, local.stderr
+      assert_includes local.stdout, File.join(@state_root, "log.tsv")
+      assert_includes local.stderr, "backend selected explicitly by --state-root."
+    end
+  end
+  # rubocop:enable Metrics/BlockLength, Metrics/MethodLength
+
+  # Bypass must suppress the ambient URL as a backend selector, but an exported
+  # token and URL still form a visible process-scoped pair. Keep that pairing
+  # solely for the mismatch diagnostic so repeating the same URL explicitly
+  # does not claim the token was unbound; a genuinely different URL still warns.
+  def test_ignore_user_config_preserves_process_api_url_for_token_binding_only
+    with_private_user_config("not a valid assignment\n") do |config_home|
+      env = {
+        "XDG_CONFIG_HOME" => config_home,
+        "AGENT_COORD_API_URL" => "http://127.0.0.1:9",
+        "AGENT_COORD_API_TOKEN" => "process-token"
+      }
+      paired = run_command(
+        env, RbConfig.ruby, BIN, "status", "--ignore-user-config", "--api-url", "http://127.0.0.1:9"
+      )
+      mismatched = run_command(
+        env, RbConfig.ruby, BIN, "status", "--ignore-user-config", "--api-url", "http://127.0.0.1:10"
+      )
+      warning = "process-scoped AGENT_COORD_API_TOKEN is being used with"
+
+      assert_equal 2, paired.status.exitstatus, paired.stderr
+      refute_includes paired.stderr, warning
+      assert_includes paired.stderr, "backend selected explicitly by --api-url"
+      assert_equal 2, mismatched.status.exitstatus, mismatched.stderr
+      assert_includes mismatched.stderr, warning
+      assert_includes mismatched.stderr, "http://127.0.0.1:10"
+      refute_includes paired.stderr, "process-token"
+      refute_includes mismatched.stderr, "process-token"
+    end
+  end
+
+  # Ignoring the canonical file must not also weaken validation of process
+  # settings that the recovery command still preserves and consumes.
+  def test_ignore_user_config_still_rejects_an_invalid_process_policy
+    with_private_user_config("not a valid assignment\n") do |config_home|
+      result = run_command(
+        { "XDG_CONFIG_HOME" => config_home, "AGENT_COORD_POLICY" => "requried" },
+        RbConfig.ruby,
+        BIN,
+        "status",
+        "--ignore-user-config",
+        "--state-root",
+        @state_root,
+        "--json"
+      )
+
+      assert_equal 2, result.status.exitstatus, result.stderr
+      assert_empty result.stdout
+      assert_includes result.stderr, "invalid coordination policy in process environment:AGENT_COORD_POLICY"
+      refute_includes result.stderr, "unsafe user config syntax"
+    end
+  end
+
+  def test_ignore_user_config_ignores_process_ref_unless_ref_is_explicit
+    with_process_env(
+      "AGENT_COORD_BACKEND" => "ambient/coordination-state",
+      "AGENT_COORD_REF" => "ambient-ref"
+    ) do
+      {
+        "default" => [[], AgentCoord::DEFAULT_REF],
+        "explicit" => [["--ref=explicit-ref"], "explicit-ref"]
+      }.each do |label, (ref_argv, expected_ref)|
+        runner = AgentCoord::Runner.new(
+          ["status", "--ignore-user-config", "--backend", "explicit/coordination-state", *ref_argv],
+          stdout: StringIO.new,
+          stderr: StringIO.new
+        )
+        argv = runner.instance_variable_get(:@argv)
+        command = argv.shift
+
+        runner.send(:load_user_configuration_unless_exempt!, command, nil)
+        options = runner.send(:parse_options, command, argv)
+
+        assert_equal "explicit/coordination-state", options.fetch(:backend), label
+        assert_equal expected_ref, options.fetch(:ref), label
+      ensure
+        runner&.send(:restore_injected_user_configuration!)
+      end
+    end
+  end
+
+  # One root has to carry the claim through all four CLI calls to prove the
+  # bypass changes selection only, not lease or read-side behavior.
+  # rubocop:disable Metrics/BlockLength
+  def test_ignore_user_config_preserves_claim_refusal_and_status_log_visibility
+    with_private_user_config("not a valid assignment\n") do |config_home|
+      recovery_root = File.join(@state_root, "recovery-semantics")
+      common = [
+        "--ignore-user-config", "--state-root", recovery_root,
+        "--repo", "acme/example", "--target", "257"
+      ]
+      warning = "canonical user configuration bypassed by --ignore-user-config; " \
+                "backend selected explicitly by --state-root."
+
+      first = run_command(
+        { "XDG_CONFIG_HOME" => config_home },
+        RbConfig.ruby, BIN, "claim", *common, "--agent-id", "worker-a", "--ttl", "3600"
+      )
+      assert_equal 0, first.status.exitstatus, first.stderr
+      assert_includes first.stderr, warning
+      assert_path_exists File.join(recovery_root, "claims", "acme", "example", "257.json")
+
+      competing = run_command(
+        { "XDG_CONFIG_HOME" => config_home },
+        RbConfig.ruby, BIN, "claim", *common, "--agent-id", "worker-b", "--ttl", "3600"
+      )
+      assert_equal 3, competing.status.exitstatus, competing.stderr
+      assert_includes competing.stderr, warning
+      assert_includes competing.stderr, "CLAIM_REFUSED"
+
+      status = run_command(
+        { "XDG_CONFIG_HOME" => config_home },
+        RbConfig.ruby, BIN, "status", *common, "--json"
+      )
+      assert_equal 0, status.status.exitstatus, status.stderr
+      assert_includes status.stderr, warning
+      status_holders = JSON.parse(status.stdout).fetch("claims").map { |claim| claim.fetch("agent_id") }
+      assert_equal ["worker-a"], status_holders
+
+      log = run_command(
+        { "XDG_CONFIG_HOME" => config_home },
+        RbConfig.ruby, BIN, "log", *common, "--json"
+      )
+      assert_equal 0, log.status.exitstatus, log.stderr
+      assert_includes log.stderr, warning
+      log_holders = JSON.parse(log.stdout).fetch("claims").map { |claim| claim.fetch("agent_id") }
+      assert_equal ["worker-a"], log_holders
+    end
+  end
+  # rubocop:enable Metrics/BlockLength
+
+  def test_ignore_user_config_cannot_rewrite_the_canonical_file
+    original = "not a valid assignment\n"
+    with_private_user_config(original) do |config_home|
+      env_file = File.join(config_home, "agent-coord", "env")
+      result = run_command(
+        { "XDG_CONFIG_HOME" => config_home },
+        RbConfig.ruby,
+        BIN,
+        "config",
+        "set",
+        "--ignore-user-config",
+        "--state-root",
+        @state_root,
+        "--machine-id",
+        "replacement"
+      )
+
+      assert_equal 1, result.status.exitstatus
+      assert_equal "--ignore-user-config is not valid for config set\n", result.stderr
+      assert_empty result.stdout
+      assert_equal original, File.read(env_file)
     end
   end
 
@@ -4683,6 +5180,19 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     assert_includes readme, "Keep this public repository code-only"
     refute_includes readme, "agent_coord --help"
     refute_includes readme, "git clone --branch state --single-branch"
+  end
+
+  def test_readme_documents_explicit_user_config_recovery_contract
+    readme = File.read(File.join(ROOT, "README.md"))
+
+    assert_includes readme, "### Recovering from a broken canonical user config"
+    assert_includes readme, "--ignore-user-config"
+    assert_includes readme, "exactly one"
+    assert_includes readme, "--state-root"
+    assert_includes readme, "--api-url"
+    assert_includes readme, "--backend"
+    assert_includes readme, "implicit local backend"
+    assert_includes readme, "ownership and dependency checks"
   end
 
   def test_local_store_concurrent_readers_never_observe_partial_json
