@@ -17,6 +17,7 @@ class TelemetryHarvesterTest < Minitest::Test # rubocop:disable Metrics/ClassLen
   COORD_CLI = File.join(ROOT, "bin", "agent-coord")
   FIXTURES = File.join(ROOT, "test", "fixtures", "telemetry")
   HARVESTER = AgentCoord::Telemetry::Harvester
+  HOST_ADAPTERS = AgentCoord::Telemetry::HostAdapters
   # The codepoint window the control-character pins compare over: C0, DEL, and
   # C1, which together cover every range any of the sanitizers targets.
   CONTROL_CODEPOINTS = (0x00..0x9F).to_a.freeze
@@ -931,6 +932,281 @@ class TelemetryHarvesterTest < Minitest::Test # rubocop:disable Metrics/ClassLen
     assert_equal %w[standard standard], profiles
   end
 
+  def test_host_adapter_records_invalid_utf8_metadata_and_continues
+    bad_records = {
+      "cwd" => { "type" => "session_meta", "payload" => { "id" => "invalid-utf8", "cwd" => "BAD_BYTE" } },
+      "model" => { "type" => "turn_context", "payload" => { "model" => "BAD_BYTE" } },
+      "effort" => { "type" => "turn_context", "payload" => { "effort" => "BAD_BYTE" } },
+      "pricing_profile" => {
+        "type" => "session_meta",
+        "payload" => { "id" => "invalid-utf8", "pricing_profile" => "BAD_BYTE" }
+      }
+    }
+
+    bad_records.each do |field, bad_record|
+      bad_line = JSON.generate(bad_record).b
+      bad_line.sub!("BAD_BYTE", "\xFF".b)
+      records = [
+        JSON.generate("type" => "session_meta", "payload" => { "id" => "invalid-utf8" }),
+        bad_line,
+        JSON.generate(
+          "type" => "turn_context",
+          "payload" => { "model" => "gpt-5.6-sol", "effort" => "high" }
+        ),
+        JSON.generate(
+          "type" => "event_msg",
+          "payload" => {
+            "type" => "token_count",
+            "info" => {
+              "last_token_usage" => { "input_tokens" => 1, "output_tokens" => 1, "total_tokens" => 2 }
+            }
+          }
+        )
+      ]
+      bytes = records.join("\n").b.force_encoding(Encoding::UTF_8)
+
+      parsed = HOST_ADAPTERS::Parser.new("codex").parse(bytes, "codex:invalid-utf8:#{field}")
+
+      assert_equal [{ "record_ordinal" => 2, "reason" => "invalid_json" }], parsed.fetch("errors"), field
+      usage = parsed.fetch("sessions").fetch(0).fetch("usage")
+      assert_equal 1, usage.length, field
+      assert_equal ["gpt-5.6-sol", "high"], usage.fetch(0).values_at("model", "effort"), field
+    end
+  end
+
+  def test_host_adapter_rolls_back_session_state_for_invalid_utf8_metadata # rubocop:disable Metrics/MethodLength
+    usage = { "input_tokens" => 1, "output_tokens" => 1, "total_tokens" => 2 }
+    codex_bad_line = JSON.generate(
+      "type" => "session_meta",
+      "payload" => { "id" => "rejected-session", "cwd" => "BAD_BYTE", "pricing_profile" => "standard" }
+    ).b
+    codex_bad_line.sub!("BAD_BYTE", "\xFF".b)
+    codex_records = [
+      JSON.generate(
+        "type" => "session_meta",
+        "payload" => { "id" => "retained-session", "cwd" => "/safe/original", "pricing_profile" => "standard" }
+      ),
+      JSON.generate(
+        "type" => "turn_context",
+        "payload" => { "model" => "gpt-5.6-sol", "effort" => "high" }
+      ),
+      codex_bad_line,
+      JSON.generate("type" => "turn_context", "payload" => {}),
+      JSON.generate(
+        "type" => "event_msg",
+        "payload" => { "type" => "token_count", "info" => { "last_token_usage" => usage } }
+      )
+    ]
+
+    claude_bad_line = JSON.generate(
+      "type" => "assistant", "sessionId" => "retained-session", "cwd" => "/unsafe/partial",
+      "pricing_profile" => "BAD_BYTE",
+      "message" => { "model" => "claude-opus-4-6", "effort" => "high", "usage" => usage }
+    ).b
+    claude_bad_line.sub!("BAD_BYTE", "\xFF".b)
+    claude_records = [
+      JSON.generate(
+        "type" => "assistant", "sessionId" => "retained-session", "cwd" => "/safe/original",
+        "pricing_profile" => "standard",
+        "message" => { "model" => "claude-opus-4-6", "effort" => "high", "usage" => usage }
+      ),
+      claude_bad_line,
+      JSON.generate(
+        "type" => "assistant", "sessionId" => "retained-session",
+        "message" => { "usage" => usage }
+      )
+    ]
+
+    codex = HOST_ADAPTERS::Parser.new("codex").parse(
+      codex_records.join("\n").b.force_encoding(Encoding::UTF_8), "codex:rollback"
+    )
+    claude = HOST_ADAPTERS::Parser.new("claude").parse(
+      claude_records.join("\n").b.force_encoding(Encoding::UTF_8), "claude:rollback"
+    )
+
+    assert_equal [{ "record_ordinal" => 3, "reason" => "invalid_json" }], codex.fetch("errors")
+    assert_equal 1, codex.fetch("sessions").length
+    codex_session = codex.fetch("sessions").fetch(0)
+    assert_equal "original", codex_session.fetch("cwd_basename")
+    assert_equal [["gpt-5.6-sol", "high", "standard"]],
+                 (codex_session.fetch("usage").map do |row|
+                   row.values_at("model", "effort", "pricing_profile")
+                 end)
+
+    assert_equal [{ "record_ordinal" => 2, "reason" => "invalid_json" }], claude.fetch("errors")
+    claude_session = claude.fetch("sessions").fetch(0)
+    assert_equal "original", claude_session.fetch("cwd_basename")
+    assert_equal [["claude-opus-4-6", "high", "standard"]] * 2,
+                 (claude_session.fetch("usage").map do |row|
+                   row.values_at("model", "effort", "pricing_profile")
+                 end)
+  end
+
+  def test_host_adapter_alias_fallbacks_respect_primary_field_presence
+    usage = { "input_tokens" => 1, "output_tokens" => 1, "total_tokens" => 2 }
+    codex_records = [
+      { "type" => "session_meta", "payload" => { "id" => "alias-presence" } },
+      { "type" => "turn_context", "payload" => { "reasoning_effort" => "high" } },
+      { "type" => "event_msg", "payload" => {
+        "type" => "token_count", "info" => { "last_token_usage" => usage }
+      } },
+      { "type" => "turn_context", "payload" => { "effort" => nil, "reasoning_effort" => "high" } },
+      { "type" => "event_msg", "payload" => {
+        "type" => "token_count", "info" => { "last_token_usage" => usage }
+      } }
+    ]
+    claude_records = [
+      {
+        "type" => "assistant", "sessionId" => "alias-presence",
+        "message" => { "usage" => usage.merge("pricing_profile" => "standard") }
+      },
+      {
+        "type" => "assistant", "sessionId" => "alias-presence", "pricing_profile" => nil,
+        "message" => { "usage" => usage.merge("pricing_profile" => "standard") }
+      }
+    ]
+
+    codex = HOST_ADAPTERS::Parser.new("codex").parse(
+      codex_records.map { |record| JSON.generate(record) }.join("\n"), "codex:alias-presence"
+    ).fetch("sessions").fetch(0).fetch("usage")
+    claude = HOST_ADAPTERS::Parser.new("claude").parse(
+      claude_records.map { |record| JSON.generate(record) }.join("\n"), "claude:alias-presence"
+    ).fetch("sessions").fetch(0).fetch("usage")
+
+    assert_equal ["high", nil], codex.map { |row| row.fetch("effort") },
+                 "an absent primary effort may fall back, but a present null must clear"
+    assert_equal ["standard", nil], claude.map { |row| row.fetch("pricing_profile") },
+                 "an absent top-level profile may fall back, but a present null must clear"
+  end
+
+  def test_host_adapter_controls_cannot_launder_session_metadata # rubocop:disable Metrics/MethodLength
+    controls = {
+      "NUL" => 0x00,
+      "TAB in the interior" => 0x09,
+      "VT" => 0x0B,
+      "FF" => 0x0C,
+      "DEL" => 0x7F
+    }
+    (0x80..0x9F).each { |codepoint| controls[format("C1 0x%02X", codepoint)] = codepoint }
+
+    controls.each do |label, codepoint|
+      character = [codepoint].pack("U")
+      dirty = lambda do |value|
+        if codepoint == 0x09
+          midpoint = value.length / 2
+          "#{value[0...midpoint]}#{character}#{value[midpoint..]}"
+        else
+          "#{value}#{character}"
+        end
+      end
+      parsed = parse_codex_host_session(
+        cwd: dirty.call("/redacted/work"),
+        model: dirty.call("gpt-5.6-sol"),
+        effort: dirty.call("high"),
+        pricing_profile: dirty.call("standard")
+      )
+      assert_empty parsed.fetch("errors"), "#{label} should be valid JSON input"
+      session = parsed.fetch("sessions").fetch(0)
+      usage = session.fetch("usage").fetch(0)
+
+      %w[cwd_basename cwd_sha256 model effort pricing_profile].each do |field|
+        assert_nil session.fetch(field), "#{label} was laundered into host_sessions.#{field}"
+      end
+      %w[model effort pricing_profile].each do |field|
+        assert_nil usage.fetch(field), "#{label} was laundered into usage_calls.#{field}"
+      end
+    end
+
+    surrounding_whitespace = "\t \r\n"
+    parsed = parse_codex_host_session(
+      cwd: "#{surrounding_whitespace}/redacted/work#{surrounding_whitespace}",
+      model: "#{surrounding_whitespace}gpt-5.6-sol#{surrounding_whitespace}",
+      effort: "#{surrounding_whitespace}high#{surrounding_whitespace}",
+      pricing_profile: "#{surrounding_whitespace}standard#{surrounding_whitespace}"
+    )
+    session = parsed.fetch("sessions").fetch(0)
+    assert_equal ["work", "gpt-5.6-sol", "high", "standard"],
+                 session.values_at("cwd_basename", "model", "effort", "pricing_profile")
+    assert_equal 64, session.fetch("cwd_sha256").length
+    assert_equal ["gpt-5.6-sol", "high", "standard"],
+                 session.fetch("usage").fetch(0).values_at("model", "effort", "pricing_profile")
+
+    assert_same HOST_ADAPTERS::INGEST_CONTROL_CHARACTERS, HARVESTER::INGEST_CONTROL_CHARACTERS
+    assert_same HOST_ADAPTERS::INGEST_SURROUNDING_WHITESPACE, HARVESTER::INGEST_SURROUNDING_WHITESPACE
+  end
+
+  def test_rejected_present_metadata_clears_last_known_session_values # rubocop:disable Metrics/MethodLength
+    nul = "\u0000"
+    usage = { "input_tokens" => 1, "output_tokens" => 1, "total_tokens" => 2 }
+    codex_records = [
+      {
+        "type" => "session_meta",
+        "payload" => {
+          "id" => "metadata-clear", "cwd" => "/redacted/work", "pricing_profile" => "standard"
+        }
+      },
+      { "type" => "turn_context", "payload" => { "model" => "gpt-5.6-sol", "effort" => "high" } },
+      { "type" => "event_msg", "payload" => {
+        "type" => "token_count", "info" => { "last_token_usage" => usage }
+      } },
+      { "type" => "turn_context", "payload" => {} },
+      { "type" => "event_msg", "payload" => {
+        "type" => "token_count", "info" => { "last_token_usage" => usage }
+      } },
+      {
+        "type" => "session_meta",
+        "payload" => {
+          "id" => "metadata-clear", "cwd" => "/redacted/work#{nul}",
+          "pricing_profile" => "standard#{nul}"
+        }
+      },
+      {
+        "type" => "turn_context",
+        "payload" => { "model" => "gpt-5.6-sol#{nul}", "effort" => "high#{nul}" }
+      },
+      { "type" => "event_msg", "payload" => {
+        "type" => "token_count", "info" => { "last_token_usage" => usage }
+      } }
+    ]
+    claude_records = [
+      {
+        "type" => "assistant", "sessionId" => "metadata-clear", "cwd" => "/redacted/work",
+        "pricing_profile" => "standard",
+        "message" => { "model" => "claude-opus-4-6", "effort" => "high", "usage" => usage }
+      },
+      {
+        "type" => "assistant", "sessionId" => "metadata-clear", "message" => { "usage" => usage }
+      },
+      {
+        "type" => "assistant", "sessionId" => "metadata-clear", "cwd" => "/redacted/work#{nul}",
+        "pricing_profile" => "standard#{nul}",
+        "message" => {
+          "model" => "claude-opus-4-6#{nul}", "effort" => "high#{nul}", "usage" => usage
+        }
+      }
+    ]
+
+    { "codex" => codex_records, "claude" => claude_records }.each do |host_family, records|
+      parsed = HOST_ADAPTERS::Parser.new(host_family).parse(
+        records.map { |record| JSON.generate(record) }.join("\n"), "#{host_family}:metadata-clear"
+      )
+      assert_empty parsed.fetch("errors"), "#{host_family} control metadata should remain valid JSON"
+      session = parsed.fetch("sessions").fetch(0)
+      clean_usage, inherited_usage, rejected_usage = session.fetch("usage")
+      expected_model = host_family == "codex" ? "gpt-5.6-sol" : "claude-opus-4-6"
+
+      assert_equal [expected_model, "high", "standard"],
+                   clean_usage.values_at("model", "effort", "pricing_profile")
+      assert_equal [expected_model, "high", "standard"],
+                   inherited_usage.values_at("model", "effort", "pricing_profile"),
+                   "#{host_family} should inherit metadata when a field is absent"
+      assert_equal [nil, nil, nil], rejected_usage.values_at("model", "effort", "pricing_profile"),
+                   "#{host_family} reused metadata from before a rejected present value"
+      assert_equal [nil, nil, nil, nil, nil],
+                   session.values_at("cwd_basename", "cwd_sha256", "model", "effort", "pricing_profile")
+    end
+  end
+
   def test_pricing_catalog_rejects_wrong_unit_and_duplicate_lookup_keys
     document = JSON.parse(File.read(File.join(ROOT, "config", "telemetry-pricing-v1.json")))
     bad_unit = Marshal.load(Marshal.dump(document))
@@ -1752,6 +2028,29 @@ class TelemetryHarvesterTest < Minitest::Test # rubocop:disable Metrics/ClassLen
   end
 
   private
+
+  def parse_codex_host_session(cwd:, model:, effort:, pricing_profile:)
+    records = [
+      {
+        "type" => "session_meta",
+        "payload" => { "id" => "control-test", "cwd" => cwd, "pricing_profile" => pricing_profile }
+      },
+      {
+        "type" => "turn_context",
+        "payload" => { "model" => model, "effort" => effort, "pricing_profile" => pricing_profile }
+      },
+      {
+        "type" => "event_msg",
+        "payload" => {
+          "type" => "token_count",
+          "info" => { "last_token_usage" => { "input_tokens" => 1, "output_tokens" => 1, "total_tokens" => 2 } }
+        }
+      }
+    ]
+    HOST_ADAPTERS::Parser.new("codex").parse(
+      records.map { |record| JSON.generate(record) }.join("\n"), "codex:control-test"
+    )
+  end
 
   # bin/agent-coord guards execution with a $PROGRAM_NAME check and keeps the
   # event vocabulary in module-level constants, so loading it here is side-effect

@@ -6,6 +6,13 @@ require "json"
 module AgentCoord
   module Telemetry
     module HostAdapters
+      # Shared with Harvester so host-session metadata and ledger metadata cannot
+      # drift on what counts as a control character or surrounding whitespace.
+      # Tab, LF, and CR are intentional layout noise only at the ends; every C0,
+      # DEL, and C1 character is rejected when it remains in the value.
+      INGEST_CONTROL_CHARACTERS = /[\u0000-\u001F\u007F-\u009F]/
+      INGEST_SURROUNDING_WHITESPACE = /\A[\u0009\u000A\u000D\u0020]+|[\u0009\u000A\u000D\u0020]+\z/
+
       class Parser
         METADATA_TOKEN = %r{\A[A-Za-z0-9][A-Za-z0-9._:+/-]{0,127}\z}
         MODELS = %w[
@@ -14,6 +21,7 @@ module AgentCoord
         ].freeze
         EFFORTS = %w[low medium high xhigh max ultra].freeze
         PRICING_PROFILES = %w[standard].freeze
+        MISSING = Object.new.freeze
 
         def initialize(host_family)
           @host_family = host_family
@@ -44,20 +52,21 @@ module AgentCoord
 
           case record["type"]
           when "session_meta"
-            @current_session_ref = session_ref(payload["id"] || "#{source_ref}:#{ordinal}")
-            session = fetch_session(@current_session_ref)
-            merge_known!(session, cwd_fields(payload["cwd"]))
-            merge_known!(session, "pricing_profile" => pricing_profile(payload["pricing_profile"]))
+            reference = session_ref(payload["id"] || "#{source_ref}:#{ordinal}")
+            metadata = cwd_fields(present_value(payload, "cwd")).merge(
+              "pricing_profile" => pricing_profile(present_value(payload, "pricing_profile"))
+            )
+            @current_session_ref = reference
+            merge_known!(fetch_session(reference), metadata)
           when "turn_context"
             return unless @current_session_ref
 
-            session = fetch_session(@current_session_ref)
-            merge_known!(
-              session,
-              "model" => model(payload["model"]),
-              "effort" => effort(payload["effort"] || payload["reasoning_effort"]),
-              "pricing_profile" => pricing_profile(payload["pricing_profile"])
-            )
+            metadata = {
+              "model" => model(present_value(payload, "model")),
+              "effort" => effort(present_value(payload, "effort", "reasoning_effort")),
+              "pricing_profile" => pricing_profile(present_value(payload, "pricing_profile"))
+            }
+            merge_known!(fetch_session(@current_session_ref), metadata)
           when "event_msg"
             return unless @current_session_ref && payload["type"] == "token_count"
 
@@ -81,15 +90,14 @@ module AgentCoord
           return unless message.is_a?(Hash) && message["usage"].is_a?(Hash)
 
           reference = session_ref(record["sessionId"] || "claude-record-#{ordinal}")
+          pricing_value = present_value(record, "pricing_profile")
+          pricing_value = present_value(message.fetch("usage"), "pricing_profile") if pricing_value.equal?(MISSING)
+          record_metadata = cwd_fields(present_value(record, "cwd")).merge(
+            "model" => model(present_value(message, "model")),
+            "effort" => effort(present_value(message, "effort")),
+            "pricing_profile" => pricing_profile(pricing_value)
+          )
           session = fetch_session(reference)
-          merge_known!(session, cwd_fields(record["cwd"]))
-          record_metadata = {
-            "model" => model(message["model"]),
-            "effort" => effort(message["effort"]),
-            "pricing_profile" => pricing_profile(
-              record["pricing_profile"] || message.dig("usage", "pricing_profile")
-            )
-          }
           merge_known!(session, record_metadata)
           session.fetch("usage") << usage_row(
             message.fetch("usage"), ordinal, session,
@@ -137,6 +145,8 @@ module AgentCoord
         end
 
         def cwd_fields(value)
+          return {} if value.equal?(MISSING)
+
           value = known(value)
           return { "cwd_basename" => nil, "cwd_sha256" => nil } unless value
 
@@ -148,7 +158,7 @@ module AgentCoord
         end
 
         def merge_known!(session, values)
-          values.each { |key, value| session[key] = value unless value.nil? }
+          values.each { |key, value| session[key] = value unless value.equal?(MISSING) }
         end
 
         def session_ref(value)
@@ -156,8 +166,16 @@ module AgentCoord
         end
 
         def known(value)
-          string = value.to_s.strip
-          string.empty? || string.casecmp?("UNKNOWN") ? nil : string
+          return MISSING if value.equal?(MISSING)
+
+          string = value.to_s
+          raise Encoding::InvalidByteSequenceError, "invalid UTF-8 metadata" unless string.valid_encoding?
+
+          string = string.gsub(INGEST_SURROUNDING_WHITESPACE, "")
+          return if string.empty? || string.casecmp?("UNKNOWN")
+          return if string.match?(INGEST_CONTROL_CHARACTERS)
+
+          string
         end
 
         def metadata_token(value)
@@ -179,7 +197,14 @@ module AgentCoord
 
         def enum(value, allowed)
           string = known(value)
+          return MISSING if string.equal?(MISSING)
+
           string if allowed.include?(string)
+        end
+
+        def present_value(record, *keys)
+          key = keys.find { |candidate| record.key?(candidate) }
+          key ? record[key] : MISSING
         end
       end
     end

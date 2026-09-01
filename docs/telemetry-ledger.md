@@ -131,26 +131,20 @@ as a bare digest rather than `NULL` — it carried something.
 Tab, LF, and CR are trimmed at the ends (layout noise) but stripped and
 digest-marked in the interior (content corruption).
 
-The trim class and the control class are single definitions within the
-harvester, not per-column copies. The harvester runs two sanitizers with
-opposite policies — `bounded_signal` strips and digest-marks the free-form
-columns, `known` rejects outright for the identity and enum columns — and both
-read the same
-`INGEST_SURROUNDING_WHITESPACE` and `INGEST_CONTROL_CHARACTERS`. They may
+The trim class and the control class are single definitions across the ingest
+boundary, not per-column copies. `AgentCoord::Telemetry::HostAdapters` owns them
+because the harvester loads that parser first; the harvester aliases the same
+objects for its two sanitizers. `bounded_signal` strips and digest-marks free-form columns,
+while both `known` implementations reject identity and enum columns. They may
 disagree about what to do with a control character; they cannot disagree about
-what one is. That is structural rather than test-enforced, which matters because
-the drift a test would have to catch is exactly what went wrong: `known` carried
-its own C0-and-DEL-only copy, so it missed the entire C1 range including U+009B
-(CSI), and it trimmed with `String#strip`, so a trailing NUL was removed before
-the allowlist comparison and `error<NUL>` was promoted to the allowlisted
-`error` (issue #171).
+what one is.
 
-That scoping is deliberate, because the harvester is not the whole ingest path.
-Host-session ingest does not share these definitions: `AgentCoord::HostAdapters`
-carries its own `known()` that trims with `String#strip` and applies no control
-check at all, so a host session's `model` and `effort` are still promoted past
-their closed allowlists. Pre-existing, unchanged by #171, and tracked in issue
-#200.
+That structural reuse matters because independent copies caused both defects.
+Harvester#known once carried a C0-and-DEL-only pattern and missed the C1 range
+including U+009B (CSI), while HostAdapters#known once applied no control check.
+Both also used `String#strip`, so a trailing NUL was removed before an allowlist
+comparison and a value such as `high<NUL>` was promoted to the allowlisted
+`high` (issues #171 and #200).
 
 Closing that promotion also made `known` self-consistent. It had rejected NUL,
 VT, and FF in the interior of a value while accepting them at the ends, purely
