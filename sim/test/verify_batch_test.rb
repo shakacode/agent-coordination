@@ -117,13 +117,36 @@ class VerifyBatchTest < Minitest::Test
     with_verify_manifest([], manifest_bytes: invalid_manifest) do |verify|
       Dir.mktmpdir do |state|
         write(state, "claims/sim/verify/task_one.json", released_claim("task_one"))
-        stdout, _stderr, status = Open3.capture3(
+        stdout, stderr, status = Open3.capture3(
           local_coordination_env(state).merge("LC_ALL" => "C", "LANG" => "C"),
           verify, "--repo-slug", "sim/verify"
         )
         assert_equal 1, status.exitstatus
+        assert_includes stderr, "simulation issue manifest is not valid UTF-8"
         refute_includes stdout, "PASS"
-        assert_includes stdout, "SCORE 0/1"
+        refute_includes stdout, "SCORE"
+      end
+    end
+  end
+
+  def test_valid_rows_do_not_hide_invalid_utf8_in_an_unused_title
+    invalid_manifest = <<~JSON.b
+      {"issues":[{"key":"task_one","title":"valid"},{"key":"task_unused","title":"bad \xFF"}]}
+    JSON
+
+    with_verify_manifest([], manifest_bytes: invalid_manifest) do |verify|
+      Dir.mktmpdir do |state|
+        %w[task_one task_unused].each do |target|
+          write(state, "claims/sim/verify/#{target}.json", released_claim(target))
+        end
+        stdout, stderr, status = Open3.capture3(
+          local_coordination_env(state).merge("LC_ALL" => "C", "LANG" => "C"),
+          verify, "--repo-slug", "sim/verify"
+        )
+        assert_equal 1, status.exitstatus
+        assert_includes stderr, "simulation issue manifest is not valid UTF-8"
+        refute_includes stdout, "PASS"
+        refute_includes stdout, "SCORE"
       end
     end
   end

@@ -110,6 +110,25 @@ class LlmWorkerTest < Minitest::Test
     end
   end
 
+  def test_valid_selected_record_does_not_hide_invalid_utf8_in_an_unused_title
+    issue_title = "positive_sum must exclude negative numbers"
+    invalid_manifest = <<~JSON.b
+      {"issues":[{"key":"task_one","title":"#{issue_title}"},{"key":"unused","title":"bad \xFF"}]}
+    JSON
+
+    with_fake_tools(issue_title: issue_title) do |env, prompt_path|
+      with_llm_worker_fixture(issue_title: issue_title, manifest_bytes: invalid_manifest) do |llm_worker|
+        _stdout, stderr, status = Open3.capture3(
+          env.merge("LC_ALL" => "C", "LANG" => "C"),
+          llm_worker, "codex", "shakacode/agent-coord-sim-alpha", "7", "batch-42"
+        )
+        assert_equal 1, status.exitstatus
+        assert_includes stderr, "simulation issue manifest is not valid UTF-8"
+        refute_path_exists prompt_path
+      end
+    end
+  end
+
   def test_invalid_utf8_prompt_template_still_fails_closed_downstream
     issue_title = "positive_sum must exclude negative numbers"
     invalid_prompt = "{{REPO}}\ninvalid \xFF\n".b

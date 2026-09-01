@@ -41,7 +41,9 @@ end
 
 sim_root = File.expand_path("..", __dir__)
 cli = File.join(sim_root, "..", "bin", "agent-coord")
-manifest = JSON.parse(File.read(File.join(sim_root, "issues.json"), encoding: "UTF-8")).fetch("issues")
+manifest_json = File.read(File.join(sim_root, "issues.json"), encoding: "UTF-8")
+abort "simulation issue manifest is not valid UTF-8" unless manifest_json.valid_encoding?
+manifest = JSON.parse(manifest_json).fetch("issues")
 
 stdout, stderr, status = capture3_utf8("ruby", cli, "status", "--json")
 abort "agent-coord status failed: #{stderr}" unless status.success?
