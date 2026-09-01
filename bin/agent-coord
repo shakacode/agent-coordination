@@ -2680,11 +2680,18 @@ module AgentCoord
     rescue Errno::ENOENT
       raise unless create
 
+      created = false
       begin
         Dir.mkdir(path, 0o700)
+        created = true
       rescue Errno::EEXIST
         nil
       end
+      # mkdir(2) filters its requested mode through the caller's umask. Pin the
+      # path only after this process successfully created it; an EEXIST race
+      # must leave the concurrent creator's directory untouched for the normal
+      # validation below.
+      File.chmod(0o700, path) if created
       File.lstat(path)
     end
 
