@@ -4,6 +4,7 @@ require "fileutils"
 require "json"
 require "minitest/autorun"
 require "open3"
+require "rbconfig"
 require "tmpdir"
 
 class VerifyBatchTest < Minitest::Test
@@ -11,6 +12,20 @@ class VerifyBatchTest < Minitest::Test
   ROOT = File.expand_path("../..", __dir__)
   HARVEST = File.join(ROOT, "bin", "agent-coord-harvest")
   TELEMETRY_FIXTURE = File.join(ROOT, "test", "fixtures", "telemetry", "coordination.json")
+  LOCAL_COORDINATION_ENV = {
+    "AGENT_COORD_API_URL" => nil,
+    "AGENT_COORD_API_TOKEN" => nil,
+    "AGENT_COORD_BACKEND" => nil,
+    "AGENT_COORD_ENV_FILE" => nil,
+    "AGENT_COORD_LOCAL" => nil,
+    "AGENT_COORD_MACHINE_ID" => nil,
+    "AGENT_COORD_POLICY" => nil,
+    "AGENT_COORD_REF" => nil,
+    "AGENT_COORD_SESSION_ID" => nil,
+    "AGENT_COORD_STATE_ROOT" => nil,
+    "AGENT_COORD_STATUS_STATE_ROOT" => nil,
+    "CODEX_THREAD_ID" => nil
+  }.freeze
 
   def write(state, path, data)
     full = File.join(state, path)
@@ -38,7 +53,7 @@ class VerifyBatchTest < Minitest::Test
         write(state, "claims/sim/verify/#{target}.json", released_claim(target))
       end
       stdout, _stderr, status = Open3.capture3(
-        { "AGENT_COORD_STATE_ROOT" => state }, VERIFY, "--repo-slug", "sim/verify"
+        local_coordination_env(state), VERIFY, "--repo-slug", "sim/verify"
       )
       assert_equal 0, status.exitstatus, stdout
       assert_includes stdout, "SCORE 3/3"
@@ -61,7 +76,7 @@ class VerifyBatchTest < Minitest::Test
         released_claim("task_two").merge("agent_id" => "w-café", "branch" => "sim/task_two—w")
       )
       stdout, stderr, status = Open3.capture3(
-        { "AGENT_COORD_STATE_ROOT" => state, "LC_ALL" => "C", "LANG" => "C" },
+        local_coordination_env(state).merge("LC_ALL" => "C", "LANG" => "C"),
         VERIFY, "--repo-slug", "sim/verify"
       )
       assert_equal 0, status.exitstatus, stderr
@@ -75,7 +90,7 @@ class VerifyBatchTest < Minitest::Test
     Dir.mktmpdir do |state|
       write(state, "claims/sim/verify/task_one.json", released_claim("task_one"))
       stdout, _stderr, status = Open3.capture3(
-        { "AGENT_COORD_STATE_ROOT" => state }, VERIFY, "--repo-slug", "sim/verify"
+        local_coordination_env(state), VERIFY, "--repo-slug", "sim/verify"
       )
       assert_equal 1, status.exitstatus
       assert_includes stdout, "FAIL task_two"
@@ -97,11 +112,7 @@ class VerifyBatchTest < Minitest::Test
       assert harvest_status.success?, "harvest failed:\n#{harvest_out}\n#{harvest_err}"
 
       stdout, stderr, status = Open3.capture3(
-        {
-          "AGENT_COORD_STATE_ROOT" => state,
-          "AGENT_COORD_API_URL" => nil,
-          "AGENT_COORD_API_TOKEN" => nil
-        },
+        local_coordination_env(state),
         VERIFY, "--repo-slug", "sim/verify",
         "--telemetry-ledger", ledger, "--batch-id", "batch-fixture"
       )
@@ -120,7 +131,7 @@ class VerifyBatchTest < Minitest::Test
 
       with_fake_gh do |env, log|
         stdout, _stderr, status = Open3.capture3(
-          env.merge("AGENT_COORD_STATE_ROOT" => state),
+          local_coordination_env(state).merge(env),
           VERIFY, "--repo-slug", "sim/verify", "--live"
         )
         assert_equal 0, status.exitstatus, stdout
@@ -138,7 +149,7 @@ class VerifyBatchTest < Minitest::Test
 
       with_fake_gh(check_buckets: ["pending"]) do |env, _log|
         stdout, _stderr, status = Open3.capture3(
-          env.merge("AGENT_COORD_STATE_ROOT" => state),
+          local_coordination_env(state).merge(env),
           VERIFY, "--repo-slug", "sim/verify", "--live"
         )
         assert_equal 1, status.exitstatus
@@ -155,7 +166,7 @@ class VerifyBatchTest < Minitest::Test
 
       with_fake_gh(check_buckets: ["cancel"]) do |env, _log|
         stdout, _stderr, status = Open3.capture3(
-          env.merge("AGENT_COORD_STATE_ROOT" => state),
+          local_coordination_env(state).merge(env),
           VERIFY, "--repo-slug", "sim/verify", "--live"
         )
         assert_equal 1, status.exitstatus
@@ -164,7 +175,7 @@ class VerifyBatchTest < Minitest::Test
 
       with_fake_gh(check_buckets: []) do |env, _log|
         stdout, _stderr, status = Open3.capture3(
-          env.merge("AGENT_COORD_STATE_ROOT" => state),
+          local_coordination_env(state).merge(env),
           VERIFY, "--repo-slug", "sim/verify", "--live"
         )
         assert_equal 1, status.exitstatus
@@ -181,7 +192,7 @@ class VerifyBatchTest < Minitest::Test
 
       with_fake_gh(checks_stdout: "not json", checks_exit: 8) do |env, _log|
         stdout, _stderr, status = Open3.capture3(
-          env.merge("AGENT_COORD_STATE_ROOT" => state),
+          local_coordination_env(state).merge(env),
           VERIFY, "--repo-slug", "sim/verify", "--live"
         )
         assert_equal 1, status.exitstatus
@@ -199,7 +210,7 @@ class VerifyBatchTest < Minitest::Test
 
       with_fake_gh(open_empty: true, multi_prs: true) do |env, _log|
         stdout, _stderr, status = Open3.capture3(
-          env.merge("AGENT_COORD_STATE_ROOT" => state),
+          local_coordination_env(state).merge(env),
           VERIFY, "--repo-slug", "sim/verify", "--live"
         )
         assert_equal 0, status.exitstatus, stdout
@@ -208,7 +219,46 @@ class VerifyBatchTest < Minitest::Test
     end
   end
 
+  # Six of these tests hand Dir.mktmpdir's own root in as the state root, so a
+  # config home derived from the state root's parent landed in the shared OS
+  # temp root instead of inside the tree the test owns.
+  def test_local_coordination_env_confines_the_config_home_to_the_test_tmp_tree
+    Dir.mktmpdir do |root|
+      nested = File.join(root, "state")
+      FileUtils.mkdir_p(nested)
+
+      [root, nested].each do |state|
+        config_home = local_coordination_env(state).fetch("XDG_CONFIG_HOME")
+
+        assert_operator config_home, :start_with?, "#{root}#{File::SEPARATOR}",
+                        "config home escaped the test tmp root for state root #{state}"
+        refute_equal File.dirname(root), File.dirname(config_home),
+                     "config home landed in the shared OS temp root for state root #{state}"
+      end
+    end
+  end
+
   private
+
+  # XDG_CONFIG_HOME has to point at a directory this test owns so an ambient
+  # developer config cannot reach the CLI. Deriving it from the state root's
+  # *parent* only worked when the caller nested the state root: most callers
+  # pass the Dir.mktmpdir root itself, so the config home landed in the shared
+  # OS temp root instead of inside the test tree. Derive it from the state root
+  # itself, which every caller owns by construction. The leaf is never created
+  # (agent-coord only reads config) and is outside every coordination state
+  # prefix, so it cannot be mistaken for state.
+  def local_coordination_env(state)
+    LOCAL_COORDINATION_ENV.merge(
+      "AGENT_COORD_STATE_ROOT" => state,
+      "XDG_CONFIG_HOME" => config_home_for(state),
+      "PATH" => [File.dirname(RbConfig.ruby), ENV.fetch("PATH")].join(File::PATH_SEPARATOR)
+    )
+  end
+
+  def config_home_for(state)
+    File.join(state, ".xdg-config")
+  end
 
   def with_fake_gh(check_buckets: ["pass"], checks_stdout: nil, checks_exit: nil, open_empty: false, multi_prs: false)
     Dir.mktmpdir do |dir|
@@ -217,7 +267,7 @@ class VerifyBatchTest < Minitest::Test
       File.write(gh, fake_gh_script)
       FileUtils.chmod(0o755, gh)
       env = {
-        "PATH" => "#{dir}:#{ENV.fetch('PATH')}",
+        "PATH" => [dir, File.dirname(RbConfig.ruby), ENV.fetch("PATH")].join(File::PATH_SEPARATOR),
         "GH_ARGS_LOG" => log,
         "GH_CHECK_BUCKETS" => check_buckets.join(","),
         "GH_OPEN_EMPTY" => open_empty ? "1" : "0",

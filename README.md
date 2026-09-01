@@ -109,7 +109,11 @@ agent-coord demo
 The demo uses an isolated temporary local store, shows a live-holder claim
 refusal followed by stale and dead heartbeat states and a successful takeover,
 then removes its temporary state. It ignores configured HTTP and legacy GitHub
-backends, so it never writes demo data remotely.
+backends, so it never writes demo data remotely. It also ignores the canonical
+user configuration file entirely — including one that is missing, insecure, or
+malformed — by reading a config home inside its own temporary root, so the
+walkthrough works before any configuration exists and while a broken one is
+being repaired.
 
 ## HTTP backend
 
@@ -284,22 +288,81 @@ carries the same tuple as an `identity.machine` component check: `failed` on a
 mismatch (driving exit `2`), `healthy` on a verified match, and `skipped` when
 no authenticated token machine is available to compare.
 
-Backend selection follows this rule:
+Backend selection is global and shell-independent. The CLI safely reads the
+canonical user file from `AGENT_COORD_ENV_FILE` when explicitly set, otherwise
+from `$XDG_CONFIG_HOME/agent-coord/env` (falling back to
+`$HOME/.config/agent-coord/env`). It parses assignments without evaluating the
+file as shell code, accepts only the documented `AGENT_COORD_*` allowlist, and
+opens it with no-follow semantics, then validates and reads that same descriptor.
+The file must be regular, current-user-owned, and have no group or world
+permissions. Its parent chain may contain only root- or current-user-owned
+directories and symlinks — the standard dotfiles layout links `~/.config` into a
+user-owned repository — and every directory in the chain, before and after
+symlink resolution, must have no group or world write permission. The
+conventional `agent-coord` leaf directory must be current-user-owned with mode
+`0700`; an explicit `AGENT_COORD_ENV_FILE` parent is validated but never
+automatically chmodded because it may contain unrelated files.
+For compatibility with older documented setup commands, a safe current-user-owned
+conventional leaf that is not group/world-writable is automatically hardened to
+`0700` when read. State-root values saved in this file must be absolute paths.
+An explicitly selected missing file, an insecure file, duplicate keys, or
+ambiguous syntax is an operational failure rather than a fallback to another
+backend. The single exception is `config set`, whose job is to bring that file
+into existence: it tolerates an `AGENT_COORD_ENV_FILE` that does not exist yet
+and creates exactly the named path. A file that *does* exist but is insecure,
+unreadable, or malformed still fails closed, for `config set` as for everything
+else, so the command can never discard one.
+Every command loads this file except `version`, `bootstrap`, and `demo`, which
+read no configuration at all: they render compiled-in constants, install the
+command, and replay a walkthrough inside a temporary root, so none of them
+resolves a backend, ref, policy, or machine identity. Those three therefore keep
+working while a broken canonical file is exactly what you are trying to repair.
+`config show` does load it, because reporting the coordination configuration is
+its job; if the file cannot be read safely, `config show` fails with the reason.
+This hardened config path requires a POSIX-compatible Ruby/filesystem with
+no-follow opens, ownership/mode checks, and `flock`; native Windows Ruby is not
+a supported runtime for this CLI.
 
-1. `--state-root` flag -> `LocalStore`
-2. `--api-url` flag or `AGENT_COORD_API_URL` env -> `HttpStore`
-3. `AGENT_COORD_STATE_ROOT` env -> `LocalStore`
-4. `--backend` flag or `AGENT_COORD_BACKEND` env -> legacy `GitHubStore`
-5. otherwise -> labeled local store at the zero-config path above
+Backend selection follows this precedence:
+
+1. explicit CLI backend flags (`--state-root`, `--api-url`, or `--backend`)
+2. backend selectors already present in the process environment
+3. backend selectors in the canonical user file
+4. otherwise, the labeled local store at the zero-config path above
+
+Passing one of those flags is an explicit selection, so an empty or
+whitespace-only value is refused with exit `1` and
+`--state-root requires a non-empty value` rather than treated as a selection of
+nothing. This matters for wrappers: `agent-coord claim --state-root
+"$STATE_ROOT"` with `STATE_ROOT` unset used to resolve to the working directory
+and silently read and write coordination state there. An *environment* selector that is empty
+or whitespace-only is treated as unset rather than as a selection, so an
+exported-but-blank variable cannot shadow a configured backend.
+
+Within an environment tier, `AGENT_COORD_API_URL` selects `HttpStore`,
+`AGENT_COORD_STATE_ROOT` selects `LocalStore`, and `AGENT_COORD_BACKEND`
+selects the legacy `GitHubStore`. Existing process values also override
+same-named user-file values for authentication and identity.
 
 When both `AGENT_COORD_API_URL` and `AGENT_COORD_STATE_ROOT` are set, the CLI
 uses the HTTP backend and warns once. Pass `--state-root` only for an explicit
-local smoke check.
+local smoke check. When both `AGENT_COORD_STATE_ROOT` and `AGENT_COORD_BACKEND`
+are set, the CLI uses the local backend and warns once; pass `--backend` to
+force the legacy GitHub backend. When both `AGENT_COORD_API_URL` and
+`AGENT_COORD_BACKEND` are set, the CLI uses the HTTP backend and warns once;
+pass `--backend` to force the legacy GitHub backend. With all three set the
+warning names the state root only; remove it and the next run reports the
+remaining backend conflict. Each CLI flag that selects a different backend
+than the configured selectors warns once the same way — `--state-root`,
+`--api-url`, and `--backend` alike, and including when the configured selector
+is `AGENT_COORD_BACKEND`. Replacing a configured selector with the same kind of
+backend (for example `--api-url` over a configured `AGENT_COORD_API_URL`) is not
+a conflict and stays quiet.
 
-Selection 5 is *implicit* local. When a consumer env file
-(`AGENT_COORD_ENV_FILE`, `$XDG_CONFIG_HOME/agent-coord/env`, or
-`$XDG_CONFIG_HOME/agent-coord/http-env.sh`) configures `AGENT_COORD_API_URL`
-but that file was never sourced, an implicit local run is a split-brain
+The last selection is *implicit* local. The canonical user file is loaded
+automatically. When the older compatibility file
+`$XDG_CONFIG_HOME/agent-coord/http-env.sh` configures
+`AGENT_COORD_API_URL` but the canonical file does not, an implicit local run is a split-brain
 configuration: writes would land on a local state root the fleet never reads.
 `claim`, `release`, `heartbeat`, `record-event`, and `register-batch` therefore
 hard stop with exit `2` and name the offending env file. Read commands
@@ -407,7 +470,8 @@ bin/agent-coord demo
 ```
 
 `demo` is a deterministic, isolated local walkthrough. It does not use backend
-environment variables, make remote requests, or preserve its temporary state.
+environment variables, read the canonical user configuration file, make remote
+requests, or preserve its temporary state.
 
 `claim` acquires or renews a lease. If an active claim exists for another agent,
 the holder's heartbeat is the normal liveness source: `live` or `stale`
@@ -1029,7 +1093,77 @@ old holder's record. For planned ownership moves, include `--handoff-to` and
 `--handoff-note` on the original release, then have the next worker claim the
 same repo/target and continue on the recorded branch/PR.
 `version` prints the CLI contract version. `config show --json` prints runtime
-defaults and machine-readable exit codes. Default `doctor` verifies the current
+defaults, machine-readable exit codes, and a `coordination` object containing
+the effective `policy`, selected `backend`, `configured` state, source
+provenance, and `available: null`. Configuration inspection never performs a
+network probe, so consumers must run `doctor` before treating the backend as
+available.
+
+The durable user policy is `required`, `optional`, or `disabled`; it defaults
+to `optional`. New writes persist `AGENT_COORD_POLICY` in the same canonical
+env file as backend and identity settings:
+
+```bash
+agent-coord config set --policy required
+```
+
+The CLI validates and reports this policy but does not make repository workflow
+decisions from it. Workflow entrypoints consume `config show --json` and enforce
+`required` or `disabled` according to their repository coordination seam.
+
+To install or repair the endpoint, token, and machine identity without putting
+the token in command history, pipe only the token to stdin:
+
+```bash
+printf '%s\n' "$AGENT_COORD_API_TOKEN" |
+  agent-coord config set \
+    --api-url https://coordination.example \
+    --token-stdin \
+    --machine-id m1 \
+    --policy required
+```
+
+`config set` validates or securely creates the full parent chain, stages one
+canonical mode-`0600` file, syncs it, atomically renames it under an exclusive
+config lock, and syncs the containing directory. Endpoint, token, identity, and
+policy therefore become visible together through one rename. This is also how
+you create the file for the first time: point `AGENT_COORD_ENV_FILE` at the path
+you want and run `config set`, and the command writes exactly that path. Until
+it exists, every other command still fails with `configured user env file does
+not exist`. Each setter re-reads under the lock, so concurrent updates preserve
+unspecified supported keys; readers use a shared lock once the lock file exists. The adjacent lock is
+namespaced to the selected config file, so an explicit file in a shared parent
+does not reuse or modify an unrelated `.config.lock`.
+A saved URL cannot be changed while preserving its old token:
+`--token-stdin` is required in the same transaction. The command never prints
+token values. A token-only update also fails if another writer changes the saved
+URL after the command reads it; retry with `--api-url` in the same transaction
+to bind the credential explicitly.
+`config set` rewrites the file as a canonical list of supported
+`AGENT_COORD_*` assignments. Comments, blank lines, and non-`AGENT_COORD_*`
+assignments in that dedicated file are intentionally not preserved. An
+unrecognized `AGENT_COORD_*` key fails closed instead of being dropped.
+If the existing file fails ownership, permission, encoding, or syntax
+validation, `config set` refuses to overwrite it. Repair or remove that file
+out of band, then rerun `config set`; the command will not discard an unreadable
+configuration while preserving unspecified keys.
+A process `AGENT_COORD_POLICY` overrides the persisted policy for one
+invocation. The old sibling `agent-coord/policy` file remains a read-only
+legacy fallback only when neither the process nor canonical env file supplies a
+policy; `config set` never updates or deletes that legacy file. That fallback is
+only consulted beside the derived `<config home>/agent-coord/env` path, so an
+`AGENT_COORD_ENV_FILE` override never reads an unrelated sibling named `policy`
+— including when the override's own directories mirror the conventional names.
+
+A token read from the user file is credential-bound to that file's saved API
+URL. A differing `--api-url` or process `AGENT_COORD_API_URL` requires a
+process-scoped `AGENT_COORD_API_TOKEN`; the CLI never forwards the persisted
+token to an override endpoint. A process-scoped token, by contrast, still wins
+for every selected URL, so the CLI warns on stderr when one is used with a URL
+it was not set alongside — for example a stale exported token reaching an API URL
+saved by `config set`. The warning never prints a token value.
+
+Default `doctor` verifies the current
 backend without writing state or parsing every record; `doctor --deep` adds full
 JSON validation. For HTTP tokens whose read scope does not overlap `claims`, use
 `doctor --doctor-prefix <read-prefix>` to verify that scoped read path.
@@ -1101,6 +1235,7 @@ export BRANCH=jg-codex/3969-agent-coord-backend
 export AGENT_COORD_REPO="$(pwd)"
 export AGENT_COORD_ENV_FILE="$HOME/.config/agent-coord/env"
 mkdir -p "$(dirname "$AGENT_COORD_ENV_FILE")"
+chmod 700 "$(dirname "$AGENT_COORD_ENV_FILE")"
 install -m 600 /dev/null "$AGENT_COORD_ENV_FILE"
 cat > "$AGENT_COORD_ENV_FILE" <<'EOF'
 AGENT_COORD_API_URL=<worker-url>

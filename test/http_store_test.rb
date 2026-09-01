@@ -74,6 +74,55 @@ class HttpStoreTestCase < Minitest::Test
 end
 
 class HttpStoreReadTest < HttpStoreTestCase
+  def test_plain_http_ipv6_loopback_uses_unbracketed_network_host
+    network_host = nil
+    response = Struct.new(:code, :body).new("200", JSON.generate("entries" => []))
+    fake_http = Object.new
+    fake_http.define_singleton_method(:active?) { true }
+    fake_http.define_singleton_method(:finish) { nil }
+    fake_http.define_singleton_method(:request) { |_request| response }
+    original_start = Net::HTTP.method(:start)
+    Net::HTTP.define_singleton_method(:start) do |host, *|
+      network_host = host
+      fake_http
+    end
+    store = AgentCoord::HttpStore.new(base_url: "http://[::1]:8787", token: "tok")
+
+    assert_empty store.list_json("claims")
+    assert_equal "::1", network_host
+  ensure
+    store&.close
+    Net::HTTP.define_singleton_method(:start, original_start) if original_start
+  end
+
+  def test_constructor_accepts_mixed_case_plain_http_loopback_base_url
+    store = AgentCoord::HttpStore.new(base_url: "http://LOCALHOST:8787", token: "tok")
+
+    assert_instance_of AgentCoord::HttpStore, store
+  ensure
+    store&.close
+  end
+
+  def test_constructor_rejects_out_of_range_port_in_base_url
+    error = assert_raises(AgentCoord::OperationalError) do
+      AgentCoord::HttpStore.new(base_url: "http://127.0.0.1:99999", token: "tok")
+    end
+
+    assert_includes error.message, "port must be between 1 and 65535"
+  end
+
+  def test_constructor_rejects_query_and_fragment_components_in_base_url
+    [
+      "https://agent-coord.example?tenant=one",
+      "https://agent-coord.example#section"
+    ].each do |base_url|
+      error = assert_raises(AgentCoord::OperationalError) do
+        AgentCoord::HttpStore.new(base_url:, token: "tok")
+      end
+      assert_includes error.message, "query or fragment"
+    end
+  end
+
   def test_reuses_http_session_across_requests
     starts = 0
     original_start = Net::HTTP.method(:start)
@@ -430,13 +479,18 @@ end
 
 class HttpEnvTestCase < Minitest::Test
   IDENTITY_ENV_KEYS = %w[AGENT_COORD_MACHINE_ID AGENT_COORD_SESSION_ID CODEX_THREAD_ID].freeze
+  PRIVATE_CONFIG_TMP_PARENT = Dir.mktmpdir(
+    "agent-coord-http-private-fixtures-", File.expand_path("..", __dir__)
+  )
+  File.chmod(0o700, PRIVATE_CONFIG_TMP_PARENT)
+  Minitest.after_run { FileUtils.rm_rf(PRIVATE_CONFIG_TMP_PARENT) }
   # An empty XDG config home keeps the suite off the developer's real
   # ~/.config/agent-coord/env, which would otherwise trip the split-brain guard.
   ISOLATED_CONFIG_HOME = Dir.mktmpdir("agent-coord-isolated-config")
   Minitest.after_run { FileUtils.rm_rf(ISOLATED_CONFIG_HOME) }
-  CLEAN_ENV = IDENTITY_ENV_KEYS.to_h { |key| [key, nil] }.merge(
-    "AGENT_COORD_ENV_FILE" => nil,
-    "AGENT_COORD_LOCAL" => nil,
+  CLEAN_ENV = (
+    AgentCoord::USER_CONFIG_ENV_KEYS + IDENTITY_ENV_KEYS + %w[AGENT_COORD_ENV_FILE]
+  ).uniq.to_h { |key| [key, nil] }.merge(
     "XDG_CONFIG_HOME" => ISOLATED_CONFIG_HOME
   ).freeze
 
@@ -447,6 +501,10 @@ class HttpEnvTestCase < Minitest::Test
     yield
   ensure
     saved.each { |key, value| value.nil? ? ENV.delete(key) : ENV[key] = value }
+  end
+
+  def with_private_config_tmpdir(prefix, &)
+    Dir.mktmpdir(prefix, PRIVATE_CONFIG_TMP_PARENT, &)
   end
 
   def run_cli(args, _env)
@@ -462,7 +520,7 @@ class HttpEnvTestCase < Minitest::Test
   end
 end
 
-class HttpBackendSelectionTest < HttpEnvTestCase
+class HttpBackendSelectionTest < HttpEnvTestCase # rubocop:disable Metrics/ClassLength
   CONSUMER_ENV_CONTENT = "AGENT_COORD_API_URL=https://agent-coord.example\nAGENT_COORD_API_TOKEN=secret\n"
 
   def claim_args(*extra)
@@ -476,9 +534,9 @@ class HttpBackendSelectionTest < HttpEnvTestCase
   # paths under it. Nesting a second with_env inside the block would re-apply
   # CLEAN_ENV and silently drop the consumer env file this sets up.
   def with_split_brain_config(extra_env = {})
-    Dir.mktmpdir("agent-coord-consumer-env") do |root|
+    Dir.mktmpdir("agent-coord-consumer-env", PRIVATE_CONFIG_TMP_PARENT) do |root|
       config_home = File.join(root, "config")
-      env_file = File.join(config_home, "agent-coord", "env")
+      env_file = File.join(config_home, "agent-coord", "http-env.sh")
       state_home = File.join(root, "state")
       FileUtils.mkdir_p(File.dirname(env_file))
       FileUtils.mkdir_p(state_home)
@@ -627,11 +685,155 @@ class HttpBackendSelectionTest < HttpEnvTestCase
     end
   end
 
+  def test_configured_url_credentials_are_redacted_from_error_and_warning_output
+    # The canonical file is not run through validate_config_api_url! at load
+    # time, so a hand-edited or externally written value can be malformed or
+    # scheme-less. Both paths previously reached stderr with userinfo intact:
+    # URI::InvalidURIError embeds the offending URL in its message, and the
+    # anchored redactor only matched an explicit scheme://.
+    # The first value needs shell quoting: a bare space makes the assignment
+    # ambiguous and the loader rejects it before any URL parsing happens.
+    cases = [
+      ["'https://svc:leak-pw-quoted@bad host'", "leak-pw-quoted", "invalid HTTP backend URL"],
+      ["fleet-user:leak-pw-schemeless@127.0.0.1:9", "leak-pw-schemeless", "AGENT_COORD_API_TOKEN"],
+      ["'https://leak-userinfo-only@bad host'", "leak-userinfo-only", "invalid HTTP backend URL"]
+    ]
+    cases.each do |url, secret, expected_fragment|
+      with_private_config_tmpdir("agent-coord-redact-configured-url") do |root|
+        config_home = File.join(root, "config")
+        env_file = File.join(config_home, "agent-coord", "env")
+        FileUtils.mkdir_p(File.dirname(env_file))
+        File.chmod(0o700, File.dirname(env_file))
+        File.write(env_file, "AGENT_COORD_API_URL=#{url}\nAGENT_COORD_API_TOKEN=saved\n")
+        File.chmod(0o600, env_file)
+
+        env = { "XDG_CONFIG_HOME" => config_home, "AGENT_COORD_API_URL" => nil,
+                "AGENT_COORD_API_TOKEN" => "process", "AGENT_COORD_STATE_ROOT" => nil,
+                "AGENT_COORD_BACKEND" => nil }
+        _code, out, err = with_env(env) { run_cli(%w[status --json], env) }
+
+        combined = out.to_s + err.to_s
+        refute_includes combined, secret
+        assert_includes combined, "***@"
+        assert_includes combined, expected_fragment
+      end
+    end
+  end
+
+  def test_a_credential_free_url_is_reported_unchanged
+    assert_equal "https://coord.example/base",
+                 AgentCoord.redact_url_userinfo("https://coord.example/base")
+    assert_equal "https://***@coord.example",
+                 AgentCoord.redact_url_userinfo("https://svc:pw@coord.example")
+    assert_equal "***@127.0.0.1:9", AgentCoord.redact_url_userinfo("u:p@127.0.0.1:9")
+    assert_equal 'bad URI: "https://***@bad host"',
+                 AgentCoord.redact_userinfo_in_text('bad URI: "https://svc:pw@bad host"')
+    assert_equal 'bad URI: "https://***@bad host"',
+                 AgentCoord.redact_userinfo_in_text('bad URI: "https://secret-token@bad host"')
+    assert_equal "contact operator@example.com",
+                 AgentCoord.redact_userinfo_in_text("contact operator@example.com")
+  end
+
+  def test_whitespace_only_process_token_falls_through_to_the_saved_token
+    # read_token_from_stdin already refuses a wholly blank token, so treating an
+    # exported blank one as a real credential both contradicts that and sends
+    # "Bearer    " in place of a perfectly usable saved token.
+    with_private_config_tmpdir("agent-coord-blank-process-token") do |root|
+      config_home = File.join(root, "config")
+      env_file = File.join(config_home, "agent-coord", "env")
+      FileUtils.mkdir_p(File.dirname(env_file))
+      File.chmod(0o700, File.dirname(env_file))
+      stub = HttpStoreStub.new([[200, { "entries" => [] }]])
+      File.write(
+        env_file,
+        "AGENT_COORD_API_URL=#{stub.base_url}\nAGENT_COORD_API_TOKEN=saved-good-token\n"
+      )
+      File.chmod(0o600, env_file)
+
+      env = {
+        "XDG_CONFIG_HOME" => config_home,
+        "AGENT_COORD_API_URL" => nil,
+        "AGENT_COORD_API_TOKEN" => "   ",
+        "AGENT_COORD_STATE_ROOT" => nil,
+        "AGENT_COORD_BACKEND" => nil
+      }
+      begin
+        with_env(env) { run_cli(%w[status --json], env) }
+
+        auth = stub.requests.map { |request| request[:auth] }
+        assert_includes auth, "Bearer saved-good-token"
+        refute_includes auth, "Bearer    "
+      ensure
+        stub.shutdown
+      end
+    end
+  end
+
+  def test_saved_token_is_not_sent_to_cli_or_process_endpoint_override
+    # rubocop:disable Metrics/BlockLength
+    with_private_config_tmpdir("agent-coord-token-provenance") do |root|
+      config_home = File.join(root, "config")
+      env_file = File.join(config_home, "agent-coord", "env")
+      FileUtils.mkdir_p(File.dirname(env_file))
+      File.chmod(0o700, File.dirname(env_file))
+      File.write(
+        env_file,
+        "AGENT_COORD_API_URL=https://saved.example\nAGENT_COORD_API_TOKEN=saved-private-token\n"
+      )
+      File.chmod(0o600, env_file)
+
+      [%w[status --api-url], %w[status]].each do |args|
+        attacker = HttpStoreStub.new([])
+        command = args.length == 2 ? [*args, attacker.base_url] : args
+        process_url = args.length == 1 ? attacker.base_url : nil
+        env = {
+          "XDG_CONFIG_HOME" => config_home,
+          "AGENT_COORD_API_URL" => process_url,
+          "AGENT_COORD_API_TOKEN" => nil,
+          "AGENT_COORD_STATE_ROOT" => nil,
+          "AGENT_COORD_BACKEND" => nil
+        }
+        with_env(env) do
+          code, _out, err = run_cli(command, env)
+
+          assert_equal 2, code
+          assert_includes err, "process-scoped AGENT_COORD_API_TOKEN"
+          assert_empty attacker.requests, "saved token must never reach an override endpoint"
+        end
+      ensure
+        attacker&.shutdown
+      end
+    end
+    # rubocop:enable Metrics/BlockLength
+  end
+
   def test_malformed_api_url_is_operational_error
-    with_env("AGENT_COORD_API_URL" => "http://[bad", "AGENT_COORD_API_TOKEN" => "tok") do
+    secret = "malformed secret"
+    with_env("AGENT_COORD_API_URL" => "https://#{secret}@bad host", "AGENT_COORD_API_TOKEN" => "tok") do
       code, _, err = run_cli(["status"], {})
       assert_equal 2, code
       assert_includes err, "invalid HTTP backend URL"
+      refute_includes err, secret
+    end
+  end
+
+  def test_whitespace_only_status_root_uses_the_implicit_local_default
+    Dir.mktmpdir("agent-coord-blank-status-root") do |state_home|
+      with_env("AGENT_COORD_API_TOKEN" => nil,
+               "AGENT_COORD_API_URL" => nil,
+               "AGENT_COORD_BACKEND" => nil,
+               "AGENT_COORD_STATE_ROOT" => nil,
+               "AGENT_COORD_STATUS_STATE_ROOT" => "   ",
+               "XDG_STATE_HOME" => state_home) do
+        runner = AgentCoord::Runner.new([], stdout: StringIO.new, stderr: StringIO.new)
+        assert_nil runner.send(:default_status_state_root)
+
+        code, _, err = run_cli(["status", "--json"], {})
+
+        assert_equal 0, code
+        assert_includes err, "local mode — single-machine only"
+        assert_includes err, File.join(state_home, "agent-coordination")
+      end
     end
   end
 
@@ -667,7 +869,7 @@ class HttpBackendSelectionTest < HttpEnvTestCase
                "HOME" => File.join(root, "home"),
                "TMPDIR" => File.join(root, "tmp")) do
         [nil, ""].each do |api_url|
-          with_env("AGENT_COORD_API_URL" => api_url) do
+          with_env("AGENT_COORD_API_URL" => api_url, "AGENT_COORD_API_TOKEN" => "token-without-url") do
             [
               ["status", "--json"],
               ["claim", "--agent-id", "worker-a", "--repo", "demo/example", "--target", "1"]
@@ -715,6 +917,40 @@ class HttpBackendSelectionTest < HttpEnvTestCase
       code, _, err = run_cli(["status"], {})
       assert_equal 0, code
       assert_includes err, "both set"
+    end
+  ensure
+    stub.shutdown
+  end
+
+  # The API_URL branch returned before AGENT_COORD_BACKEND was ever consulted,
+  # so the HTTP backend displaced a configured legacy GitHub backend in silence
+  # while every other configured-tier pair announced which side won.
+  def test_configured_api_url_warns_when_it_shadows_a_configured_backend
+    stub = HttpStoreStub.new(Array.new(4) { [200, { "entries" => [] }] })
+    with_env("AGENT_COORD_API_URL" => stub.base_url, "AGENT_COORD_API_TOKEN" => "tok",
+             "AGENT_COORD_BACKEND" => "acme/legacy-repo") do
+      code, _, err = run_cli(["status"], {})
+      assert_equal 0, code
+      assert_includes err, "warning: AGENT_COORD_API_URL and AGENT_COORD_BACKEND are both set; " \
+                           "using the HTTP backend. Pass --backend to force the legacy GitHub backend."
+      refute_empty stub.requests
+    end
+  ensure
+    stub.shutdown
+  end
+
+  # All three selectors displace two losers at once. Naming only the
+  # next-highest keeps one decision to one warning; the backend conflict
+  # surfaces on the next run once the state root is removed.
+  def test_all_three_configured_selectors_warn_once_naming_the_state_root
+    stub = HttpStoreStub.new(Array.new(4) { [200, { "entries" => [] }] })
+    with_env("AGENT_COORD_API_URL" => stub.base_url, "AGENT_COORD_API_TOKEN" => "tok",
+             "AGENT_COORD_STATE_ROOT" => "/tmp/nonexistent-root",
+             "AGENT_COORD_BACKEND" => "acme/legacy-repo") do
+      code, _, err = run_cli(["status"], {})
+      assert_equal 0, code
+      assert_includes err, "AGENT_COORD_API_URL and AGENT_COORD_STATE_ROOT are both set"
+      refute_includes err, "AGENT_COORD_BACKEND are both set"
     end
   ensure
     stub.shutdown
@@ -779,7 +1015,7 @@ class HttpBackendSelectionTest < HttpEnvTestCase
 
   def test_status_warns_when_consumer_env_file_points_remote_but_cli_uses_local
     Dir.mktmpdir("agent-coord-xdg-config") do |config_home|
-      env_file = File.join(config_home, "agent-coord", "env")
+      env_file = File.join(config_home, "agent-coord", "http-env.sh")
       FileUtils.mkdir_p(File.dirname(env_file))
       File.write(env_file, "AGENT_COORD_API_URL=https://agent-coord.example\nAGENT_COORD_API_TOKEN=secret\n")
 
@@ -799,9 +1035,27 @@ class HttpBackendSelectionTest < HttpEnvTestCase
     end
   end
 
+  def test_saved_api_url_does_not_mask_split_brain_advisory_for_a_cli_local_read
+    with_split_brain_config do |root, env_file|
+      canonical = File.join(File.dirname(env_file), "env")
+      File.chmod(0o700, File.dirname(canonical))
+      File.write(canonical, "AGENT_COORD_API_URL=https://saved.example\n")
+      File.chmod(0o600, canonical)
+      state_root = File.join(root, "explicit-state")
+      FileUtils.mkdir_p(state_root)
+
+      code, _, err = run_cli(["status", "--state-root", state_root, "--json"], {})
+
+      assert_equal 0, code, err
+      assert_includes err, "warning: AGENT_COORD_API_URL and --state-root are both set"
+      assert_includes err, "split-brain configuration"
+      assert_includes err, canonical
+    end
+  end
+
   def test_status_ignores_consumer_env_file_with_invalid_encoding
     Dir.mktmpdir("agent-coord-xdg-config") do |config_home|
-      env_file = File.join(config_home, "agent-coord", "env")
+      env_file = File.join(config_home, "agent-coord", "http-env.sh")
       FileUtils.mkdir_p(File.dirname(env_file))
       File.binwrite(env_file, "\xFFAGENT_COORD_API_URL=https://agent-coord.example\n".b)
 
@@ -816,6 +1070,25 @@ class HttpBackendSelectionTest < HttpEnvTestCase
         assert_equal 0, code
         refute_includes err, "split-brain"
       end
+    end
+  end
+
+  def test_write_command_hard_stops_when_a_blank_api_url_masks_the_consumer_env_file
+    # A whitespace-only AGENT_COORD_API_URL resolves to the implicit local
+    # backend, so the split-brain guard must treat it as unset exactly as
+    # backend resolution does. Testing it raw let the blank value suppress
+    # detection of the compatibility file and silently write local state.
+    with_split_brain_config("AGENT_COORD_API_URL" => "   ") do |_root, env_file|
+      code, out, err = run_cli(claim_args, {})
+
+      assert_equal 2, code
+      assert_empty out
+      assert_includes err, "split-brain configuration"
+      assert_includes err, env_file
+      # The refusal happens instead of entering local mode, so the local-mode
+      # notice must not appear -- unlike the AGENT_COORD_LOCAL=1 remedy the
+      # refusal message itself suggests.
+      refute_includes err, "notice: local mode"
     end
   end
 
@@ -1242,6 +1515,38 @@ class HttpDoctorTest < HttpEnvTestCase
     stub.shutdown
   end
 
+  # doctor output is pasted into issues and archived by CI. A configured API URL
+  # may legally carry userinfo, and HttpStore never uses it (auth is the Bearer
+  # token), so both the text report and the JSON payload strip it.
+  def test_doctor_redacts_api_url_credentials_in_text_and_json
+    responses = [
+      [200, { "entries" => [] }],
+      [200, { "status" => "ok" }],
+      [200, { "entries" => [] }],
+      [200, { "status" => "ok" }]
+    ]
+    stub = HttpStoreStub.new(responses)
+    credentialed = stub.base_url.sub(%r{\Ahttp://}, "http://ops:doctor-url-password@")
+    redacted = stub.base_url.sub(%r{\Ahttp://}, "http://***@")
+    with_env("AGENT_COORD_API_URL" => credentialed, "AGENT_COORD_API_TOKEN" => "tok") do
+      text = StringIO.new
+      assert_equal 0, AgentCoord::Runner.new(["doctor"], stdout: text, stderr: StringIO.new).run
+      json = StringIO.new
+      assert_equal 0, AgentCoord::Runner.new(["doctor", "--json"], stdout: json, stderr: StringIO.new).run
+
+      assert_includes text.string, "backend_url: #{redacted}"
+      assert_equal redacted, JSON.parse(json.string).fetch("backend_url")
+      [text.string, json.string].each do |output|
+        refute_includes output, "doctor-url-password"
+        refute_includes output, "ops:"
+        # The host and port still identify the deployment.
+        assert_includes output, stub.base_url.sub(%r{\Ahttp://}, "")
+      end
+    end
+  ensure
+    stub.shutdown
+  end
+
   def test_doctor_uses_custom_http_readable_prefix
     responses = [
       [200, { "entries" => [] }],
@@ -1396,6 +1701,33 @@ class HttpDoctorTest < HttpEnvTestCase
     end
   ensure
     stub&.shutdown
+  end
+
+  def test_doctor_deep_recovery_recognizes_mixed_case_loopback_as_local
+    stub = HttpStoreStub.new([
+                               [200, { "status" => "ok" }],
+                               [401, { "error" => "unknown_token" }]
+                             ])
+    mixed_case_url = stub.base_url.sub("http://127.0.0.1", "http://LOCALHOST")
+    with_env("AGENT_COORD_API_URL" => mixed_case_url, "AGENT_COORD_API_TOKEN" => "stale") do
+      error = assert_raises(AgentCoord::OperationalError) do
+        AgentCoord::Runner.new(["doctor", "--deep"], stdout: StringIO.new, stderr: StringIO.new).run
+      end
+
+      assert_includes error.message,
+                      "worker/bin/provision-token <machine-name> --local --database <database-name>"
+    end
+  ensure
+    stub&.shutdown
+  end
+
+  def test_doctor_deep_recovery_recognizes_bracketed_ipv6_loopback_as_local
+    assert AgentCoord::Runner.new([], stdout: StringIO.new, stderr: StringIO.new)
+                             .send(:local_http_url?, "http://[::1]:8787"),
+           "bracketed IPv6 loopback must be recognized as local"
+    refute AgentCoord::Runner.new([], stdout: StringIO.new, stderr: StringIO.new)
+                             .send(:local_http_url?, "https://coord.example"),
+           "a remote host must not be recognized as local"
   end
 
   def test_doctor_deep_tolerates_worker_without_whoami_route

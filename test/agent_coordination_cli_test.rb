@@ -26,6 +26,9 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
   end
   ROOT = File.expand_path("..", __dir__)
   BIN = File.join(ROOT, "bin", "agent-coord")
+  PRIVATE_CONFIG_TMP_PARENT = Dir.mktmpdir("agent-coord-private-fixtures-", ROOT)
+  File.chmod(0o700, PRIVATE_CONFIG_TMP_PARENT)
+  Minitest.after_run { FileUtils.rm_rf(PRIVATE_CONFIG_TMP_PARENT) }
   HTTP_INTEGRATION_BIN = File.join(ROOT, "bin", "test-http-integration")
   LAUNCHD_HEARTBEAT_TEMPLATE = File.join(ROOT, "launchd", "com.shakacode.agent-coord-heartbeat.plist.example")
   SYSTEMD_TEMPLATE = File.join(ROOT, "systemd", "agent-coord-heartbeat.service.example")
@@ -111,13 +114,14 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
 
   # In-process runners read the real process ENV, so keep them off the developer's
   # consumer env file, which would otherwise trip the split-brain guard.
-  CONSUMER_ENV_KEYS = %w[AGENT_COORD_ENV_FILE AGENT_COORD_LOCAL XDG_CONFIG_HOME].freeze
+  CONSUMER_ENV_KEYS = (
+    AgentCoord::USER_CONFIG_ENV_KEYS + %w[AGENT_COORD_ENV_FILE XDG_CONFIG_HOME]
+  ).uniq.freeze
 
   def setup
     @state_root = Dir.mktmpdir("agent-coord-test")
     @saved_consumer_env = CONSUMER_ENV_KEYS.to_h { |key| [key, ENV.fetch(key, nil)] }
-    ENV.delete("AGENT_COORD_ENV_FILE")
-    ENV.delete("AGENT_COORD_LOCAL")
+    CONSUMER_ENV_KEYS.each { |key| ENV.delete(key) }
     ENV["XDG_CONFIG_HOME"] = ISOLATED_CONFIG_HOME
   end
 
@@ -140,6 +144,48 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     assert_includes result.stdout, "doctor"
     assert_includes result.stdout, "bootstrap"
     assert_includes result.stdout, "demo"
+  end
+
+  # Help and command-name validation are argv-only operations. They must remain
+  # available when the configuration the operator is trying to repair cannot
+  # be parsed, just like the top-level help path already is.
+  def test_subcommand_help_and_unknown_commands_do_not_load_user_configuration
+    with_private_user_config("not a valid assignment\n") do |config_home|
+      env = { "XDG_CONFIG_HOME" => config_home }
+
+      [
+        %w[status --help],
+        %w[status --json --help],
+        %w[status --json -h],
+        %w[config show --help],
+        %w[config show --json --help],
+        %w[config set --machine-id machine-a --help]
+      ].each do |argv|
+        result = run_command(env, RbConfig.ruby, BIN, *argv)
+
+        assert_equal 0, result.status.exitstatus, "#{argv.join(' ')}: #{result.stderr}"
+        assert_includes result.stdout, "Usage: agent-coord #{argv.first}"
+        refute_includes result.stderr, "unsafe user config syntax"
+      end
+
+      unknown = run_command(env, RbConfig.ruby, BIN, "not-a-command")
+
+      assert_equal 1, unknown.status.exitstatus
+      assert_equal "unknown command: not-a-command\n", unknown.stderr
+      refute_includes unknown.stderr, "unsafe user config syntax"
+    end
+  end
+
+  def test_help_like_arguments_do_not_bypass_user_configuration
+    with_private_user_config("not a valid assignment\n") do |config_home|
+      env = { "XDG_CONFIG_HOME" => config_home }
+      [%w[log help --json], %w[status --branch --help --json], %w[log -- --help]].each do |argv|
+        result = run_command(env, RbConfig.ruby, BIN, *argv)
+
+        assert_equal 2, result.status.exitstatus, argv.join(" ")
+        assert_includes result.stderr, "unsafe user config syntax"
+      end
+    end
   end
 
   def test_gc_requires_an_explicit_mode
@@ -1145,6 +1191,63 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     end
   end
 
+  # "isolated local store — no remote writes" has to cover the config the demo
+  # reads, not just the state root it writes. Each nested run loads the canonical
+  # user configuration itself, so an ambient file the operator happens to have
+  # installed used to fail the entire walkthrough.
+  def test_demo_ignores_an_unreadable_ambient_user_configuration
+    with_private_user_config("AGENT_COORD_POLICY=required\n") do |config_home|
+      File.chmod(0o644, File.join(config_home, "agent-coord", "env"))
+      clean = run_command({}, RbConfig.ruby, BIN, "demo")
+
+      [
+        { "XDG_CONFIG_HOME" => config_home },
+        { "AGENT_COORD_ENV_FILE" => File.join(config_home, "agent-coord", "env") },
+        { "AGENT_COORD_ENV_FILE" => File.join(config_home, "agent-coord", "absent") }
+      ].each do |env|
+        result = run_command(env, RbConfig.ruby, BIN, "demo")
+
+        assert_equal 0, result.status.exitstatus, "#{env.keys.first}: #{result.stderr}"
+        assert_empty result.stderr, env.keys.first
+        assert_equal clean.stdout, result.stdout, env.keys.first
+      end
+    end
+  end
+
+  # The nested runs are in-process, so isolation swaps process ENV rather than
+  # handing Open3 an env hash. Anything it swaps has to come back.
+  def test_demo_restores_the_process_environment_it_isolates
+    with_process_env(
+      "XDG_CONFIG_HOME" => "/nonexistent-demo-config-home",
+      "AGENT_COORD_ENV_FILE" => "/nonexistent-demo-env-file",
+      "AGENT_COORD_STATE_ROOT" => @state_root
+    ) do
+      AgentCoord::Runner.new(["demo"], stdout: StringIO.new, stderr: StringIO.new).run
+
+      assert_equal "/nonexistent-demo-config-home", ENV.fetch("XDG_CONFIG_HOME")
+      assert_equal "/nonexistent-demo-env-file", ENV.fetch("AGENT_COORD_ENV_FILE")
+      assert_equal @state_root, ENV.fetch("AGENT_COORD_STATE_ROOT")
+    end
+  end
+
+  def test_demo_isolates_ambient_session_identity_and_restores_it
+    runner = AgentCoord::Runner.new([], stdout: StringIO.new, stderr: StringIO.new)
+    with_process_env(
+      "AGENT_COORD_SESSION_ID" => "ambient-agent-session",
+      "CODEX_THREAD_ID" => "ambient-codex-thread"
+    ) do
+      runner.send(:with_demo_isolated_env, @state_root) do
+        assert_equal(
+          [nil, AgentCoord::SESSION_SOURCE_UNSET],
+          AgentCoord.environment_session_identity
+        )
+      end
+
+      assert_equal "ambient-agent-session", ENV.fetch("AGENT_COORD_SESSION_ID")
+      assert_equal "ambient-codex-thread", ENV.fetch("CODEX_THREAD_ID")
+    end
+  end
+
   def test_global_help_omits_doctor_only_deep_option
     result = run_agent_coord("--help", state_root: nil)
     doctor = run_agent_coord("doctor", "--help", state_root: nil)
@@ -1267,6 +1370,2202 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
 
     assert_equal 0, result.status.exitstatus, result.stderr
     assert_includes result.stdout, "default_backend: none"
+  end
+
+  def test_config_show_auto_loads_unsourced_canonical_user_config
+    with_private_user_config(
+      "AGENT_COORD_API_URL=https://coordination.example\n" \
+      "AGENT_COORD_API_TOKEN=private-token\n"
+    ) do |config_home|
+      result = run_command(
+        { "XDG_CONFIG_HOME" => config_home },
+        RbConfig.ruby,
+        BIN,
+        "config",
+        "show",
+        "--json"
+      )
+
+      assert_equal 0, result.status.exitstatus, result.stderr
+      payload = JSON.parse(result.stdout)
+      assert_equal(
+        {
+          "policy" => "optional",
+          "configured" => true,
+          "backend" => "http",
+          "source" => {
+            "backend" => "user_config",
+            "policy" => "default"
+          },
+          "available" => nil
+        },
+        payload.fetch("coordination")
+      )
+      refute_includes result.stdout, "private-token"
+      refute_includes result.stderr, "private-token"
+    end
+  end
+
+  def test_config_show_rejects_quoted_carriage_return_in_canonical_token
+    assert_canonical_config_rejects_token_control("\r", "cr")
+  end
+
+  def test_config_show_rejects_quoted_nul_in_canonical_token
+    assert_canonical_config_rejects_token_control("\0", "nul")
+  end
+
+  def test_config_show_process_backend_overrides_user_config_backend
+    with_private_user_config(
+      "AGENT_COORD_API_URL=https://file.example\nAGENT_COORD_API_TOKEN=file-token\n"
+    ) do |config_home|
+      result = run_command(
+        {
+          "XDG_CONFIG_HOME" => config_home,
+          "AGENT_COORD_STATE_ROOT" => "/tmp/process-selected-agent-coord"
+        },
+        RbConfig.ruby,
+        BIN,
+        "config",
+        "show",
+        "--json"
+      )
+
+      assert_equal 0, result.status.exitstatus, result.stderr
+      coordination = JSON.parse(result.stdout).fetch("coordination")
+      assert_equal "local", coordination.fetch("backend")
+      assert_equal "process_env", coordination.dig("source", "backend")
+      refute_includes result.stdout, "file-token"
+    end
+  end
+
+  def test_config_show_cli_backend_overrides_process_and_user_config_backends
+    with_private_user_config(
+      "AGENT_COORD_STATE_ROOT=/tmp/file-selected-agent-coord\n"
+    ) do |config_home|
+      result = run_command(
+        {
+          "XDG_CONFIG_HOME" => config_home,
+          "AGENT_COORD_BACKEND" => "example/process-backend"
+        },
+        RbConfig.ruby,
+        BIN,
+        "config",
+        "show",
+        "--api-url",
+        "https://cli.example",
+        "--json"
+      )
+
+      assert_equal 0, result.status.exitstatus, result.stderr
+      coordination = JSON.parse(result.stdout).fetch("coordination")
+      assert_equal "http", coordination.fetch("backend")
+      assert_equal "cli", coordination.dig("source", "backend")
+    end
+  end
+
+  # `agent-coord claim --state-root "$STATE_ROOT"` with STATE_ROOT unset passed
+  # an empty value that build_store accepted on a plain truthy check, so
+  # File.expand_path("") resolved to Dir.pwd and coordination state was read and
+  # written into whatever directory the script happened to run from.
+  def test_empty_state_root_is_refused_instead_of_using_the_working_directory
+    with_private_config_tmpdir("agent-coord-empty-state-root") do |root|
+      workdir = File.join(root, "workdir")
+      FileUtils.mkdir_p(workdir)
+      stdout, stderr, status = Open3.capture3(
+        COMMAND_ENV.merge("AGENT_COORD_STATE_ROOT" => nil),
+        RbConfig.ruby, BIN,
+        "claim", "--agent-id", "a", "--repo", "o/r", "--target", "1", "--state-root", "",
+        chdir: workdir
+      )
+
+      assert_equal 1, status.exitstatus
+      assert_equal "--state-root requires a non-empty value\n", stderr
+      assert_empty stdout
+      assert_empty Dir.children(workdir)
+    end
+  end
+
+  # A whitespace-only value is the same broken invocation with a quoted space in
+  # it, and File.expand_path would turn it into a directory next to Dir.pwd.
+  def test_whitespace_only_selector_values_are_refused
+    {
+      "--state-root" => "   ",
+      "--api-url" => " ",
+      "--backend" => "\t"
+    }.each do |flag, value|
+      result = run_command(
+        { "AGENT_COORD_STATE_ROOT" => nil },
+        RbConfig.ruby, BIN, "status", flag, value
+      )
+
+      assert_equal 1, result.status.exitstatus, flag
+      assert_equal "#{flag} requires a non-empty value\n", result.stderr, flag
+    end
+  end
+
+  # An empty backend selector used to be a selection of nothing that config show
+  # and runtime resolution then had to agree about. Both now refuse it, so they
+  # still agree, and neither has to model the fallthrough.
+  def test_empty_backend_selector_flags_are_rejected_consistently
+    Dir.mktmpdir("agent-coord-empty-backend-flag") do |state_home|
+      %w[--backend --state-root --api-url].each do |flag|
+        results = [%w[config show], %w[status]].map do |command|
+          run_command({ "XDG_STATE_HOME" => state_home }, RbConfig.ruby, BIN, *command, flag, "", "--json")
+        end
+
+        results.each do |result|
+          assert_equal 1, result.status.exitstatus, "#{flag}: #{result.stderr}"
+          assert_equal "#{flag} requires a non-empty value\n", result.stderr, flag
+        end
+        refute_includes results.last.stderr, "local mode — single-machine only", flag
+      end
+    end
+  end
+
+  def test_config_show_still_reports_a_non_empty_backend_flag_as_a_cli_selection
+    with_private_user_config("AGENT_COORD_STATE_ROOT=/tmp/file-selected-agent-coord\n") do |config_home|
+      result = run_command(
+        { "XDG_CONFIG_HOME" => config_home },
+        RbConfig.ruby, BIN, "config", "show", "--backend", "acme/legacy-repo", "--json"
+      )
+
+      assert_equal 0, result.status.exitstatus, result.stderr
+      coordination = JSON.parse(result.stdout).fetch("coordination")
+      assert_equal "github", coordination.fetch("backend")
+      assert_equal true, coordination.fetch("configured")
+      assert_equal "cli", coordination.dig("source", "backend")
+    end
+  end
+
+  # --state-root and --api-url both announce that they outrank a configured
+  # fleet backend; --backend used to override one silently.
+  def test_cli_backend_warns_when_it_overrides_a_configured_api_url
+    with_private_user_config(
+      "AGENT_COORD_API_URL=https://fleet.example\nAGENT_COORD_API_TOKEN=fleet-token\n"
+    ) do |config_home|
+      result = run_command(
+        { "XDG_CONFIG_HOME" => config_home, "PATH" => "/nonexistent" },
+        RbConfig.ruby, BIN, "status", "--backend", "acme/legacy-repo"
+      )
+
+      assert_includes result.stderr,
+                      "warning: AGENT_COORD_API_URL and --backend are both set; " \
+                      "using the legacy GitHub backend."
+      refute_includes result.stderr, "fleet-token"
+    end
+  end
+
+  def test_cli_backend_warns_when_it_overrides_a_configured_state_root
+    with_private_config_tmpdir("agent-coord-backend-over-state-root") do |root|
+      state_root = File.join(root, "state")
+      FileUtils.mkdir_p(state_root)
+      result = run_command(
+        { "AGENT_COORD_STATE_ROOT" => state_root, "PATH" => "/nonexistent" },
+        RbConfig.ruby, BIN, "status", "--backend", "acme/legacy-repo"
+      )
+
+      assert_includes result.stderr,
+                      "warning: AGENT_COORD_STATE_ROOT and --backend are both set; " \
+                      "using the legacy GitHub backend."
+    end
+  end
+
+  # AGENT_COORD_BACKEND is a configured selector like the other two, but the
+  # --state-root and --api-url branches returned before resolve_configured_backend
+  # ever saw it, so a GitHub-to-local or GitHub-to-HTTP override was silent while
+  # the README promised a warning.
+  def test_cli_state_root_warns_when_it_overrides_a_configured_backend
+    with_private_config_tmpdir("agent-coord-state-root-over-configured-backend") do |root|
+      state_root = File.join(root, "state")
+      FileUtils.mkdir_p(state_root)
+      result = run_command(
+        { "AGENT_COORD_BACKEND" => "acme/legacy-repo" },
+        RbConfig.ruby, BIN, "status", "--state-root", state_root, "--json"
+      )
+
+      assert_equal 0, result.status.exitstatus, result.stderr
+      assert_includes result.stderr,
+                      "warning: AGENT_COORD_BACKEND and --state-root are both set; using the local backend."
+    end
+  end
+
+  def test_cli_api_url_warns_when_it_overrides_a_configured_backend
+    with_private_config_tmpdir("agent-coord-api-url-over-configured-backend") do |root|
+      config_home = File.join(root, "config")
+      result = run_command(
+        {
+          "XDG_CONFIG_HOME" => config_home,
+          "AGENT_COORD_BACKEND" => "acme/legacy-repo",
+          "AGENT_COORD_API_TOKEN" => "fleet-token"
+        },
+        RbConfig.ruby, BIN, "status", "--api-url", "http://127.0.0.1:9"
+      )
+
+      assert_includes result.stderr,
+                      "warning: AGENT_COORD_BACKEND and --api-url are both set; using the HTTP backend."
+      refute_includes result.stderr, "fleet-token"
+    end
+  end
+
+  def test_cli_selector_conflicts_warn_when_backend_is_another_cli_flag
+    with_private_config_tmpdir("agent-coord-cli-selector-conflicts") do |root|
+      state_root = File.join(root, "state")
+      FileUtils.mkdir_p(state_root)
+      local_stderr = StringIO.new
+      http_stderr = StringIO.new
+
+      local = AgentCoord::Runner.new([], stdout: StringIO.new, stderr: local_stderr).send(
+        :parse_options, "status", ["--backend", "acme/legacy-repo", "--state-root", state_root]
+      )
+      http = AgentCoord::Runner.new([], stdout: StringIO.new, stderr: http_stderr).send(
+        :parse_options, "status", ["--backend", "acme/legacy-repo", "--api-url", "https://fleet.example"]
+      )
+
+      assert_equal state_root, local.fetch(:state_root)
+      assert_includes local_stderr.string,
+                      "warning: --backend and --state-root are both set; using the local backend."
+      assert_equal "https://fleet.example", http.fetch(:api_url)
+      assert_includes http_stderr.string,
+                      "warning: --backend and --api-url are both set; using the HTTP backend."
+    end
+  end
+
+  # Replacing a configured selector with the same kind of backend is not a
+  # backend override, so it must stay quiet.
+  def test_cli_state_root_does_not_warn_about_a_configured_state_root
+    with_private_config_tmpdir("agent-coord-state-root-over-state-root") do |root|
+      configured = File.join(root, "configured")
+      selected = File.join(root, "selected")
+      [configured, selected].each { |path| FileUtils.mkdir_p(path) }
+      result = run_command(
+        { "AGENT_COORD_STATE_ROOT" => configured },
+        RbConfig.ruby, BIN, "status", "--state-root", selected, "--json"
+      )
+
+      assert_equal 0, result.status.exitstatus, result.stderr
+      refute_includes result.stderr, "are both set"
+    end
+  end
+
+  # An empty --backend is not an override. It is also no longer a run: the
+  # invocation is refused before any configured selector is consulted, so it
+  # neither warns about a takeover nor quietly uses the configured state root.
+  def test_empty_cli_backend_is_refused_instead_of_overriding_a_configured_state_root
+    with_private_config_tmpdir("agent-coord-empty-backend-no-warning") do |root|
+      state_root = File.join(root, "state")
+      FileUtils.mkdir_p(state_root)
+      result = run_command(
+        { "AGENT_COORD_STATE_ROOT" => state_root },
+        RbConfig.ruby, BIN, "status", "--backend", "", "--json"
+      )
+
+      assert_equal 1, result.status.exitstatus
+      assert_equal "--backend requires a non-empty value\n", result.stderr
+      assert_empty result.stdout
+    end
+  end
+
+  # Every other pairwise selector conflict in resolve_configured_backend
+  # announces which side won. AGENT_COORD_STATE_ROOT silently shadowed a
+  # configured AGENT_COORD_BACKEND, so an operator whose fleet backend stopped
+  # being used had no diagnostic at all.
+  def test_whitespace_only_process_policy_falls_through_to_the_saved_policy
+    with_private_config_tmpdir("agent-coord-whitespace-policy") do |root|
+      config_home = File.join(root, "config")
+      env_file = File.join(config_home, "agent-coord", "env")
+      FileUtils.mkdir_p(File.dirname(env_file))
+      File.chmod(0o700, File.dirname(env_file))
+      File.write(env_file, "AGENT_COORD_POLICY=required\n")
+      File.chmod(0o600, env_file)
+
+      shown = run_command(
+        { "XDG_CONFIG_HOME" => config_home, "AGENT_COORD_POLICY" => "   " },
+        RbConfig.ruby, BIN, "config", "show", "--json"
+      )
+
+      assert_equal 0, shown.status.exitstatus, shown.stderr
+      coordination = JSON.parse(shown.stdout).fetch("coordination")
+      assert_equal "required", coordination.fetch("policy"),
+                   "a whitespace-only process policy must not shadow the saved policy"
+      assert_equal "user_config", coordination.fetch("source").fetch("policy")
+
+      bogus = run_command(
+        { "XDG_CONFIG_HOME" => config_home, "AGENT_COORD_POLICY" => "nonsense" },
+        RbConfig.ruby, BIN, "config", "show"
+      )
+      refute_equal 0, bogus.status.exitstatus, "a genuinely invalid policy must still be rejected"
+      assert_includes bogus.stderr, "invalid coordination policy"
+    end
+  end
+
+  def test_whitespace_only_process_selector_does_not_shadow_a_configured_backend
+    with_private_config_tmpdir("agent-coord-whitespace-selector") do |root|
+      config_home = File.join(root, "config")
+      env_file = File.join(config_home, "agent-coord", "env")
+      FileUtils.mkdir_p(File.dirname(env_file))
+      File.chmod(0o700, File.dirname(env_file))
+      File.write(env_file, "AGENT_COORD_BACKEND=acme/legacy-repo\n")
+      File.chmod(0o600, env_file)
+
+      shown = run_command(
+        { "XDG_CONFIG_HOME" => config_home, "AGENT_COORD_STATE_ROOT" => "   " },
+        RbConfig.ruby, BIN, "config", "show", "--json"
+      )
+
+      assert_equal 0, shown.status.exitstatus, shown.stderr
+      coordination = JSON.parse(shown.stdout).fetch("coordination")
+      assert_equal "github", coordination.fetch("backend"),
+                   "a whitespace-only process selector must not shadow the configured backend"
+      assert_equal "user_config", coordination.fetch("source").fetch("backend")
+    end
+  end
+
+  # `config show --json` is the enforcement seam: a workflow that requires
+  # coordination reads it and refuses to run when no backend is configured.
+  # Reporting spelled its own emptiness rule, so a canonical
+  # AGENT_COORD_API_URL='   ' was announced as `backend: http, configured: true`
+  # while resolution stripped the same value and fell through to the implicit
+  # local backend. The enforcing workflow passed and every command then wrote to
+  # local state the fleet never reads -- precisely the split-brain this
+  # reporting exists to prevent. Reporting and resolution must answer from one
+  # predicate, so assert both halves against the same config file.
+  def test_config_show_agrees_with_resolution_on_a_whitespace_only_configured_api_url
+    with_private_config_tmpdir("agent-coord-blank-configured-api-url") do |root|
+      config_home = File.join(root, "config")
+      env_file = File.join(config_home, "agent-coord", "env")
+      FileUtils.mkdir_p(File.dirname(env_file))
+      File.chmod(0o700, File.dirname(env_file))
+      File.write(env_file, "AGENT_COORD_API_URL='   '\n")
+      File.chmod(0o600, env_file)
+      env = { "XDG_CONFIG_HOME" => config_home, "XDG_STATE_HOME" => File.join(root, "state") }
+
+      shown = run_command(env, RbConfig.ruby, BIN, "config", "show", "--json")
+      resolved = run_command(env, RbConfig.ruby, BIN, "doctor", "--json")
+
+      assert_equal 0, shown.status.exitstatus, shown.stderr
+      assert_equal 0, resolved.status.exitstatus, resolved.stderr
+      coordination = JSON.parse(shown.stdout).fetch("coordination")
+      assert_equal "local", JSON.parse(resolved.stdout).fetch("backend")
+      assert_equal "local", coordination.fetch("backend"),
+                   "config show must not report a backend resolution will not use"
+      refute coordination.fetch("configured"),
+             "a whitespace-only configured selector is not a configured backend"
+      assert_equal "default", coordination.fetch("source").fetch("backend")
+    end
+  end
+
+  def test_whitespace_only_canonical_path_selectors_are_unset
+    %w[AGENT_COORD_STATE_ROOT AGENT_COORD_STATUS_STATE_ROOT].each do |key|
+      with_private_user_config("#{key}='   '\n") do |config_home|
+        result = run_command(
+          { "XDG_CONFIG_HOME" => config_home },
+          RbConfig.ruby, BIN, "config", "show", "--json"
+        )
+
+        assert_equal 0, result.status.exitstatus, "#{key}: #{result.stderr}"
+        coordination = JSON.parse(result.stdout).fetch("coordination")
+        assert_equal "local", coordination.fetch("backend"), key
+        refute coordination.fetch("configured"), key
+      end
+    end
+  end
+
+  def test_configured_state_root_warns_when_it_shadows_a_configured_backend
+    with_private_config_tmpdir("agent-coord-state-root-over-backend") do |root|
+      config_home = File.join(root, "config")
+      state_root = File.join(root, "state")
+      env_file = File.join(config_home, "agent-coord", "env")
+      FileUtils.mkdir_p(File.dirname(env_file))
+      File.chmod(0o700, File.dirname(env_file))
+      FileUtils.mkdir_p(state_root)
+      File.write(env_file, "AGENT_COORD_STATE_ROOT=#{state_root}\nAGENT_COORD_BACKEND=acme/legacy-repo\n")
+      File.chmod(0o600, env_file)
+
+      result = run_command(
+        { "XDG_CONFIG_HOME" => config_home },
+        RbConfig.ruby, BIN, "status", "--json"
+      )
+      shown = run_command(
+        { "XDG_CONFIG_HOME" => config_home },
+        RbConfig.ruby, BIN, "config", "show", "--json"
+      )
+
+      assert_equal 0, result.status.exitstatus, result.stderr
+      assert_includes result.stderr,
+                      "warning: AGENT_COORD_STATE_ROOT and AGENT_COORD_BACKEND are both set; " \
+                      "using the local backend. Pass --backend to force the legacy GitHub backend."
+      assert_equal 0, shown.status.exitstatus, shown.stderr
+      assert_equal "local", JSON.parse(shown.stdout).dig("coordination", "backend")
+    end
+  end
+
+  def test_process_state_root_warns_when_it_shadows_a_process_backend
+    with_private_config_tmpdir("agent-coord-process-state-root-over-backend") do |root|
+      state_root = File.join(root, "state")
+      FileUtils.mkdir_p(state_root)
+      result = run_command(
+        { "AGENT_COORD_STATE_ROOT" => state_root, "AGENT_COORD_BACKEND" => "acme/legacy-repo" },
+        RbConfig.ruby, BIN, "status", "--json"
+      )
+
+      assert_equal 0, result.status.exitstatus, result.stderr
+      assert_includes result.stderr,
+                      "warning: AGENT_COORD_STATE_ROOT and AGENT_COORD_BACKEND are both set; " \
+                      "using the local backend. Pass --backend to force the legacy GitHub backend."
+    end
+  end
+
+  # A state root on its own is an unambiguous selection; warning there would
+  # train operators to ignore the message.
+  def test_configured_state_root_alone_does_not_warn_about_a_shadowed_backend
+    with_private_config_tmpdir("agent-coord-state-root-without-backend") do |root|
+      state_root = File.join(root, "state")
+      FileUtils.mkdir_p(state_root)
+      result = run_command(
+        { "AGENT_COORD_STATE_ROOT" => state_root },
+        RbConfig.ruby, BIN, "status", "--json"
+      )
+
+      assert_equal 0, result.status.exitstatus, result.stderr
+      refute_includes result.stderr, "AGENT_COORD_BACKEND are both set"
+    end
+  end
+
+  def test_config_set_persists_policy_in_canonical_env_and_config_show_resolves_it
+    # rubocop:disable Metrics/BlockLength
+    with_private_config_tmpdir("agent-coord-config-set-policy") do |root|
+      config_home = File.join(root, "config")
+      set_result = run_command(
+        { "XDG_CONFIG_HOME" => config_home },
+        RbConfig.ruby,
+        BIN,
+        "config",
+        "set",
+        "--policy",
+        "required"
+      )
+
+      assert_equal 0, set_result.status.exitstatus, set_result.stderr
+      env_file = File.join(config_home, "agent-coord", "env")
+      assert_includes File.read(env_file), "AGENT_COORD_POLICY=required"
+      assert_equal 0o600, File.stat(env_file).mode & 0o777
+      refute_path_exists File.join(config_home, "agent-coord", "policy")
+
+      show_result = run_command(
+        { "XDG_CONFIG_HOME" => config_home },
+        RbConfig.ruby,
+        BIN,
+        "config",
+        "show",
+        "--json"
+      )
+      assert_equal 0, show_result.status.exitstatus, show_result.stderr
+      coordination = JSON.parse(show_result.stdout).fetch("coordination")
+      assert_equal "required", coordination.fetch("policy")
+      assert_equal "user_config", coordination.dig("source", "policy")
+    end
+    # rubocop:enable Metrics/BlockLength
+  end
+
+  # rubocop:disable Metrics/MethodLength
+  def test_config_set_updates_private_env_atomically_from_token_stdin_and_preserves_unspecified_keys
+    # rubocop:disable Metrics/BlockLength
+    with_private_user_config(
+      "AGENT_COORD_REF=existing-ref\nAGENT_COORD_API_TOKEN=old-private-token\n"
+    ) do |config_home|
+      legacy_policy = File.join(config_home, "agent-coord", "policy")
+      File.write(legacy_policy, "disabled\n")
+      File.chmod(0o600, legacy_policy)
+      result = run_command(
+        { "XDG_CONFIG_HOME" => config_home },
+        RbConfig.ruby,
+        BIN,
+        "config",
+        "set",
+        "--api-url",
+        "https://coordination.example",
+        "--token-stdin",
+        "--machine-id",
+        "m1",
+        "--policy",
+        "required",
+        stdin_data: "new-private-token\n"
+      )
+
+      assert_equal 0, result.status.exitstatus, result.stderr
+      refute_includes result.stdout, "new-private-token"
+      refute_includes result.stderr, "new-private-token"
+      env_file = File.join(config_home, "agent-coord", "env")
+      assert_equal 0o600, File.stat(env_file).mode & 0o777
+      contents = File.read(env_file)
+      assert_includes contents, "AGENT_COORD_REF=existing-ref"
+      assert_includes contents, "AGENT_COORD_API_URL=https://coordination.example"
+      assert_includes contents, "AGENT_COORD_API_TOKEN=new-private-token"
+      assert_includes contents, "AGENT_COORD_MACHINE_ID=m1"
+      assert_includes contents, "AGENT_COORD_POLICY=required"
+      refute_includes contents, "old-private-token"
+      assert_equal "disabled\n", File.read(legacy_policy), "legacy fallback is read-only"
+
+      show_result = run_command(
+        { "XDG_CONFIG_HOME" => config_home },
+        RbConfig.ruby,
+        BIN,
+        "config",
+        "show",
+        "--json"
+      )
+      coordination = JSON.parse(show_result.stdout).fetch("coordination")
+      assert_equal "required", coordination.fetch("policy")
+      assert_equal "user_config", coordination.dig("source", "policy")
+    end
+    # rubocop:enable Metrics/BlockLength
+  end
+  # rubocop:enable Metrics/MethodLength
+
+  # A saved token is bound to its saved URL, but a process token wins for every
+  # selected URL. A stale exported token therefore reached a URL it was never
+  # paired with, silently, while the correctly bound saved token went unused.
+  def test_process_token_paired_with_a_user_config_api_url_warns_without_printing_tokens
+    # rubocop:disable Metrics/BlockLength
+    with_private_config_tmpdir("agent-coord-unbound-process-token") do |root|
+      config_home = File.join(root, "config")
+      set_result = run_command(
+        { "XDG_CONFIG_HOME" => config_home },
+        RbConfig.ruby, BIN, "config", "set", "--api-url", "http://127.0.0.1:9", "--token-stdin",
+        stdin_data: "saved-token\n"
+      )
+      assert_equal 0, set_result.status.exitstatus, set_result.stderr
+
+      warned = run_command(
+        { "XDG_CONFIG_HOME" => config_home, "AGENT_COORD_API_TOKEN" => "stale-process-token" },
+        RbConfig.ruby, BIN, "status"
+      )
+      saved_only = run_command({ "XDG_CONFIG_HOME" => config_home }, RbConfig.ruby, BIN, "status")
+      process_pair = run_command(
+        {
+          "XDG_CONFIG_HOME" => config_home,
+          "AGENT_COORD_API_URL" => "http://127.0.0.1:9",
+          "AGENT_COORD_API_TOKEN" => "stale-process-token"
+        },
+        RbConfig.ruby, BIN, "status"
+      )
+
+      warning = "warning: process-scoped AGENT_COORD_API_TOKEN is being used with http://127.0.0.1:9, " \
+                "which it was not set alongside; the process token takes precedence over any saved token."
+      assert_includes warned.stderr, warning
+      %w[stale-process-token saved-token].each do |secret|
+        refute_includes warned.stderr, secret
+        refute_includes warned.stdout, secret
+      end
+      # The saved token is bound to this URL, so pairing it is not a mismatch.
+      refute_includes saved_only.stderr, "process-scoped AGENT_COORD_API_TOKEN is being used with"
+      # A process token beside its own process URL is an explicit, visible pair.
+      refute_includes process_pair.stderr, "process-scoped AGENT_COORD_API_TOKEN is being used with"
+    end
+    # rubocop:enable Metrics/BlockLength
+  end
+
+  # validate_config_api_url! accepts userinfo, so a saved API URL can carry a
+  # password. Command stderr is captured by CI and service logs, so the
+  # unbound-token warning must name the deployment without disclosing the
+  # credential embedded in the URL.
+  def test_unbound_process_token_warning_redacts_api_url_credentials
+    with_private_config_tmpdir("agent-coord-unbound-token-credentials") do |root|
+      config_home = File.join(root, "config")
+      set_result = run_command(
+        { "XDG_CONFIG_HOME" => config_home },
+        RbConfig.ruby, BIN, "config", "set",
+        "--api-url", "http://fleet-user:fleet-url-password@127.0.0.1:9", "--token-stdin",
+        stdin_data: "saved-token\n"
+      )
+      assert_equal 0, set_result.status.exitstatus, set_result.stderr
+
+      warned = run_command(
+        { "XDG_CONFIG_HOME" => config_home, "AGENT_COORD_API_TOKEN" => "stale-process-token" },
+        RbConfig.ruby, BIN, "status"
+      )
+
+      assert_includes warned.stderr,
+                      "warning: process-scoped AGENT_COORD_API_TOKEN is being used with " \
+                      "http://***@127.0.0.1:9, which it was not set alongside; " \
+                      "the process token takes precedence over any saved token."
+      # The host still identifies which deployment the token reached.
+      assert_includes warned.stderr, "127.0.0.1:9"
+      %w[fleet-url-password fleet-user stale-process-token saved-token].each do |secret|
+        refute_includes warned.stderr, secret
+        refute_includes warned.stdout, secret
+      end
+    end
+  end
+
+  def test_config_set_rejects_url_change_without_replacement_token
+    with_private_user_config(
+      "AGENT_COORD_API_URL=https://old.example\nAGENT_COORD_API_TOKEN=old-private-token\n"
+    ) do |config_home|
+      env_file = File.join(config_home, "agent-coord", "env")
+      original = File.read(env_file)
+      result = run_command(
+        { "XDG_CONFIG_HOME" => config_home },
+        RbConfig.ruby,
+        BIN,
+        "config",
+        "set",
+        "--api-url",
+        "https://new.example"
+      )
+
+      assert_equal 1, result.status.exitstatus
+      assert_includes result.stderr, "--token-stdin is required when changing"
+      assert_equal original, File.read(env_file)
+      refute_includes result.stdout, "old-private-token"
+      refute_includes result.stderr, "old-private-token"
+    end
+  end
+
+  # stdin is injectable exactly like stdout and stderr, so a test can supply
+  # --token-stdin input without reaching into private state, and an omitted
+  # stdin: still reads the process stdin.
+  def test_runner_stdin_is_injectable_and_defaults_to_the_process_stdin
+    injected = AgentCoord::Runner.new(
+      [], stdin: StringIO.new("injected-token\n"), stdout: StringIO.new, stderr: StringIO.new
+    )
+
+    assert_equal "injected-token", injected.send(:read_token_from_stdin)
+
+    original_stdin = $stdin
+    $stdin = StringIO.new("process-token\n")
+    default = AgentCoord::Runner.new([], stdout: StringIO.new, stderr: StringIO.new)
+
+    assert_equal "process-token", default.send(:read_token_from_stdin)
+  ensure
+    $stdin = original_stdin if original_stdin
+  end
+
+  def test_token_only_config_set_rejects_a_concurrent_saved_url_change
+    with_private_user_config("AGENT_COORD_API_URL=https://old.example\n") do |config_home|
+      env_file = File.join(config_home, "agent-coord", "env")
+      token_stdin = StringIO.new("private-token\n")
+      token_runner = AgentCoord::Runner.new([], stdin: token_stdin, stdout: StringIO.new, stderr: StringIO.new)
+      url_runner = AgentCoord::Runner.new([], stdout: StringIO.new, stderr: StringIO.new)
+
+      with_process_env(
+        "XDG_CONFIG_HOME" => config_home,
+        "AGENT_COORD_API_URL" => nil,
+        "AGENT_COORD_API_TOKEN" => nil
+      ) do
+        token_runner.send(:load_user_configuration!)
+        token_runner.send(:restore_injected_user_configuration!)
+        url_runner.send(:load_user_configuration!)
+        url_runner.send(:persist_config, api_url_cli: true, api_url: "https://new.example")
+        url_runner.send(:restore_injected_user_configuration!)
+
+        error = assert_raises(AgentCoord::Error) do
+          token_runner.send(:persist_config, token_stdin: true)
+        end
+        assert_includes error.message, "saved API URL changed"
+      ensure
+        [token_runner, url_runner].each { |runner| runner.send(:restore_injected_user_configuration!) }
+      end
+
+      contents = File.read(env_file)
+      assert_includes contents, "AGENT_COORD_API_URL=https://new.example"
+      refute_includes contents, "AGENT_COORD_API_TOKEN"
+      refute_includes contents, "private-token"
+    end
+  end
+
+  def test_config_set_rejects_empty_token_stdin_cleanly
+    with_private_config_tmpdir("agent-coord-empty-token") do |root|
+      config_home = File.join(root, "config")
+      result = run_command(
+        { "XDG_CONFIG_HOME" => config_home },
+        RbConfig.ruby,
+        BIN,
+        "config",
+        "set",
+        "--api-url",
+        "https://coordination.example",
+        "--token-stdin",
+        stdin_data: ""
+      )
+
+      assert_equal 1, result.status.exitstatus
+      assert_includes result.stderr, "--token-stdin requires a non-empty token"
+      refute_includes result.stderr, "NoMethodError"
+      refute_path_exists File.join(config_home, "agent-coord", "env")
+    end
+  end
+
+  def test_config_set_reports_an_unreadable_token_stdin_cleanly
+    closed_input = StringIO.new("private-token\n")
+    closed_input.close
+    bad_descriptor = Object.new
+    bad_descriptor.define_singleton_method(:read) { |_limit| raise Errno::EBADF }
+
+    [closed_input, bad_descriptor].each do |input|
+      runner = AgentCoord::Runner.new([], stdin: input, stdout: StringIO.new, stderr: StringIO.new)
+      error = assert_raises(AgentCoord::Error) { runner.send(:read_token_from_stdin) }
+
+      assert_includes error.message, "--token-stdin could not read from stdin"
+    end
+  end
+
+  # A blank token used to persist verbatim and then latch: the saved URL could no
+  # longer be changed without a replacement --token-stdin.
+  def test_config_set_rejects_a_whitespace_only_token_stdin
+    with_private_config_tmpdir("agent-coord-blank-token") do |root|
+      config_home = File.join(root, "config")
+      result = run_command(
+        { "XDG_CONFIG_HOME" => config_home },
+        RbConfig.ruby,
+        BIN,
+        "config",
+        "set",
+        "--api-url",
+        "https://coordination.example",
+        "--token-stdin",
+        stdin_data: "   \n"
+      )
+
+      assert_equal 1, result.status.exitstatus
+      assert_includes result.stderr, "--token-stdin requires a non-empty token"
+      refute_path_exists File.join(config_home, "agent-coord", "env")
+    end
+  end
+
+  def test_config_set_rejects_invalid_utf8_token_without_writing_config
+    with_private_config_tmpdir("agent-coord-invalid-token-encoding") do |root|
+      config_home = File.join(root, "config")
+      result = run_command(
+        { "XDG_CONFIG_HOME" => config_home },
+        RbConfig.ruby,
+        BIN,
+        "config",
+        "set",
+        "--api-url",
+        "https://coordination.example",
+        "--token-stdin",
+        stdin_data: "\xFF\n".b
+      )
+
+      assert_equal 1, result.status.exitstatus
+      assert_includes result.stderr, "--token-stdin token must be valid UTF-8"
+      refute_includes result.stderr, "bin/agent-coord:"
+      refute_path_exists File.join(config_home, "agent-coord", "env")
+    end
+  end
+
+  def test_config_set_rejects_token_without_an_api_url
+    with_private_config_tmpdir("agent-coord-orphan-token") do |root|
+      config_home = File.join(root, "config")
+      result = run_command(
+        { "XDG_CONFIG_HOME" => config_home },
+        RbConfig.ruby,
+        BIN,
+        "config",
+        "set",
+        "--token-stdin",
+        stdin_data: "private-token\n"
+      )
+
+      assert_equal 1, result.status.exitstatus
+      assert_includes result.stderr, "requires a saved API URL"
+      refute_path_exists File.join(config_home, "agent-coord", "env")
+    end
+  end
+
+  def test_config_set_round_trips_a_token_with_trailing_space
+    with_private_config_tmpdir("agent-coord-token-whitespace") do |root|
+      config_home = File.join(root, "config")
+      result = run_command(
+        { "XDG_CONFIG_HOME" => config_home },
+        RbConfig.ruby,
+        BIN,
+        "config",
+        "set",
+        "--api-url",
+        "https://coordination.example",
+        "--token-stdin",
+        stdin_data: "private-token \n"
+      )
+
+      assert_equal 0, result.status.exitstatus, result.stderr
+      runner = AgentCoord::Runner.new([], stdout: StringIO.new, stderr: StringIO.new)
+      with_process_env(
+        "XDG_CONFIG_HOME" => config_home,
+        "AGENT_COORD_API_URL" => nil,
+        "AGENT_COORD_API_TOKEN" => nil
+      ) do
+        runner.send(:load_user_configuration!)
+        assert_equal "private-token ", runner.instance_variable_get(:@user_config).fetch("AGENT_COORD_API_TOKEN")
+      ensure
+        runner.send(:restore_injected_user_configuration!)
+      end
+    end
+  end
+
+  def test_config_set_rejects_backend_selectors_it_does_not_persist
+    {
+      "--state-root" => "/tmp/agent-coord-state",
+      "--backend" => "example/coordination",
+      "--ref" => "custom-ref"
+    }.each do |option, value|
+      with_private_config_tmpdir("agent-coord-config-selector") do |root|
+        config_home = File.join(root, "config")
+        result = run_command(
+          { "XDG_CONFIG_HOME" => config_home },
+          RbConfig.ruby,
+          BIN,
+          "config",
+          "set",
+          "--machine-id",
+          "m1",
+          option,
+          value
+        )
+
+        assert_equal 1, result.status.exitstatus
+        assert_includes result.stderr, "#{option} is not valid for config set"
+        refute_path_exists File.join(config_home, "agent-coord", "env")
+      end
+    end
+  end
+
+  def test_config_set_rejects_non_loopback_plain_http_url
+    with_private_config_tmpdir("agent-coord-insecure-api-url") do |root|
+      config_home = File.join(root, "config")
+      result = run_command(
+        { "XDG_CONFIG_HOME" => config_home },
+        RbConfig.ruby,
+        BIN,
+        "config",
+        "set",
+        "--api-url",
+        "http://coordination.example"
+      )
+
+      assert_equal 1, result.status.exitstatus
+      assert_includes result.stderr, "must use https unless it points at localhost"
+      refute_path_exists File.join(config_home, "agent-coord", "env")
+    end
+  end
+
+  # URI.parse accepts a port above 65535, so an out-of-range port used to be
+  # persisted and only failed later at the socket layer, where some resolvers
+  # truncate it to 16 bits and reach a different service.
+  def test_config_set_rejects_api_url_with_out_of_range_port
+    with_private_config_tmpdir("agent-coord-out-of-range-port-api-url") do |root|
+      config_home = File.join(root, "config")
+      result = run_command(
+        { "XDG_CONFIG_HOME" => config_home },
+        RbConfig.ruby,
+        BIN,
+        "config",
+        "set",
+        "--api-url",
+        "http://127.0.0.1:99999"
+      )
+
+      assert_equal 1, result.status.exitstatus
+      assert_includes result.stderr, "port must be between 1 and 65535"
+      refute_path_exists File.join(config_home, "agent-coord", "env")
+    end
+  end
+
+  def test_config_set_rejects_api_urls_with_query_or_fragment_components
+    {
+      "https://coordination.example?tenant=one" => "query",
+      "https://coordination.example#section" => "fragment"
+    }.each do |api_url, component|
+      with_private_config_tmpdir("agent-coord-ambiguous-api-url") do |root|
+        config_home = File.join(root, "config")
+        result = run_command(
+          { "XDG_CONFIG_HOME" => config_home },
+          RbConfig.ruby,
+          BIN,
+          "config",
+          "set",
+          "--api-url",
+          api_url
+        )
+
+        assert_equal 1, result.status.exitstatus
+        assert_includes result.stderr, component
+        refute_path_exists File.join(config_home, "agent-coord", "env")
+      end
+    end
+  end
+
+  def test_user_config_rejects_relative_state_roots
+    %w[AGENT_COORD_STATE_ROOT AGENT_COORD_STATUS_STATE_ROOT].each do |key|
+      with_private_user_config("#{key}=relative-state\n") do |config_home|
+        result = run_command(
+          { "XDG_CONFIG_HOME" => config_home },
+          RbConfig.ruby,
+          BIN,
+          "config",
+          "show",
+          "--json"
+        )
+
+        assert_equal 2, result.status.exitstatus
+        assert_includes result.stderr, key
+        assert_includes result.stderr, "absolute path"
+      end
+    end
+  end
+
+  def test_config_set_accepts_loopback_plain_http_url
+    with_private_config_tmpdir("agent-coord-loopback-api-url") do |root|
+      config_home = File.join(root, "config")
+      result = run_command(
+        { "XDG_CONFIG_HOME" => config_home },
+        RbConfig.ruby,
+        BIN,
+        "config",
+        "set",
+        "--api-url",
+        "http://127.0.0.1:8787"
+      )
+
+      assert_equal 0, result.status.exitstatus, result.stderr
+      assert_includes(
+        File.read(File.join(config_home, "agent-coord", "env")),
+        "AGENT_COORD_API_URL=http://127.0.0.1:8787"
+      )
+    end
+  end
+
+  def test_config_set_accepts_ipv6_loopback_plain_http_url
+    with_private_config_tmpdir("agent-coord-ipv6-loopback-api-url") do |root|
+      config_home = File.join(root, "config")
+      result = run_command(
+        { "XDG_CONFIG_HOME" => config_home },
+        RbConfig.ruby,
+        BIN,
+        "config",
+        "set",
+        "--api-url",
+        "http://[::1]:8787"
+      )
+
+      assert_equal 0, result.status.exitstatus, result.stderr
+      assert_includes(
+        File.read(File.join(config_home, "agent-coord", "env")),
+        "AGENT_COORD_API_URL=http://\\[::1\\]:8787"
+      )
+    end
+  end
+
+  # DNS hostnames are case-insensitive, so a mixed-case loopback host is still
+  # a loopback host and must not be rejected as a non-loopback plain-HTTP URL.
+  def test_config_set_accepts_mixed_case_loopback_plain_http_url
+    with_private_config_tmpdir("agent-coord-mixed-case-loopback-api-url") do |root|
+      config_home = File.join(root, "config")
+      result = run_command(
+        { "XDG_CONFIG_HOME" => config_home },
+        RbConfig.ruby,
+        BIN,
+        "config",
+        "set",
+        "--api-url",
+        "http://LOCALHOST:8787"
+      )
+
+      assert_equal 0, result.status.exitstatus, result.stderr
+      assert_includes(
+        File.read(File.join(config_home, "agent-coord", "env")),
+        "AGENT_COORD_API_URL=http://LOCALHOST:8787"
+      )
+    end
+  end
+
+  def test_legacy_policy_file_is_read_only_fallback
+    with_private_config_tmpdir("agent-coord-legacy-policy") do |root|
+      config_home = File.join(root, "config")
+      directory = File.join(config_home, "agent-coord")
+      policy_file = File.join(directory, "policy")
+      FileUtils.mkdir_p(directory)
+      File.chmod(0o700, directory)
+      File.write(policy_file, "required\n")
+      File.chmod(0o600, policy_file)
+
+      result = run_command(
+        { "XDG_CONFIG_HOME" => config_home },
+        RbConfig.ruby,
+        BIN,
+        "config",
+        "show",
+        "--json"
+      )
+
+      assert_equal 0, result.status.exitstatus, result.stderr
+      coordination = JSON.parse(result.stdout).fetch("coordination")
+      assert_equal "required", coordination.fetch("policy")
+      assert_equal "policy_file", coordination.dig("source", "policy")
+    end
+  end
+
+  def test_blank_canonical_policy_is_unset_but_invalid_nonblank_still_fails
+    with_private_user_config("AGENT_COORD_POLICY=\n") do |config_home|
+      env_file = File.join(config_home, "agent-coord", "env")
+      policy_file = File.join(config_home, "agent-coord", "policy")
+      File.write(policy_file, "required\n")
+      File.chmod(0o600, policy_file)
+      show = -> { run_command({ "XDG_CONFIG_HOME" => config_home }, RbConfig.ruby, BIN, "config", "show", "--json") }
+
+      empty = show.call
+      assert_equal 0, empty.status.exitstatus, empty.stderr
+      empty_policy = JSON.parse(empty.stdout).fetch("coordination")
+      assert_equal "required", empty_policy.fetch("policy")
+      assert_equal "policy_file", empty_policy.dig("source", "policy")
+
+      File.write(env_file, "AGENT_COORD_POLICY='   '\n")
+      FileUtils.rm_f(policy_file)
+      whitespace = show.call
+      assert_equal 0, whitespace.status.exitstatus, whitespace.stderr
+      whitespace_policy = JSON.parse(whitespace.stdout).fetch("coordination")
+      assert_equal "optional", whitespace_policy.fetch("policy")
+      assert_equal "default", whitespace_policy.dig("source", "policy")
+
+      File.write(env_file, "AGENT_COORD_POLICY=invalid\n")
+      invalid = show.call
+      assert_equal 2, invalid.status.exitstatus
+      assert_includes invalid.stderr, "invalid coordination policy"
+    end
+  end
+
+  def test_canonical_config_accepts_a_trailing_comment_after_an_empty_value
+    with_private_user_config("AGENT_COORD_API_URL= # remote disabled\n") do |config_home|
+      result = run_command(
+        { "XDG_CONFIG_HOME" => config_home },
+        RbConfig.ruby, BIN, "config", "show", "--json"
+      )
+
+      assert_equal 0, result.status.exitstatus, result.stderr
+      coordination = JSON.parse(result.stdout).fetch("coordination")
+      assert_equal "local", coordination.fetch("backend")
+      refute coordination.fetch("configured")
+    end
+  end
+
+  # An explicit AGENT_COORD_ENV_FILE can live in a shared directory. Deriving the
+  # legacy fallback as the generic sibling named "policy" there parsed an
+  # unrelated file and subjected it to the 0600 checks, failing every command
+  # despite a perfectly valid explicit config.
+  def test_legacy_policy_fallback_is_not_derived_beside_an_explicit_env_file
+    with_private_config_tmpdir("agent-coord-explicit-policy-sibling") do |root|
+      shared = File.join(root, "shared")
+      env_file = File.join(shared, "coord.env")
+      unrelated_policy = File.join(shared, "policy")
+      FileUtils.mkdir_p(shared)
+      File.chmod(0o755, shared)
+      File.write(env_file, "AGENT_COORD_MACHINE_ID=m1\n")
+      File.chmod(0o600, env_file)
+      File.write(unrelated_policy, "some unrelated project policy\n")
+      File.chmod(0o644, unrelated_policy)
+
+      result = run_command(
+        { "AGENT_COORD_ENV_FILE" => env_file },
+        RbConfig.ruby,
+        BIN,
+        "config",
+        "show",
+        "--json"
+      )
+
+      assert_equal 0, result.status.exitstatus, result.stderr
+      coordination = JSON.parse(result.stdout).fetch("coordination")
+      assert_equal "optional", coordination.fetch("policy")
+      assert_equal "default", coordination.dig("source", "policy")
+      assert_equal "some unrelated project policy\n", File.read(unrelated_policy)
+    end
+  end
+
+  # A shared or mirrored team config is free to spell its directories the
+  # conventional way. Deciding "conventional layout" from the path's basenames
+  # rather than from the explicit-override flag classified such a config as
+  # conventional and parsed the unrelated sibling "policy" anyway, failing every
+  # command with exit 2.
+  def test_legacy_policy_fallback_is_not_derived_from_an_explicit_env_file_mirroring_the_convention
+    with_private_config_tmpdir("agent-coord-explicit-conventional-names") do |root|
+      shared = File.join(root, "team-configs", "agent-coord")
+      env_file = File.join(shared, "env")
+      unrelated_policy = File.join(shared, "policy")
+      FileUtils.mkdir_p(shared)
+      File.chmod(0o755, shared)
+      File.write(env_file, "AGENT_COORD_MACHINE_ID=m1\n")
+      File.chmod(0o600, env_file)
+      File.write(unrelated_policy, "some unrelated project policy\n")
+      File.chmod(0o644, unrelated_policy)
+
+      result = run_command(
+        { "AGENT_COORD_ENV_FILE" => env_file },
+        RbConfig.ruby,
+        BIN,
+        "config",
+        "show",
+        "--json"
+      )
+
+      assert_equal 0, result.status.exitstatus, result.stderr
+      coordination = JSON.parse(result.stdout).fetch("coordination")
+      assert_equal "optional", coordination.fetch("policy")
+      assert_equal "default", coordination.dig("source", "policy")
+      assert_equal "some unrelated project policy\n", File.read(unrelated_policy)
+    end
+  end
+
+  def test_legacy_policy_with_invalid_utf8_fails_as_an_operational_error
+    with_private_config_tmpdir("agent-coord-invalid-policy-encoding") do |root|
+      config_home = File.join(root, "config")
+      directory = File.join(config_home, "agent-coord")
+      policy_file = File.join(directory, "policy")
+      FileUtils.mkdir_p(directory)
+      File.chmod(0o700, directory)
+      File.binwrite(policy_file, "\xFF\n".b)
+      File.chmod(0o600, policy_file)
+
+      result = run_command(
+        { "XDG_CONFIG_HOME" => config_home },
+        RbConfig.ruby,
+        BIN,
+        "config",
+        "show",
+        "--json"
+      )
+
+      assert_equal 2, result.status.exitstatus
+      assert_includes result.stderr, "invalid UTF-8"
+      refute_includes result.stderr, "bin/agent-coord:"
+    end
+  end
+
+  def test_canonical_policy_ignores_an_invalid_legacy_fallback
+    with_private_user_config("AGENT_COORD_POLICY=required\n") do |config_home|
+      legacy_policy = File.join(config_home, "agent-coord", "policy")
+      File.write(legacy_policy, "invalid\n")
+      File.chmod(0o644, legacy_policy)
+
+      result = run_command(
+        { "XDG_CONFIG_HOME" => config_home },
+        RbConfig.ruby,
+        BIN,
+        "config",
+        "show",
+        "--json"
+      )
+
+      assert_equal 0, result.status.exitstatus, result.stderr
+      coordination = JSON.parse(result.stdout).fetch("coordination")
+      assert_equal "required", coordination.fetch("policy")
+      assert_equal "user_config", coordination.dig("source", "policy")
+    end
+  end
+
+  def test_process_policy_ignores_an_invalid_legacy_fallback
+    with_private_config_tmpdir("agent-coord-process-policy-legacy-fallback") do |root|
+      config_home = File.join(root, "config")
+      directory = File.join(config_home, "agent-coord")
+      legacy_policy = File.join(directory, "policy")
+      FileUtils.mkdir_p(directory)
+      File.chmod(0o700, directory)
+      File.write(legacy_policy, "invalid\n")
+      File.chmod(0o644, legacy_policy)
+
+      result = run_command(
+        { "XDG_CONFIG_HOME" => config_home, "AGENT_COORD_POLICY" => "disabled" },
+        RbConfig.ruby,
+        BIN,
+        "config",
+        "show",
+        "--json"
+      )
+
+      assert_equal 0, result.status.exitstatus, result.stderr
+      coordination = JSON.parse(result.stdout).fetch("coordination")
+      assert_equal "disabled", coordination.fetch("policy")
+      assert_equal "process_env", coordination.dig("source", "policy")
+    end
+  end
+
+  def test_failed_canonical_config_rename_preserves_all_old_values
+    # rubocop:disable Metrics/BlockLength
+    with_private_user_config(
+      "AGENT_COORD_API_URL=https://old.example\n" \
+      "AGENT_COORD_API_TOKEN=old-token\n" \
+      "AGENT_COORD_MACHINE_ID=old-machine\n" \
+      "AGENT_COORD_POLICY=required\n"
+    ) do |config_home|
+      env_file = File.join(config_home, "agent-coord", "env")
+      original_contents = File.read(env_file)
+      resolved_env_file = File.join(File.realpath(File.dirname(env_file)), "env")
+      runner = AgentCoord::Runner.new([], stdout: StringIO.new, stderr: StringIO.new)
+      original_rename = File.method(:rename)
+
+      with_process_env(
+        "XDG_CONFIG_HOME" => config_home,
+        "AGENT_COORD_API_URL" => nil,
+        "AGENT_COORD_API_TOKEN" => nil,
+        "AGENT_COORD_MACHINE_ID" => nil,
+        "AGENT_COORD_POLICY" => nil
+      ) do
+        runner.send(:load_user_configuration!)
+        File.define_singleton_method(:rename) do |source, destination|
+          raise Errno::EIO, "injected rename failure" if destination == resolved_env_file
+
+          original_rename.call(source, destination)
+        end
+
+        error = assert_raises(AgentCoord::OperationalError) do
+          runner.send(
+            :persist_config,
+            machine_id_given: true,
+            machine_id: "new-machine",
+            policy_given: true,
+            policy: "disabled"
+          )
+        end
+        assert_includes error.message, "injected rename failure"
+      ensure
+        File.define_singleton_method(:rename, original_rename)
+        runner.send(:restore_injected_user_configuration!)
+      end
+
+      assert_equal original_contents, File.read(env_file)
+      assert_empty Dir.glob(File.join(File.dirname(env_file), ".env.tmp-*"))
+    end
+    # rubocop:enable Metrics/BlockLength
+  end
+
+  def test_concurrent_config_set_preserves_both_writers_unspecified_keys
+    # rubocop:disable Metrics/BlockLength
+    with_private_user_config("AGENT_COORD_REF=existing-ref\n") do |config_home|
+      with_process_env(
+        "XDG_CONFIG_HOME" => config_home,
+        "AGENT_COORD_API_URL" => nil,
+        "AGENT_COORD_API_TOKEN" => nil,
+        "AGENT_COORD_MACHINE_ID" => nil
+      ) do
+        api_runner = AgentCoord::Runner.new([], stdout: StringIO.new, stderr: StringIO.new)
+        machine_runner = AgentCoord::Runner.new([], stdout: StringIO.new, stderr: StringIO.new)
+        [api_runner, machine_runner].each { |runner| runner.send(:load_user_configuration!) }
+
+        ready = Queue.new
+        start = Queue.new
+        errors = Queue.new
+        workers = [
+          Thread.new do
+            ready << true
+            start.pop
+            api_runner.send(:persist_config, api_url_cli: true, api_url: "https://new.example")
+          rescue StandardError => e
+            errors << e
+          end,
+          Thread.new do
+            ready << true
+            start.pop
+            machine_runner.send(:persist_config, machine_id_given: true, machine_id: "m1")
+          rescue StandardError => e
+            errors << e
+          end
+        ]
+        2.times { ready.pop }
+        2.times { start << true }
+        thread_values!(workers, "concurrent config set writers")
+        worker_error = errors.pop unless errors.empty?
+        assert_nil worker_error, worker_error&.full_message
+
+        env_file = File.join(config_home, "agent-coord", "env")
+        contents = File.read(env_file)
+        assert_includes contents, "AGENT_COORD_REF=existing-ref"
+        assert_includes contents, "AGENT_COORD_API_URL=https://new.example"
+        assert_includes contents, "AGENT_COORD_MACHINE_ID=m1"
+      ensure
+        [api_runner, machine_runner].compact.each do |runner|
+          runner.send(:restore_injected_user_configuration!)
+        end
+      end
+    end
+    # rubocop:enable Metrics/BlockLength
+  end
+
+  def test_secure_directory_lstat_accepts_a_concurrent_creator
+    with_private_config_tmpdir("agent-coord-concurrent-config-parent") do |root|
+      path = File.join(root, "new-config")
+      runner = AgentCoord::Runner.new([])
+      original_mkdir = Dir.method(:mkdir)
+
+      Dir.define_singleton_method(:mkdir) do |candidate, mode = 0o777|
+        if candidate == path
+          original_mkdir.call(candidate, mode)
+          raise Errno::EEXIST, candidate
+        end
+
+        original_mkdir.call(candidate, mode)
+      end
+
+      stat = runner.send(:secure_directory_lstat, path, create: true)
+      assert stat.directory?
+      assert_equal 0o700, stat.mode & 0o777
+    ensure
+      Dir.define_singleton_method(:mkdir, original_mkdir) if original_mkdir
+    end
+  end
+
+  def test_config_parent_symlink_trust_follows_ownership_not_symlink_mode
+    runner = AgentCoord::Runner.new([])
+    symlink_stat = Struct.new(:uid, :mode)
+    foreign_uid = [12_345, Process.uid, 0].max + 1
+
+    assert runner.send(:trusted_config_parent_symlink?, symlink_stat.new(0, 0o120777))
+    assert runner.send(:trusted_config_parent_symlink?, symlink_stat.new(Process.uid, 0o120777))
+    refute runner.send(:trusted_config_parent_symlink?, symlink_stat.new(foreign_uid, 0o120700))
+  end
+
+  def test_resolved_config_parent_chain_rejects_an_unsafe_ancestor
+    with_private_config_tmpdir("agent-coord-resolved-parent") do |root|
+      unsafe = File.join(root, "unsafe")
+      target = File.join(unsafe, "target")
+      FileUtils.mkdir_p(target)
+      File.chmod(0o770, unsafe)
+      File.chmod(0o700, target)
+      runner = AgentCoord::Runner.new([])
+
+      error = assert_raises(AgentCoord::OperationalError) do
+        runner.send(:validate_resolved_directory_chain!, target, leaf: true)
+      end
+      assert_includes error.message, "config parent permissions are unsafe: #{unsafe}"
+    end
+  end
+
+  def test_backend_resolution_applies_saved_ref_without_a_backend_selector
+    runner = AgentCoord::Runner.new([])
+    runner.instance_variable_set(
+      :@process_config,
+      AgentCoord::USER_CONFIG_ENV_KEYS.to_h { |key| [key, nil] }
+    )
+    runner.instance_variable_set(
+      :@user_config,
+      { "AGENT_COORD_REF" => "configured-ref" }
+    )
+    options = runner.send(:default_options)
+
+    runner.send(:resolve_backend_env, options)
+
+    assert_equal "configured-ref", options.fetch(:ref)
+  end
+
+  def test_backend_resolution_normalizes_a_blank_ref
+    runner = AgentCoord::Runner.new([])
+    runner.instance_variable_set(
+      :@process_config,
+      AgentCoord::USER_CONFIG_ENV_KEYS.to_h { |key| [key, nil] }
+    )
+    runner.instance_variable_set(:@user_config, { "AGENT_COORD_REF" => "" })
+    options = runner.send(:default_options)
+
+    runner.send(:resolve_backend_env, options)
+
+    assert_equal AgentCoord::DEFAULT_REF, options.fetch(:ref)
+  end
+
+  # Config injection already treats a whitespace-only process value as unset and
+  # publishes the saved one, but the ref's own precedence check spelled
+  # emptiness without stripping. An exported AGENT_COORD_REF='   ' therefore
+  # displaced a saved `configured-ref` and was handed to the GitHub store as a
+  # real ref, so doctor probed `git/trees/   `. A blank is not a value; both
+  # tiers being blank must still land on the default rather than on whitespace.
+  def test_a_whitespace_only_process_ref_does_not_displace_the_saved_ref
+    {
+      "configured-ref" => "configured-ref",
+      "" => AgentCoord::DEFAULT_REF,
+      "  " => AgentCoord::DEFAULT_REF
+    }.each do |saved_ref, expected_ref|
+      runner = AgentCoord::Runner.new([])
+      runner.instance_variable_set(
+        :@process_config,
+        AgentCoord::USER_CONFIG_ENV_KEYS.to_h { |key| [key, nil] }.merge("AGENT_COORD_REF" => "   ")
+      )
+      runner.instance_variable_set(:@user_config, { "AGENT_COORD_REF" => saved_ref })
+      options = runner.send(:default_options)
+
+      runner.send(:resolve_backend_env, options)
+
+      assert_equal expected_ref, options.fetch(:ref),
+                   "a whitespace-only process ref must be unset, not a ref"
+    end
+  end
+
+  # The CLI door into the same defect: --ref never went through the non-empty
+  # check its sibling selector flags do, so `--ref ""` short-circuited ref
+  # resolution and sent the blank to the backend.
+  def test_whitespace_only_ref_flag_is_refused
+    ["", "   "].each do |value|
+      result = run_agent_coord("status", "--json", "--ref", value)
+
+      assert_equal 1, result.status.exitstatus, result.stderr
+      assert_includes result.stderr, "--ref requires a non-empty value"
+      assert_empty result.stdout
+    end
+  end
+
+  def test_backend_resolution_normalizes_a_blank_backend
+    runner = AgentCoord::Runner.new([])
+    runner.instance_variable_set(
+      :@process_config,
+      AgentCoord::USER_CONFIG_ENV_KEYS.to_h { |key| [key, nil] }
+    )
+    runner.instance_variable_set(:@user_config, { "AGENT_COORD_BACKEND" => "" })
+    options = runner.send(:default_options)
+
+    runner.send(:resolve_backend_env, options)
+
+    assert_nil options.fetch(:backend)
+    refute options.key?(:backend_source)
+  end
+
+  def test_config_read_lock_does_not_retry_an_enoent_from_the_reader
+    with_private_user_config("AGENT_COORD_POLICY=required\n") do |config_home|
+      runner = AgentCoord::Runner.new([])
+      runner.instance_variable_set(:@user_config_path, File.join(config_home, "agent-coord", "env"))
+      lock_path = runner.send(:user_config_lock_path, File.join(config_home, "agent-coord"))
+      File.write(lock_path, "")
+      File.chmod(0o600, lock_path)
+      calls = 0
+
+      assert_raises(Errno::ENOENT) do
+        runner.send(:with_optional_config_read_lock) do
+          calls += 1
+          raise Errno::ENOENT, "reader failure"
+        end
+      end
+      assert_equal 1, calls
+    end
+  end
+
+  def test_user_config_lock_identity_uses_the_resolved_destination
+    runner = AgentCoord::Runner.new([])
+    runner.instance_variable_set(:@user_config_path, "/aliased/shared/coord.env")
+    resolved_directory = "/resolved/shared"
+    resolved_destination = File.join(resolved_directory, "coord.env")
+    digest = Digest::SHA256.hexdigest(resolved_destination)[0, 16]
+
+    assert_equal(
+      File.join(resolved_directory, ".agent-coord-config-#{digest}.lock"),
+      runner.send(:user_config_lock_path, resolved_directory)
+    )
+  end
+
+  # The writer locks inside the resolved config directory. A reader that digests
+  # the unresolved directory lands on a different filename whenever an ancestor
+  # is a symlink, gets ENOENT, and silently degrades to no lock forever. Drive
+  # the real reader rather than the lock-path helper, because the helper is
+  # correct in isolation; only the caller was aliased.
+  def test_config_read_lock_uses_the_same_inode_as_the_writer_across_a_symlinked_chain
+    # rubocop:disable Metrics/BlockLength
+    with_private_config_tmpdir("agent-coord-lock-symlink") do |root|
+      actual = File.join(root, "actual")
+      selected = File.join(root, "selected")
+      FileUtils.mkdir_p(actual)
+      File.chmod(0o700, actual)
+      File.symlink(actual, selected)
+      set_result = run_command(
+        { "XDG_CONFIG_HOME" => selected }, RbConfig.ruby, BIN, "config", "set", "--policy", "required"
+      )
+      assert_equal 0, set_result.status.exitstatus, set_result.stderr
+      writer_locks = Dir.glob(File.join(actual, "agent-coord", ".agent-coord-config-*.lock"))
+      assert_equal 1, writer_locks.length, "expected exactly one writer lock, got #{writer_locks.inspect}"
+
+      reader_locks = []
+      original_open = File.method(:open)
+      File.define_singleton_method(:open) do |path, *args, &block|
+        reader_locks << path if path.to_s.end_with?(".lock")
+        original_open.call(path, *args, &block)
+      end
+      runner = AgentCoord::Runner.new([], stdout: StringIO.new, stderr: StringIO.new)
+      with_process_env(
+        "XDG_CONFIG_HOME" => selected,
+        "AGENT_COORD_ENV_FILE" => nil,
+        "AGENT_COORD_POLICY" => nil,
+        "AGENT_COORD_API_URL" => nil,
+        "AGENT_COORD_API_TOKEN" => nil
+      ) do
+        runner.send(:load_user_configuration!)
+      ensure
+        runner.send(:restore_injected_user_configuration!)
+      end
+
+      assert_equal 1, reader_locks.length, "reader must open exactly one config lock"
+      assert_path_exists reader_locks.first
+      writer_stat = File.stat(writer_locks.first)
+      reader_stat = File.stat(reader_locks.first)
+      assert_equal [writer_stat.dev, writer_stat.ino], [reader_stat.dev, reader_stat.ino]
+    ensure
+      File.define_singleton_method(:open, original_open) if original_open
+    end
+    # rubocop:enable Metrics/BlockLength
+  end
+
+  def test_config_read_lock_closes_the_descriptor_when_unlock_fails
+    with_private_user_config("AGENT_COORD_POLICY=required\n") do |config_home|
+      runner = AgentCoord::Runner.new([])
+      runner.instance_variable_set(:@user_config_path, File.join(config_home, "agent-coord", "env"))
+      lock_path = runner.send(:user_config_lock_path, File.join(config_home, "agent-coord"))
+      File.write(lock_path, "")
+      File.chmod(0o600, lock_path)
+      original_open = File.method(:open)
+      opened_lock = nil
+
+      File.define_singleton_method(:open) do |path, *args, &block|
+        next original_open.call(path, *args, &block) unless path == lock_path && block.nil?
+
+        opened_lock = original_open.call(path, *args)
+        original_flock = opened_lock.method(:flock)
+        opened_lock.define_singleton_method(:flock) do |operation|
+          raise Errno::EIO, "injected unlock failure" if operation == File::LOCK_UN
+
+          original_flock.call(operation)
+        end
+        opened_lock
+      end
+
+      assert_raises(Errno::EIO) { runner.send(:with_optional_config_read_lock) { :read } }
+      assert opened_lock.closed?
+    ensure
+      File.define_singleton_method(:open, original_open) if original_open
+      opened_lock&.close unless opened_lock&.closed?
+    end
+  end
+
+  def test_user_config_is_never_evaluated_as_shell
+    with_private_config_tmpdir("agent-coord-no-shell-eval") do |root|
+      config_home = File.join(root, "config")
+      env_file = File.join(config_home, "agent-coord", "env")
+      marker = File.join(root, "must-not-exist")
+      FileUtils.mkdir_p(File.dirname(env_file))
+      File.chmod(0o700, File.dirname(env_file))
+      File.write(
+        env_file,
+        "AGENT_COORD_API_URL=$(touch #{marker})\nAGENT_COORD_API_TOKEN=private-token\n"
+      )
+      File.chmod(0o600, env_file)
+
+      result = run_command(
+        { "XDG_CONFIG_HOME" => config_home },
+        RbConfig.ruby,
+        BIN,
+        "config",
+        "show",
+        "--json"
+      )
+
+      assert_equal 2, result.status.exitstatus
+      refute_path_exists marker
+      refute_includes result.stdout, "private-token"
+      refute_includes result.stderr, "private-token"
+    end
+  end
+
+  def test_user_config_with_invalid_utf8_fails_as_an_operational_error
+    with_private_config_tmpdir("agent-coord-invalid-config-encoding") do |root|
+      config_home = File.join(root, "config")
+      env_file = File.join(config_home, "agent-coord", "env")
+      FileUtils.mkdir_p(File.dirname(env_file))
+      File.chmod(0o700, File.dirname(env_file))
+      File.binwrite(env_file, "\xFFAGENT_COORD_POLICY=required\n".b)
+      File.chmod(0o600, env_file)
+
+      result = run_command(
+        { "XDG_CONFIG_HOME" => config_home },
+        RbConfig.ruby,
+        BIN,
+        "config",
+        "show",
+        "--json"
+      )
+
+      assert_equal 2, result.status.exitstatus
+      assert_includes result.stderr, "invalid UTF-8"
+      refute_includes result.stderr, "bin/agent-coord:"
+    end
+  end
+
+  def test_user_config_fifo_is_rejected_without_blocking
+    with_private_config_tmpdir("agent-coord-config-fifo") do |root|
+      config_home = File.join(root, "config")
+      env_file = File.join(config_home, "agent-coord", "env")
+      FileUtils.mkdir_p(File.dirname(env_file))
+      File.chmod(0o700, File.dirname(env_file))
+      File.mkfifo(env_file, 0o600)
+      stdin, stdout, stderr, wait_thread = Open3.popen3(
+        COMMAND_ENV.merge("XDG_CONFIG_HOME" => config_home),
+        RbConfig.ruby, BIN, "config", "show", "--json"
+      )
+      stdin.close
+
+      unless wait_thread.join(1)
+        Process.kill("KILL", wait_thread.pid)
+        wait_thread.join
+        flunk "config read blocked while opening a FIFO"
+      end
+
+      captured_stdout = stdout.read
+      captured_stderr = stderr.read
+      assert_equal 2, wait_thread.value.exitstatus, captured_stderr
+      assert_empty captured_stdout
+      assert_includes captured_stderr, "must be a regular file"
+    ensure
+      [stdin, stdout, stderr].compact.each { |io| io.close unless io.closed? }
+    end
+  end
+
+  def test_insecure_user_config_fails_closed_without_exposing_token
+    with_private_user_config(
+      "AGENT_COORD_API_URL=https://coordination.example\nAGENT_COORD_API_TOKEN=private-token\n"
+    ) do |config_home|
+      env_file = File.join(config_home, "agent-coord", "env")
+      File.chmod(0o644, env_file)
+      result = run_command(
+        { "XDG_CONFIG_HOME" => config_home },
+        RbConfig.ruby,
+        BIN,
+        "config",
+        "show",
+        "--json"
+      )
+
+      assert_equal 2, result.status.exitstatus
+      assert_includes result.stderr, "permissions are insecure"
+      refute_includes result.stdout, "private-token"
+      refute_includes result.stderr, "private-token"
+    end
+  end
+
+  # version and bootstrap consult no configuration, so an unreadable canonical
+  # file must not break them: they are the two commands an operator reaches for
+  # while repairing exactly that file.
+  def test_insecure_user_config_does_not_break_config_independent_commands
+    with_private_user_config("AGENT_COORD_POLICY=optional\n") do |config_home|
+      File.chmod(0o644, File.join(config_home, "agent-coord", "env"))
+      env = { "XDG_CONFIG_HOME" => config_home }
+
+      version = run_command(env, RbConfig.ruby, BIN, "version")
+
+      assert_equal 0, version.status.exitstatus, version.stderr
+      assert_includes version.stdout, "agent-coord "
+
+      with_private_config_tmpdir("agent-coord-independent-bootstrap") do |install_root|
+        bootstrap = run_command(
+          env, RbConfig.ruby, BIN, "bootstrap", "--install-dir", File.join(install_root, "bin"), "--no-profile"
+        )
+
+        assert_equal 0, bootstrap.status.exitstatus, bootstrap.stderr
+        assert_path_exists File.join(install_root, "bin", "agent-coord")
+      end
+    end
+  end
+
+  def test_malformed_user_config_does_not_break_config_independent_commands
+    with_private_user_config("not a valid assignment\n") do |config_home|
+      env = { "XDG_CONFIG_HOME" => config_home }
+
+      version = run_command(env, RbConfig.ruby, BIN, "version", "--json")
+
+      assert_equal 0, version.status.exitstatus, version.stderr
+      assert_equal AgentCoord::VERSION, JSON.parse(version.stdout).fetch("version")
+    end
+  end
+
+  # The exemption is an allowlist, not a general relaxation: every command that
+  # actually resolves a backend, and config show which reports one, must still
+  # fail closed on a config it cannot read.
+  def test_insecure_user_config_still_fails_config_dependent_commands
+    with_private_user_config("AGENT_COORD_POLICY=optional\n") do |config_home|
+      File.chmod(0o644, File.join(config_home, "agent-coord", "env"))
+      env = { "XDG_CONFIG_HOME" => config_home }
+
+      %w[status doctor claim gc].each do |command|
+        result = run_command(env, RbConfig.ruby, BIN, command, "--state-root", @state_root)
+
+        assert_equal 2, result.status.exitstatus, "#{command}: #{result.stderr}"
+        assert_includes result.stderr, "permissions are insecure", command
+      end
+
+      show = run_command(env, RbConfig.ruby, BIN, "config", "show")
+
+      assert_equal 2, show.status.exitstatus, show.stderr
+      assert_includes show.stderr, "permissions are insecure"
+    end
+  end
+
+  # rubocop:disable Metrics/MethodLength
+  def test_user_config_swap_after_open_reads_and_validates_the_opened_descriptor
+    # rubocop:disable Metrics/BlockLength
+    with_private_config_tmpdir("agent-coord-config-swap") do |root|
+      config_home = File.join(root, "config")
+      env_file = File.join(config_home, "agent-coord", "env")
+      trusted_backup = "#{env_file}.trusted"
+      attacker_file = File.join(root, "attacker-env")
+      FileUtils.mkdir_p(File.dirname(env_file))
+      File.chmod(0o700, File.dirname(env_file))
+      File.write(
+        env_file,
+        "AGENT_COORD_API_URL=https://trusted.example\nAGENT_COORD_API_TOKEN=trusted-token\n"
+      )
+      File.chmod(0o600, env_file)
+      File.write(
+        attacker_file,
+        "AGENT_COORD_API_URL=https://attacker.example\nAGENT_COORD_API_TOKEN=attacker-token\n"
+      )
+      File.chmod(0o644, attacker_file)
+
+      runner = AgentCoord::Runner.new([])
+      swapped = false
+      swap_path = lambda do
+        next if swapped
+
+        File.rename(env_file, trusted_backup)
+        File.symlink(attacker_file, env_file)
+        swapped = true
+      end
+      original_validation = runner.method(:validate_private_config_file!)
+      runner.define_singleton_method(:validate_private_config_file!) do |*args|
+        original_validation.call(*args)
+        swap_path.call
+      end
+      with_process_env(
+        "XDG_CONFIG_HOME" => config_home,
+        "AGENT_COORD_API_URL" => nil,
+        "AGENT_COORD_API_TOKEN" => nil
+      ) do
+        runner.send(:load_user_configuration!)
+        assert_nil ENV.fetch("AGENT_COORD_API_TOKEN", nil), "persisted credentials must not be injected into ENV"
+      ensure
+        runner.send(:restore_injected_user_configuration!)
+      end
+
+      assert swapped, "fixture must replace the checked pathname"
+      user_config = runner.instance_variable_get(:@user_config)
+      assert_equal "https://trusted.example", user_config.fetch("AGENT_COORD_API_URL")
+      assert_equal "trusted-token", user_config.fetch("AGENT_COORD_API_TOKEN")
+      refute_includes user_config.values, "attacker-token"
+    end
+    # rubocop:enable Metrics/BlockLength
+  end
+  # rubocop:enable Metrics/MethodLength
+
+  def test_user_config_symlink_is_rejected_without_reading_target_secret
+    Dir.mktmpdir("agent-coord-config-symlink") do |root|
+      target = File.join(root, "attacker-env")
+      selected = File.join(root, "selected-env")
+      File.write(target, "AGENT_COORD_API_URL=https://attacker.example\nAGENT_COORD_API_TOKEN=attacker-token\n")
+      File.chmod(0o644, target)
+      File.symlink(target, selected)
+
+      result = run_command(
+        { "AGENT_COORD_ENV_FILE" => selected },
+        RbConfig.ruby,
+        BIN,
+        "config",
+        "show",
+        "--json"
+      )
+
+      assert_equal 2, result.status.exitstatus
+      refute_includes result.stdout, "attacker-token"
+      refute_includes result.stderr, "attacker-token"
+    end
+  end
+
+  # The GNU stow / dotbot dotfiles layout links ~/.config into a user-owned
+  # repository. Refusing that made load_user_configuration! raise before command
+  # dispatch, so every command — including `version` — exited 2.
+  def test_unrelated_command_traverses_a_user_owned_config_parent_symlink
+    with_private_config_tmpdir("agent-coord-parent-symlink-read") do |root|
+      actual = File.join(root, "dotfiles-config")
+      selected = File.join(root, "selected")
+      env_file = File.join(actual, "agent-coord", "env")
+      FileUtils.mkdir_p(File.dirname(env_file))
+      File.chmod(0o700, actual, File.dirname(env_file))
+      File.write(env_file, "AGENT_COORD_POLICY=required\n")
+      File.chmod(0o600, env_file)
+      File.symlink(actual, selected)
+
+      version_result = run_command({ "XDG_CONFIG_HOME" => selected }, RbConfig.ruby, BIN, "version")
+      show_result = run_command(
+        { "XDG_CONFIG_HOME" => selected }, RbConfig.ruby, BIN, "config", "show", "--json"
+      )
+
+      assert_equal 0, version_result.status.exitstatus, version_result.stderr
+      assert_equal 0, show_result.status.exitstatus, show_result.stderr
+      coordination = JSON.parse(show_result.stdout).fetch("coordination")
+      assert_equal "required", coordination.fetch("policy")
+      assert_equal "user_config", coordination.dig("source", "policy")
+    end
+  end
+
+  def test_config_set_writes_through_a_user_owned_config_parent_symlink
+    with_private_config_tmpdir("agent-coord-parent-symlink") do |root|
+      actual = File.join(root, "actual")
+      selected = File.join(root, "selected")
+      FileUtils.mkdir_p(actual)
+      File.chmod(0o700, actual)
+      File.symlink(actual, selected)
+
+      result = run_command(
+        { "XDG_CONFIG_HOME" => selected },
+        RbConfig.ruby,
+        BIN,
+        "config",
+        "set",
+        "--policy",
+        "required"
+      )
+
+      assert_equal 0, result.status.exitstatus, result.stderr
+      env_file = File.join(actual, "agent-coord", "env")
+      assert_path_exists env_file
+      assert_includes File.read(env_file), "AGENT_COORD_POLICY=required"
+      assert_equal 0o600, File.stat(env_file).mode & 0o777
+    end
+  end
+
+  # open(2) filters its mode argument through the caller's umask, so a hostile
+  # umask stripped owner-read from the staged config file and the config write
+  # lock. config set still reported success, and every later invocation then
+  # failed to read the configuration that run had just written.
+  def test_config_set_under_a_hostile_umask_keeps_private_files_owner_readable
+    with_private_config_tmpdir("agent-coord-config-set-umask") do |root|
+      config_home = File.join(root, "config")
+      config_dir = File.join(config_home, "agent-coord")
+      FileUtils.mkdir_p(config_dir)
+      [config_home, config_dir].each { |path| File.chmod(0o700, path) }
+
+      saved_umask = File.umask(0o477)
+      set_result = run_command(
+        { "XDG_CONFIG_HOME" => config_home },
+        RbConfig.ruby, BIN, "config", "set", "--policy", "required"
+      )
+      File.umask(saved_umask)
+
+      assert_equal 0, set_result.status.exitstatus, set_result.stderr
+      env_file = File.join(config_dir, "env")
+      assert_equal 0o600, File.stat(env_file).mode & 0o777
+      locks = Dir.glob(File.join(config_dir, ".agent-coord-config-*.lock"))
+      refute_empty locks
+      locks.each { |lock| assert_equal 0o600, File.stat(lock).mode & 0o777 }
+
+      show_result = run_command(
+        { "XDG_CONFIG_HOME" => config_home },
+        RbConfig.ruby, BIN, "config", "show", "--json"
+      )
+      assert_equal 0, show_result.status.exitstatus, show_result.stderr
+      assert_equal "required", JSON.parse(show_result.stdout).dig("coordination", "policy")
+    ensure
+      File.umask(saved_umask) if saved_umask
+    end
+  end
+
+  # Directory fsync is unsupported on some filesystems, which is why every other
+  # atomic writer in the CLI routes it through AgentCoord.fsync_parent_directory.
+  # This path called fsync on the descriptor directly, so an unsupported sync
+  # failed the whole config set after its rename had already committed.
+  def test_config_set_tolerates_an_unsupported_directory_fsync
+    with_private_config_tmpdir("agent-coord-config-set-fsync-enotsup") do |root|
+      config_home = File.join(root, "config")
+      original_fsync = File.instance_method(:fsync)
+      File.define_method(:fsync) do
+        raise Errno::ENOTSUP, path if stat.directory?
+
+        original_fsync.bind_call(self)
+      end
+      patched = true
+
+      code = with_process_env("XDG_CONFIG_HOME" => config_home) do
+        AgentCoord::Runner.new(
+          %w[config set --policy required], stdout: StringIO.new, stderr: StringIO.new
+        ).run
+      end
+
+      assert_equal 0, code
+      assert_includes File.read(File.join(config_home, "agent-coord", "env")), "AGENT_COORD_POLICY=required"
+    ensure
+      File.remove_method(:fsync) if patched
+    end
+  end
+
+  # Trusting the link must not trust its destination: the resolved chain is
+  # still re-validated component by component.
+  def test_user_owned_config_parent_symlink_into_an_unsafe_directory_is_rejected
+    with_private_config_tmpdir("agent-coord-parent-symlink-unsafe") do |root|
+      unsafe = File.join(root, "unsafe")
+      actual = File.join(unsafe, "config")
+      selected = File.join(root, "selected")
+      FileUtils.mkdir_p(actual)
+      File.chmod(0o700, actual)
+      File.chmod(0o777, unsafe)
+      File.symlink(actual, selected)
+
+      result = run_command(
+        { "XDG_CONFIG_HOME" => selected },
+        RbConfig.ruby,
+        BIN,
+        "config",
+        "set",
+        "--policy",
+        "required"
+      )
+
+      assert_equal 2, result.status.exitstatus
+      assert_includes result.stderr, "config parent permissions are unsafe: #{unsafe}"
+      refute_path_exists File.join(actual, "agent-coord", "env")
+    end
+  end
+
+  def test_config_set_rejects_group_writable_config_ancestor
+    Dir.mktmpdir("agent-coord-parent-mode") do |root|
+      unsafe = File.join(root, "unsafe")
+      FileUtils.mkdir_p(unsafe)
+      File.chmod(0o770, unsafe)
+      config_home = File.join(unsafe, "config")
+
+      result = run_command(
+        { "XDG_CONFIG_HOME" => config_home },
+        RbConfig.ruby,
+        BIN,
+        "config",
+        "set",
+        "--policy",
+        "required"
+      )
+
+      assert_equal 2, result.status.exitstatus
+      assert_includes result.stderr, "permissions are unsafe"
+      refute_path_exists File.join(config_home, "agent-coord", "env")
+    end
+  end
+
+  def test_existing_safe_config_directory_is_hardened_to_0700_before_read
+    with_private_config_tmpdir("agent-coord-config-directory-migration") do |root|
+      config_home = File.join(root, "config")
+      directory = File.join(config_home, "agent-coord")
+      env_file = File.join(directory, "env")
+      FileUtils.mkdir_p(directory)
+      File.chmod(0o755, directory)
+      File.write(env_file, "AGENT_COORD_POLICY=required\n")
+      File.chmod(0o600, env_file)
+
+      result = run_command(
+        { "XDG_CONFIG_HOME" => config_home },
+        RbConfig.ruby,
+        BIN,
+        "config",
+        "show",
+        "--json"
+      )
+
+      assert_equal 0, result.status.exitstatus, result.stderr
+      assert_equal 0o700, File.stat(directory).mode & 0o777
+    end
+  end
+
+  def test_config_set_does_not_harden_an_explicit_nondedicated_parent
+    # rubocop:disable Metrics/BlockLength
+    with_private_config_tmpdir("agent-coord-explicit-parent") do |root|
+      parent = File.join(root, "shared-parent")
+      env_file = File.join(parent, "coord.env")
+      unrelated_lock = File.join(parent, ".config.lock")
+      FileUtils.mkdir_p(parent)
+      File.chmod(0o755, parent)
+      File.write(env_file, "AGENT_COORD_POLICY=required\n")
+      File.chmod(0o600, env_file)
+      File.write(unrelated_lock, "unrelated\n")
+      File.chmod(0o644, unrelated_lock)
+
+      result = run_command(
+        { "AGENT_COORD_ENV_FILE" => env_file },
+        RbConfig.ruby,
+        BIN,
+        "config",
+        "set",
+        "--machine-id",
+        "m1"
+      )
+
+      assert_equal 0, result.status.exitstatus, result.stderr
+      assert_equal 0o755, File.stat(parent).mode & 0o777
+      assert_equal "unrelated\n", File.read(unrelated_lock)
+      assert_equal 0o644, File.stat(unrelated_lock).mode & 0o777
+      namespaced_locks = Dir.glob(File.join(parent, ".agent-coord-config-*.lock"))
+      assert_equal 1, namespaced_locks.length
+      assert_equal 0o600, File.stat(namespaced_locks.first).mode & 0o777
+      contents = File.read(env_file)
+      assert_includes contents, "AGENT_COORD_POLICY=required"
+      assert_includes contents, "AGENT_COORD_MACHINE_ID=m1"
+    end
+    # rubocop:enable Metrics/BlockLength
+  end
+
+  # The documented first-time setup points AGENT_COORD_ENV_FILE at a path and
+  # then runs `config set` to create it. The explicit-path flag made the initial
+  # read required, so the command failed before persist_config could ever write
+  # the very file the variable named.
+  def test_config_set_creates_a_missing_explicit_env_file
+    with_private_config_tmpdir("agent-coord-explicit-create") do |root|
+      parent = File.join(root, "parent")
+      env_file = File.join(parent, "coord.env")
+      FileUtils.mkdir_p(parent)
+      File.chmod(0o700, parent)
+
+      result = run_command(
+        { "AGENT_COORD_ENV_FILE" => env_file },
+        RbConfig.ruby, BIN, "config", "set", "--machine-id", "m1", "--policy", "required"
+      )
+
+      assert_equal 0, result.status.exitstatus, result.stderr
+      assert_path_exists env_file
+      assert_equal 0o600, File.stat(env_file).mode & 0o777
+      contents = File.read(env_file)
+      assert_includes contents, "AGENT_COORD_MACHINE_ID=m1"
+      assert_includes contents, "AGENT_COORD_POLICY=required"
+    end
+  end
+
+  # Only `config set` may tolerate a missing explicit file. For anything else a
+  # silent fallback to a different config would pick a backend the operator
+  # never selected, so a missing AGENT_COORD_ENV_FILE stays a loud failure.
+  def test_missing_explicit_env_file_still_fails_every_other_command
+    with_private_config_tmpdir("agent-coord-explicit-missing") do |root|
+      parent = File.join(root, "parent")
+      env_file = File.join(parent, "coord.env")
+      FileUtils.mkdir_p(parent)
+      File.chmod(0o700, parent)
+      env = { "AGENT_COORD_ENV_FILE" => env_file }
+
+      [%w[config show], ["status", "--state-root", @state_root], %w[doctor]].each do |command|
+        result = run_command(env, RbConfig.ruby, BIN, *command)
+
+        assert_equal 2, result.status.exitstatus, "#{command.join(' ')}: #{result.stderr}"
+        assert_includes result.stderr, "configured user env file does not exist", command.join(" ")
+      end
+      refute_path_exists env_file
+    end
+  end
+
+  # Relaxing "missing" must not relax "unusable": config set still refuses to
+  # overwrite a file it cannot read and validate, in either failure mode.
+  def test_config_set_still_fails_closed_on_an_unusable_explicit_env_file
+    {
+      "insecure" => ["AGENT_COORD_MACHINE_ID=saved\n", 0o644, "permissions are insecure"],
+      "malformed" => ["not an assignment\n", 0o600, "unsafe user config syntax"]
+    }.each do |label, (contents, mode, message)|
+      with_private_config_tmpdir("agent-coord-explicit-unusable") do |root|
+        parent = File.join(root, "parent")
+        env_file = File.join(parent, "coord.env")
+        FileUtils.mkdir_p(parent)
+        File.chmod(0o700, parent)
+        File.write(env_file, contents)
+        File.chmod(mode, env_file)
+
+        result = run_command(
+          { "AGENT_COORD_ENV_FILE" => env_file },
+          RbConfig.ruby, BIN, "config", "set", "--machine-id", "m1"
+        )
+
+        assert_equal 2, result.status.exitstatus, label
+        assert_includes result.stderr, message, label
+        assert_equal contents, File.read(env_file), label
+      end
+    end
+  end
+
+  def test_process_policy_overrides_persisted_policy
+    with_private_config_tmpdir("agent-coord-process-policy") do |root|
+      config_home = File.join(root, "config")
+      set_result = run_command(
+        { "XDG_CONFIG_HOME" => config_home },
+        RbConfig.ruby,
+        BIN,
+        "config",
+        "set",
+        "--policy",
+        "required"
+      )
+      assert_equal 0, set_result.status.exitstatus, set_result.stderr
+
+      show_result = run_command(
+        { "XDG_CONFIG_HOME" => config_home, "AGENT_COORD_POLICY" => "disabled" },
+        RbConfig.ruby,
+        BIN,
+        "config",
+        "show",
+        "--json"
+      )
+      assert_equal 0, show_result.status.exitstatus, show_result.stderr
+      coordination = JSON.parse(show_result.stdout).fetch("coordination")
+      assert_equal "disabled", coordination.fetch("policy")
+      assert_equal "process_env", coordination.dig("source", "policy")
+    end
+  end
+
+  def test_invalid_process_policy_fails_closed_for_non_config_commands
+    result = run_agent_coord(
+      "status",
+      "--json",
+      env: { "AGENT_COORD_POLICY" => "requried" }
+    )
+
+    assert_equal 2, result.status.exitstatus
+    assert_includes result.stderr, "invalid coordination policy"
+  end
+
+  def test_blank_process_machine_id_uses_and_then_restores_persisted_identity
+    with_private_user_config("AGENT_COORD_MACHINE_ID=m1\n") do |config_home|
+      runner = AgentCoord::Runner.new([])
+      with_process_env(
+        "XDG_CONFIG_HOME" => config_home,
+        "AGENT_COORD_MACHINE_ID" => ""
+      ) do
+        runner.send(:load_user_configuration!)
+        assert_equal "m1", AgentCoord.environment_machine_id
+        runner.send(:restore_injected_user_configuration!)
+        assert_equal "", ENV.fetch("AGENT_COORD_MACHINE_ID")
+      end
+    end
+  end
+
+  # A whitespace-only process value is not a selection. The identity readers
+  # strip before testing for empty, so treating it as present here dropped the
+  # configured machine attribution from every write without anything replacing it.
+  def test_whitespace_process_machine_id_uses_and_then_restores_persisted_identity
+    with_private_user_config("AGENT_COORD_MACHINE_ID=m1\n") do |config_home|
+      runner = AgentCoord::Runner.new([])
+      with_process_env(
+        "XDG_CONFIG_HOME" => config_home,
+        "AGENT_COORD_MACHINE_ID" => "  "
+      ) do
+        runner.send(:load_user_configuration!)
+        assert_equal "m1", AgentCoord.environment_machine_id
+        runner.send(:restore_injected_user_configuration!)
+        assert_equal "  ", ENV.fetch("AGENT_COORD_MACHINE_ID")
+      end
+    end
+  end
+
+  def test_whitespace_process_machine_id_still_stamps_writes_with_the_saved_identity
+    with_private_user_config("AGENT_COORD_MACHINE_ID=m1\n") do |config_home|
+      result = run_agent_coord(
+        "heartbeat", "--agent-id", "worker-whitespace-identity",
+        env: { "XDG_CONFIG_HOME" => config_home, "AGENT_COORD_MACHINE_ID" => "  " }
+      )
+
+      assert_equal 0, result.status.exitstatus, result.stderr
+      heartbeat = JSON.parse(
+        File.read(File.join(@state_root, "heartbeats", "worker-whitespace-identity.json"))
+      )
+      assert_equal "m1", heartbeat.fetch("machine_id")
+    end
   end
 
   def test_unconfigured_status_defaults_to_labeled_xdg_local_store
@@ -1620,26 +3919,28 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     fake_bin = Dir.mktmpdir("agent-coord-gh")
     write_fake_gh(fake_bin)
 
-    with_agent_coord_without_source_state do |bin|
-      result = run_command(
-        {
-          "AGENT_COORD_STATE_ROOT" => nil,
-          "AGENT_COORD_STATUS_STATE_ROOT" => nil,
-          "PATH" => [fake_bin, File.dirname(RbConfig.ruby)].join(File::PATH_SEPARATOR)
-        },
-        RbConfig.ruby,
-        bin,
-        "doctor",
-        "--backend",
-        "shakacode/agent-coordination-state",
-        "--ref",
-        "missing-ref"
-      )
+    with_private_config_tmpdir("agent-coord-status-root") do |status_root|
+      with_agent_coord_without_source_state do |bin|
+        result = run_command(
+          {
+            "AGENT_COORD_STATE_ROOT" => nil,
+            "AGENT_COORD_STATUS_STATE_ROOT" => status_root,
+            "PATH" => [fake_bin, File.dirname(RbConfig.ruby)].join(File::PATH_SEPARATOR)
+          },
+          RbConfig.ruby,
+          bin,
+          "doctor",
+          "--backend",
+          "shakacode/agent-coordination-state",
+          "--ref",
+          "missing-ref"
+        )
 
-      assert_equal 2, result.status.exitstatus
-      assert_includes result.stderr, "backend ref"
-      assert_includes result.stderr, "missing-ref"
-      refute_includes result.stdout, "status: ok"
+        assert_equal 2, result.status.exitstatus
+        assert_includes result.stderr, "backend ref"
+        assert_includes result.stderr, "missing-ref"
+        refute_includes result.stdout, "status: ok"
+      end
     end
   ensure
     FileUtils.remove_entry(fake_bin) if fake_bin && Dir.exist?(fake_bin)
@@ -8503,6 +10804,8 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     "AGENT_COORD_ENV_FILE" => nil,
     "AGENT_COORD_LOCAL" => nil,
     "AGENT_COORD_MACHINE_ID" => nil,
+    "AGENT_COORD_POLICY" => nil,
+    "AGENT_COORD_REF" => nil,
     "AGENT_COORD_SESSION_ID" => nil,
     "AGENT_COORD_STATE_ROOT" => nil,
     "AGENT_COORD_STATUS_STATE_ROOT" => nil,
@@ -8859,6 +11162,22 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     end
 
     private
+
+    # These fixtures intentionally run Runner instances concurrently in one
+    # process. Keep their injected stores independent of Runner#run's temporary,
+    # process-wide user-configuration ENV projection. The keyword only decides
+    # whether a missing explicit config file is tolerated, and this stub reads no
+    # file at all, but the signature has to track Runner's.
+    def load_user_configuration!(creating_user_config: false)
+      @creating_user_config = creating_user_config
+      @process_config = AgentCoord::USER_CONFIG_ENV_KEYS.to_h { |key| [key, nil] }
+      @user_config_path = nil
+      @user_config_path_explicit = false
+      @policy_file_path = nil
+      @user_config = {}
+      @policy_file_value = nil
+      @injected_user_config_keys = []
+    end
 
     def build_store(_options)
       @injected_store
@@ -10070,6 +12389,57 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     merged_env = {}
     merged_env["AGENT_COORD_STATE_ROOT"] = state_root if state_root
     run_command(merged_env.merge(env), "ruby", BIN, *, stdin_data: stdin_data)
+  end
+
+  def with_private_user_config(contents)
+    with_private_config_tmpdir("agent-coord-private-config") do |root|
+      config_home = File.join(root, "config")
+      env_file = File.join(config_home, "agent-coord", "env")
+      FileUtils.mkdir_p(File.dirname(env_file))
+      File.chmod(0o700, File.dirname(env_file))
+      File.write(env_file, contents)
+      File.chmod(0o600, env_file)
+      yield config_home
+    end
+  end
+
+  def assert_canonical_config_rejects_token_control(control, label)
+    secret_prefix = "#{label}-secret-prefix"
+    secret_suffix = "#{label}-secret-suffix"
+    with_private_user_config(
+      "AGENT_COORD_API_URL=https://coordination.example\n" \
+      "AGENT_COORD_API_TOKEN='#{secret_prefix}#{control}#{secret_suffix}'\n"
+    ) do |config_home|
+      result = run_command(
+        { "XDG_CONFIG_HOME" => config_home },
+        RbConfig.ruby,
+        BIN,
+        "config",
+        "show",
+        "--json"
+      )
+
+      assert_equal 2, result.status.exitstatus
+      assert_empty result.stdout
+      assert_includes result.stderr, "AGENT_COORD_API_TOKEN"
+      assert_includes result.stderr, "must be one line"
+      refute_includes result.stderr, secret_prefix
+      refute_includes result.stderr, secret_suffix
+      refute_includes result.stderr, "ArgumentError"
+      refute_includes result.stderr, "#{BIN}:"
+    end
+  end
+
+  def with_private_config_tmpdir(prefix, &)
+    Dir.mktmpdir(prefix, PRIVATE_CONFIG_TMP_PARENT, &)
+  end
+
+  def with_process_env(values)
+    saved = values.to_h { |key, _value| [key, ENV.fetch(key, nil)] }
+    values.each { |key, value| value.nil? ? ENV.delete(key) : ENV[key] = value }
+    yield
+  ensure
+    saved.each { |key, value| value.nil? ? ENV.delete(key) : ENV[key] = value }
   end
 
   def with_identity_env(values)
