@@ -974,6 +974,74 @@ class TelemetryHarvesterTest < Minitest::Test # rubocop:disable Metrics/ClassLen
     end
   end
 
+  def test_host_adapter_rolls_back_session_state_for_invalid_utf8_metadata # rubocop:disable Metrics/MethodLength
+    usage = { "input_tokens" => 1, "output_tokens" => 1, "total_tokens" => 2 }
+    codex_bad_line = JSON.generate(
+      "type" => "session_meta",
+      "payload" => { "id" => "rejected-session", "cwd" => "BAD_BYTE", "pricing_profile" => "standard" }
+    ).b
+    codex_bad_line.sub!("BAD_BYTE", "\xFF".b)
+    codex_records = [
+      JSON.generate(
+        "type" => "session_meta",
+        "payload" => { "id" => "retained-session", "cwd" => "/safe/original", "pricing_profile" => "standard" }
+      ),
+      JSON.generate(
+        "type" => "turn_context",
+        "payload" => { "model" => "gpt-5.6-sol", "effort" => "high" }
+      ),
+      codex_bad_line,
+      JSON.generate("type" => "turn_context", "payload" => {}),
+      JSON.generate(
+        "type" => "event_msg",
+        "payload" => { "type" => "token_count", "info" => { "last_token_usage" => usage } }
+      )
+    ]
+
+    claude_bad_line = JSON.generate(
+      "type" => "assistant", "sessionId" => "retained-session", "cwd" => "/unsafe/partial",
+      "pricing_profile" => "BAD_BYTE",
+      "message" => { "model" => "claude-opus-4-6", "effort" => "high", "usage" => usage }
+    ).b
+    claude_bad_line.sub!("BAD_BYTE", "\xFF".b)
+    claude_records = [
+      JSON.generate(
+        "type" => "assistant", "sessionId" => "retained-session", "cwd" => "/safe/original",
+        "pricing_profile" => "standard",
+        "message" => { "model" => "claude-opus-4-6", "effort" => "high", "usage" => usage }
+      ),
+      claude_bad_line,
+      JSON.generate(
+        "type" => "assistant", "sessionId" => "retained-session",
+        "message" => { "usage" => usage }
+      )
+    ]
+
+    codex = HOST_ADAPTERS::Parser.new("codex").parse(
+      codex_records.join("\n").b.force_encoding(Encoding::UTF_8), "codex:rollback"
+    )
+    claude = HOST_ADAPTERS::Parser.new("claude").parse(
+      claude_records.join("\n").b.force_encoding(Encoding::UTF_8), "claude:rollback"
+    )
+
+    assert_equal [{ "record_ordinal" => 3, "reason" => "invalid_json" }], codex.fetch("errors")
+    assert_equal 1, codex.fetch("sessions").length
+    codex_session = codex.fetch("sessions").fetch(0)
+    assert_equal "original", codex_session.fetch("cwd_basename")
+    assert_equal [["gpt-5.6-sol", "high", "standard"]],
+                 (codex_session.fetch("usage").map do |row|
+                   row.values_at("model", "effort", "pricing_profile")
+                 end)
+
+    assert_equal [{ "record_ordinal" => 2, "reason" => "invalid_json" }], claude.fetch("errors")
+    claude_session = claude.fetch("sessions").fetch(0)
+    assert_equal "original", claude_session.fetch("cwd_basename")
+    assert_equal [["claude-opus-4-6", "high", "standard"]] * 2,
+                 (claude_session.fetch("usage").map do |row|
+                   row.values_at("model", "effort", "pricing_profile")
+                 end)
+  end
+
   def test_host_adapter_alias_fallbacks_respect_primary_field_presence
     usage = { "input_tokens" => 1, "output_tokens" => 1, "total_tokens" => 2 }
     codex_records = [

@@ -52,23 +52,21 @@ module AgentCoord
 
           case record["type"]
           when "session_meta"
-            @current_session_ref = session_ref(payload["id"] || "#{source_ref}:#{ordinal}")
-            session = fetch_session(@current_session_ref)
-            merge_known!(session, cwd_fields(present_value(payload, "cwd")))
-            merge_known!(
-              session,
+            reference = session_ref(payload["id"] || "#{source_ref}:#{ordinal}")
+            metadata = cwd_fields(present_value(payload, "cwd")).merge(
               "pricing_profile" => pricing_profile(present_value(payload, "pricing_profile"))
             )
+            @current_session_ref = reference
+            merge_known!(fetch_session(reference), metadata)
           when "turn_context"
             return unless @current_session_ref
 
-            session = fetch_session(@current_session_ref)
-            merge_known!(
-              session,
+            metadata = {
               "model" => model(present_value(payload, "model")),
               "effort" => effort(present_value(payload, "effort", "reasoning_effort")),
               "pricing_profile" => pricing_profile(present_value(payload, "pricing_profile"))
-            )
+            }
+            merge_known!(fetch_session(@current_session_ref), metadata)
           when "event_msg"
             return unless @current_session_ref && payload["type"] == "token_count"
 
@@ -92,15 +90,14 @@ module AgentCoord
           return unless message.is_a?(Hash) && message["usage"].is_a?(Hash)
 
           reference = session_ref(record["sessionId"] || "claude-record-#{ordinal}")
-          session = fetch_session(reference)
-          merge_known!(session, cwd_fields(present_value(record, "cwd")))
           pricing_value = present_value(record, "pricing_profile")
           pricing_value = present_value(message.fetch("usage"), "pricing_profile") if pricing_value.equal?(MISSING)
-          record_metadata = {
+          record_metadata = cwd_fields(present_value(record, "cwd")).merge(
             "model" => model(present_value(message, "model")),
             "effort" => effort(present_value(message, "effort")),
             "pricing_profile" => pricing_profile(pricing_value)
-          }
+          )
+          session = fetch_session(reference)
           merge_known!(session, record_metadata)
           session.fetch("usage") << usage_row(
             message.fetch("usage"), ordinal, session,
