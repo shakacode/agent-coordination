@@ -22,7 +22,9 @@ esac
 ISSUE_TITLE="$("$GH_BIN" issue view "$ISSUE" --repo "$REPO" --json title --jq .title)"
 ISSUE_KEY="$(
   ruby -rjson -e '
-    manifest = JSON.parse(File.read(ARGV.fetch(0))).fetch("issues")
+    manifest_json = File.read(ARGV.fetch(0), encoding: "UTF-8")
+    abort "simulation issue manifest is not valid UTF-8" unless manifest_json.valid_encoding?
+    manifest = JSON.parse(manifest_json).fetch("issues")
     title = ARGV.fetch(1)
     issue = manifest.find { |candidate| candidate.fetch("title") == title }
     abort "no sim issue key for issue title: #{title}" unless issue
@@ -37,7 +39,7 @@ PROMPT="$(
   REPO="$REPO" ISSUE_NUMBER="$ISSUE" ISSUE_KEY="$ISSUE_KEY" \
     AGENT_ID="$AGENT_ID" BATCH_ID="$BATCH" BRANCH="$BRANCH" \
     ruby - "$HERE/prompts/worker-prompt.md" <<'RUBY'
-template = File.read(ARGV.fetch(0))
+template = File.read(ARGV.fetch(0), encoding: "UTF-8")
 {
   "{{REPO}}" => ENV.fetch("REPO"),
   "{{ISSUE_NUMBER}}" => ENV.fetch("ISSUE_NUMBER"),
