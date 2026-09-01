@@ -4673,6 +4673,31 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     assert_equal "/tmp/café", backend_check.dig("details", "state_root")
   end
 
+  def test_stack_doctor_config_failure_contains_non_ascii_compatible_state_root_encoding
+    state_root = "/tmp/café".encode(Encoding::UTF_16LE)
+    stdout = StringIO.new
+    stderr = StringIO.new
+    runner = AgentCoord::Runner.new(
+      ["doctor", "--stack-json", "--state-root", state_root],
+      stdout:,
+      stderr:
+    )
+    runner.define_singleton_method(:load_user_configuration_unless_exempt!) do |_command, _config_action|
+      raise AgentCoord::OperationalError, "broken configuration"
+    end
+
+    assert_predicate state_root, :valid_encoding?
+    refute_predicate state_root.encoding, :ascii_compatible?
+    assert_includes state_root.b, "\0".b
+    assert_equal 2, runner.run
+    assert_empty stderr.string
+    report = JSON.parse(stdout.string)
+    backend_check = report.fetch("checks").find { |check| check.fetch("id") == "backend.readability" }
+    diagnostic = backend_check.dig("details", "state_root")
+    assert_predicate diagnostic, :valid_encoding?
+    assert_equal AgentCoord.utf8_diagnostic(state_root.b), diagnostic
+  end
+
   def test_stack_doctor_config_failure_scrubs_invalid_utf8_environment_identity
     identity_cases = {
       "AGENT_COORD_MACHINE_ID" => ["machine_id", nil],

@@ -1028,16 +1028,18 @@ module AgentCoord
 
     # OptionParser matches path values with a regexp. Under a UTF-8 locale, a
     # path containing arbitrary filesystem bytes can therefore raise before the
-    # PATH callback receives either the inline or separate form. Retag only
-    # encoding-invalid path arguments as BINARY: valid declared encodings must
-    # survive so diagnostic rendering can transcode them correctly.
+    # PATH callback receives either the inline or separate form. Retag invalid
+    # or non-ASCII-compatible path arguments as BINARY so OptionParser can
+    # inspect them. Retagging changes only encoding metadata and preserves the
+    # exact filesystem bytes. Keep valid ASCII-compatible encodings tagged so
+    # diagnostics can transcode them correctly.
     def shield_invalid_path_options!(argv, command:)
       path_options = registered_options(command).path_options
       scan_raw_options(argv, command:) do |index, option, value_of, _awaits_value, inline_value|
         next unless path_options.include?(value_of || (option if inline_value))
 
         argument = argv[index].to_s
-        argv[index] = argument.b unless argument.valid_encoding?
+        argv[index] = argument.b unless argument.valid_encoding? && argument.encoding.ascii_compatible?
       end
     end
 
