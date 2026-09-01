@@ -3404,6 +3404,34 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     end
   end
 
+  def test_config_show_reads_a_private_config_directory_without_owner_write
+    with_private_config_tmpdir("agent-coord-config-show-read-only-directory") do |root|
+      config_home = File.join(root, "config")
+      config_dir = File.join(config_home, "agent-coord")
+      env_file = File.join(config_dir, "env")
+      FileUtils.mkdir_p(config_dir)
+      File.chmod(0o700, config_home, config_dir)
+      File.write(env_file, "AGENT_COORD_POLICY=required\n")
+      File.chmod(0o600, env_file)
+      lock_digest = Digest::SHA256.hexdigest(env_file)[0, 16]
+      lock_file = File.join(config_dir, ".agent-coord-config-#{lock_digest}.lock")
+      File.write(lock_file, "")
+      File.chmod(0o600, lock_file)
+      File.chmod(0o500, config_dir)
+
+      result = run_command(
+        { "XDG_CONFIG_HOME" => config_home },
+        RbConfig.ruby, BIN, "config", "show", "--json"
+      )
+
+      assert_equal 0, result.status.exitstatus, result.stderr
+      assert_equal "required", JSON.parse(result.stdout).dig("coordination", "policy")
+      assert_equal 0o500, File.stat(config_dir).mode & 0o777
+    ensure
+      File.chmod(0o700, config_dir) if config_dir && File.exist?(config_dir)
+    end
+  end
+
   def test_config_set_rejects_a_preexisting_config_directory_missing_owner_rwx_before_mutation
     with_private_config_tmpdir("agent-coord-config-directory-owner-mode") do |root|
       config_home = File.join(root, "config")

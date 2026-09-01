@@ -2575,7 +2575,8 @@ module AgentCoord
       directory = validate_secure_directory_chain!(
         File.dirname(@user_config_path),
         create: true,
-        private_leaf: dedicated_user_config_parent?
+        private_leaf: dedicated_user_config_parent?,
+        require_owner_rwx: true
       )
       lock_path = user_config_lock_path(directory)
       File.open(lock_path, File::RDWR | File::CREAT | File::NOFOLLOW, 0o600) do |lock|
@@ -2617,10 +2618,12 @@ module AgentCoord
       File.join(directory, ".agent-coord-config-#{digest}.lock")
     end
 
-    def validate_secure_directory_chain!(directory, create:, private_leaf: true)
+    def validate_secure_directory_chain!(directory, create:, private_leaf: true, require_owner_rwx: false)
       expanded = File.expand_path(directory)
       current = File::SEPARATOR
-      validate_secure_directory_component!(File.lstat(current), current, leaf: private_leaf && expanded == current)
+      validate_secure_directory_component!(
+        File.lstat(current), current, leaf: private_leaf && expanded == current, require_owner_rwx:
+      )
       components = expanded.split(File::SEPARATOR).reject(&:empty?)
 
       components.each_with_index do |component, index|
@@ -2633,11 +2636,11 @@ module AgentCoord
           end
 
           current = File.realpath(candidate)
-          validate_resolved_directory_chain!(current, leaf:)
+          validate_resolved_directory_chain!(current, leaf:, require_owner_rwx:)
           next
         end
 
-        validate_secure_directory_component!(stat, candidate, leaf:)
+        validate_secure_directory_component!(stat, candidate, leaf:, require_owner_rwx:)
         current = candidate
       end
       current
@@ -2661,16 +2664,20 @@ module AgentCoord
       stat.uid.zero? || stat.uid == Process.uid
     end
 
-    def validate_resolved_directory_chain!(directory, leaf:)
+    def validate_resolved_directory_chain!(directory, leaf:, require_owner_rwx: false)
       expanded = File.expand_path(directory)
       current = File::SEPARATOR
-      validate_secure_directory_component!(File.lstat(current), current, leaf: leaf && expanded == current)
+      validate_secure_directory_component!(
+        File.lstat(current), current, leaf: leaf && expanded == current, require_owner_rwx:
+      )
       components = expanded.split(File::SEPARATOR).reject(&:empty?)
 
       components.each_with_index do |component, index|
         current = File.join(current, component)
         stat = File.lstat(current)
-        validate_secure_directory_component!(stat, current, leaf: leaf && index == components.length - 1)
+        validate_secure_directory_component!(
+          stat, current, leaf: leaf && index == components.length - 1, require_owner_rwx:
+        )
       end
       expanded
     end
@@ -2695,7 +2702,7 @@ module AgentCoord
       File.lstat(path)
     end
 
-    def validate_secure_directory_component!(stat, path, leaf:)
+    def validate_secure_directory_component!(stat, path, leaf:, require_owner_rwx: false)
       raise OperationalError, "config parent component is not a directory: #{path}" unless stat.directory?
       unless [0, Process.uid].include?(stat.uid)
         raise OperationalError, "config parent component has an unsafe owner: #{path}"
@@ -2704,7 +2711,7 @@ module AgentCoord
       return unless leaf
 
       raise OperationalError, "config parent leaf is not owned by the current user: #{path}" if stat.uid != Process.uid
-      unless stat.mode.allbits?(0o700)
+      if require_owner_rwx && !stat.mode.allbits?(0o700)
         raise OperationalError, "config parent leaf permissions are unsafe (expected 0700): #{path}"
       end
 
@@ -2735,7 +2742,8 @@ module AgentCoord
       directory = validate_secure_directory_chain!(
         File.dirname(path),
         create: true,
-        private_leaf: dedicated_user_config_parent?
+        private_leaf: dedicated_user_config_parent?,
+        require_owner_rwx: true
       )
       destination = File.join(directory, File.basename(path))
       temp_path = File.join(directory, ".#{File.basename(path)}.tmp-#{Process.pid}-#{SecureRandom.hex(6)}")
@@ -2745,7 +2753,8 @@ module AgentCoord
         validate_secure_directory_component!(
           directory_file.stat,
           directory,
-          leaf: dedicated_user_config_parent?
+          leaf: dedicated_user_config_parent?,
+          require_owner_rwx: true
         )
         # The rename already committed, so an unsupported directory fsync must
         # not be reported as a write failure. Reuse the shared errno tolerance
