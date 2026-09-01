@@ -57,12 +57,14 @@ module AgentCoord
   BYPASSED_PROCESS_SELECTOR_ENV_KEYS = (
     BACKEND_SELECTOR_ENV_KEYS + ["AGENT_COORD_REF", STATUS_STATE_ROOT_ENV]
   ).freeze
-  # Whole-value URL redaction fails closed before validation. A malformed or
-  # scheme-less authority can contain whitespace before `@`; consume it through
-  # the last authority `@`, but stop before `/`, `?`, or `#` so those characters
-  # in a path or query are never mistaken for credentials.
-  URL_SCHEME_USERINFO_PREFIX = %r{\A\s*([a-zA-Z][a-zA-Z0-9+.-]*://)[^/?\#]*@}
-  URL_USERINFO_PREFIX = %r{\A[^/?\#]*@}
+  # Whole-value URL redaction fails closed after parsing. A malformed or
+  # scheme-less value can contain whitespace or URL delimiters before its final
+  # `@`; consume through that `@` rather than risk exposing userinfo. A valid URL
+  # can contain `@` in its path, so redact it only when URI identifies userinfo.
+  # The prose redactor below remains narrow so ordinary path text stays intact.
+  INVALID_URL_SCHEME_USERINFO_PREFIX = %r{\A\s*([a-zA-Z][a-zA-Z0-9+.-]*://).*@}m
+  INVALID_URL_AUTHORITY_USERINFO_PREFIX = %r{\A(//).*@}m
+  INVALID_URL_USERINFO_PREFIX = /\A.*@/m
   # Unanchored twin for prose. URI::InvalidURIError embeds the offending URL in
   # its message, so a malformed configured value would otherwise reach stderr
   # with its userinfo intact -- the anchored form cannot match mid-sentence.
@@ -8350,9 +8352,27 @@ module AgentCoord
     return value if value.nil?
 
     text = value.to_s.dup
-    return text if text.sub!(URL_SCHEME_USERINFO_PREFIX) { "#{Regexp.last_match(1)}***@" }
+    begin
+      uri = URI.parse(text)
+      if uri.host
+        return text if uri.userinfo.nil?
 
-    text.sub(URL_USERINFO_PREFIX, "***@")
+        authority_start = uri.scheme ? text.index("://") + 3 : 2
+        authority_end = text.index(%r{[/?#]}, authority_start) || text.length
+        userinfo_end = text[authority_start...authority_end].rindex("@")
+        return text unless userinfo_end
+
+        userinfo_end += authority_start
+        return "#{text[0...authority_start]}***@#{text[(userinfo_end + 1)..]}"
+      end
+    rescue URI::InvalidURIError
+      # A parse-invalid configured URL can still contain credentials. Fall
+      # through to the broad whole-value patterns so diagnostics fail closed.
+    end
+    return text if text.sub!(INVALID_URL_SCHEME_USERINFO_PREFIX) { "#{Regexp.last_match(1)}***@" }
+    return text if text.sub!(INVALID_URL_AUTHORITY_USERINFO_PREFIX) { "#{Regexp.last_match(1)}***@" }
+
+    text.sub(INVALID_URL_USERINFO_PREFIX, "***@")
   end
 
   # Prose form: redact every credential-bearing URL embedded in a message.

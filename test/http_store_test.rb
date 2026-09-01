@@ -723,8 +723,17 @@ class HttpBackendSelectionTest < HttpEnvTestCase # rubocop:disable Metrics/Class
   def test_a_credential_free_url_is_reported_unchanged
     assert_equal "https://coord.example/base",
                  AgentCoord.redact_url_userinfo("https://coord.example/base")
+    assert_equal "https://coord.example/base/user@example.org",
+                 AgentCoord.redact_url_userinfo("https://coord.example/base/user@example.org")
     assert_equal "https://***@coord.example",
                  AgentCoord.redact_url_userinfo("https://svc:pw@coord.example")
+    assert_equal "https://***@host/path@p?x=a@b#c@d",
+                 AgentCoord.redact_url_userinfo("https://u:s@host/path@p?x=a@b#c@d")
+    assert_equal "//host/path@p", AgentCoord.redact_url_userinfo("//host/path@p")
+    assert_equal "//***@host/path@p", AgentCoord.redact_url_userinfo("//u:s@host/path@p")
+    assert_equal "https://***@host", AgentCoord.redact_url_userinfo("https://u@host")
+    assert_equal "https://***@host", AgentCoord.redact_url_userinfo("https://:s@host")
+    assert_equal "https://***@[::1]", AgentCoord.redact_url_userinfo("https://u:p%40ss@[::1]")
     assert_equal "***@127.0.0.1:9", AgentCoord.redact_url_userinfo("u:p@127.0.0.1:9")
     assert_equal 'bad URI: "https://***@bad host"',
                  AgentCoord.redact_userinfo_in_text('bad URI: "https://svc:pw@bad host"')

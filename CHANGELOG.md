@@ -411,10 +411,10 @@ when releases begin.
   `PATH` placeholder spelling rather than on a type, so a path option declared
   `DIR` or `FILE` would not be exempted and nothing would fail loudly; the
   declaration site carries that warning.
-  One limit on that guarantee, unchanged from before and tracked in issue #226: a
-  path whose bytes are not decodable at all still crashes in pre-parse token
-  scanning under a UTF-8 locale, before any syscall sees it. The locales where
-  non-UTF-8 filenames actually occur, `C` and the latin-1 family, are unaffected.
+  The stack-doctor work also removes the issue #226 pre-parse limit: an
+  encoding-invalid path option is retagged as BINARY before OptionParser scans
+  it, so the original bytes still reach the syscall without an argument-scanning
+  backtrace.
   A second gap in the exemption, also tracked separately as issue #228: the
   scanner that classifies path arguments does not honor a standalone `--`, so a
   positional shaped like an inline path option -- `log -- --state-root=<invalid>`
@@ -450,19 +450,11 @@ when releases begin.
   `US-ASCII`, but one carrying non-ASCII bytes `ASCII-8BIT`, so a non-ASCII
   `AGENT_COORD_MACHINE_ID` or sibling identity variable still reaches
   `JSON.generate` as BINARY and still warns on write. That residual is tracked
-  in issue #216. The path exemption leaves a second one, in `doctor` rather than
-  on any write path: `doctor` serializes the `--state-root` it was given into its
-  JSON report, and because that value is now deliberately not normalized, a
-  non-UTF-8 root still reaches `JSON.generate` as BINARY. `doctor --json`,
-  `doctor --json --deep`, and `doctor --stack-json --deep` still warn, and
-  `doctor --stack-json` still fails outright with `JSON::GeneratorError`. This is
-  unchanged from before -- a sweep under `LC_ALL=C` with a non-ASCII state-root
-  path emits the warning nine times before this change and three after, with
-  every state-writing command going to zero -- but the trigger is ordinary
-  (`--state-root /Users/José/...`) and the command is one aggregators run
-  unattended. Fixing it means deciding how an unencodable path should be
-  displayed inside a JSON payload, which is a third encoding policy rather than a
-  reapplication of these two, so it is tracked in issue #225.
+  in issue #216. The path exemption leaves a second one in the legacy doctor
+  report: `doctor --json` still serializes the raw `--state-root` and can warn on
+  a non-UTF-8 path. The stack-JSON report now routes its diagnostic copy through
+  `utf8_diagnostic`, so it remains parseable without changing the operational
+  path bytes. The legacy-report residual remains tracked in issue #225.
 - The GitHub backend no longer crashes on non-ASCII `gh` output under a non-UTF-8
   locale (issue #159). `Open3.capture3` tags what it captures with
   `Encoding.default_external`, which is `US-ASCII` under `LC_ALL=C` or `LANG=C`,

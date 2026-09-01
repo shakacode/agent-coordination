@@ -4483,10 +4483,24 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
         "https://***@example.invalid"
       ],
       "scheme-less" => ["operator:#{secret} with-space@example.invalid", "***@example.invalid"],
-      "leading whitespace" => [
-        " https://operator:#{secret}@example.invalid",
+      "scheme-relative" => ["//operator:#{secret}@example.invalid", "//***@example.invalid"],
+      "leading whitespace" => [" https://operator:#{secret}@example.invalid", "https://***@example.invalid"],
+      "path delimiter before authority" => [
+        "https://operator:#{secret}/path@example.invalid",
         "https://***@example.invalid"
-      ]
+      ],
+      "query delimiter before authority" => [
+        "https://operator:#{secret}?query@example.invalid",
+        "https://***@example.invalid"
+      ],
+      "fragment delimiter before authority" => [
+        "https://operator:#{secret}#fragment@example.invalid",
+        "https://***@example.invalid"
+      ],
+      "backslash before authority" => ["https://operator:#{secret}\\path@example.invalid",
+                                       "https://***@example.invalid"],
+      "multiple authority delimiters" => ["https://operator@relay:#{secret}@example.invalid",
+                                          "https://***@example.invalid"]
     }
 
     cases.each do |label, (api_url, expected)|
