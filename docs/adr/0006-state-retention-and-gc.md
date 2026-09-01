@@ -40,11 +40,11 @@ terminal marker is also compacted once each event passes the synthetic window.
 Such orphan groups may lack repository and/or target metadata: batch, lane, and
 available provenance form a deterministic safe identity, preventing simulation
 orphans from leaking while leaving non-synthetic or unaged orphans untouched.
-Before terminal validation or provenance grouping, GC excludes event records
-whose repository field is a string with invalid UTF-8. It leaves those records
-in hot storage byte-for-byte and continues processing healthy groups. This
-applies to ordinary terminal history and synthetic orphan history; GC never
-scrubs or transcodes the corrupt repository bytes.
+Before terminal validation or provenance grouping, GC recursively checks every
+string key and value in each event record. It excludes records that contain
+invalid UTF-8, leaves them in hot storage byte-for-byte, and continues
+processing healthy groups. This applies to ordinary terminal history and
+synthetic orphan history; GC never scrubs or transcodes the corrupt bytes.
 The compacted envelope lists all consumed paths while its records retain first,
 last, every valid terminal event, and phase transitions and omit repeated
 renewals.

@@ -876,7 +876,27 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     terminal = terminal.merge("repo" => gc_invalid_repo)
     refute AgentCoord::Runner.new([]).send(:gc_terminal_identity_valid?, terminal)
     %w[C C.UTF-8].product({ "dry-run" => "--dry-run", "execute" => "--execute" }.to_a).each do |locale, (mode, flag)|
-      assert_gc_invalid_repo_mode(locale, mode, flag)
+      assert_gc_invalid_event_data_mode(locale, mode, flag, :repo)
+    end
+  end
+
+  def test_gc_skips_invalidly_encoded_terminal_urls_and_continues_healthy_groups
+    invalid_url = "https://example.test/\xFF".b.force_encoding(Encoding::UTF_8)
+    refute AgentCoord::Runner.new([]).send(:gc_valid_http_uri?, invalid_url)
+    %w[C C.UTF-8].product({ "dry-run" => "--dry-run", "execute" => "--execute" }.to_a).each do |locale, (mode, flag)|
+      assert_gc_invalid_event_data_mode(locale, mode, flag, :url)
+    end
+  end
+
+  def test_gc_skips_invalidly_encoded_nested_event_values_and_continues_healthy_groups
+    %w[C C.UTF-8].product({ "dry-run" => "--dry-run", "execute" => "--execute" }.to_a).each do |locale, (mode, flag)|
+      assert_gc_invalid_event_data_mode(locale, mode, flag, :nested_value)
+    end
+  end
+
+  def test_gc_skips_invalidly_encoded_nested_event_keys_and_continues_healthy_groups
+    %w[C C.UTF-8].product({ "dry-run" => "--dry-run", "execute" => "--execute" }.to_a).each do |locale, (mode, flag)|
+      assert_gc_invalid_event_data_mode(locale, mode, flag, :nested_key)
     end
   end
 
@@ -11469,10 +11489,12 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     assert_includes status.stdout, "deps batch-a:backend blocked_on batch-a:backend"
   end
 
-  def assert_gc_invalid_repo_mode(locale, mode, flag)
-    state_root = File.join(@state_root, "invalid-repo-#{locale.tr('.', '-')}-#{mode}")
-    records = gc_invalid_repo_records
-    original_corrupt_bytes = write_gc_invalid_repo_records(state_root, records)
+  def assert_gc_invalid_event_data_mode(locale, mode, flag, fixture)
+    records, placeholder, invalid_bytes = gc_invalid_event_fixture(fixture)
+    state_root = File.join(@state_root, "invalid-#{fixture.to_s.tr('_', '-')}-#{locale.tr('.', '-')}-#{mode}")
+    original_corrupt_bytes = write_gc_invalid_event_records(
+      state_root, records, placeholder: placeholder, invalid_bytes: invalid_bytes
+    )
     result = run_agent_coord(
       "gc", flag, "--json", state_root: state_root,
                             env: { "LC_ALL" => locale, "LANG" => locale }
@@ -11485,6 +11507,21 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     assert_equal gc_record_paths(records, corrupt: false), source_paths
     assert_gc_corrupt_records_unchanged(state_root, original_corrupt_bytes)
     assert_gc_mode_paths(mode, state_root, actions, gc_record_paths(records, corrupt: false))
+  end
+
+  def gc_invalid_event_fixture(fixture)
+    case fixture
+    when :repo
+      [gc_invalid_repo_records, "shakacode/corrupt-byte".b, gc_invalid_repo.b]
+    when :url
+      [gc_invalid_url_records, "https://example.test/corrupt-byte".b, "https://example.test/\xFF".b]
+    when :nested_value
+      [gc_invalid_nested_value_records, "nested-corrupt-byte".b, "nested-\xFF".b]
+    when :nested_key
+      [gc_invalid_nested_key_records, "nested-corrupt-key".b, "nested-\xFF".b]
+    else
+      raise "unknown invalid event fixture: #{fixture.inspect}"
+    end
   end
 
   def assert_gc_stderr_has_no_encoding_exception(stderr)
@@ -11535,6 +11572,48 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     }
   end
 
+  def gc_invalid_url_records
+    gc_invalid_terminal_records(
+      "url",
+      corrupt_extra: { "pr_url" => "https://example.test/corrupt-byte" },
+      healthy_extra: { "pr_url" => "https://example.test/pull/1" }
+    )
+  end
+
+  def gc_invalid_nested_value_records
+    gc_invalid_terminal_records(
+      "nested-value",
+      corrupt_extra: { "metadata" => { "labels" => ["nested-corrupt-byte"] } },
+      healthy_extra: { "metadata" => { "labels" => ["healthy"] } }
+    )
+  end
+
+  def gc_invalid_nested_key_records
+    gc_invalid_terminal_records(
+      "nested-key",
+      corrupt_extra: { "metadata" => { "nested-corrupt-key" => "value" } },
+      healthy_extra: { "metadata" => { "healthy-key" => "value" } }
+    )
+  end
+
+  def gc_invalid_terminal_records(label, corrupt_extra:, healthy_extra:)
+    old = "2020-01-01T00:00:00Z"
+    {
+      "events/corrupt-#{label}/lane_closed-corrupt.json" => [
+        valid_gc_lane_closed(
+          event_id: "lane_closed-corrupt-#{label}", batch_id: "corrupt-#{label}",
+          target: "corrupt-#{label}", at: old, extra: corrupt_extra
+        ), true
+      ],
+      "events/healthy-#{label}/lane_closed-healthy.json" => [
+        valid_gc_lane_closed(
+          event_id: "lane_closed-healthy-#{label}", batch_id: "healthy-#{label}",
+          target: "healthy-#{label}", at: old, extra: healthy_extra
+        ), false
+      ]
+    }
+  end
+
   def gc_synthetic_orphan(event_id, batch_id, target, repo, at)
     {
       "schema_version" => 1, "event_id" => event_id, "batch_id" => batch_id,
@@ -11543,12 +11622,12 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     }
   end
 
-  def write_gc_invalid_repo_records(state_root, records)
+  def write_gc_invalid_event_records(state_root, records, placeholder:, invalid_bytes:)
     records.each_with_object({}) do |(path, (payload, corrupt)), originals|
       full_path = File.join(state_root, path)
       FileUtils.mkdir_p(File.dirname(full_path))
       bytes = "#{JSON.pretty_generate(payload)}\n".b
-      bytes.sub!("shakacode/corrupt-byte".b, gc_invalid_repo.b) if corrupt
+      bytes.sub!(placeholder, invalid_bytes) if corrupt
       File.binwrite(full_path, bytes)
       originals[path] = bytes if corrupt
     end
