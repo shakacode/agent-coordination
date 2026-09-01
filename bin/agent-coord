@@ -609,6 +609,7 @@ module AgentCoord
       if config_home.empty?
         home = ENV.fetch("HOME", "")
         return [nil, false] if home.empty?
+        raise OperationalError, "HOME must be an absolute path" unless Pathname.new(home).absolute?
 
         config_home = File.join(home, ".config")
       end
@@ -771,22 +772,6 @@ module AgentCoord
 
       raise OperationalError,
             "invalid coordination policy in #{source}: expected #{COORDINATION_POLICIES.join(', ')}"
-    end
-
-    # The process tier wins only when it actually carries a value. This is the
-    # same rule load_user_configuration! already applies when deciding whether
-    # to inject a saved setting into ENV, and the two must not disagree: with a
-    # saved AGENT_COORD_REF=configured-ref and an exported AGENT_COORD_REF='   ',
-    # injection treated the process value as unset and published the saved ref,
-    # while this reader spelled emptiness without stripping, returned the blank,
-    # and GitHub-backed commands then requested `git/trees/   ` -- doctor probed
-    # a ref no repository has. A blank is not a value at all; which tier a real
-    # ref should follow is a separate question (issue #189).
-    def effective_config_value(key)
-      process_value = @process_config&.fetch(key, nil)
-      return process_value if AgentCoord.config_value_set?(process_value)
-
-      @user_config&.fetch(key, nil)
     end
 
     # A whitespace-only selector is not a selection. The CLI flags reject such a
@@ -1300,13 +1285,13 @@ module AgentCoord
       resolve_configured_backend(options, env_api, env_root, env_backend)
     end
 
-    # Both tiers can be blank -- an exported AGENT_COORD_REF='   ' over a saved
-    # AGENT_COORD_REF='' -- so the fallback to DEFAULT_REF asks the same
-    # question effective_config_value just asked, not a looser one.
+    # The ref is part of the selected GitHub backend identity, so it follows the
+    # same atomic process-vs-user tier lock as the backend selector group. Both
+    # tiers can still be blank, in which case the normal default applies.
     def resolve_effective_ref!(options)
       return if options[:ref_cli]
 
-      configured_ref = effective_config_value("AGENT_COORD_REF")
+      configured_ref = effective_backend_env_value("AGENT_COORD_REF")
       options[:ref] = AgentCoord.config_value_set?(configured_ref) ? configured_ref : DEFAULT_REF
     end
 

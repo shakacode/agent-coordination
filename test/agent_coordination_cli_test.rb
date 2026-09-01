@@ -2315,6 +2315,22 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     end
   end
 
+  def test_relative_home_diagnostic_names_home_when_xdg_config_home_is_unset
+    result = run_command(
+      { "XDG_CONFIG_HOME" => nil, "HOME" => "relative/home" },
+      RbConfig.ruby,
+      BIN,
+      "config",
+      "show",
+      "--json"
+    )
+
+    assert_equal 2, result.status.exitstatus
+    assert_empty result.stdout
+    assert_includes result.stderr, "HOME must be an absolute path"
+    refute_includes result.stderr, "XDG_CONFIG_HOME"
+  end
+
   def test_config_set_accepts_loopback_plain_http_url
     with_private_config_tmpdir("agent-coord-loopback-api-url") do |root|
       config_home = File.join(root, "config")
@@ -2754,6 +2770,50 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     runner.send(:resolve_backend_env, options)
 
     assert_equal "configured-ref", options.fetch(:ref)
+  end
+
+  # AGENT_COORD_REF names a branch inside the selected GitHub backend. It must
+  # therefore come from the same configuration tier as the backend selectors:
+  # a stale process ref alone must not escape the selector tier lock and pair
+  # with the saved backend.
+  def test_backend_resolution_tier_locks_ref_with_the_saved_backend
+    runner = AgentCoord::Runner.new([])
+    runner.instance_variable_set(
+      :@process_config,
+      AgentCoord::USER_CONFIG_ENV_KEYS.to_h { |key| [key, nil] }.merge("AGENT_COORD_REF" => "stale-ref")
+    )
+    runner.instance_variable_set(
+      :@user_config,
+      { "AGENT_COORD_BACKEND" => "acme/coordination", "AGENT_COORD_REF" => "configured-ref" }
+    )
+    options = runner.send(:default_options)
+
+    runner.send(:resolve_backend_env, options)
+
+    assert_equal "acme/coordination", options.fetch(:backend)
+    assert_equal "configured-ref", options.fetch(:ref)
+    assert_equal "user_config", options.fetch(:backend_source)
+  end
+
+  def test_backend_resolution_does_not_borrow_a_saved_ref_for_a_process_backend
+    runner = AgentCoord::Runner.new([])
+    runner.instance_variable_set(
+      :@process_config,
+      AgentCoord::USER_CONFIG_ENV_KEYS.to_h { |key| [key, nil] }.merge(
+        "AGENT_COORD_BACKEND" => "acme/process-coordination"
+      )
+    )
+    runner.instance_variable_set(
+      :@user_config,
+      { "AGENT_COORD_BACKEND" => "acme/saved-coordination", "AGENT_COORD_REF" => "saved-ref" }
+    )
+    options = runner.send(:default_options)
+
+    runner.send(:resolve_backend_env, options)
+
+    assert_equal "acme/process-coordination", options.fetch(:backend)
+    assert_equal AgentCoord::DEFAULT_REF, options.fetch(:ref)
+    assert_equal "process_env", options.fetch(:backend_source)
   end
 
   def test_backend_resolution_normalizes_a_blank_ref
