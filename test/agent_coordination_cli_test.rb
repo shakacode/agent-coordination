@@ -4475,6 +4475,38 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     end
   end
 
+  def test_stack_doctor_config_failure_normalizes_identity_metadata_in_c_locale
+    identity_cases = {
+      "AGENT_COORD_MACHINE_ID" => ["machine_id", nil],
+      "AGENT_COORD_SESSION_ID" => %w[session_id agent_coord_session_id],
+      "CODEX_THREAD_ID" => %w[session_id codex_thread_id]
+    }
+
+    with_private_user_config("AGENT_COORD_POLICY=optional\n") do |config_home|
+      File.chmod(0o644, File.join(config_home, "agent-coord", "env"))
+
+      identity_cases.each do |environment_key, (field, session_source)|
+        result = run_command(
+          { "XDG_CONFIG_HOME" => config_home, "LC_ALL" => "C", environment_key => "café" },
+          RbConfig.ruby,
+          BIN,
+          "doctor",
+          "--stack-json",
+          "--state-root",
+          @state_root
+        )
+
+        assert_equal 2, result.status.exitstatus, "#{environment_key}: #{result.stderr}"
+        assert_empty result.stderr, environment_key
+        report = JSON.parse(result.stdout)
+        identity = report.fetch("checks").find { |check| check.fetch("id") == "identity.machine" }.fetch("details")
+        assert_equal "café", identity.fetch(field), environment_key
+        assert_equal Encoding::UTF_8, identity.fetch(field).encoding, environment_key
+        assert_equal session_source, identity.fetch("session_source"), environment_key if session_source
+      end
+    end
+  end
+
   def test_stack_doctor_with_valid_user_config_preserves_healthy_report
     with_private_user_config("AGENT_COORD_POLICY=optional\n") do |config_home|
       result = run_command(

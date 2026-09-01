@@ -2934,7 +2934,8 @@ module AgentCoord
     # environment tuple is metadata only and never carries token values.
     def environment_identity_report(token_identity)
       session_id, session_source = AgentCoord.environment_session_identity
-      machine_id = AgentCoord.environment_machine_id
+      session_id = diagnostic_environment_identity(session_id)
+      machine_id = diagnostic_environment_identity(AgentCoord.environment_machine_id)
       token_machine = token_identity && token_identity["machine"].to_s
       token_machine = nil if token_machine.to_s.empty?
       {
@@ -2945,6 +2946,14 @@ module AgentCoord
         "token_machine" => token_machine,
         "machine_match" => machine_match_status(machine_id, token_machine)
       }
+    end
+
+    # Environment identity is state payload data in claim/heartbeat paths, but
+    # diagnostic metadata here. Normalize only at this reporting seam so a
+    # locale's ASCII-8BIT tag cannot break JSON without silently rewriting the
+    # identity stored by state-mutating commands.
+    def diagnostic_environment_identity(value)
+      AgentCoord.utf8_diagnostic(value) if value
     end
 
     def machine_match_status(machine_id, token_machine)
