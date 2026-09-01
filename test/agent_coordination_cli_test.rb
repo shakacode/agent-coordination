@@ -2938,6 +2938,60 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     end
   end
 
+  def test_config_locks_retry_nonblocking_until_available_before_deadline
+    { "read" => File::LOCK_SH, "write" => File::LOCK_EX }.each do |kind, operation|
+      monotonic_time = 0.0
+      sleeps = []
+      monotonic_clock = -> { monotonic_time }
+      sleeper = lambda do |seconds|
+        sleeps << seconds
+        monotonic_time += seconds
+      end
+      outcomes = [false, false, true]
+      operations = []
+      lock = Object.new
+      lock.define_singleton_method(:flock) do |requested_operation|
+        operations << requested_operation
+        outcomes.shift
+      end
+      runner = AgentCoord::Runner.new([], monotonic_clock:, sleeper:)
+
+      assert_nil runner.send(:acquire_config_lock, lock, operation, "/safe/config.lock", kind)
+      assert_equal [operation | File::LOCK_NB] * 3, operations
+      assert_equal 2, sleeps.length
+      assert sleeps.all?(&:positive?)
+      assert_operator sleeps.sum, :<, 2
+    end
+  end
+
+  def test_config_lock_contention_times_out_with_deterministic_diagnostics
+    {
+      "read" => File::LOCK_SH,
+      "write" => File::LOCK_EX
+    }.each do |kind, operation|
+      monotonic_time = 0.0
+      operations = []
+      monotonic_clock = -> { monotonic_time }
+      sleeper = ->(seconds) { monotonic_time += seconds }
+      lock = Object.new
+      lock.define_singleton_method(:flock) do |requested_operation|
+        operations << requested_operation
+        false
+      end
+      runner = AgentCoord::Runner.new([], monotonic_clock:, sleeper:)
+      lock_path = "/safe/config/.agent-coord-config.lock"
+
+      error = assert_raises(AgentCoord::OperationalError) do
+        runner.send(:acquire_config_lock, lock, operation, lock_path, kind)
+      end
+
+      assert_equal "timed out acquiring config #{kind} lock after 2 seconds: #{lock_path}", error.message
+      assert_in_delta 2, monotonic_time
+      assert_operator operations.length, :>, 1
+      assert(operations.all? { |requested| requested == (operation | File::LOCK_NB) })
+    end
+  end
+
   def test_user_config_is_never_evaluated_as_shell
     with_private_config_tmpdir("agent-coord-no-shell-eval") do |root|
       config_home = File.join(root, "config")

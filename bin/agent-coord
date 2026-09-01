@@ -30,6 +30,10 @@ module AgentCoord
   DEFAULT_CLAIM_TTL = 4 * 60 * 60
   DEFAULT_HEARTBEAT_TTL = 15 * 60
   HEARTBEAT_DEAD_AFTER_TTL_MULTIPLIER = 4
+  # Config writes are one tiny atomic rename. Two seconds absorbs normal
+  # scheduler delay without letting a stale holder block every CLI command.
+  CONFIG_LOCK_TIMEOUT_SECONDS = 2
+  CONFIG_LOCK_RETRY_INTERVAL_SECONDS = 0.05
   DEFAULT_HOT_DAYS = 7
   DEFAULT_ARCHIVE_DAYS = 30
   DEFAULT_SYNTHETIC_HOT_DAYS = 1
@@ -385,14 +389,17 @@ module AgentCoord
 
   class Runner # rubocop:disable Metrics/ClassLength
     # Every collaborator is an injectable keyword with the process default, so
-    # tests never have to reach into private state. That is one keyword past the
-    # metric's limit; splitting the seam into a bag would only hide it.
+    # tests never have to reach into private state. Splitting these seams into a
+    # bag would only hide the dependencies.
     def initialize(argv, stdin: $stdin, stdout: $stdout, stderr: $stderr, clock: Time, # rubocop:disable Metrics/ParameterLists
-                   backend_conflict_warnings: true)
+                   monotonic_clock: -> { Process.clock_gettime(Process::CLOCK_MONOTONIC) },
+                   sleeper: ->(seconds) { sleep(seconds) }, backend_conflict_warnings: true)
       @stdin = stdin
       @stdout = stdout
       @stderr = stderr
       @clock = clock
+      @monotonic_clock = monotonic_clock
+      @sleeper = sleeper
       @backend_conflict_warnings = backend_conflict_warnings
       # Set on the first degraded listing; read by both the --sync guard and the
       # --json trail state, so it must exist before either runs.
@@ -2533,7 +2540,7 @@ module AgentCoord
 
       begin
         validate_private_config_file!(lock, lock_path)
-        raise OperationalError, "cannot acquire config read lock: #{lock_path}" unless lock.flock(File::LOCK_SH)
+        acquire_config_lock(lock, File::LOCK_SH, lock_path, "read")
       rescue SystemCallError => e
         lock.close
         raise OperationalError, "cannot acquire config read lock #{lock_path}: #{e.message}"
@@ -2553,6 +2560,21 @@ module AgentCoord
       end
     end
 
+    def acquire_config_lock(lock, operation, lock_path, kind)
+      deadline = @monotonic_clock.call + CONFIG_LOCK_TIMEOUT_SECONDS
+      loop do
+        return if lock.flock(operation | File::LOCK_NB)
+
+        remaining = deadline - @monotonic_clock.call
+        unless remaining.positive?
+          raise OperationalError,
+                "timed out acquiring config #{kind} lock after #{CONFIG_LOCK_TIMEOUT_SECONDS} seconds: #{lock_path}"
+        end
+
+        @sleeper.call([CONFIG_LOCK_RETRY_INTERVAL_SECONDS, remaining].min)
+      end
+    end
+
     def with_config_write_lock
       directory = validate_secure_directory_chain!(
         File.dirname(@user_config_path),
@@ -2566,7 +2588,7 @@ module AgentCoord
         # lock read-only. Chmod after validation so a pre-existing insecure lock
         # is still reported instead of quietly repaired.
         lock.chmod(0o600)
-        raise OperationalError, "cannot acquire config write lock: #{lock_path}" unless lock.flock(File::LOCK_EX)
+        acquire_config_lock(lock, File::LOCK_EX, lock_path, "write")
 
         yield
       ensure
