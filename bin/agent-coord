@@ -3190,7 +3190,7 @@ module AgentCoord
     end
 
     def failed_stack_resource_check(options, error, error_class: nil)
-      details = stack_resource_scope_details(options).merge("error" => error)
+      details = stack_resource_scope_details(options).merge("error" => AgentCoord.utf8_diagnostic(error))
       details["error_class"] = error_class if error_class
       stack_check(
         "resources.deep",

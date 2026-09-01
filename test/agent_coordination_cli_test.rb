@@ -4709,6 +4709,31 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     refute_includes stdout.string, secret
   end
 
+  def test_stack_doctor_normalizes_operational_resource_failure_error
+    store = Class.new do
+      def verify_layout!(_prefixes); end
+
+      def list_json(_prefix)
+        raise AgentCoord::OperationalError, "resource failure \xFF".b
+      end
+    end.new
+    stdout = StringIO.new
+    stderr = StringIO.new
+    runner = AgentCoord::Runner.new(
+      ["doctor", "--stack-json", "--deep", "--api-url", "https://coordination.invalid"],
+      stdout:, stderr:
+    )
+    runner.define_singleton_method(:build_store) { |_options| store }
+    runner.define_singleton_method(:close_store) { |_store| nil }
+
+    assert_equal 2, runner.run
+    assert_empty stderr.string
+    report = JSON.parse(stdout.string)
+    resource_check = report.fetch("checks").find { |check| check.fetch("id") == "resources.deep" }
+    assert_equal "failed", report.fetch("status")
+    assert_equal "resource failure �", resource_check.dig("details", "error")
+  end
+
   def test_stack_doctor_contains_unexpected_backend_failure_without_leaking_details
     secret = "backend-secret-value"
     store = Class.new do
