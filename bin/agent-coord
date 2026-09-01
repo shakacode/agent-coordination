@@ -1932,21 +1932,28 @@ module AgentCoord
     end
 
     def gc_compaction_candidates(store, now, hot_days, synthetic_hot_days)
-      entries = store.list_json("events").reject do |entry|
+      entries = store.list_json("events")
+      valid_entries = entries.reject do |entry|
         gc_invalid_encoding?(entry.data)
       end
-      terminal_lanes = gc_terminal_lanes_by_provenance(entries)
+      terminal_lanes = gc_terminal_lanes_by_provenance(valid_entries)
       groups = entries.group_by do |entry|
-        data = entry.data
-        provenance = gc_event_provenance(entry)
-        lane = data["lane"]
-        lanes = terminal_lanes[provenance]
-        lane = lanes.first if lane.to_s.empty? && lanes&.one?
-        [*provenance, lane]
+        gc_event_compaction_group(entry, terminal_lanes)
       end
       groups.filter_map do |group, entries|
+        next if entries.any? { |entry| gc_invalid_encoding?(entry.data) }
+
         gc_compaction_candidate(group, entries, now, hot_days, synthetic_hot_days)
       end
+    end
+
+    def gc_event_compaction_group(entry, terminal_lanes)
+      data = entry.data
+      provenance = gc_event_provenance(entry)
+      lane = data["lane"]
+      lanes = terminal_lanes[provenance]
+      lane = lanes.first if lane.to_s.empty? && lanes&.one?
+      [*provenance, lane]
     end
 
     def gc_invalid_encoding?(value)

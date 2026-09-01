@@ -900,6 +900,12 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     end
   end
 
+  def test_gc_leaves_an_entire_group_untouched_when_a_sibling_has_invalid_encoding
+    %w[C C.UTF-8].product({ "dry-run" => "--dry-run", "execute" => "--execute" }.to_a).each do |locale, (mode, flag)|
+      assert_gc_invalid_sibling_group_mode(locale, mode, flag)
+    end
+  end
+
   def test_gc_compaction_retry_accepts_consumed_renewal_paths_without_positional_records
     at = "2026-07-01T00:00:00Z"
     entries = [
@@ -11509,6 +11515,31 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     assert_gc_mode_paths(mode, state_root, actions, gc_record_paths(records, corrupt: false))
   end
 
+  def assert_gc_invalid_sibling_group_mode(locale, mode, flag)
+    state_root = File.join(@state_root, "invalid-sibling-#{locale.tr('.', '-')}-#{mode}")
+    records = gc_invalid_sibling_group_records
+    originals = write_gc_invalid_event_records(
+      state_root, records, placeholder: "nested-corrupt-sibling".b, invalid_bytes: "nested-\xFF".b
+    )
+    result = run_agent_coord(
+      "gc", flag, "--json", state_root: state_root,
+                            env: { "LC_ALL" => locale, "LANG" => locale }
+    )
+
+    assert_equal 0, result.status.exitstatus, "#{locale} #{mode}: #{result.stderr}"
+    assert_gc_stderr_has_no_encoding_exception(result.stderr)
+    actions = JSON.parse(result.stdout).fetch("actions").select { |action| action["action"] == "compact" }
+    healthy_paths = ["events/healthy-control/lane_closed-healthy.json"]
+    source_paths = actions.flat_map { |action| action.fetch("source_paths") }.sort
+    assert_equal healthy_paths, source_paths
+    assert_gc_corrupt_records_unchanged(state_root, originals)
+    %w[
+      events/shared-corrupt-group/fresh-corrupt.json
+      events/shared-corrupt-group/lane_closed-old.json
+    ].each { |path| assert_path_exists File.join(state_root, path) }
+    assert_gc_mode_paths(mode, state_root, actions, healthy_paths)
+  end
+
   def gc_invalid_event_fixture(fixture)
     case fixture
     when :repo
@@ -11609,6 +11640,32 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
         valid_gc_lane_closed(
           event_id: "lane_closed-healthy-#{label}", batch_id: "healthy-#{label}",
           target: "healthy-#{label}", at: old, extra: healthy_extra
+        ), false
+      ]
+    }
+  end
+
+  def gc_invalid_sibling_group_records
+    old = "2020-01-01T00:00:00Z"
+    fresh = Time.now.utc.iso8601
+    {
+      "events/shared-corrupt-group/lane_closed-old.json" => [
+        valid_gc_lane_closed(
+          event_id: "lane_closed-old", batch_id: "shared-corrupt-group", target: "shared", at: old,
+          extra: { "lane" => "shared-lane" }
+        ), false
+      ],
+      "events/shared-corrupt-group/fresh-corrupt.json" => [
+        {
+          "schema_version" => 1, "event_id" => "fresh-corrupt", "batch_id" => "shared-corrupt-group",
+          "type" => "phase", "repo" => "shakacode/example", "target" => "shared", "lane" => "shared-lane",
+          "phase" => "qa", "at" => fresh, "metadata" => { "label" => "nested-corrupt-sibling" }
+        }, true
+      ],
+      "events/healthy-control/lane_closed-healthy.json" => [
+        valid_gc_lane_closed(
+          event_id: "lane_closed-healthy-control", batch_id: "healthy-control", target: "healthy", at: old,
+          extra: { "lane" => "healthy-lane" }
         ), false
       ]
     }
