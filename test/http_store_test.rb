@@ -2028,15 +2028,13 @@ class LogHttpBackendTest < HttpEnvTestCase
     stub.shutdown
   end
 
-  # The event store records one repo under two casings, and the HTTP backend is
-  # case-sensitive, so both claim paths match the query. Taking whichever the
-  # listing yields first is a coin flip; both orders are exercised here because
-  # listing order alone would otherwise decide the outcome.
-  def test_log_claim_note_selects_the_most_recently_updated_case_variant
+  # The HTTP backend is case-sensitive, so repo spellings are distinct literal
+  # claim keys. Both listing orders must report both live holders.
+  def test_log_reports_both_live_holders_for_repo_case_variants
     newer = { "schema_version" => 1, "repo" => "ShakaCode/example", "target" => "1", "status" => "active",
               "agent_id" => "current-worker", "machine_id" => "m5", "host" => "codex",
               "updated_at" => "2026-08-01T03:13:03Z" }
-    older = { "schema_version" => 1, "repo" => "shakacode/example", "target" => "1", "status" => "released",
+    older = { "schema_version" => 1, "repo" => "shakacode/example", "target" => "1", "status" => "active",
               "agent_id" => "old-worker", "machine_id" => "m1", "host" => "codex",
               "updated_at" => "2026-07-01T00:00:00Z" }
     [[newer, older], [older, newer]].each do |first, second|
@@ -2052,7 +2050,7 @@ class LogHttpBackendTest < HttpEnvTestCase
         _code, out, = run_cli(["log", "shakacode/example#1"], {})
 
         assert_includes out, "current-worker"
-        refute_includes out, "old-worker"
+        assert_includes out, "old-worker"
       end
       stub.shutdown
     end

@@ -4,6 +4,7 @@ require "fileutils"
 require "json"
 require "minitest/autorun"
 require "open3"
+require "stringio"
 require "tmpdir"
 
 # `agent-coord log` renders the per-work-item custody trail already carried by
@@ -32,6 +33,7 @@ class AgentCoordLogTestCase < Minitest::Test
     "CODEX_THREAD_ID" => nil,
     "XDG_CONFIG_HOME" => ISOLATED_CONFIG_HOME
   }.freeze
+  load BIN
 
   def setup
     @state_root = Dir.mktmpdir("agent-coord-log-test")
@@ -109,6 +111,69 @@ class AgentCoordLogTestCase < Minitest::Test
     env = args.first.is_a?(Hash) ? args.shift : {}
     stdout, stderr, status = Open3.capture3(env, *args, stdin_data: stdin_data)
     CommandResult.new(stdout: stdout, stderr: stderr, status: status)
+  end
+
+  def log_claim_entry(path:, repo:, target:, agent_id:, updated_at:)
+    AgentCoord::StoredJson.new(
+      path: path,
+      data: {
+        "schema_version" => 1,
+        "repo" => repo,
+        "target" => target,
+        "status" => "active",
+        "agent_id" => agent_id,
+        "updated_at" => updated_at
+      },
+      sha: "fixture"
+    )
+  end
+
+  def log_event_entry(path:, repo:, target:, agent_id:, at:)
+    AgentCoord::StoredJson.new(
+      path: path,
+      data: {
+        "schema_version" => 2,
+        "event_id" => "release",
+        "batch_id" => "batch",
+        "type" => "claim.released",
+        "repo" => repo,
+        "target" => target,
+        "agent_id" => agent_id,
+        "at" => at
+      },
+      sha: "fixture"
+    )
+  end
+
+  def log_payload_from_claim_entries(entries, events: [], query: "shakacode/example#319")
+    store = Object.new
+    store.define_singleton_method(:list_json) do |prefix|
+      case prefix
+      when "claims" then entries
+      when "events" then events
+      else []
+      end
+    end
+    stdout = StringIO.new
+    runner = AgentCoord::Runner.new([], stdout: stdout, stderr: StringIO.new)
+    runner.define_singleton_method(:build_store) { |_options| store }
+    options = {
+      work_item: query,
+      repo: nil,
+      target: nil,
+      json: true,
+      format: nil,
+      sync: false,
+      include_synthetic: false,
+      limit: nil,
+      since: nil,
+      machine: nil,
+      host: nil,
+      type: nil
+    }
+
+    assert_equal 0, runner.send(:render_log, options)
+    JSON.parse(stdout.string)
   end
 end
 
@@ -1483,17 +1548,108 @@ end
 
 # The difference between "two records" and "two holders" is the exact claim key.
 class AgentCoordLogClaimKeyTest < AgentCoordLogTestCase
-  def test_one_key_recorded_under_two_casings_reports_only_the_newest
-    write_claim("shakacode/example", "9832", "status" => "released", "agent_id" => "old-worker",
-                                             "updated_at" => "2026-07-01T00:00:00Z")
-    # Same lease, repo casing differs, so this is the same key recorded twice.
-    write_claim("ShakaCode/example", "9832", "status" => "active", "agent_id" => "current-worker",
-                                             "updated_at" => "2026-08-01T00:00:00Z")
+  def test_two_target_case_keys_report_both_live_holders
+    entries = [
+      log_claim_entry(
+        path: "claims/shakacode/example/issue:319.json",
+        repo: "shakacode/example",
+        target: "issue:319",
+        agent_id: "worker-lower",
+        updated_at: "2026-08-01T00:00:00Z"
+      ),
+      log_claim_entry(
+        path: "claims/shakacode/example/ISSUE:319.json",
+        repo: "shakacode/example",
+        target: "ISSUE:319",
+        agent_id: "worker-upper",
+        updated_at: "2026-08-02T00:00:00Z"
+      )
+    ]
 
-    holders = JSON.parse(run_log("shakacode/example#9832", "--json").stdout)
-                  .fetch("claims").map { |claim| claim.fetch("agent_id") }
+    holders = log_payload_from_claim_entries(entries).fetch("claims").map { |claim| claim.fetch("agent_id") }
 
-    assert_equal ["current-worker"], holders
+    assert_equal %w[worker-lower worker-upper], holders.sort
+  end
+
+  def test_two_repo_case_keys_report_both_live_holders
+    entries = [
+      log_claim_entry(
+        path: "claims/shakacode/example/319.json",
+        repo: "shakacode/example",
+        target: "319",
+        agent_id: "worker-lower",
+        updated_at: "2026-08-01T00:00:00Z"
+      ),
+      log_claim_entry(
+        path: "claims/ShakaCode/example/319.json",
+        repo: "ShakaCode/example",
+        target: "319",
+        agent_id: "worker-upper",
+        updated_at: "2026-08-02T00:00:00Z"
+      )
+    ]
+
+    holders = log_payload_from_claim_entries(entries).fetch("claims").map { |claim| claim.fetch("agent_id") }
+
+    assert_equal %w[worker-lower worker-upper], holders.sort
+  end
+
+  def test_same_record_identity_deduplicates_renewals_without_hiding_a_different_holder
+    entries = [
+      log_claim_entry(
+        path: "claims/shakacode/example/ISSUE:319.json",
+        repo: "shakacode/example",
+        target: "issue:319",
+        agent_id: "worker-one",
+        updated_at: "2026-08-01T00:00:00Z"
+      ),
+      log_claim_entry(
+        path: "claims/shakacode/example/issue:319.json",
+        repo: "shakacode/example",
+        target: "issue:319",
+        agent_id: "worker-one",
+        updated_at: "2026-08-02T00:00:00Z"
+      ),
+      log_claim_entry(
+        path: "claims/shakacode/example/issue:319.json",
+        repo: "shakacode/example",
+        target: "issue:319",
+        agent_id: "worker-two",
+        updated_at: "2026-08-03T00:00:00Z"
+      )
+    ]
+
+    claims = log_payload_from_claim_entries(entries).fetch("claims")
+
+    assert_equal %w[worker-one worker-two], claims.map { |claim| claim.fetch("agent_id") }.sort
+    worker_one = claims.find { |claim| claim.fetch("agent_id") == "worker-one" }
+    assert_equal "2026-08-02T00:00:00Z", worker_one.fetch("updated_at")
+  end
+
+  def test_event_on_a_case_differing_key_does_not_supersede_a_live_claim
+    claims = [
+      log_claim_entry(
+        path: "claims/shakacode/example/issue:319.json",
+        repo: "shakacode/example",
+        target: "issue:319",
+        agent_id: "worker-lower",
+        updated_at: "2026-08-01T00:00:00Z"
+      )
+    ]
+    events = [
+      log_event_entry(
+        path: "events/batch/release.json",
+        repo: "shakacode/example",
+        target: "ISSUE:319",
+        agent_id: "worker-upper",
+        at: "2026-08-02T00:00:00Z"
+      )
+    ]
+
+    holders = (log_payload_from_claim_entries(claims, events: events)["claims"] || [])
+              .map { |claim| claim.fetch("agent_id") }
+
+    assert_equal ["worker-lower"], holders
   end
 
   def test_two_distinct_keys_report_both_holders

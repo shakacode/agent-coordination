@@ -5371,15 +5371,19 @@ module AgentCoord
       claims.reject { |claim| log_claim_superseded?(claim, rows) }
     end
 
-    # Only the claim's own key can supersede it. Aliases are separate leases, so an
-    # event on `pr:1` says nothing about whether the lease on `1` still stands, and
-    # letting it decide would drop a live holder. This is also what the literal
-    # match did before identity folding: a claim was only ever weighed against
-    # events recorded under its own spelling.
+    # Only the claim's own literal key can supersede it. Aliases and case variants
+    # are separately claimable on case-sensitive stores, so an event under either
+    # one says nothing about whether another lease still stands. This deliberately
+    # does not decide which event types supersede a claim; it only keeps that
+    # existing decision scoped to the exact repo and target key.
     def log_claim_superseded?(claim, rows)
-      key = claim.fetch("target").downcase
-      latest = rows.select { |row| row.fetch("target").downcase == key }.last
+      key = log_claim_event_key(claim)
+      latest = rows.select { |row| log_claim_event_key(row) == key }.last
       latest && log_at_key(claim.fetch("record").fetch("updated_at")) < latest.fetch("at_key")
+    end
+
+    def log_claim_event_key(entry)
+      [entry.fetch("identity").fetch(0), entry.fetch("target")]
     end
 
     def log_claim_lookup(store, options)
@@ -5399,15 +5403,14 @@ module AgentCoord
 
         log_identity_match?(log_claim_identity(candidate), wanted_identity, lane_exact: true)
       end
-      # Two records can mean two different things, and the difference is the exact
-      # claim key. One key written under two casings is a single lease recorded
-      # twice, so the newest describes where the work is and the older is stale
-      # noise. Two distinct keys are two leases: `claim` writes raw target paths,
-      # so `9832` and `pr:9832` are independently claimable and the fleet holds
-      # such pairs live under different agents -- collapsing those would conceal
-      # exactly the double-claim an operator most needs to see. Lanes are matched
-      # exactly rather than rolled up, because a lane holds its own lease too.
-      matches.group_by { |candidate| log_claim_key(candidate) }
+      # A listing can return one lease more than once, including two reads around
+      # a renewal, so group on the immutable identity the record names and retain
+      # its newest snapshot. Repo and target stay exact: case variants are separate
+      # literal keys on case-sensitive stores, and collapsing them would conceal
+      # double custody. A different holder also stays visible because two reads
+      # around a takeover are genuinely ambiguous. Lanes remain exact because each
+      # lane holds its own lease.
+      matches.group_by { |candidate| claim_lease_key(candidate) }
              .values
              .map { |variants| variants.max_by { |candidate| log_at_key(candidate.data["updated_at"]) } }
              .sort_by { |candidate| log_at_key(candidate.data["updated_at"]) }
@@ -5416,12 +5419,6 @@ module AgentCoord
                  "target" => log_claim_target(candidate),
                  "identity" => log_claim_identity(candidate) }
              end
-    end
-
-    # The exact lease key, case-folded. Not the work-item identity: that folds
-    # aliases, which are separate leases.
-    def log_claim_key(entry)
-      [log_claim_repo(entry).downcase, log_claim_target(entry).downcase]
     end
 
     def log_claim_identity(entry)
@@ -5437,6 +5434,16 @@ module AgentCoord
 
     def log_claim_target(entry)
       (entry.data["target"] || AgentCoord.target_from_path(entry.path)).to_s.strip
+    end
+
+    # Repo, target, and holder do not move under renewal. A record without enough
+    # identity to prove that two reads name one lease falls back to its path, so
+    # uncertain legacy records stay visible rather than hiding a possible holder.
+    def claim_lease_key(entry)
+      data = entry.data
+      return entry.path if data["target"].to_s.empty? || data["agent_id"].to_s.empty?
+
+      [data["repo"], data["target"], data["agent_id"]]
     end
 
     # Built from claim fields directly rather than through log_row, whose "phase"
@@ -6219,22 +6226,13 @@ module AgentCoord
     # of itself, so it keys on its own path and never collapses. Two such records
     # collapsing would hide a holder, which is the worse error of the two.
     #
-    # `log` still folds casing across its listing, so for two live leases under two
-    # casings it reports one holder where this reports both. A lease is a file, so
-    # `status` is the correct answer there and the divergence is deliberate; do not
-    # restore the collapse to hide it.
+    # `log` shares this lease identity, so both views retain two literal keys that
+    # differ only by case instead of hiding one holder behind the other.
     #
     # `uniq` keeps the first record of a lease -- the operator's own spelling --
     # and leaves every distinct lease in candidate order.
     def target_collapsed_claims(entries)
-      entries.uniq { |entry| target_lease_key(entry) }
-    end
-
-    def target_lease_key(entry)
-      data = entry.data
-      return entry.path if data["target"].to_s.empty? || data["agent_id"].to_s.empty?
-
-      [data["repo"], data["target"], data["agent_id"]]
+      entries.uniq { |entry| claim_lease_key(entry) }
     end
 
     # This stays a closed set of point reads rather than a claims listing:
