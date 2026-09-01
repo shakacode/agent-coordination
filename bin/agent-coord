@@ -3042,7 +3042,7 @@ module AgentCoord
     end
 
     def emit_failed_stack_backend_report(checks, options, backend_kind, error, error_class: nil)
-      details = stack_backend_details(options, backend_kind).merge("error" => error)
+      details = stack_backend_details(options, backend_kind).merge("error" => AgentCoord.utf8_diagnostic(error))
       details["error_class"] = error_class if error_class
       checks << stack_check(
         "backend.readability",

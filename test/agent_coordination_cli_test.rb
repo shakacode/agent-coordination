@@ -4586,6 +4586,27 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     end
   end
 
+  def test_stack_doctor_backend_failure_normalizes_diagnostic_error_in_c_locale
+    state_root = File.join(@state_root, "missing-café")
+
+    result = run_command(
+      { "LC_ALL" => "C" },
+      RbConfig.ruby,
+      BIN,
+      "doctor",
+      "--stack-json",
+      "--state-root",
+      state_root
+    )
+
+    assert_equal 2, result.status.exitstatus
+    assert_empty result.stderr
+    report = JSON.parse(result.stdout)
+    backend_check = report.fetch("checks").find { |check| check.fetch("id") == "backend.readability" }
+    assert_equal state_root, backend_check.dig("details", "state_root")
+    assert_includes backend_check.dig("details", "error"), "state root does not exist"
+  end
+
   def test_stack_doctor_healthy_report_scrubs_invalid_utf8_environment_identity
     identity_cases = {
       "AGENT_COORD_MACHINE_ID" => ["machine_id", nil],
