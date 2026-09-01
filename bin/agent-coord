@@ -53,6 +53,10 @@ module AgentCoord
     AGENT_COORD_STATE_ROOT
     AGENT_COORD_BACKEND
   ].freeze
+  EXPLICIT_BACKEND_FLAGS = %w[--state-root --api-url --backend].freeze
+  BYPASSED_PROCESS_SELECTOR_ENV_KEYS = (
+    BACKEND_SELECTOR_ENV_KEYS + ["AGENT_COORD_REF", STATUS_STATE_ROOT_ENV]
+  ).freeze
   # `scheme://` followed by an authority that ends in `@`. The authority stops
   # at the first `/`, `?`, or `#`, so an `@` in a path or query is never
   # mistaken for credentials.
@@ -490,8 +494,50 @@ module AgentCoord
     def load_user_configuration_unless_exempt!(command, config_action)
       return if CONFIG_INDEPENDENT_COMMANDS.include?(command)
       return if subcommand_help_request?(command, config_action)
+      return if bypass_user_configuration?(command, config_action)
 
       load_user_configuration!(creating_user_config: config_action == "set")
+    end
+
+    # Recovery is intentionally argv-bound: process and user configuration may
+    # be exactly what is broken, so neither can authorize a bypass or select its
+    # backend. Count option tokens with the same registry used by OptionParser so
+    # separate and --key=value forms agree, while option values that merely look
+    # like flags never count as selectors.
+    def bypass_user_configuration?(command, config_action)
+      parser_command = config_action == "set" ? "config-set" : command
+      requested = false
+      selectors = []
+      scan_raw_options(@argv.map(&:b), command: parser_command) do |_index, option, value_of, _awaits_value|
+        next if value_of
+
+        requested ||= option == "--ignore-user-config"
+        selectors << option if EXPLICIT_BACKEND_FLAGS.include?(option)
+      end
+      return false unless requested
+
+      raise Error, "--ignore-user-config is not valid for config set" if command == "config" && config_action == "set"
+      unless selectors.one?
+        raise Error,
+              "--ignore-user-config requires exactly one explicit backend selector: " \
+              "--state-root, --api-url, or --backend"
+      end
+
+      @user_config_bypass_selector = selectors.first
+      initialize_bypassed_user_configuration!
+      true
+    end
+
+    # Preserve process-scoped credentials and identity for an explicitly named
+    # backend, but make every process backend/ref selector and read-only local
+    # fallback unavailable to resolution. The canonical file and legacy policy
+    # fallback are not opened at all.
+    def initialize_bypassed_user_configuration!
+      @process_config = USER_CONFIG_ENV_KEYS.to_h { |key| [key, ENV.fetch(key, nil)] }
+      BYPASSED_PROCESS_SELECTOR_ENV_KEYS.each { |key| @process_config[key] = nil }
+      @user_config = {}
+      @policy_file_value = nil
+      @injected_user_config_keys = []
     end
 
     # OptionParser accepts help flags anywhere in the option stream. Detect the
@@ -894,6 +940,7 @@ module AgentCoord
           --state-root PATH          use local files for tests or smoke checks
           --backend OWNER/REPO       explicit legacy GitHub backend repository
           --ref REF                  legacy GitHub backend branch/ref (default: #{DEFAULT_REF})
+          --ignore-user-config       bypass a broken user config with exactly one explicit backend selector
           --json                     emit JSON for supported commands
           -h, --help                 show command help
       HELP
@@ -964,6 +1011,9 @@ module AgentCoord
         options[:api_url] = explicit_selector_value!(value, "--api-url")
         options[:api_url_cli] = true
         parse_state[:backend_selector_count] += 1
+      end
+      opts.on("--ignore-user-config", "bypass user config; requires exactly one explicit backend selector") do
+        options[:ignore_user_config] = true
       end
       opts.on("--json", "emit JSON for supported commands") { options[:json] = true }
     end
@@ -1188,6 +1238,7 @@ module AgentCoord
       validate_closeout_option_usage!(command, options)
       validate_register_batch_option_usage!(command, options)
       validate_config_set_backend_option_usage!(command, options)
+      validate_user_config_bypass_option_usage!(command, options)
 
       if backend_command?(command)
         resolve_backend_env(options)
@@ -1195,7 +1246,24 @@ module AgentCoord
         warn_consumer_split_brain(command, options)
         refuse_split_brain_write!(command, options)
       end
+      emit_user_config_bypass_notice(options)
       options
+    end
+
+    def validate_user_config_bypass_option_usage!(command, options)
+      return unless options[:ignore_user_config]
+      return if @user_config_bypass_selector && (backend_command?(command) || command == "config")
+
+      raise Error, "--ignore-user-config is only valid for commands that select or report a coordination backend"
+    end
+
+    def emit_user_config_bypass_notice(options)
+      return unless options[:ignore_user_config]
+
+      @stderr.puts(
+        "warning: canonical user configuration bypassed by --ignore-user-config; " \
+        "backend selected explicitly by #{@user_config_bypass_selector}."
+      )
     end
 
     def validate_config_set_backend_option_usage!(command, options)

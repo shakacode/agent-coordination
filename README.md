@@ -323,6 +323,35 @@ This hardened config path requires a POSIX-compatible Ruby/filesystem with
 no-follow opens, ownership/mode checks, and `flock`; native Windows Ruby is not
 a supported runtime for this CLI.
 
+### Recovering from a broken canonical user config
+
+Default behavior remains fail closed: without an explicit recovery option, an
+insecure, unreadable, or malformed canonical user file blocks every command
+that loads it even when the command also names a backend. Automation that must
+keep inspecting or safely coordinating work while that file is repaired can
+use `--ignore-user-config`, for example:
+
+```bash
+agent-coord status --ignore-user-config --state-root "$RECOVERY_STATE_ROOT" --json
+```
+
+The option is accepted only when the same invocation supplies exactly one
+explicit backend selector: `--state-root`, `--api-url`, or `--backend`.
+Different selectors and duplicate occurrences of the same selector are both
+refused before any coordination mutation. Process- and user-file backend
+selectors, saved refs, and status-only local roots do not participate; an
+explicit `--ref` may accompany `--backend`. The recovery path therefore never
+selects an implicit local backend. Process-scoped credentials and machine or
+session identity remain available to authenticate and attribute the explicitly
+named backend.
+
+Every accepted invocation writes a warning to stderr that says the canonical
+file was bypassed and names the selector flag, never its value or a secret.
+Claim refusal, ambiguous-result handling, and ownership and dependency checks
+are unchanged. The option does not repair or rewrite the file and is not valid
+for `config set` or config-independent commands; repair the canonical file
+separately, then resume normal fail-closed operation without the flag.
+
 Backend selection follows this precedence:
 
 1. explicit CLI backend flags (`--state-root`, `--api-url`, or `--backend`)
