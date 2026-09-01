@@ -4510,6 +4510,9 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     end
   end
 
+  # Ruby 3.2 Shellwords returned this NUL-bearing value and ENV#[]= then raised a
+  # bare ArgumentError; newer Shellwords rejected it during parsing. Pin the
+  # structured failure at the config boundary on every supported Ruby.
   def test_stack_doctor_contains_nul_in_saved_non_token_config
     with_private_user_config("AGENT_COORD_BACKEND=owner/repo\0suffix\n") do |config_home|
       result = run_command(

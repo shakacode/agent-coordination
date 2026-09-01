@@ -794,6 +794,11 @@ module AgentCoord
     def parse_env_assignment_value(raw, path, line_number)
       return "" if raw.empty?
 
+      # Shellwords rejected NUL on newer Ruby but returned it unchanged on 3.2,
+      # where the later ENV assignment raised a bare ArgumentError. Reject the
+      # impossible environment value at the config-text boundary consistently.
+      raise OperationalError, "unsafe user config value at #{path}:#{line_number}" if raw.include?("\0")
+
       uncommented = strip_env_assignment_comment(raw)
       words = Shellwords.shellsplit(uncommented)
       return "" if words.empty? && uncommented != raw
