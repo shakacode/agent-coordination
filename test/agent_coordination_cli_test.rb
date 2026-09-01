@@ -906,6 +906,12 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     end
   end
 
+  def test_gc_leaves_lane_less_sibling_untouched_when_terminal_has_invalid_encoding
+    %w[C C.UTF-8].product({ "dry-run" => "--dry-run", "execute" => "--execute" }.to_a).each do |locale, (mode, flag)|
+      assert_gc_invalid_terminal_sibling_group_mode(locale, mode, flag)
+    end
+  end
+
   def test_gc_compaction_retry_accepts_consumed_renewal_paths_without_positional_records
     at = "2026-07-01T00:00:00Z"
     entries = [
@@ -11540,6 +11546,31 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     assert_gc_mode_paths(mode, state_root, actions, healthy_paths)
   end
 
+  def assert_gc_invalid_terminal_sibling_group_mode(locale, mode, flag)
+    state_root = File.join(@state_root, "invalid-terminal-sibling-#{locale.tr('.', '-')}-#{mode}")
+    records = gc_invalid_terminal_sibling_group_records
+    originals = write_gc_invalid_event_records(
+      state_root, records, placeholder: "nested-corrupt-terminal".b, invalid_bytes: "nested-\xFF".b
+    )
+    result = run_agent_coord(
+      "gc", flag, "--json", state_root: state_root,
+                            env: { "LC_ALL" => locale, "LANG" => locale }
+    )
+
+    assert_equal 0, result.status.exitstatus, "#{locale} #{mode}: #{result.stderr}"
+    assert_gc_stderr_has_no_encoding_exception(result.stderr)
+    actions = JSON.parse(result.stdout).fetch("actions").select { |action| action["action"] == "compact" }
+    healthy_paths = ["events/healthy-reverse-control/lane_closed-healthy.json"]
+    source_paths = actions.flat_map { |action| action.fetch("source_paths") }.sort
+    assert_equal healthy_paths, source_paths
+    assert_gc_corrupt_records_unchanged(state_root, originals)
+    %w[
+      events/reverse-corrupt-group/lane-less-synthetic.json
+      events/reverse-corrupt-group/lane_closed-corrupt.json
+    ].each { |path| assert_path_exists File.join(state_root, path) }
+    assert_gc_mode_paths(mode, state_root, actions, healthy_paths)
+  end
+
   def gc_invalid_event_fixture(fixture)
     case fixture
     when :repo
@@ -11666,6 +11697,29 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
         valid_gc_lane_closed(
           event_id: "lane_closed-healthy-control", batch_id: "healthy-control", target: "healthy", at: old,
           extra: { "lane" => "healthy-lane" }
+        ), false
+      ]
+    }
+  end
+
+  def gc_invalid_terminal_sibling_group_records
+    old = "2020-01-01T00:00:00Z"
+    {
+      "events/reverse-corrupt-group/lane_closed-corrupt.json" => [
+        valid_gc_lane_closed(
+          event_id: "lane_closed-corrupt", batch_id: "reverse-corrupt-group", target: "shared", at: old,
+          extra: { "lane" => "shared-lane", "metadata" => { "label" => "nested-corrupt-terminal" } }
+        ), true
+      ],
+      "events/reverse-corrupt-group/lane-less-synthetic.json" => [
+        gc_synthetic_orphan(
+          "lane-less-synthetic", "reverse-corrupt-group", "shared", "shakacode/example", old
+        ), false
+      ],
+      "events/healthy-reverse-control/lane_closed-healthy.json" => [
+        valid_gc_lane_closed(
+          event_id: "lane_closed-healthy-reverse-control", batch_id: "healthy-reverse-control",
+          target: "healthy", at: old, extra: { "lane" => "healthy-lane" }
         ), false
       ]
     }

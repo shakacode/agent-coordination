@@ -1933,15 +1933,16 @@ module AgentCoord
 
     def gc_compaction_candidates(store, now, hot_days, synthetic_hot_days)
       entries = store.list_json("events")
-      valid_entries = entries.reject do |entry|
-        gc_invalid_encoding?(entry.data)
+      invalid_encoding_by_entry = {}.compare_by_identity
+      entries.each do |entry|
+        invalid_encoding_by_entry[entry] = gc_invalid_encoding?(entry.data)
       end
-      terminal_lanes = gc_terminal_lanes_by_provenance(valid_entries)
+      terminal_lanes = gc_terminal_lanes_by_provenance(entries)
       groups = entries.group_by do |entry|
         gc_event_compaction_group(entry, terminal_lanes)
       end
       groups.filter_map do |group, entries|
-        next if entries.any? { |entry| gc_invalid_encoding?(entry.data) }
+        next if entries.any? { |entry| invalid_encoding_by_entry.fetch(entry) }
 
         gc_compaction_candidate(group, entries, now, hot_days, synthetic_hot_days)
       end
