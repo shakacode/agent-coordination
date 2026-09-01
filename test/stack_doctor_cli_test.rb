@@ -601,7 +601,7 @@ class ExplicitBackendPrecedenceStackDoctorTest < Minitest::Test
   end
 
   def test_explicit_github_stack_selector_prefers_process_ref_over_saved_ref
-    Dir.mktmpdir("agent-coord-stack-doctor") do |root|
+    Dir.mktmpdir("agent-coord-stack-doctor", StackDoctorCliTestHarness::ROOT) do |root|
       fake_bin = File.join(root, "bin")
       log_path = File.join(root, "gh.log")
       env_file = File.join(root, "agent-coord.env")
