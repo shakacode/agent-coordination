@@ -8284,7 +8284,10 @@ module AgentCoord
   end
 
   def self.validate_segment!(segment, field)
-    return if segment.to_s.match?(/\A[A-Za-z0-9_:-]+(?:\.[A-Za-z0-9_:-]+)*\z/)
+    value = segment.to_s
+    raise PathValidationError, "invalid #{field}: #{utf8_diagnostic(value)}" unless value.valid_encoding?
+
+    return if value.match?(/\A[A-Za-z0-9_:-]+(?:\.[A-Za-z0-9_:-]+)*\z/)
 
     raise PathValidationError, "invalid #{field}: #{segment}"
   end
