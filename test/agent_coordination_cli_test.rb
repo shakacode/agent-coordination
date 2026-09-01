@@ -3427,6 +3427,37 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     assert_equal expected, ordinary.stderr
   end
 
+  # PATH arguments retain their original bytes. An invalid UTF-8 byte in the
+  # equals form therefore reaches this early bypass guard, whose error rescue
+  # must still detect --stack-json without re-scanning the raw text encoding.
+  # Exercise the guard directly so the regression remains pinned to its
+  # pre-OptionParser exit-code mapping rather than to a later parser outcome.
+  def test_stack_json_config_bypass_error_is_binary_safe_for_invalid_path_bytes
+    invalid_root = "--state-root=/tmp/invalid-\xFF".b.force_encoding(Encoding::UTF_8)
+    stdout = StringIO.new
+    stderr = StringIO.new
+    runner = AgentCoord::Runner.new(
+      ["doctor", "--stack-json", "--ignore-user-config", invalid_root, "--state-root", @state_root],
+      stdout:,
+      stderr:
+    )
+    argv = runner.instance_variable_get(:@argv)
+    command = argv.shift
+
+    refute_predicate invalid_root, :valid_encoding?
+    error = assert_raises(AgentCoord::Error) do
+      runner.send(:bypass_user_configuration?, command, nil)
+    end
+    assert_equal AgentCoord::STACK_EXIT_USAGE, error.exit_code
+    assert_equal(
+      "--ignore-user-config requires exactly one explicit backend selector: " \
+      "--state-root, --api-url, or --backend",
+      error.message
+    )
+    assert_empty stdout.string
+    assert_empty stderr.string
+  end
+
   # Remote recovery backends have no explicit local mirror destination. A fake
   # empty GitHub tree lets the old path reach --sync and expose its ambient-root
   # fallback; the HTTP case proves the guard runs before credentials/backend IO.
@@ -3488,6 +3519,58 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     end
   end
   # rubocop:enable Metrics/BlockLength, Metrics/MethodLength
+
+  # Bypass must suppress the ambient URL as a backend selector, but an exported
+  # token and URL still form a visible process-scoped pair. Keep that pairing
+  # solely for the mismatch diagnostic so repeating the same URL explicitly
+  # does not claim the token was unbound; a genuinely different URL still warns.
+  def test_ignore_user_config_preserves_process_api_url_for_token_binding_only
+    with_private_user_config("not a valid assignment\n") do |config_home|
+      env = {
+        "XDG_CONFIG_HOME" => config_home,
+        "AGENT_COORD_API_URL" => "http://127.0.0.1:9",
+        "AGENT_COORD_API_TOKEN" => "process-token"
+      }
+      paired = run_command(
+        env, RbConfig.ruby, BIN, "status", "--ignore-user-config", "--api-url", "http://127.0.0.1:9"
+      )
+      mismatched = run_command(
+        env, RbConfig.ruby, BIN, "status", "--ignore-user-config", "--api-url", "http://127.0.0.1:10"
+      )
+      warning = "process-scoped AGENT_COORD_API_TOKEN is being used with"
+
+      assert_equal 2, paired.status.exitstatus, paired.stderr
+      refute_includes paired.stderr, warning
+      assert_includes paired.stderr, "backend selected explicitly by --api-url"
+      assert_equal 2, mismatched.status.exitstatus, mismatched.stderr
+      assert_includes mismatched.stderr, warning
+      assert_includes mismatched.stderr, "http://127.0.0.1:10"
+      refute_includes paired.stderr, "process-token"
+      refute_includes mismatched.stderr, "process-token"
+    end
+  end
+
+  # Ignoring the canonical file must not also weaken validation of process
+  # settings that the recovery command still preserves and consumes.
+  def test_ignore_user_config_still_rejects_an_invalid_process_policy
+    with_private_user_config("not a valid assignment\n") do |config_home|
+      result = run_command(
+        { "XDG_CONFIG_HOME" => config_home, "AGENT_COORD_POLICY" => "requried" },
+        RbConfig.ruby,
+        BIN,
+        "status",
+        "--ignore-user-config",
+        "--state-root",
+        @state_root,
+        "--json"
+      )
+
+      assert_equal 2, result.status.exitstatus, result.stderr
+      assert_empty result.stdout
+      assert_includes result.stderr, "invalid coordination policy in process environment:AGENT_COORD_POLICY"
+      refute_includes result.stderr, "unsafe user config syntax"
+    end
+  end
 
   def test_ignore_user_config_ignores_process_ref_unless_ref_is_explicit
     with_process_env(

@@ -530,7 +530,7 @@ module AgentCoord
       # This guard intentionally runs before run_doctor_command can apply its
       # stack-report usage mapping. Preserve that public exit-code contract even
       # though a rejected bypass never reaches the doctor parser.
-      raise unless command == "doctor" && e.exit_code == EXIT_USAGE && stack_json_option_token?(@argv)
+      raise unless command == "doctor" && e.exit_code == EXIT_USAGE && stack_json_option_token?(@argv.map(&:b))
 
       raise Error.new(e.message, exit_code: STACK_EXIT_USAGE)
     end
@@ -541,6 +541,12 @@ module AgentCoord
     # fallback are not opened at all.
     def initialize_bypassed_user_configuration!
       @process_config = USER_CONFIG_ENV_KEYS.to_h { |key| [key, ENV.fetch(key, nil)] }
+      process_policy = @process_config.fetch(POLICY_ENV, nil)
+      validate_policy!(process_policy, "process environment:#{POLICY_ENV}") if policy_supplied?(process_policy)
+      # Backend resolution must not see the ambient URL, but a process token is
+      # still visibly paired with the URL exported beside it. Retain that value
+      # only for the unbound-token diagnostic below.
+      @bypassed_process_api_url = @process_config.fetch("AGENT_COORD_API_URL", nil)
       BYPASSED_PROCESS_SELECTOR_ENV_KEYS.each { |key| @process_config[key] = nil }
       @user_config = {}
       @policy_file_value = nil
@@ -6932,7 +6938,13 @@ module AgentCoord
     # in the selected URL cannot leak into stderr.
     def warn_unbound_process_token(selected_url, options)
       return unless AgentCoord.config_value_set?(@process_config&.fetch("AGENT_COORD_API_TOKEN", nil))
-      return if selected_url == @process_config&.fetch("AGENT_COORD_API_URL", nil)
+
+      process_api_url = if @user_config_bypass_selector
+                          @bypassed_process_api_url
+                        else
+                          @process_config&.fetch("AGENT_COORD_API_URL", nil)
+                        end
+      return if selected_url == process_api_url
 
       emit_backend_conflict_warning(
         "warning: process-scoped AGENT_COORD_API_TOKEN is being used with " \
