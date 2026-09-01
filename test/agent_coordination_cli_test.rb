@@ -3404,6 +3404,38 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     end
   end
 
+  def test_config_set_rejects_a_preexisting_config_directory_missing_owner_rwx_before_mutation
+    with_private_config_tmpdir("agent-coord-config-directory-owner-mode") do |root|
+      config_home = File.join(root, "config")
+      config_dir = File.join(config_home, "agent-coord")
+      env_file = File.join(config_dir, "env")
+      sentinel = File.join(config_dir, "sentinel")
+      lock_digest = Digest::SHA256.hexdigest(env_file)[0, 16]
+      lock_file = File.join(config_dir, ".agent-coord-config-#{lock_digest}.lock")
+      FileUtils.mkdir_p(config_dir)
+      File.chmod(0o700, config_home, config_dir)
+      File.write(sentinel, "preserve me\n")
+      File.chmod(0o600, sentinel)
+      original_entries = Dir.children(config_dir).sort
+      File.chmod(0o300, config_dir)
+
+      result = run_command(
+        { "XDG_CONFIG_HOME" => config_home },
+        RbConfig.ruby, BIN, "config", "set", "--policy", "required"
+      )
+
+      assert_equal 2, result.status.exitstatus
+      assert_equal 0o300, File.stat(config_dir).mode & 0o777
+      assert_equal "preserve me\n", File.read(sentinel)
+      File.chmod(0o700, config_dir)
+      assert_equal original_entries, Dir.children(config_dir).sort
+      assert_empty([env_file, lock_file].select { |path| File.exist?(path) })
+      assert_includes result.stderr, "config parent leaf permissions are unsafe (expected 0700): #{config_dir}"
+    ensure
+      File.chmod(0o700, config_dir) if config_dir && File.exist?(config_dir)
+    end
+  end
+
   # Directory fsync is unsupported on some filesystems, which is why every other
   # atomic writer in the CLI routes it through AgentCoord.fsync_parent_directory.
   # This path called fsync on the descriptor directly, so an unsupported sync

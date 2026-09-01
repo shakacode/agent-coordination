@@ -2704,6 +2704,9 @@ module AgentCoord
       return unless leaf
 
       raise OperationalError, "config parent leaf is not owned by the current user: #{path}" if stat.uid != Process.uid
+      unless stat.mode.allbits?(0o700)
+        raise OperationalError, "config parent leaf permissions are unsafe (expected 0700): #{path}"
+      end
 
       stat = harden_legacy_config_leaf!(stat, path) unless stat.mode.nobits?(0o077)
       return if stat.mode.nobits?(0o077)
