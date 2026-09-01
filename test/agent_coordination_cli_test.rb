@@ -1999,6 +1999,26 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     end
   end
 
+  def test_unbound_process_token_warning_fails_closed_for_invalid_encoded_api_url
+    secret = "invalid-url-secret"
+    api_url = "https://fleet-user:#{secret}\xFF@127.0.0.1:9".force_encoding(Encoding::UTF_8)
+    stderr = StringIO.new
+    runner = AgentCoord::Runner.new(["status"], stdout: StringIO.new, stderr:)
+    runner.instance_variable_set(:@process_config, { "AGENT_COORD_API_TOKEN" => "process-token" })
+    runner.instance_variable_set(:@user_config, {})
+
+    refute_predicate api_url, :valid_encoding?
+    runner.send(:warn_unbound_process_token, api_url, stack_json: false)
+
+    assert_predicate stderr.string, :valid_encoding?
+    assert_includes stderr.string,
+                    "warning: process-scoped AGENT_COORD_API_TOKEN is being used with [invalid URL], " \
+                    "which it was not set alongside; the process token takes precedence over any saved token."
+    ["fleet-user", secret, "process-token"].each do |credential|
+      refute_includes stderr.string, credential
+    end
+  end
+
   def test_config_set_rejects_url_change_without_replacement_token
     with_private_user_config(
       "AGENT_COORD_API_URL=https://old.example\nAGENT_COORD_API_TOKEN=old-private-token\n"
@@ -6481,6 +6501,30 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     text_result = run_agent_coord("doctor", env: { "AGENT_COORD_MACHINE_ID" => "m5" })
     assert_equal 0, text_result.status.exitstatus, text_result.stderr
     refute_includes text_result.stdout, "machine_id:"
+  end
+
+  def test_lightweight_doctor_fails_closed_for_invalid_encoded_backend_url
+    secret = "doctor-url-secret"
+    api_url = "https://fleet-user:#{secret}\xFF@coord.example".force_encoding(Encoding::UTF_8)
+    stdout = StringIO.new
+    runner = AgentCoord::Runner.new(["doctor", "--json"], stdout:, stderr: StringIO.new)
+    store = Object.new
+    store.define_singleton_method(:verify_layout!) { |_prefixes| nil }
+    runner.define_singleton_method(:verify_doctor_store) do |_options, _backend_kind, deep: false|
+      raise "expected lightweight doctor" if deep
+
+      store
+    end
+
+    with_process_env("AGENT_COORD_API_URL" => api_url, "AGENT_COORD_API_TOKEN" => "process-token") do
+      assert_equal 0, runner.run
+    end
+
+    payload = JSON.parse(stdout.string)
+    assert_equal "[invalid URL]", payload.fetch("backend_url")
+    ["fleet-user", secret, "process-token"].each do |credential|
+      refute_includes stdout.string, credential
+    end
   end
 
   def test_doctor_deep_http_reports_machine_match_and_token_identity

@@ -65,6 +65,7 @@ module AgentCoord
   INVALID_URL_SCHEME_USERINFO_PREFIX = %r{\A\s*([a-zA-Z][a-zA-Z0-9+.-]*://).*@}m
   INVALID_URL_AUTHORITY_USERINFO_PREFIX = %r{\A(//).*@}m
   INVALID_URL_USERINFO_PREFIX = /\A.*@/m
+  INVALID_URL_DIAGNOSTIC = "[invalid URL]"
   # Unanchored twin for prose. URI::InvalidURIError embeds the offending URL in
   # its message, so a malformed configured value would otherwise reach stderr
   # with its userinfo intact -- the anchored form cannot match mid-sentence.
@@ -3004,18 +3005,16 @@ module AgentCoord
       [nil, SESSION_SOURCE_UNSET]
     end
 
-    # Mirror the state-path presence and whitespace rules without letting an
-    # invalid UTF-8 encoding tag make the diagnostic path raise before it can
-    # report the bad bytes. The binary copy retains the original bytes for the
-    # machine comparison; only the emitted diagnostic value is scrubbed.
+    # Use the canonical configuration-presence rule, then retain the original
+    # bytes for machine comparison. Only the emitted diagnostic value is
+    # scrubbed.
     def diagnostic_environment_identity_value(name)
       value = ENV.fetch(name, nil)
-      return nil unless value
+      return nil unless AgentCoord.config_value_set?(value)
 
       value = value.to_s
       value = value.b unless value.valid_encoding?
-      value = value.strip
-      value.empty? ? nil : value
+      value.strip
     end
 
     # Environment identity is state payload data in claim/heartbeat paths, but
@@ -8354,6 +8353,16 @@ module AgentCoord
     return value if value.nil?
 
     text = value.to_s.dup
+    # An invalid byte sequence cannot be inspected reliably for the authority
+    # delimiter. Do not return any part of it because that could expose
+    # credential bytes from a malformed configured URL.
+    return INVALID_URL_DIAGNOSTIC unless text.valid_encoding?
+
+    # URI and the fallback patterns use ASCII delimiters. A valid URL in a
+    # non-ASCII-compatible encoding can be transcoded without losing those
+    # delimiters, so diagnostics keep the readable URL shape after redaction.
+    text = utf8_diagnostic(text) unless text.encoding.ascii_compatible?
+
     begin
       uri = URI.parse(text)
       if uri.host

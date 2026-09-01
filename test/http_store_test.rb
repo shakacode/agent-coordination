@@ -743,6 +743,26 @@ class HttpBackendSelectionTest < HttpEnvTestCase # rubocop:disable Metrics/Class
                  AgentCoord.redact_userinfo_in_text("contact operator@example.com")
   end
 
+  def test_url_redactor_transcodes_non_ascii_compatible_url_before_redacting
+    secret = "utf16-url-secret"
+    encoded_url = "https://fleet-user:#{secret}@coord.example/base".encode(Encoding::UTF_16LE)
+
+    refute_predicate encoded_url.encoding, :ascii_compatible?
+    redacted = AgentCoord.redact_url_userinfo(encoded_url)
+
+    assert_equal "https://***@coord.example/base", redacted
+    assert_equal Encoding::UTF_8, redacted.encoding
+    refute_includes redacted, "fleet-user"
+    refute_includes redacted, secret
+
+    # Keep the established valid-input boundary: malformed ASCII URLs still
+    # use the broad authority redaction, and an @ in a valid path is unchanged.
+    assert_equal "https://***@example.invalid",
+                 AgentCoord.redact_url_userinfo("https://operator:secret with-space@example.invalid")
+    assert_equal "https://coord.example/base/user@example.org",
+                 AgentCoord.redact_url_userinfo("https://coord.example/base/user@example.org")
+  end
+
   def test_whitespace_only_process_token_falls_through_to_the_saved_token
     # read_token_from_stdin already refuses a wholly blank token, so treating an
     # exported blank one as a real credential both contradicts that and sends
