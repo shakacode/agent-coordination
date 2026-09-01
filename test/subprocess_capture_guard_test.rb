@@ -13,38 +13,45 @@ class Capture3SourceScanner
 
     @path = path
     @sites = []
-    walk(syntax_tree, nil, nil)
+    walk(syntax_tree, [], nil)
     @sites
   end
 
   private
 
-  def walk(node, definition_identity, lexical_owner)
+  def walk(node, scope_path, definition_identity)
     return unless node.is_a?(Array)
 
-    nested_owner = lexical_owner_name(node)
-    if nested_owner
-      lexical_owner = [lexical_owner, nested_owner].compact.join("::")
+    nested_scope = scope_identity(node)
+    if nested_scope
+      scope_path += [nested_scope]
       definition_identity = nil
     end
-    definition_identity = definition_identity_for(node, lexical_owner) || definition_identity
+    definition_identity = definition_identity_for(node, scope_path) || definition_identity
     @sites << capture_site(node, definition_identity) if capture3_call?(node)
     children = node.first.is_a?(Symbol) ? node.drop(1) : node
-    children.each { |child| walk(child, definition_identity, lexical_owner) }
+    children.each { |child| walk(child, scope_path, definition_identity) }
   end
 
-  def lexical_owner_name(node)
-    constant_name(node[1]) if %i[class module].include?(node.first)
-  end
-
-  def definition_identity_for(node, lexical_owner)
+  def scope_identity(node)
     case node.first
-    when :def
-      "#{lexical_owner || '<top-level>'}##{node.dig(1, 1)}"
-    when :defs
-      owner = self_receiver?(node[1]) ? lexical_owner || "<top-level>" : constant_name(node[1])
-      "#{owner || '<dynamic>'}.#{node.dig(3, 1)}"
+    when :class, :module
+      "#{node.first}(#{constant_name(node[1]) || '<dynamic>'})"
+    when :sclass
+      "singleton(#{receiver_name(node[1])})"
     end
+  end
+
+  def definition_identity_for(node, scope_path)
+    definition = "def(#{node.dig(1, 1)})" if node.first == :def
+    definition = "defs(#{receiver_name(node[1])}.#{node.dig(3, 1)})" if node.first == :defs
+    return unless definition
+
+    (scope_path + [definition]).join("/")
+  end
+
+  def receiver_name(node)
+    self_receiver?(node) ? "self" : constant_name(node) || "<dynamic>"
   end
 
   def self_receiver?(node)
@@ -57,8 +64,10 @@ class Capture3SourceScanner
     case node.first
     when :@const
       node[1]
-    when :const_ref, :top_const_ref, :var_ref
+    when :const_ref, :var_ref
       constant_name(node[1])
+    when :top_const_ref
+      "::#{constant_name(node[1])}"
     when :const_path_ref
       [constant_name(node[1]), constant_name(node[2])].compact.join("::")
     end
@@ -84,9 +93,9 @@ class SubprocessCaptureGuardTest < Minitest::Test
   ROOT = File.expand_path("..", __dir__)
   RUBY_SHEBANG = /\A\#!.*\bruby(?:\d+(?:\.\d+)*)?(?:\s|$)/n
   REVIEWED_HELPERS = {
-    "bin/agent-coord" => "AgentCoord.capture3_utf8",
-    "sim/bin/graveyard" => "<top-level>#capture3_utf8",
-    "sim/bin/verify-batch" => "<top-level>#capture3_utf8"
+    "bin/agent-coord" => "module(AgentCoord)/defs(self.capture3_utf8)",
+    "sim/bin/graveyard" => "def(capture3_utf8)",
+    "sim/bin/verify-batch" => "def(capture3_utf8)"
   }.freeze
 
   def test_only_the_reviewed_utf8_helpers_call_open3_capture3
@@ -121,7 +130,7 @@ class SubprocessCaptureGuardTest < Minitest::Test
     source = "#{read(path)}\nOpen3.capture3(\"ruby\", \"-v\")\n"
     sites = Capture3SourceScanner.new.scan(path, source)
 
-    assert_equal [[path, nil], [path, "<top-level>#capture3_utf8"]], sorted_site_identities(sites)
+    assert_equal [[path, nil], [path, "def(capture3_utf8)"]], sorted_site_identities(sites)
     assert_equal 1, unreviewed_sites(sites).length
   end
 
@@ -138,7 +147,60 @@ class SubprocessCaptureGuardTest < Minitest::Test
     offenders = unreviewed_sites(Capture3SourceScanner.new.scan(path, source))
 
     assert_equal 1, offenders.length
-    assert_match(/OtherRunner#capture3_utf8/, format_site(offenders.first))
+    assert_match(%r{class\(OtherRunner\)/def\(capture3_utf8\)}, format_site(offenders.first))
+  end
+
+  def test_guard_reports_a_same_named_helper_owned_by_another_singleton_class
+    path = "sim/bin/verify-batch"
+    source = <<~RUBY
+      class << OtherRunner
+        def capture3_utf8(*)
+          Open3.capture3(*)
+        end
+      end
+    RUBY
+
+    offenders = unreviewed_sites(Capture3SourceScanner.new.scan(path, source))
+
+    assert_equal 1, offenders.length
+    assert_match(%r{singleton\(OtherRunner\)/def\(capture3_utf8\)}, format_site(offenders.first))
+  end
+
+  def test_guard_reports_a_relative_singleton_owner_nested_under_another_module
+    path = "bin/agent-coord"
+    source = <<~RUBY
+      module Outer
+        module AgentCoord
+        end
+
+        class << AgentCoord
+          def capture3_utf8(*)
+            Open3.capture3(*)
+          end
+        end
+      end
+    RUBY
+
+    offenders = unreviewed_sites(Capture3SourceScanner.new.scan(path, source))
+
+    assert_equal 1, offenders.length
+  end
+
+  def test_guard_reports_a_def_self_nested_inside_a_singleton_scope
+    path = "bin/agent-coord"
+    source = <<~RUBY
+      module AgentCoord
+        class << self
+          def self.capture3_utf8(*)
+            Open3.capture3(*)
+          end
+        end
+      end
+    RUBY
+
+    offenders = unreviewed_sites(Capture3SourceScanner.new.scan(path, source))
+
+    assert_equal 1, offenders.length
   end
 
   def test_non_ruby_binary_file_is_skipped_before_utf8_parsing
