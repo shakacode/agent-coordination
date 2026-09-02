@@ -355,6 +355,16 @@ class SimulationTemplateTest < Minitest::Test
     assert_equal "Unexpected changed files for single-task validation:\ndocs/café.md\n", err
   end
 
+  def test_validate_escapes_control_characters_in_unexpected_paths
+    env = fake_git_env("docs/\n\e[31m.md\0".b)
+    env["BASH_ENV"] = File::NULL
+
+    _out, err, status = validate("HEAD", env)
+
+    refute status.success?
+    assert_equal "Unexpected changed files for single-task validation:\ndocs/\\n\\e[31m.md\n", err
+  end
+
   def test_validate_runs_no_change_suite_when_repo_path_contains_spaces
     test_runner = File.join(@repo, ".agents/bin/test")
     File.write(test_runner, "#!/usr/bin/env bash\nexit 0\n")
@@ -385,6 +395,19 @@ class SimulationTemplateTest < Minitest::Test
     File.chmod(0o644, File.join(@repo, ".agents/bin/test"))
     git("add", ".agents/bin/test")
     git("commit", "-qm", "make test runner non-executable")
+
+    _out, err, status = validate
+
+    refute status.success?
+    assert_equal "Simulation test runner must remain executable.\n", err
+  end
+
+  def test_validate_reports_directory_no_change_test_runner_without_backtrace
+    test_runner = File.join(@repo, ".agents/bin/test")
+    FileUtils.rm(test_runner)
+    git("add", "-A")
+    git("commit", "-qm", "remove test runner")
+    FileUtils.mkdir(test_runner)
 
     _out, err, status = validate
 
@@ -435,6 +458,15 @@ class SimulationTemplateTest < Minitest::Test
     assert_equal "Unexpected config-only paths: docs/café.md\n", err
   end
 
+  def test_config_check_escapes_control_characters_in_unexpected_paths
+    env = fake_git_env("docs/\n\e[31m.md\0".b)
+
+    _out, err, status = config_check("HEAD", env)
+
+    refute status.success?
+    assert_equal "Unexpected config-only paths: docs/\\n\\e[31m.md\n", err
+  end
+
   def test_seam_guard_rejects_invalid_filename_bytes_without_a_backtrace
     env = fake_git_env("lib/task_\xFF.rb\0".b)
     env.merge!("LC_ALL" => "C", "LANG" => "C")
@@ -465,6 +497,15 @@ class SimulationTemplateTest < Minitest::Test
 
     refute status.success?
     assert_equal "Unexpected guarded paths: docs/café.md\n", err
+  end
+
+  def test_seam_guard_escapes_control_characters_in_unexpected_paths
+    env = fake_git_env("docs/\n\e[31m.md\0".b)
+
+    _out, err, status = seam_guard("HEAD", "HEAD", env)
+
+    refute status.success?
+    assert_equal "Unexpected guarded paths: docs/\\n\\e[31m.md\n", err
   end
 
   def test_config_check_rejects_invalid_ci_script_syntax

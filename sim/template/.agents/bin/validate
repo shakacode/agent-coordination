@@ -47,10 +47,18 @@ if [ -n "$base_ref" ]; then
     changed = output.dup.force_encoding(Encoding::UTF_8)
     abort "Changed simulation paths must be valid UTF-8." unless changed.valid_encoding?
 
+    # Keep diagnostic escaping aligned with config-check and seam-guard. Match
+    # policy against raw valid UTF-8, but never emit control characters.
+    def diagnostic_path(path)
+      path.gsub(/\p{C}/u) { |character| character.dump[1...-1] }
+    end
+
     paths = changed.split("\0")
     if paths.empty?
       test_runner = File.join(root, ".agents/bin/test")
-      abort "Simulation test runner must remain executable." unless File.executable?(test_runner)
+      unless File.file?(test_runner) && File.executable?(test_runner)
+        abort "Simulation test runner must remain executable."
+      end
 
       exec [test_runner, test_runner]
     end
@@ -59,7 +67,7 @@ if [ -n "$base_ref" ]; then
     invalid = paths.reject { |path| path.match?(task_path) }
     unless invalid.empty?
       warn "Unexpected changed files for single-task validation:"
-      invalid.each { |path| warn path }
+      invalid.each { |path| warn diagnostic_path(path) }
       exit 1
     end
 

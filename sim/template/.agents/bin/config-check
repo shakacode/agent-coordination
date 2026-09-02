@@ -20,6 +20,12 @@ def changed_paths(output)
   utf8.split("\0")
 end
 
+# Keep diagnostic escaping aligned with seam-guard and the embedded Ruby in
+# validate. Match policy against raw valid UTF-8, but never emit controls.
+def diagnostic_path(path)
+  path.gsub(/\p{C}/u) { |character| character.dump[1...-1] }
+end
+
 root = File.expand_path("../..", __dir__)
 base_ref = ARGV[0] or abort "usage: config-check <base_ref>"
 allowed_paths = %w[
@@ -38,7 +44,7 @@ allowed_paths = %w[
 task_path = %r{\Alib/task_[[:alnum:]_]+\.rb\z}
 # Regenerate after a reviewed validator update with:
 # ruby -rdigest -e 'puts Digest::SHA256.file(".agents/bin/validate").hexdigest'
-expected_validator_sha256 = "83885ff9c97ea5c056a42781c024e4c7c26b1ff2b0fb086a0fb10c6d06bc6cee"
+expected_validator_sha256 = "28a1690bdc7faa4ab8c6dc780014558bb70451af69e2a3e107254164bc662e02"
 
 base_commit, base_status = Open3.capture2("git", "-C", root, "rev-parse", "--verify", "#{base_ref}^{commit}")
 abort "Could not resolve config-check base ref." unless base_status.success?
@@ -60,7 +66,8 @@ abort "Simulation validator does not match the checked contract." unless validat
 
 unless task_paths.empty?
   unless non_task_paths.empty?
-    abort "Task changes cannot be combined with config or unrelated paths: #{non_task_paths.join(', ')}"
+    displayed_paths = non_task_paths.map { |path| diagnostic_path(path) }
+    abort "Task changes cannot be combined with config or unrelated paths: #{displayed_paths.join(', ')}"
   end
 
   puts "TASK_ONLY"
@@ -68,7 +75,10 @@ unless task_paths.empty?
 end
 
 unexpected_paths = non_task_paths - allowed_paths
-abort "Unexpected config-only paths: #{unexpected_paths.join(', ')}" unless unexpected_paths.empty?
+unless unexpected_paths.empty?
+  displayed_paths = unexpected_paths.map { |path| diagnostic_path(path) }
+  abort "Unexpected config-only paths: #{displayed_paths.join(', ')}"
+end
 
 scripts = [
   validator,
