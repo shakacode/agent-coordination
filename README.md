@@ -221,6 +221,17 @@ worker/bin/provision-token dev --local \
   --write-prefix claims
 ```
 
+`bin/test-http-integration` and CI's standalone `worker-smoke` job select a free
+port by default. Set `AGENT_COORD_TEST_HTTP_PORT` to pin the port while
+reproducing a run:
+
+```bash
+AGENT_COORD_TEST_HTTP_PORT=8799 bin/test-http-integration
+```
+
+The pinned value is used unchanged, so it must be numeric and free. Pinning a
+busy port makes Wrangler report `EADDRINUSE`.
+
 Machine names may contain letters, numbers, dots, underscores, colons, and
 hyphens. Database names may contain letters, numbers, dots, underscores, and
 hyphens. If `wrangler d1 execute` fails, the script preserves Wrangler's output.

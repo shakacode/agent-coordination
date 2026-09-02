@@ -365,4 +365,30 @@ class PackagingTest < Minitest::Test
     floor_tests = floor_job.fetch("steps").find { |step| step.fetch("name", "") == "Run tests" }
     assert_equal canonical_tests.fetch("run"), floor_tests.fetch("run")
   end
+
+  def test_worker_smoke_uses_one_configurable_http_port
+    ci_jobs = YAML.safe_load_file(File.join(ROOT, ".github/workflows/ci.yml"), aliases: true).fetch("jobs")
+    smoke_step = ci_jobs.fetch("worker-smoke").fetch("steps").find do |step|
+      step.fetch("name", "") == "Run Worker smoke"
+    end
+    run = smoke_step.fetch("run")
+
+    assert_includes run, 'AGENT_COORD_TEST_HTTP_PORT="${AGENT_COORD_TEST_HTTP_PORT:-'
+    assert_includes run, 'npx wrangler dev --local --port "$AGENT_COORD_TEST_HTTP_PORT"'
+    assert_includes run, 'AGENT_COORD_API_URL="http://127.0.0.1:${AGENT_COORD_TEST_HTTP_PORT}"'
+    assert_equal 2, run.scan('curl -fsS "$AGENT_COORD_API_URL/v1/health"').length
+    refute_includes run, "127.0.0.1:8787"
+
+    smoke = File.read(File.join(ROOT, "worker/bin/smoke"))
+    assert_includes smoke, 'BASE="${AGENT_COORD_API_URL:-http://127.0.0.1:8787}"'
+  end
+
+  def test_readme_documents_the_local_http_test_port_override
+    readme = File.read(File.join(ROOT, "README.md"))
+
+    assert_includes readme, "`AGENT_COORD_TEST_HTTP_PORT`"
+    assert_match(/select a free\s+port by default/, readme)
+    assert_match(/pinned value.*numeric.*free/m, readme)
+    assert_includes readme, "EADDRINUSE"
+  end
 end
