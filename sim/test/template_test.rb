@@ -1,6 +1,7 @@
 # frozen_string_literal: true
 
 require "fileutils"
+require "digest"
 require "minitest/autorun"
 require "open3"
 require "tmpdir"
@@ -8,6 +9,7 @@ require "yaml"
 
 SIM_ROOT = File.expand_path("..", __dir__)
 TEMPLATE = File.join(SIM_ROOT, "template")
+PROJECT_ROOT = File.expand_path("..", SIM_ROOT)
 
 class SimulationTemplateTest < Minitest::Test
   POINTER = <<~MARKDOWN.chomp
@@ -59,6 +61,18 @@ class SimulationTemplateTest < Minitest::Test
     policy = YAML.safe_load_file(File.join(TEMPLATE, ".agents/agent-workflow.yml"), aliases: false)
 
     assert_equal ["actions/checkout", "ruby/setup-ruby"], policy.fetch("trusted_actions")
+  end
+
+  def test_rubocop_explicitly_includes_template_guard_scripts
+    output, status = Open3.capture2e(
+      "bundle", "exec", "rubocop", "--list-target-files",
+      chdir: PROJECT_ROOT
+    )
+
+    assert status.success?, output
+    targets = output.lines(chomp: true)
+    assert_includes targets, "sim/template/.agents/bin/config-check"
+    assert_includes targets, "sim/template/.agents/bin/seam-guard"
   end
 
   def test_validate_allows_policy_only_configuration_change
@@ -279,6 +293,253 @@ class SimulationTemplateTest < Minitest::Test
     refute_includes err, "IndexError"
   end
 
+  def test_config_check_handles_utf8_task_filename_under_c_locale
+    task = "lib/task_café.rb"
+    File.write(File.join(@repo, task), "TASK = :café\n")
+    git("add", task)
+
+    out, err, status = config_check("HEAD", { "LC_ALL" => "C", "LANG" => "C" })
+
+    assert status.success?, err
+    assert_includes out, "TASK_ONLY"
+  end
+
+  def test_seam_guard_handles_utf8_task_filename_under_c_locale
+    task = "lib/task_café.rb"
+    File.write(File.join(@repo, task), "TASK = :café\n")
+    git("add", task)
+    git("commit", "-qm", "unicode task")
+
+    out, err, status = seam_guard(
+      "HEAD^", "HEAD", { "LC_ALL" => "C", "LANG" => "C" }
+    )
+
+    assert status.success?, err
+    assert_includes out, "TASK_ONLY"
+  end
+
+  def test_ci_handles_utf8_task_filename_under_c_locale
+    task = "lib/task_café.rb"
+    test = "test/task_café_test.rb"
+    File.write(File.join(@repo, task), "TASK = :original\n")
+    File.write(File.join(@repo, test), "exit 0\n")
+    git("add", task, test)
+    git("commit", "-qm", "seed unicode task")
+    File.write(File.join(@repo, task), "TASK = :updated\n")
+
+    _out, err, status = run_ci_gate(
+      "HEAD", { "LC_ALL" => "C", "LANG" => "C" }
+    )
+
+    assert status.success?, err
+  end
+
+  def test_validate_rejects_invalid_filename_bytes_without_a_backtrace
+    env = fake_git_env("lib/task_\xFF.rb\0".b)
+    env.merge!("BASH_ENV" => File::NULL, "LC_ALL" => "C", "LANG" => "C")
+
+    _out, err, status = validate("HEAD", env)
+
+    refute status.success?
+    assert_equal "Changed simulation paths must be valid UTF-8.\n", err
+  end
+
+  def test_validate_reports_valid_utf8_unexpected_path_under_c_locale
+    env = fake_git_env("docs/café.md\0".b)
+    env.merge!(utf8_stderr_contract_env)
+    env.merge!("BASH_ENV" => File::NULL, "LC_ALL" => "C", "LANG" => "C")
+
+    _out, err, status = validate("HEAD", env)
+
+    refute status.success?
+    assert_equal "Unexpected changed files for single-task validation:\ndocs/café.md\n", err
+  end
+
+  def test_validate_escapes_control_characters_in_unexpected_paths
+    env = fake_git_env("docs/\n\e[31m/\uE000\u200D.md\0".b)
+    env["BASH_ENV"] = File::NULL
+
+    _out, err, status = validate("HEAD", env)
+
+    refute status.success?
+    assert_equal "Unexpected changed files for single-task validation:\ndocs/\\n\\e[31m/\uE000\\u200D.md\n", err
+  end
+
+  def test_validate_runs_no_change_suite_when_repo_path_contains_spaces
+    test_runner = File.join(@repo, ".agents/bin/test")
+    File.write(test_runner, "#!/usr/bin/env bash\nexit 0\n")
+    git("add", ".agents/bin/test")
+    git("commit", "-qm", "make full suite deterministic")
+
+    spaced_repo = File.join(@dir, "repo with spaces")
+    FileUtils.mv(@repo, spaced_repo)
+    @repo = spaced_repo
+
+    _out, err, status = validate
+
+    assert status.success?, err
+  end
+
+  def test_validate_reports_missing_no_change_test_runner_without_backtrace
+    FileUtils.rm(File.join(@repo, ".agents/bin/test"))
+    git("add", "-A")
+    git("commit", "-qm", "remove test runner")
+
+    _out, err, status = validate
+
+    refute status.success?
+    assert_equal "Simulation test runner must remain executable.\n", err
+  end
+
+  def test_validate_reports_non_executable_no_change_test_runner_without_backtrace
+    File.chmod(0o644, File.join(@repo, ".agents/bin/test"))
+    git("add", ".agents/bin/test")
+    git("commit", "-qm", "make test runner non-executable")
+
+    _out, err, status = validate
+
+    refute status.success?
+    assert_equal "Simulation test runner must remain executable.\n", err
+  end
+
+  def test_validate_reports_directory_no_change_test_runner_without_backtrace
+    test_runner = File.join(@repo, ".agents/bin/test")
+    FileUtils.rm(test_runner)
+    git("add", "-A")
+    git("commit", "-qm", "remove test runner")
+    FileUtils.mkdir(test_runner)
+
+    _out, err, status = validate
+
+    refute status.success?
+    assert_equal "Simulation test runner must remain executable.\n", err
+  end
+
+  def test_validate_reports_missing_fallback_test_runner_without_backtrace
+    FileUtils.rm(File.join(@repo, ".agents/bin/test"))
+    git("branch", "-M", "main")
+
+    _out, err, status = validate(nil, { "BASH_ENV" => File::NULL })
+
+    refute status.success?
+    assert_equal "Simulation test runner must remain executable.\n", err
+  end
+
+  def test_validate_reports_non_executable_fallback_test_runner_without_backtrace
+    File.chmod(0o644, File.join(@repo, ".agents/bin/test"))
+    git("branch", "-M", "main")
+
+    _out, err, status = validate(nil, { "BASH_ENV" => File::NULL })
+
+    refute status.success?
+    assert_equal "Simulation test runner must remain executable.\n", err
+  end
+
+  def test_validate_reports_directory_fallback_test_runner_without_backtrace
+    test_runner = File.join(@repo, ".agents/bin/test")
+    FileUtils.rm(test_runner)
+    FileUtils.mkdir(test_runner)
+    git("branch", "-M", "main")
+
+    _out, err, status = validate(nil, { "BASH_ENV" => File::NULL })
+
+    refute status.success?
+    assert_equal "Simulation test runner must remain executable.\n", err
+  end
+
+  def test_validate_does_not_honor_inherited_syntax_only_environment
+    FileUtils.rm(File.join(@repo, ".agents/bin/test"))
+    git("add", "-A")
+    git("commit", "-qm", "remove test runner")
+
+    _out, err, status = validate("HEAD", { "AGENT_SIM_VALIDATE_SYNTAX_ONLY" => "1" })
+
+    refute status.success?
+    assert_equal "Simulation test runner must remain executable.\n", err
+  end
+
+  def test_config_check_rejects_invalid_filename_bytes_without_a_backtrace
+    env = fake_git_env("lib/task_\xFF.rb\0".b)
+    env.merge!("LC_ALL" => "C", "LANG" => "C")
+
+    _out, err, status = config_check("HEAD", env)
+
+    refute status.success?
+    assert_equal "Changed simulation paths must be valid UTF-8.\n", err
+  end
+
+  def test_config_check_reports_valid_utf8_task_mix_under_c_locale
+    env = fake_git_env("lib/task_one.rb\0docs/café.md\0".b)
+    env.merge!(utf8_stderr_contract_env)
+    env.merge!("LC_ALL" => "C", "LANG" => "C")
+
+    _out, err, status = config_check("HEAD", env)
+
+    refute status.success?
+    assert_equal "Task changes cannot be combined with config or unrelated paths: docs/café.md\n", err
+  end
+
+  def test_config_check_reports_valid_utf8_unexpected_path_under_c_locale
+    env = fake_git_env("docs/café.md\0".b)
+    env.merge!(utf8_stderr_contract_env)
+    env.merge!("LC_ALL" => "C", "LANG" => "C")
+
+    _out, err, status = config_check("HEAD", env)
+
+    refute status.success?
+    assert_equal "Unexpected config-only paths: docs/café.md\n", err
+  end
+
+  def test_config_check_escapes_control_characters_in_unexpected_paths
+    env = fake_git_env("docs/\n\e[31m/\uE000\u200D.md\0".b)
+
+    _out, err, status = config_check("HEAD", env)
+
+    refute status.success?
+    assert_equal "Unexpected config-only paths: docs/\\n\\e[31m/\uE000\\u200D.md\n", err
+  end
+
+  def test_seam_guard_rejects_invalid_filename_bytes_without_a_backtrace
+    env = fake_git_env("lib/task_\xFF.rb\0".b)
+    env.merge!("LC_ALL" => "C", "LANG" => "C")
+
+    _out, err, status = seam_guard("HEAD", "HEAD", env)
+
+    refute status.success?
+    assert_equal "Changed simulation paths must be valid UTF-8.\n", err
+  end
+
+  def test_seam_guard_reports_valid_utf8_task_mix_under_c_locale
+    env = fake_git_env("lib/task_one.rb\0docs/café.md\0".b)
+    env.merge!(utf8_stderr_contract_env)
+    env.merge!("LC_ALL" => "C", "LANG" => "C")
+
+    _out, err, status = seam_guard("HEAD", "HEAD", env)
+
+    refute status.success?
+    assert_equal "Task changes cannot be combined with config or unrelated paths: docs/café.md\n", err
+  end
+
+  def test_seam_guard_reports_valid_utf8_unexpected_path_under_c_locale
+    env = fake_git_env("docs/café.md\0".b)
+    env.merge!(utf8_stderr_contract_env)
+    env.merge!("LC_ALL" => "C", "LANG" => "C")
+
+    _out, err, status = seam_guard("HEAD", "HEAD", env)
+
+    refute status.success?
+    assert_equal "Unexpected guarded paths: docs/café.md\n", err
+  end
+
+  def test_seam_guard_escapes_control_characters_in_unexpected_paths
+    env = fake_git_env("docs/\n\e[31m/\uE000\u200D.md\0".b)
+
+    _out, err, status = seam_guard("HEAD", "HEAD", env)
+
+    refute status.success?
+    assert_equal "Unexpected guarded paths: docs/\\n\\e[31m/\uE000\\u200D.md\n", err
+  end
+
   def test_config_check_rejects_invalid_ci_script_syntax
     File.open(File.join(@repo, ".agents/bin/ci"), "a") { |file| file << "\nif\n" }
 
@@ -307,6 +568,21 @@ class SimulationTemplateTest < Minitest::Test
 
     refute status.success?
     assert_includes err, "Invalid shell syntax in simulation command scripts."
+  end
+
+  def test_config_check_rejects_invalid_embedded_validate_ruby_syntax
+    validator = File.join(@repo, ".agents/bin/validate")
+    File.write(validator, File.read(validator).sub('changed.split("\\0")', 'changed.split("\\0"'))
+    validator_sha256 = Digest::SHA256.file(validator).hexdigest
+    guard = File.join(@repo, ".agents/bin/config-check")
+    guard_contents = File.read(guard).sub(/expected_validator_sha256 = "[0-9a-f]+"/,
+                                          "expected_validator_sha256 = \"#{validator_sha256}\"")
+    File.write(guard, guard_contents)
+
+    _out, err, status = config_check
+
+    refute status.success?
+    assert_includes err, "Invalid embedded Ruby syntax in simulation validator."
   end
 
   def test_config_check_ignores_base_only_changes_for_stale_task_branch
@@ -407,24 +683,77 @@ class SimulationTemplateTest < Minitest::Test
     output.strip
   end
 
-  def run_ci_gate(base_ref = "HEAD")
+  def fake_git_env(diff_output)
+    fake_bin = File.join(@dir, "fake-bin")
+    FileUtils.mkdir_p(fake_bin)
+    fake_git = File.join(fake_bin, "git")
+    File.write(fake_git, <<~RUBY)
+      #!/usr/bin/env ruby
+      if ARGV.include?("diff") && ARGV.include?("-z")
+        STDOUT.binmode
+        STDOUT.write(#{diff_output.dump}.b)
+        exit 0
+      end
+      exec(ENV.fetch("REAL_GIT"), *ARGV)
+    RUBY
+    File.chmod(0o755, fake_git)
+
+    real_git = ENV.fetch("PATH").split(File::PATH_SEPARATOR).filter_map do |directory|
+      candidate = File.join(directory, "git")
+      candidate if File.file?(candidate) && File.executable?(candidate)
+    end.first
+    raise "git executable not found" unless real_git
+
+    {
+      "PATH" => [fake_bin, ENV.fetch("PATH")].join(File::PATH_SEPARATOR),
+      "REAL_GIT" => real_git
+    }
+  end
+
+  def utf8_stderr_contract_env
+    assertion = File.join(@dir, "assert-utf8-stderr.rb")
+    File.write(assertion, <<~RUBY)
+      relevant_program = $PROGRAM_NAME == "-e" || %w[config-check seam-guard].include?(File.basename($PROGRAM_NAME))
+      if relevant_program
+        at_exit do
+          warn "Expected explicit UTF-8 stderr." unless $stderr.external_encoding == Encoding::UTF_8
+        end
+      end
+    RUBY
+
+    rubyopt = [ENV.fetch("RUBYOPT", nil), "-r#{assertion}"].compact.join(" ")
+    { "RUBYOPT" => rubyopt }
+  end
+
+  def run_ci_gate(base_ref = "HEAD", env = {})
     Open3.capture3(
-      { "AGENT_SIM_BASE_REF" => base_ref },
+      env.merge("AGENT_SIM_BASE_REF" => base_ref),
       File.join(@repo, ".agents/bin/ci"),
       chdir: @repo
     )
   end
 
-  def config_check(base_ref = "HEAD")
+  def validate(base_ref = "HEAD", env = {})
+    validator = File.join(@repo, ".agents/bin/validate")
     Open3.capture3(
+      env.merge("AGENT_SIM_BASE_REF" => base_ref),
+      [validator, validator],
+      chdir: @repo
+    )
+  end
+
+  def config_check(base_ref = "HEAD", env = {})
+    Open3.capture3(
+      env,
       File.join(@repo, ".agents/bin/config-check"),
       base_ref,
       chdir: @repo
     )
   end
 
-  def seam_guard(base_ref, head_ref)
+  def seam_guard(base_ref, head_ref, env = {})
     Open3.capture3(
+      env,
       File.join(TEMPLATE, ".agents/bin/seam-guard"),
       @repo,
       base_ref,
