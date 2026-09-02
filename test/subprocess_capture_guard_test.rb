@@ -69,7 +69,7 @@ class Capture3SourceScanner
     when :top_const_ref
       "::#{constant_name(node[1])}"
     when :const_path_ref
-      [constant_name(node[1]), constant_name(node[2])].compact.join("::")
+      [constant_name(node[1]) || "<dynamic>", constant_name(node[2]) || "<dynamic>"].join("::")
     end
   end
 
@@ -78,10 +78,9 @@ class Capture3SourceScanner
   end
 
   def open3_receiver?(node)
-    node = node.dig(1, 0) while node.is_a?(Array) && node.first == :paren && node[1].is_a?(Array) && node[1].one?
-    return false unless node.is_a?(Array) && %i[var_ref top_const_ref].include?(node.first)
+    node = node[1].last while node.is_a?(Array) && node.first == :paren && node[1].is_a?(Array) && !node[1].empty?
 
-    node.dig(1, 0) == :@const && node.dig(1, 1) == "Open3"
+    %w[Open3 ::Open3 Object::Open3 ::Object::Open3].include?(constant_name(node))
   end
 
   def capture_site(node, definition_identity)
@@ -123,6 +122,29 @@ class SubprocessCaptureGuardTest < Minitest::Test
 
     assert_equal 1, offenders.length
     assert_match %r{\Abin/new-tool:\d+: Open3\.capture3 in <top-level>\z}, format_site(offenders.first)
+  end
+
+  def test_guard_reports_a_multi_statement_parenthesized_open3_receiver
+    path = "bin/new-tool"
+    source = "#!/usr/bin/env ruby\n(setup; Open3).capture3(\"ruby\", \"-v\")\n"
+
+    offenders = unreviewed_sites(Capture3SourceScanner.new.scan(path, source))
+
+    assert_equal 1, offenders.length
+    assert_match %r{\Abin/new-tool:\d+: Open3\.capture3 in <top-level>\z}, format_site(offenders.first)
+  end
+
+  def test_guard_reports_object_qualified_open3_receivers
+    path = "bin/new-tool"
+    source = <<~RUBY
+      #!/usr/bin/env ruby
+      Object::Open3.capture3("ruby", "-v")
+      ::Object::Open3.capture3("ruby", "-v")
+    RUBY
+
+    offenders = unreviewed_sites(Capture3SourceScanner.new.scan(path, source))
+
+    assert_equal 2, offenders.length
   end
 
   def test_guard_reports_a_top_level_call_in_a_reviewed_file_without_a_sorting_error
@@ -184,6 +206,22 @@ class SubprocessCaptureGuardTest < Minitest::Test
     offenders = unreviewed_sites(Capture3SourceScanner.new.scan(path, source))
 
     assert_equal 1, offenders.length
+  end
+
+  def test_guard_preserves_a_dynamic_scope_prefix
+    path = "bin/agent-coord"
+    source = <<~RUBY
+      module factory::AgentCoord
+        def self.capture3_utf8(*)
+          Open3.capture3(*)
+        end
+      end
+    RUBY
+
+    offenders = unreviewed_sites(Capture3SourceScanner.new.scan(path, source))
+
+    assert_equal 1, offenders.length
+    assert_match(%r{module\(<dynamic>::AgentCoord\)/defs\(self\.capture3_utf8\)}, format_site(offenders.first))
   end
 
   def test_guard_reports_a_def_self_nested_inside_a_singleton_scope
