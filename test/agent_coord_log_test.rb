@@ -538,6 +538,17 @@ class AgentCoordLogTest < AgentCoordLogTestCase
     refute_includes result.stdout, "no events"
   end
 
+  def test_log_keeps_an_explicitly_empty_positional_unscoped
+    write_trace
+
+    result = run_log("")
+
+    assert_equal 0, result.status.exitstatus, result.stderr
+    assert_equal 6, result.stdout.lines.length
+    assert_includes result.stdout, "shakacode/example#104"
+    assert_includes result.stdout, "shakacode/other#7"
+  end
+
   # The mirror is a complete durable copy, not a filtered view. A narrow sync
   # followed by a broader one would append the older events after the newer ones,
   # so the file's last line would no longer be the current state.

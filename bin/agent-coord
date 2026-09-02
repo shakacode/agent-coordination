@@ -4492,7 +4492,7 @@ module AgentCoord
 
                     "#{options[:repo]}##{options[:target]}"
                   end
-      return if work_item.nil?
+      return if work_item.to_s.empty?
 
       repo, target = log_split_work_item(work_item)
       AgentCoord.validate_repo!(repo, "work item")
