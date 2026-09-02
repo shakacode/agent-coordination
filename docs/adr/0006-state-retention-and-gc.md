@@ -47,8 +47,17 @@ it with sibling records, the entire group stays in hot storage byte-for-byte;
 otherwise the corrupt record itself stays hot. Other healthy groups continue
 processing. This applies to ordinary terminal history and synthetic orphan
 history; GC never scrubs or transcodes the corrupt bytes. This decision is
-scoped to event compaction and does not define malformed-encoding handling for
-claims, heartbeats, batches, or `batch-audit`.
+scoped to event compaction.
+
+At the separate archive-candidate boundary, GC recursively checks claims,
+heartbeats, and batches before it evaluates or serializes them. It skips each
+record that contains malformed UTF-8, leaves its source bytes unchanged, and
+continues with healthy eligible records in both dry-run and execute modes.
+`batch-audit` applies its own read-only boundary to the selected batch and event
+trail. Malformed UTF-8 produces the existing `unknown` verdict and a valid UTF-8
+diagnostic; it never produces a partial audit verdict or rewrites the source.
+These command-specific policies do not define a shared store policy and do not
+change the event-compaction grouping policy above.
 The compacted envelope lists all consumed paths while its records retain first,
 last, every valid terminal event, and phase transitions and omit repeated
 renewals.
