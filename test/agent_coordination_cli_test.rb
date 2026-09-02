@@ -2241,6 +2241,30 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     end
   end
 
+  def test_token_only_config_set_rejects_an_invalid_saved_api_url_without_writing_token
+    with_private_user_config("AGENT_COORD_API_URL=http://coordination.example\n") do |config_home|
+      env_file = File.join(config_home, "agent-coord", "env")
+      result = run_command(
+        {
+          "XDG_CONFIG_HOME" => config_home,
+          "AGENT_COORD_API_URL" => nil,
+          "AGENT_COORD_API_TOKEN" => nil
+        },
+        RbConfig.ruby,
+        BIN,
+        "config",
+        "set",
+        "--token-stdin",
+        stdin_data: "private-token\n"
+      )
+
+      assert_equal 1, result.status.exitstatus
+      assert_includes result.stderr, "must use https unless it points at localhost"
+      assert_equal "AGENT_COORD_API_URL=http://coordination.example\n", File.read(env_file)
+      refute_includes File.read(env_file), "private-token"
+    end
+  end
+
   def test_config_set_rejects_empty_token_stdin_cleanly
     with_private_config_tmpdir("agent-coord-empty-token") do |root|
       config_home = File.join(root, "config")

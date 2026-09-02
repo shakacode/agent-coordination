@@ -2563,6 +2563,7 @@ module AgentCoord
         validate_api_url_token_transition!(current, updates)
         merged = current.merge(updates)
         validate_config_token_binding!(merged)
+        validate_config_api_url!(merged.fetch("AGENT_COORD_API_URL")) if updates.key?("AGENT_COORD_API_TOKEN")
         write_canonical_config_file(@user_config_path, render_user_env(merged))
       end
       @stdout.puts "updated user configuration: #{@user_config_path} (#{updates.keys.sort.join(', ')})" \
