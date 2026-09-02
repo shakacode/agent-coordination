@@ -676,6 +676,35 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     refute_includes compacted.fetch("records").map { |row| row.fetch("event_id") }, "claimed-renewal"
   end
 
+  # This is deliberately a producer-side test: every envelope comes from a real
+  # gc --execute, then the public log command proves that its archive validator
+  # still accepts the producer's retained subset, synthetic metadata, and
+  # single-event boundary as one complete trail.
+  def test_gc_execute_envelopes_round_trip_through_log_archive_validation
+    old = Time.utc(2026, 7, 1, 12, 0, 0)
+    write_gc_log_retained_events(old)
+    write_gc_log_synthetic_events(old)
+    write_gc_log_single_event(old)
+
+    gc = run_agent_coord(
+      "gc", "--execute", "--hot-days", "0", "--synthetic-hot-days", "0", "--json"
+    )
+    assert_equal 0, gc.status.exitstatus, gc.stderr
+    compactions = JSON.parse(gc.stdout).fetch("actions").select { |action| action["action"] == "compact" }
+    assert_equal 3, compactions.length
+    assert_equal [1, 2, 3], compactions.map { |action| action.fetch("source_paths").length }.sort
+
+    assert_gc_log_round_trip("shakacode/example", "retained-subset", %w[first closed])
+    assert_gc_log_synthetic_hidden
+    assert_gc_log_round_trip("sim/example", "synthetic-only", %w[first last], include_synthetic: true)
+    assert_gc_log_round_trip("shakacode/example", "single-boundary", %w[closed])
+
+    sync = run_agent_coord("log", "--sync", "--include-synthetic")
+    assert_equal 0, sync.status.exitstatus,
+                 "log must accept every gc envelope as a complete trail: #{sync.stderr}"
+    assert_equal 5, File.readlines(File.join(@state_root, "log.tsv"), encoding: "UTF-8").length
+  end
+
   def test_gc_terminal_compaction_is_scoped_to_one_lane
     now = Time.utc(2026, 7, 12, 12, 0, 0)
     old = (now - (8 * 86_400)).iso8601
@@ -11430,6 +11459,71 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     assert_equal 0, status.status.exitstatus, status.stderr
     assert_includes status.stdout, "lane docs owner worker-docs targets 3972 status blocked live"
     assert_includes status.stdout, "deps batch-a:backend blocked_on batch-a:backend"
+  end
+
+  def write_gc_log_retained_events(old)
+    batch_id = "gc-log-retained"
+    events = {
+      "first" => {
+        "type" => "claim.acquired", "phase" => "implementation", "agent_id" => "round-trip-worker"
+      },
+      "renewal" => { "type" => "claim.released", "agent_id" => "round-trip-worker" },
+      "closed" => valid_gc_lane_closed(
+        event_id: "closed", batch_id: batch_id, target: "retained-subset",
+        at: (old + 2).iso8601, extra: { "lane" => "code" }
+      )
+    }
+    events.each_with_index do |(event_id, payload), index|
+      common = {
+        "schema_version" => 2, "event_id" => event_id, "batch_id" => batch_id,
+        "repo" => "shakacode/example", "target" => "retained-subset", "lane" => "code",
+        "at" => (old + index).iso8601
+      }
+      write_state_record("events/#{batch_id}/#{event_id}.json", common.merge(payload))
+    end
+  end
+
+  def write_gc_log_synthetic_events(old)
+    batch_id = "gc-log-synthetic"
+    %w[first last].each_with_index do |event_id, index|
+      write_state_record(
+        "events/#{batch_id}/#{event_id}.json",
+        "schema_version" => 2, "event_id" => event_id, "batch_id" => batch_id,
+        "type" => "phase.changed", "repo" => "sim/example", "target" => "synthetic-only", "lane" => "sim",
+        "phase" => event_id, "synthetic" => true, "synthetic_kind" => "simulation",
+        "at" => (old + index).iso8601
+      )
+    end
+  end
+
+  def write_gc_log_single_event(old)
+    batch_id = "gc-log-single"
+    write_state_record(
+      "events/#{batch_id}/closed.json",
+      valid_gc_lane_closed(
+        event_id: "closed", batch_id: batch_id, target: "single-boundary", at: old.iso8601,
+        extra: { "lane" => "code" }
+      )
+    )
+  end
+
+  def assert_gc_log_round_trip(repo, target, expected_ids, include_synthetic: false)
+    flags = include_synthetic ? ["--include-synthetic"] : []
+    log = run_agent_coord("log", "--repo", repo, "--target", target, "--json", *flags)
+    event_ids = JSON.parse(log.stdout).fetch("events").map { |event| event.fetch("event_id") }
+
+    assert_equal 0, log.status.exitstatus, log.stderr
+    assert_equal expected_ids.sort, event_ids.sort
+    refute_includes log.stderr, "this trail may be incomplete",
+                    "log archive validation must stay in sync with gc for #{repo}##{target}"
+  end
+
+  def assert_gc_log_synthetic_hidden
+    log = run_agent_coord("log", "--repo", "sim/example", "--target", "synthetic-only", "--json")
+
+    assert_equal 0, log.status.exitstatus, log.stderr
+    assert_empty JSON.parse(log.stdout).fetch("events")
+    assert_empty log.stderr, "gc must mark a wholly synthetic envelope so log can hide its provenance"
   end
 
   def valid_gc_lane_closed(event_id:, batch_id:, target:, at:, extra: {})
