@@ -4973,6 +4973,47 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     assert_includes result.stdout, "--stack-json  emit the versioned component report for stack aggregators"
   end
 
+  def test_doctor_help_documents_split_brain_status_and_local_mode_selections
+    result = run_agent_coord("doctor", "--help", state_root: nil)
+
+    assert_equal 0, result.status.exitstatus, result.stderr
+    assert_includes result.stdout, "status: split_brain"
+    assert_includes result.stdout, "split_brain_env_file"
+    assert_includes result.stdout, "--state-root PATH"
+    assert_includes result.stdout, "AGENT_COORD_STATE_ROOT"
+    assert_includes result.stdout, "AGENT_COORD_LOCAL=1"
+    refute_includes result.stdout, "split_brain_construct"
+    refute_includes result.stdout, "split_brain_reason"
+  end
+
+  def test_write_command_help_documents_the_split_brain_hard_stop
+    %w[claim release heartbeat record-event register-batch].each do |command|
+      result = run_agent_coord(command, "--help", state_root: nil)
+
+      assert_equal 0, result.status.exitstatus, result.stderr
+      assert_includes result.stdout, "Backend safety:", command
+      assert_includes result.stdout, "status: split_brain", command
+      assert_includes result.stdout, "--state-root PATH", command
+      assert_includes result.stdout, "AGENT_COORD_STATE_ROOT", command
+      assert_includes result.stdout, "AGENT_COORD_LOCAL=1", command
+      refute_includes result.stdout, "split_brain_construct", command
+    end
+
+    %w[status log batch-audit gc doctor].each do |command|
+      result = run_agent_coord(command, "--help", state_root: nil)
+
+      refute_includes result.stdout, "Backend safety:", command
+    end
+  end
+
+  def test_register_batch_help_documents_the_reserved_lane_identity
+    result = run_agent_coord("register-batch", "--help", state_root: nil)
+
+    assert_equal 0, result.status.exitstatus, result.stderr
+    assert_includes result.stdout, "UNKNOWN (any case) is rejected"
+    assert_includes result.stdout, "no-name/no-owner sentinel"
+  end
+
   def test_non_doctor_deep_guard_ignores_deep_as_option_value
     commands = [
       ["status", "--branch", "--deep", "--json"],
@@ -11190,6 +11231,52 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     assert_equal 1, result.status.exitstatus
     assert_includes result.stderr, "batch lane 1 name must be a string"
     refute_path_exists File.join(@state_root, "batches", "batch-b.json")
+  end
+
+  def test_register_batch_rejects_reserved_unknown_lane_name
+    manifest_path = File.join(@state_root, "batch-manifest.json")
+    [{ "name" => "UNKNOWN" }, { "name" => "unknown" }, { "id" => "Unknown" }].each do |identity|
+      lane = identity.merge("owner" => "worker-docs", "targets" => ["3972"])
+      File.write(manifest_path, JSON.pretty_generate("batch_id" => "batch-b", "lanes" => [lane]))
+
+      result = run_agent_coord("register-batch", "--file", manifest_path)
+
+      assert_equal 1, result.status.exitstatus, result.stderr
+      assert_includes result.stderr, "batch lane 1 name #{identity.values.first} is reserved"
+      assert_includes result.stderr, "no-name/no-owner sentinel"
+      refute_path_exists File.join(@state_root, "batches", "batch-b.json")
+    end
+  end
+
+  def test_register_batch_rejects_reserved_unknown_lane_owner
+    manifest_path = File.join(@state_root, "batch-manifest.json")
+    [{ "owner" => "UNKNOWN" }, { "owner" => "unknown" }, { "agent_id" => "Unknown" }].each do |identity|
+      lane = identity.merge("name" => "docs", "targets" => ["3972"])
+      File.write(manifest_path, JSON.pretty_generate("batch_id" => "batch-b", "lanes" => [lane]))
+
+      result = run_agent_coord("register-batch", "--file", manifest_path)
+
+      assert_equal 1, result.status.exitstatus, result.stderr
+      assert_includes result.stderr, "batch lane docs owner #{identity.values.first} is reserved"
+      assert_includes result.stderr, "no-name/no-owner sentinel"
+      refute_path_exists File.join(@state_root, "batches", "batch-b.json")
+    end
+  end
+
+  def test_register_batch_accepts_lane_identities_that_only_contain_unknown
+    manifest_path = File.join(@state_root, "batch-manifest.json")
+    File.write(
+      manifest_path,
+      JSON.pretty_generate(
+        "batch_id" => "batch-b",
+        "lanes" => [{ "name" => "unknown-docs", "owner" => "worker-unknown", "targets" => ["3972"] }]
+      )
+    )
+
+    result = run_agent_coord("register-batch", "--file", manifest_path)
+
+    assert_equal 0, result.status.exitstatus, result.stderr
+    assert_path_exists File.join(@state_root, "batches", "batch-b.json")
   end
 
   def test_status_batch_scope_reports_missing_lane_owner_heartbeats
