@@ -376,6 +376,7 @@ module AgentCoord
   end
 
   StoredJson = Struct.new(:path, :data, :sha, keyword_init: true)
+  JsonEncodingPartition = Struct.new(:records, :invalid_utf8_paths, keyword_init: true)
   # Per-lane attribution context for batch-audit. `targets` is the lane's full
   # declared target list; `unique_targets` is the subset that maps to exactly one
   # lane in the batch. Grouping these keeps the event matcher within the argument
@@ -1889,7 +1890,7 @@ module AgentCoord
 
     def gc_archive_candidates(store, now, hot_days, synthetic_hot_days, prefixes = JSON_PREFIXES)
       candidates = prefixes.flat_map do |prefix|
-        store.list_json(prefix).filter_map do |entry|
+        gc_archive_entries(store, prefix).filter_map do |entry|
           next if gc_invalid_encoding?(entry.data)
 
           reason, eligible_at = gc_archive_eligibility(entry, prefix, now)
@@ -1914,6 +1915,12 @@ module AgentCoord
         end
       end
       candidates.sort_by { |candidate| candidate.dig(:action, "source_path") }
+    end
+
+    def gc_archive_entries(store, prefix)
+      return store.list_json(prefix) unless store.respond_to?(:list_json_partitioned_by_encoding)
+
+      store.list_json_partitioned_by_encoding(prefix).records
     end
 
     def gc_delete_candidates(store, now)
@@ -5733,8 +5740,9 @@ module AgentCoord
         "verdict" => reports.all? { |lane| lane.fetch("complete") } ? "complete" : "incomplete",
         "lanes" => reports
       }
-    rescue OperationalError, JSON::ParserError, PathValidationError => e
-      batch_audit_unknown_report(batch_id, "coordination state unreadable: #{e.message}")
+    rescue OperationalError, JSON::ParserError, PathValidationError, EncodingError => e
+      message = AgentCoord.utf8_diagnostic(e.message)
+      batch_audit_unknown_report(batch_id, "coordination state unreadable: #{message}")
     end
 
     def batch_audit_unknown_report(batch_id, reason)
@@ -7503,6 +7511,24 @@ module AgentCoord
       end
     end
 
+    def list_json_partitioned_by_encoding(prefix)
+      directory = readable_list_directory(prefix)
+      return JsonEncodingPartition.new(records: [], invalid_utf8_paths: []) unless directory
+
+      entries = []
+      invalid_utf8_paths = []
+      list_json_files(directory, prefix).each do |file|
+        path = file.delete_prefix("#{@root}/")
+        contents = File.read(file, encoding: "UTF-8")
+        if contents.valid_encoding?
+          entries << StoredJson.new(path: path, data: JSON.parse(contents), sha: file_sha(file))
+        else
+          invalid_utf8_paths << path
+        end
+      end
+      JsonEncodingPartition.new(records: entries, invalid_utf8_paths: invalid_utf8_paths)
+    end
+
     def delete_json(path, message:, sha:) # rubocop:disable Lint/UnusedMethodArgument
       file = expanded_path(path)
       with_file_lock(file) do
@@ -7748,6 +7774,20 @@ module AgentCoord
       end
     end
 
+    def list_json_partitioned_by_encoding(prefix)
+      AgentCoord.safe_path!(prefix)
+      entries = []
+      invalid_utf8_paths = []
+      tree_nodes.each do |node|
+        path = node["path"]
+        next unless node["type"] == "blob" && path&.start_with?("#{prefix}/") && path.end_with?(".json")
+
+        entry, valid_encoding = read_json_with_encoding_status(path)
+        (valid_encoding ? entries : invalid_utf8_paths) << (valid_encoding ? entry : path)
+      end
+      JsonEncodingPartition.new(records: entries.compact, invalid_utf8_paths: invalid_utf8_paths)
+    end
+
     def delete_json(path, message:, sha:)
       AgentCoord.safe_path!(path)
       result = gh_api(
@@ -7798,6 +7838,26 @@ module AgentCoord
     end
 
     private
+
+    def read_json_with_encoding_status(path)
+      return [@json_cache[path], true] if @json_cache.key?(path)
+
+      result = gh_api("repos/#{@backend}/contents/#{path}?ref=#{@ref}")
+      if result.not_found?
+        verify_ref_readable!
+        @json_cache[path] = nil
+        return [nil, true]
+      end
+      raise OperationalError, result.error_message unless result.success?
+
+      response = JSON.parse(result.stdout)
+      content = AgentCoord.force_utf8(Base64.decode64(response.fetch("content")))
+      return [nil, false] unless content.valid_encoding?
+
+      entry = StoredJson.new(path: path, data: JSON.parse(content), sha: response.fetch("sha"))
+      @json_cache[path] = entry
+      [entry, true]
+    end
 
     def verify_ref_readable!
       return if @ref_readable
@@ -7907,6 +7967,10 @@ module AgentCoord
       end
 
       entries
+    end
+
+    def list_json_partitioned_by_encoding(prefix)
+      JsonEncodingPartition.new(records: list_json(prefix), invalid_utf8_paths: [])
     end
 
     def filtered_list?(prefix)

@@ -53,9 +53,14 @@ At the separate archive-candidate boundary, GC recursively checks claims,
 heartbeats, and batches before it evaluates or serializes them. It skips each
 record that contains malformed UTF-8, leaves its source bytes unchanged, and
 continues with healthy eligible records in both dry-run and execute modes.
+Stores that expose raw record bytes partition malformed UTF-8 before JSON
+parsing, so a parser-rejected record cannot block adjacent healthy work.
+Syntactically malformed records whose bytes are valid UTF-8 still use the
+existing fail-closed plan policy.
 `batch-audit` applies its own read-only boundary to the selected batch and event
 trail. Malformed UTF-8 produces the existing `unknown` verdict and a valid UTF-8
-diagnostic; it never produces a partial audit verdict or rewrites the source.
+diagnostic, including when the parser error itself contains malformed bytes; it
+never produces a partial audit verdict or rewrites the source.
 These command-specific policies do not define a shared store policy and do not
 change the event-compaction grouping policy above.
 The compacted envelope lists all consumed paths while its records retain first,
