@@ -375,6 +375,7 @@ class PackagingTest < Minitest::Test
 
     assert_includes run, "discover_wrangler_url()"
     assert_includes run, 'WRANGLER_PORT="${AGENT_COORD_TEST_HTTP_PORT:-0}"'
+    assert_includes run, '[ "${AGENT_COORD_TEST_HTTP_PORT:-}" != "0" ]'
     assert_includes run, 'npx wrangler dev --local --port "$WRANGLER_PORT"'
     assert_includes run, 'AGENT_COORD_API_URL="http://127.0.0.1:${AGENT_COORD_TEST_HTTP_PORT}"'
     assert_includes run, 'AGENT_COORD_API_URL="$(discover_wrangler_url 2>/dev/null || true)"'
@@ -393,6 +394,7 @@ class PackagingTest < Minitest::Test
     assert_includes harness, "WRANGLER_PORT=0"
     assert_includes harness, '--port "$WRANGLER_PORT"'
     assert_includes harness, 'DYNAMIC_HTTP_PORT=0'
+    assert_includes harness, '[ "${AGENT_COORD_TEST_HTTP_PORT:-}" != "0" ]'
     assert_includes harness, 'HTTP_PORT="$AGENT_COORD_TEST_HTTP_PORT"'
     refute_includes harness, "resolve_free_port()"
   end
@@ -403,6 +405,7 @@ class PackagingTest < Minitest::Test
     assert_includes readme, "`AGENT_COORD_TEST_HTTP_PORT`"
     assert_match(/select a free\s+port by default/, readme)
     assert_match(/pinned value.*numeric.*free/m, readme)
+    assert_match(/value of\s+`0` keeps Wrangler-owned allocation/m, readme)
     assert_includes readme, "EADDRINUSE"
   end
 end

@@ -229,7 +229,8 @@ reproducing a run:
 AGENT_COORD_TEST_HTTP_PORT=8799 bin/test-http-integration
 ```
 
-The pinned value is used unchanged, so it must be numeric and free. Pinning a
+The pinned value is used unchanged, so it must be numeric and free. A value of
+`0` keeps Wrangler-owned allocation and discovers the ready address. Pinning a
 busy port makes Wrangler report `EADDRINUSE`.
 
 Machine names may contain letters, numbers, dots, underscores, colons, and

@@ -1358,6 +1358,23 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     end
   end
 
+  def test_http_integration_harness_treats_zero_override_as_wrangler_owned_port
+    with_fake_http_harness do |env, paths|
+      result = run_command(
+        env.merge("AGENT_COORD_TEST_HTTP_PORT" => "0"),
+        "bash",
+        HTTP_INTEGRATION_BIN
+      )
+
+      assert_fake_http_harness_run(result, paths)
+      dev = fake_harness_events(paths).find { |event| event["argv"]&.first(2) == %w[wrangler dev] }
+      ready = fake_harness_events(paths).find { |event| event.key?("ready_port") }
+      assert_equal "0", http_integration_port_arg(dev.fetch("argv"))
+      assert_equal "http://127.0.0.1:#{ready.fetch('ready_port')}",
+                   File.read(paths.fetch(:bundle_api_url_log))
+    end
+  end
+
   def test_http_integration_harness_follows_the_latest_valid_ready_address
     with_fake_http_harness do |env, paths|
       result = run_command(
