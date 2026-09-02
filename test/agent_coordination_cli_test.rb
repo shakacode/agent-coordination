@@ -9243,6 +9243,42 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     end
   end
 
+  # BINARY reports every byte sequence as valid for its own encoding. An invalid
+  # AGENT_COORD_BACKEND under LC_ALL=C must still be validated as UTF-8, and its
+  # domain error must not echo the raw byte that made validation fail.
+  def test_configured_backend_rejects_binary_invalid_utf8_with_a_utf8_domain_error
+    [Encoding::UTF_8, Encoding::US_ASCII, Encoding::ASCII_8BIT].each do |encoding|
+      repository = "shakacode/state".dup.force_encoding(encoding)
+
+      assert_nil AgentCoord.validate_repo!(repository, "backend"), encoding.name
+    end
+
+    invalid_byte_error = assert_raises(AgentCoord::Error) do
+      AgentCoord.validate_repo!("shakacode/\xFF".b, "backend")
+    end
+    invalid_grammar_error = assert_raises(AgentCoord::Error) do
+      AgentCoord.validate_repo!("shakacode/not allowed".b, "backend")
+    end
+
+    assert_equal "invalid backend repo: shakacode/\uFFFD", invalid_byte_error.message
+    [invalid_byte_error, invalid_grammar_error].each do |error|
+      assert_equal Encoding::UTF_8, error.message.encoding
+      assert_predicate error.message, :valid_encoding?
+    end
+
+    result = run_command(
+      { "AGENT_COORD_BACKEND" => "shakacode/\xFF".b, "LC_ALL" => "C", "LANG" => "C" },
+      RbConfig.ruby, BIN, "status"
+    )
+    stderr = result.stderr.dup.force_encoding(Encoding::UTF_8)
+
+    assert_equal 1, result.status.exitstatus
+    assert_empty result.stdout
+    assert_predicate stderr, :valid_encoding?
+    assert_equal "invalid backend repo: shakacode/\uFFFD\n", stderr
+    refute_includes result.stderr.bytes, 0xFF
+  end
+
   # State JSON is UTF-8 by definition, but the store used to read it through
   # Encoding.default_external, which is US-ASCII under a non-UTF-8 locale. One
   # record holding a non-ASCII byte then crashed JSON.parse with
