@@ -168,7 +168,8 @@ class AgentCoordLogTest < AgentCoordLogTestCase
     result = run_log("shakacode/example#999")
 
     assert_equal 0, result.status.exitstatus, result.stderr
-    assert_includes result.stdout, "no events"
+    assert_includes result.stdout, "no events for shakacode/example#999"
+    refute_includes result.stdout, "no events shown"
   end
 
   # The live event store records shakacode/hichee under two different casings.
@@ -329,6 +330,16 @@ class AgentCoordLogTest < AgentCoordLogTestCase
     assert_includes stdout.lines.last, "lane_closed"
   end
 
+  def test_log_reports_when_zero_limit_suppressed_an_existing_trail
+    write_trace
+
+    result = run_log("shakacode/example#104", "--limit", "0")
+
+    assert_equal 0, result.status.exitstatus, result.stderr
+    assert_includes result.stdout, "no events shown for shakacode/example#104 (--limit 0)"
+    refute_includes result.stdout, "no events for shakacode/example#104"
+  end
+
   # --- output shapes ---------------------------------------------------------
   def test_log_emits_structured_json_on_request
     write_trace
@@ -341,6 +352,18 @@ class AgentCoordLogTest < AgentCoordLogTestCase
     assert_equal "m5", first.fetch("machine")
     assert_equal "codex", first.fetch("host")
     assert_equal "claim.acquired", first.fetch("type")
+  end
+
+  def test_log_json_marks_whether_an_existing_trail_was_suppressed
+    write_trace
+
+    suppressed = JSON.parse(run_log("shakacode/example#104", "--limit", "0", "--json").stdout)
+    empty = JSON.parse(run_log("shakacode/example#999", "--json").stdout)
+
+    assert_equal true, suppressed.fetch("events_suppressed")
+    assert_equal false, empty.fetch("events_suppressed")
+    assert_empty suppressed.fetch("events")
+    assert_empty empty.fetch("events")
   end
 
   # Under a non-UTF-8 locale the appended line reads back tagged with the locale
@@ -468,8 +491,18 @@ class AgentCoordLogTest < AgentCoordLogTestCase
 
     stdout = run_log("shakacode/example#10112", "--type", "error").stdout
 
-    assert_includes stdout, "no events"
+    assert_includes stdout, "no events shown for shakacode/example#10112 (--type error)"
+    refute_includes stdout, "no events for shakacode/example#10112"
     refute_includes stdout, "claim active"
+  end
+
+  def test_log_tsv_reports_a_suppressed_trail_on_stderr
+    write_trace
+
+    result = run_log("shakacode/example#104", "--type", "error", "--format", "tsv")
+
+    assert_empty result.stdout
+    assert_includes result.stderr, "no events shown for shakacode/example#104 (--type error)"
   end
 
   # An explicitly requested backend must not be silently replaced by the local
@@ -495,6 +528,14 @@ class AgentCoordLogTest < AgentCoordLogTestCase
     payload = JSON.parse(run_log("--json", "shakacode/example#104").stdout)
 
     assert_equal 5, payload.fetch("events").length
+  end
+
+  def test_log_rejects_a_positional_without_the_work_item_separator
+    result = run_log("shakacode/example")
+
+    assert_equal 1, result.status.exitstatus
+    assert_includes result.stderr, "invalid work item repo"
+    refute_includes result.stdout, "no events"
   end
 
   # The mirror is a complete durable copy, not a filtered view. A narrow sync
@@ -580,6 +621,41 @@ class AgentCoordLogTest < AgentCoordLogTestCase
 
     assert_equal 5, stdout.lines.length
     refute_includes stdout, "shakacode/other#7"
+  end
+
+  def test_log_rejects_malformed_positional_work_items
+    ["x/y#1 2", "x/y#", "#1", "x/y#1/2", "x/y#1#2"].each do |work_item|
+      result = run_log(work_item)
+
+      assert_equal 1, result.status.exitstatus, "expected #{work_item.inspect} to be rejected"
+      assert_includes result.stderr, "invalid work item", "expected #{work_item.inspect} to explain the error"
+      refute_includes result.stdout, "no events"
+    end
+  end
+
+  def test_log_rejects_malformed_repo_and_target_option_values
+    [
+      ["x/y/z", "1"],
+      ["x/y", "1 2"],
+      ["", "1"],
+      ["x/y", ""]
+    ].each do |repo, target|
+      result = run_log("--repo", repo, "--target", target)
+
+      assert_equal 1, result.status.exitstatus, "expected #{repo.inspect}##{target.inspect} to be rejected"
+      assert_includes result.stderr, "invalid work item"
+      refute_includes result.stdout, "no events"
+    end
+  end
+
+  def test_log_accepts_real_colon_and_lane_target_forms
+    %w[issue:10112 adhoc:backfill-docs pr:32389 pr:32389:qa 319: adhoc::qa :qa].each do |target|
+      positional = run_log("shakacode/example##{target}")
+      options = run_log("--repo", "shakacode/example", "--target", target)
+
+      assert_equal 0, positional.status.exitstatus, positional.stderr
+      assert_equal 0, options.status.exitstatus, options.stderr
+    end
   end
 
   def test_log_rejects_a_work_item_given_both_ways

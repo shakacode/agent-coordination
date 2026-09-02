@@ -4482,11 +4482,22 @@ module AgentCoord
     # of the positional rather than silently answering for the whole fleet.
     def log_work_item_scope(options)
       scoped = [options[:repo], options[:target]].compact
-      return options[:work_item] if scoped.empty?
-      raise Error, "give the work item either positionally or with --repo/--target, not both" if options[:work_item]
-      raise Error, "--repo and --target must be given together" unless scoped.length == 2
+      work_item = if scoped.empty?
+                    options[:work_item]
+                  else
+                    if options[:work_item]
+                      raise Error, "give the work item either positionally or with --repo/--target, not both"
+                    end
+                    raise Error, "--repo and --target must be given together" unless scoped.length == 2
 
-      "#{options[:repo]}##{options[:target]}"
+                    "#{options[:repo]}##{options[:target]}"
+                  end
+      return if work_item.nil?
+
+      repo, target = log_split_work_item(work_item)
+      AgentCoord.validate_repo!(repo, "work item")
+      AgentCoord.validate_segment!(target, "work item target")
+      work_item
     end
 
     def log_rows(store, options)
@@ -5279,6 +5290,7 @@ module AgentCoord
         # A display limit that shrank it would understate which spellings answered.
         payload = { "work_item" => log_work_item_summary(options, matched, claims),
                     "trail" => log_trail_state,
+                    "events_suppressed" => log_events_suppressed?(rows),
                     "events" => events, "claim" => records.last }.compact
         # Oldest first, like the trail above it, so the last thing printed or listed
         # is the current one. `claim` stays the newest for consumers that read one;
@@ -5331,11 +5343,31 @@ module AgentCoord
     # A claim reaches here only when it is the latest thing known about the work
     # item, so it always belongs last: it is the answer to "where is it now".
     def log_report_trailer(options, claims, rows, stream)
-      stream.puts "no events for #{options[:work_item] || 'the current filters'}" if rows.empty?
+      if rows.empty?
+        subject = log_scrub(options[:work_item] || "the current filters")
+        if log_events_suppressed?(rows)
+          stream.puts "no events shown for #{subject} (#{log_narrowing_descriptions(options).join(', ')})"
+        else
+          stream.puts "no events for #{subject}"
+        end
+      end
       # One line per holder, oldest first: with two live alias claims, printing
       # only the newest would read as sole custody, and printing them newest-first
       # would contradict the trail's own last-line-is-current reading.
       claims.each { |claim| stream.puts log_claim_note_line(claim.fetch("record")) }
+    end
+
+    def log_events_suppressed?(rows)
+      rows.empty? && !Array(@log_scoped_rows).empty?
+    end
+
+    def log_narrowing_descriptions(options)
+      LOG_TRAIL_FILTERS.filter_map do |field|
+        next unless log_narrowing_option?(options, field)
+
+        flag = "--#{field.to_s.tr('_', '-')}"
+        log_scrub("#{flag} #{options[field]}")
+      end
     end
 
     # Columns are sized to the rows actually being rendered so a single-work-item
