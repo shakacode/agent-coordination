@@ -366,17 +366,20 @@ class PackagingTest < Minitest::Test
     assert_equal canonical_tests.fetch("run"), floor_tests.fetch("run")
   end
 
-  def test_worker_smoke_uses_one_configurable_http_port
+  def test_worker_smoke_uses_wrangler_owned_default_port_and_ready_address
     ci_jobs = YAML.safe_load_file(File.join(ROOT, ".github/workflows/ci.yml"), aliases: true).fetch("jobs")
     smoke_step = ci_jobs.fetch("worker-smoke").fetch("steps").find do |step|
       step.fetch("name", "") == "Run Worker smoke"
     end
     run = smoke_step.fetch("run")
 
-    assert_includes run, 'AGENT_COORD_TEST_HTTP_PORT="${AGENT_COORD_TEST_HTTP_PORT:-'
-    assert_includes run, 'npx wrangler dev --local --port "$AGENT_COORD_TEST_HTTP_PORT"'
+    assert_includes run, "discover_wrangler_url()"
+    assert_includes run, 'WRANGLER_PORT="${AGENT_COORD_TEST_HTTP_PORT:-0}"'
+    assert_includes run, 'npx wrangler dev --local --port "$WRANGLER_PORT"'
     assert_includes run, 'AGENT_COORD_API_URL="http://127.0.0.1:${AGENT_COORD_TEST_HTTP_PORT}"'
+    assert_includes run, 'AGENT_COORD_API_URL="$(discover_wrangler_url 2>/dev/null || true)"'
     assert_equal 2, run.scan('curl -fsS "$AGENT_COORD_API_URL/v1/health"').length
+    refute_includes run, "net.createServer()"
     refute_includes run, "127.0.0.1:8787"
 
     smoke = File.read(File.join(ROOT, "worker/bin/smoke"))
