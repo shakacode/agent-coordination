@@ -2008,7 +2008,7 @@ module AgentCoord
         data = entry.data
         lane = data["lane"]
         next unless gc_terminal_identity_valid?(data)
-        next unless gc_invalid_encoding?(data) || gc_terminal_context_valid?(data)
+        next unless gc_terminal_context_valid?(data, allow_invalid_encoding: true)
         next if lane.to_s.empty?
 
         lanes = (lanes_by_provenance[gc_event_provenance(entry)] ||= [])
@@ -2054,14 +2054,19 @@ module AgentCoord
       repo.is_a?(String) && repo.valid_encoding? && repo.match?(%r{\A[^/]+/[^/]+\z})
     end
 
-    def gc_terminal_context_valid?(data)
+    def gc_terminal_context_valid?(data, allow_invalid_encoding: false)
       return false unless gc_nonempty_string?(data["workspace"])
-      return false unless gc_valid_closed_by?(data["closed_by"]) && gc_valid_datetime?(data["at"])
+      return false unless gc_valid_closed_by?(data["closed_by"])
+      return false unless gc_valid_datetime?(data["at"]) ||
+                          (allow_invalid_encoding && gc_invalid_encoding?(data["at"]))
       return false unless %w[batch_id lane branch pr_state].all? do |field|
         !data.key?(field) || gc_nonempty_string?(data[field])
       end
 
-      %w[pr_url evidence_url].all? { |field| !data.key?(field) || gc_valid_http_uri?(data[field]) }
+      %w[pr_url evidence_url].all? do |field|
+        !data.key?(field) || gc_valid_http_uri?(data[field]) ||
+          (allow_invalid_encoding && gc_invalid_encoding?(data[field]))
+      end
     end
 
     def gc_nonempty_string?(value)
@@ -2069,7 +2074,8 @@ module AgentCoord
     end
 
     def gc_valid_closed_by?(value)
-      return false unless value.is_a?(Hash) && value.keys.sort == %w[agent_id machine]
+      return false unless value.is_a?(Hash) && value.length == 2
+      return false unless %w[agent_id machine].all? { |field| value.key?(field) }
 
       %w[agent_id machine].all? { |field| gc_nonempty_string?(value[field]) }
     end

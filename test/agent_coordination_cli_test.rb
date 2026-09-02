@@ -953,6 +953,16 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     end
   end
 
+  def test_gc_does_not_group_synthetic_sibling_with_encoding_corrupt_independently_invalid_context_terminal
+    context_defects = %i[missing_workspace malformed_closed_by invalid_time invalid_url]
+    matrix = context_defects.product(
+      %w[C C.UTF-8], { "dry-run" => "--dry-run", "execute" => "--execute" }.to_a
+    )
+    matrix.each do |defect, locale, (mode, flag)|
+      assert_gc_invalid_terminal_context_and_encoding_sibling_mode(locale, mode, flag, defect)
+    end
+  end
+
   def test_gc_compaction_retry_accepts_consumed_renewal_paths_without_positional_records
     at = "2026-07-01T00:00:00Z"
     entries = [
@@ -11746,6 +11756,32 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     assert_gc_mode_paths(mode, state_root, actions, [sibling_path])
   end
 
+  def assert_gc_invalid_terminal_context_and_encoding_sibling_mode(locale, mode, flag, defect)
+    state_root = File.join(
+      @state_root, "invalid-terminal-context-and-encoding-#{defect}-#{locale.tr('.', '-')}-#{mode}"
+    )
+    records = gc_invalid_terminal_context_and_encoding_sibling_records(defect)
+    originals = write_gc_invalid_event_records(
+      state_root, records, placeholder: "nested-context-corrupt".b, invalid_bytes: "nested-\xFF".b
+    )
+    result = run_agent_coord(
+      "gc", flag, "--json", state_root: state_root,
+                            env: { "LC_ALL" => locale, "LANG" => locale }
+    )
+
+    assert_equal 0, result.status.exitstatus, "#{defect} #{locale} #{mode}: #{result.stderr}"
+    assert_gc_stderr_has_no_encoding_exception(result.stderr)
+    actions = JSON.parse(result.stdout).fetch("actions").select { |action| action["action"] == "compact" }
+    compacted_paths = [
+      "events/context-corrupt-#{defect}/lane-less-synthetic.json",
+      "events/healthy-context-control-#{defect}/lane_closed-healthy.json"
+    ]
+    source_paths = actions.flat_map { |action| action.fetch("source_paths") }.sort
+    assert_equal compacted_paths.sort, source_paths
+    assert_gc_corrupt_records_unchanged(state_root, originals)
+    assert_gc_mode_paths(mode, state_root, actions, compacted_paths)
+  end
+
   def gc_invalid_event_fixture(fixture)
     case fixture
     when :repo
@@ -11907,6 +11943,40 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
       "events/invalid-context-group/lane-less-synthetic.json" => gc_synthetic_orphan(
         "lane-less-synthetic", "invalid-context-group", "shared", "shakacode/example", old
       )
+    }
+  end
+
+  def gc_invalid_terminal_context_and_encoding_sibling_records(defect)
+    old = "2020-01-01T00:00:00Z"
+    batch_id = "context-corrupt-#{defect}"
+    invalid_terminal = valid_gc_lane_closed(
+      event_id: "lane_closed-invalid", batch_id: batch_id, target: "shared", at: old,
+      extra: { "lane" => "shared-lane", "metadata" => { "label" => "nested-context-corrupt" } }
+    )
+    case defect
+    when :missing_workspace
+      invalid_terminal.delete("workspace")
+    when :malformed_closed_by
+      invalid_terminal["closed_by"] = { "agent_id" => "gc-worker", "machine" => "test", "extra" => "no" }
+    when :invalid_time
+      invalid_terminal["at"] = "not-a-time"
+    when :invalid_url
+      invalid_terminal["pr_url"] = "file:///tmp/not-http"
+    else
+      raise "unknown terminal context defect: #{defect.inspect}"
+    end
+
+    {
+      "events/#{batch_id}/lane_closed-invalid.json" => [invalid_terminal, true],
+      "events/#{batch_id}/lane-less-synthetic.json" => [
+        gc_synthetic_orphan("lane-less-synthetic", batch_id, "shared", "shakacode/example", old), false
+      ],
+      "events/healthy-context-control-#{defect}/lane_closed-healthy.json" => [
+        valid_gc_lane_closed(
+          event_id: "lane_closed-healthy", batch_id: "healthy-context-control-#{defect}",
+          target: "healthy", at: old, extra: { "lane" => "healthy-lane" }
+        ), false
+      ]
     }
   end
 
