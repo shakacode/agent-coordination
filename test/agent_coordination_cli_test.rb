@@ -14,6 +14,7 @@ require "timeout"
 
 class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
   THREAD_TIMEOUT = 5
+  LOCAL_STORE_ATOMICITY_TIMEOUT = 30
 
   def self.wait_for_condition!(condition, mutex, label)
     deadline = Process.clock_gettime(Process::CLOCK_MONOTONIC) + THREAD_TIMEOUT
@@ -5223,12 +5224,23 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
         199.times { store.read_json(path) }
       end
     end
-    thread_values!([writer] + readers, "atomic LocalStore readers/writer")
+    thread_values!([writer] + readers, "atomic LocalStore readers/writer", timeout: LOCAL_STORE_ATOMICITY_TIMEOUT)
 
     final = store.read_json(path).data
     assert_equal [0, 0, 0, 0], 4.times.map { observed.pop }.sort
     assert_equal 49, final.fetch("sequence")
     assert_equal 100_000, final.fetch("payload").length
+  end
+
+  def test_thread_values_supports_a_per_call_budget_and_reports_expiry_honestly
+    thread = Thread.new { sleep 1 }
+
+    error = assert_raises(Minitest::Assertion) do
+      thread_values!([thread], "slow worker", timeout: 0.01)
+    end
+
+    assert_includes error.message,
+                    "timed out after 0.01s waiting for slow worker; completion assertions were not evaluated"
   end
 
   def test_local_store_lists_missing_root_and_nested_prefix_as_healthy_empty_without_mutation
@@ -12337,11 +12349,11 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
 
   private
 
-  def thread_values!(threads, label)
-    Timeout.timeout(THREAD_TIMEOUT) { threads.map(&:value) }
+  def thread_values!(threads, label, timeout: THREAD_TIMEOUT)
+    Timeout.timeout(timeout) { threads.map(&:value) }
   rescue Timeout::Error
     threads.each(&:kill)
-    flunk "timed out waiting for #{label}"
+    flunk "timed out after #{timeout}s waiting for #{label}; completion assertions were not evaluated"
   ensure
     threads.each { |thread| thread.join(0.1) }
   end
