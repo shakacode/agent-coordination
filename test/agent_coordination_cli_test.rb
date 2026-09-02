@@ -4977,6 +4977,7 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     result = run_agent_coord("doctor", "--help", state_root: nil)
 
     assert_equal 0, result.status.exitstatus, result.stderr
+    assert_includes result.stdout, "inspect status and diagnostics"
     assert_includes result.stdout, "status: split_brain"
     assert_includes result.stdout, "split_brain_env_file"
     assert_includes result.stdout, "--state-root PATH"
@@ -4984,6 +4985,7 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     assert_includes result.stdout, "AGENT_COORD_LOCAL=1"
     refute_includes result.stdout, "split_brain_construct"
     refute_includes result.stdout, "split_brain_reason"
+    refute_includes result.stdout, "coordination state is UNKNOWN until backend access is fixed"
   end
 
   def test_write_command_help_documents_the_split_brain_hard_stop
