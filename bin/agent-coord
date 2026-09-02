@@ -5537,7 +5537,10 @@ module AgentCoord
     end
 
     def log_scrub(value)
-      value.to_s.gsub(/[\t\r\n]+/, " ").gsub(LOG_CONTROL_CHARACTERS, "")
+      # A Unix path can carry bytes that are not valid UTF-8. Normalize before
+      # the UTF-8 regular expressions so describing a bad record cannot become
+      # the second failure that hides every readable sibling.
+      AgentCoord.utf8_diagnostic(value.to_s).gsub(/[\t\r\n]+/, " ").gsub(LOG_CONTROL_CHARACTERS, "")
     end
 
     # `--sync` mirrors the event store into a plain tab-separated file so grep

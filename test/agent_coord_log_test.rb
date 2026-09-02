@@ -4,7 +4,10 @@ require "fileutils"
 require "json"
 require "minitest/autorun"
 require "open3"
+require "stringio"
 require "tmpdir"
+
+load File.expand_path("../bin/agent-coord", __dir__)
 
 # `agent-coord log` renders the per-work-item custody trail already carried by
 # the event store (issue #129). These tests pin the operator contract: which
@@ -1848,6 +1851,30 @@ class AgentCoordLogLiveRecordResilienceTest < AgentCoordLogTestCase
     assert_equal 2, sync.status.exitstatus, "a mirror must not be written over the shortened trail"
     assert_includes sync.stderr, "refusing to sync an incomplete trail: events"
     refute_path_exists File.join(@state_root, "log.tsv")
+  end
+
+  # Unix filenames can carry bytes that are not valid UTF-8. The record is
+  # already being reported as incomplete, so its diagnostic path must be made
+  # printable instead of letting the scrubber raise and hide every good event.
+  def test_log_scrubs_invalid_utf8_from_a_non_object_live_record_path
+    good = AgentCoord::StoredJson.new(
+      path: "events/b1/e1.json",
+      data: { "event_id" => "e1", "batch_id" => "b1", "type" => "claim.acquired",
+              "repo" => "shakacode/example", "target" => "104", "at" => "2026-08-03T02:40:16Z" }
+    )
+    bad = AgentCoord::StoredJson.new(path: "events/b1/bad-\xE2.json".b, data: [1, 2, 3])
+    store = Object.new
+    store.define_singleton_method(:list_json) { |prefix, &_handler| prefix == "events" ? [good, bad] : [] }
+    stderr = StringIO.new
+    runner = AgentCoord::Runner.new([], stderr: stderr)
+
+    rows = runner.send(:log_event_rows, store)
+
+    assert_equal ["e1"], rows.map { |row| row.fetch("event_id") }, "the readable event must survive"
+    assert_predicate stderr.string, :valid_encoding?
+    assert_includes stderr.string, "live event record is not an object at events/b1/bad-\uFFFD.json"
+    refute_match(/ArgumentError|invalid byte sequence/, stderr.string, "must not leak the failed scrub")
+    assert_equal "events", runner.send(:log_incomplete_prefixes), "--sync must see an incomplete trail"
   end
 
   private
