@@ -2007,7 +2007,7 @@ module AgentCoord
       entries.each_with_object({}) do |entry, lanes_by_provenance|
         data = entry.data
         lane = data["lane"]
-        next unless gc_terminal_event?(data) && !lane.to_s.empty?
+        next unless gc_terminal_identity_valid?(data) && !lane.to_s.empty?
 
         lanes = (lanes_by_provenance[gc_event_provenance(entry)] ||= [])
         lanes << lane unless lanes.include?(lane)

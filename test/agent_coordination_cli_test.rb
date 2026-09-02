@@ -908,7 +908,13 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
 
   def test_gc_leaves_lane_less_sibling_untouched_when_terminal_has_invalid_encoding
     %w[C C.UTF-8].product({ "dry-run" => "--dry-run", "execute" => "--execute" }.to_a).each do |locale, (mode, flag)|
-      assert_gc_invalid_terminal_sibling_group_mode(locale, mode, flag)
+      assert_gc_invalid_terminal_sibling_group_mode(locale, mode, flag, :nested_value)
+    end
+  end
+
+  def test_gc_leaves_lane_less_sibling_untouched_when_terminal_url_has_invalid_encoding
+    %w[C C.UTF-8].product({ "dry-run" => "--dry-run", "execute" => "--execute" }.to_a).each do |locale, (mode, flag)|
+      assert_gc_invalid_terminal_sibling_group_mode(locale, mode, flag, :url)
     end
   end
 
@@ -11546,11 +11552,13 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     assert_gc_mode_paths(mode, state_root, actions, healthy_paths)
   end
 
-  def assert_gc_invalid_terminal_sibling_group_mode(locale, mode, flag)
-    state_root = File.join(@state_root, "invalid-terminal-sibling-#{locale.tr('.', '-')}-#{mode}")
-    records = gc_invalid_terminal_sibling_group_records
+  def assert_gc_invalid_terminal_sibling_group_mode(locale, mode, flag, fixture)
+    records, placeholder, invalid_bytes = gc_invalid_terminal_sibling_group_fixture(fixture)
+    state_root = File.join(
+      @state_root, "invalid-terminal-sibling-#{fixture.to_s.tr('_', '-')}-#{locale.tr('.', '-')}-#{mode}"
+    )
     originals = write_gc_invalid_event_records(
-      state_root, records, placeholder: "nested-corrupt-terminal".b, invalid_bytes: "nested-\xFF".b
+      state_root, records, placeholder: placeholder, invalid_bytes: invalid_bytes
     )
     result = run_agent_coord(
       "gc", flag, "--json", state_root: state_root,
@@ -11702,13 +11710,28 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     }
   end
 
-  def gc_invalid_terminal_sibling_group_records
+  def gc_invalid_terminal_sibling_group_fixture(fixture)
+    case fixture
+    when :nested_value
+      [gc_invalid_terminal_sibling_group_records(
+        "metadata" => { "label" => "nested-corrupt-terminal" }
+      ), "nested-corrupt-terminal".b, "nested-\xFF".b]
+    when :url
+      [gc_invalid_terminal_sibling_group_records(
+        "pr_url" => "https://example.test/corrupt-terminal"
+      ), "https://example.test/corrupt-terminal".b, "https://example.test/\xFF".b]
+    else
+      raise "unknown invalid terminal sibling fixture: #{fixture.inspect}"
+    end
+  end
+
+  def gc_invalid_terminal_sibling_group_records(corrupt_extra)
     old = "2020-01-01T00:00:00Z"
     {
       "events/reverse-corrupt-group/lane_closed-corrupt.json" => [
         valid_gc_lane_closed(
           event_id: "lane_closed-corrupt", batch_id: "reverse-corrupt-group", target: "shared", at: old,
-          extra: { "lane" => "shared-lane", "metadata" => { "label" => "nested-corrupt-terminal" } }
+          extra: { "lane" => "shared-lane" }.merge(corrupt_extra)
         ), true
       ],
       "events/reverse-corrupt-group/lane-less-synthetic.json" => [
