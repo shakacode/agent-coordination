@@ -4628,15 +4628,26 @@ module AgentCoord
     # custody trail is what this command promises, and the silence was the defect.
     def log_event_rows(store)
       seen = {}
-      rows = log_event_entries(store).map do |entry|
-        row = log_row(entry.data)
+      rows = log_event_entries(store).filter_map do |entry|
+        data = entry.data
+        unless data.is_a?(Hash)
+          log_live_event_incomplete(entry, "live event record is not an object")
+          next
+        end
+
+        row = log_row(data)
         # The row itself, not a marker: an archived duplicate of this event needs
         # somewhere to record the envelope it came from, and the row that is
         # reported is the only thing the note can still see.
-        seen[log_event_dedup_key(entry.data)] = row
+        seen[log_event_dedup_key(data)] = row
         row
       end
       rows + log_archived_event_rows(store, seen)
+    end
+
+    def log_live_event_incomplete(entry, reason)
+      message = "warning: #{reason} at #{entry.path}; this trail may be incomplete"
+      log_note_incomplete("events", log_scrub(message))
     end
 
     # Compaction writes the archive envelope before deleting its sources, so a
@@ -5130,7 +5141,10 @@ module AgentCoord
     # is missing -- and treating that as an incomplete trail is what stopped
     # --sync writing a mirror at all on such a backend.
     def log_listing(store, prefix)
-      entries = store.list_json(prefix)
+      entries = store.list_json(prefix) do |path, error|
+        reason = "unreadable (#{error.message}) at #{path}"
+        log_note_incomplete(prefix, log_scrub(yield(reason)))
+      end
       log_note_incomplete(prefix, yield("filtered by scoped token")) if filtered_status_list?(store, prefix)
       entries
     rescue OperationalError => e
@@ -7457,9 +7471,16 @@ module AgentCoord
       directory = readable_list_directory(prefix)
       return [] unless directory
 
-      list_json_files(directory, prefix).map do |file|
+      list_json_files(directory, prefix).filter_map do |file|
         path = file.delete_prefix("#{@root}/")
-        StoredJson.new(path: path, data: JSON.parse(File.read(file, encoding: "UTF-8")), sha: file_sha(file))
+        begin
+          StoredJson.new(path: path, data: JSON.parse(File.read(file, encoding: "UTF-8")), sha: file_sha(file))
+        rescue SystemCallError => e
+          raise unless block_given?
+
+          yield path, e
+          nil
+        end
       end
     end
 

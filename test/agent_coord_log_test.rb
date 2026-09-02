@@ -1799,6 +1799,70 @@ class AgentCoordLogLimitProvenanceTest < AgentCoordLogTestCase
   end
 end
 
+# A damaged live event record must shorten only that record, not the whole
+# read-only custody trail. The shortened result is still incomplete and cannot
+# be persisted by --sync.
+class AgentCoordLogLiveRecordResilienceTest < AgentCoordLogTestCase
+  TSV_EVENT_ID_COLUMN = 10
+
+  # A single unreadable live record must not hide the readable custody events
+  # beside it. The warning also marks the trail incomplete so --sync cannot
+  # persist the shortened view as a complete mirror.
+  def test_log_degrades_when_a_live_record_file_is_unreadable
+    write_trace
+    unreadable = File.join(@state_root, "events", "b1", "e3.json")
+    FileUtils.chmod(0o000, unreadable)
+
+    result = run_log("shakacode/example#104", "--format", "tsv")
+    sync = run_log("--sync")
+
+    assert_equal 0, result.status.exitstatus, result.stderr
+    assert_includes result.stderr, "events unreadable"
+    assert_includes result.stderr, "this trail may be incomplete"
+    refute_match(/SystemCallError|Errno::/, result.stderr, "must not leak the exception class")
+    refute_match(%r{\bfrom .*bin/agent-coord:\d+}, result.stderr, "must not leak a Ruby backtrace")
+    assert_equal %w[e1 e2 e4 e5], tsv_rows_event_ids(result), "only the unreadable event is omitted"
+    assert_equal 2, sync.status.exitstatus, "a mirror must not be written over the shortened trail"
+    assert_includes sync.stderr, "refusing to sync an incomplete trail: events"
+    refute_path_exists File.join(@state_root, "log.tsv")
+  ensure
+    FileUtils.chmod(0o600, unreadable) if unreadable && File.exist?(unreadable)
+  end
+
+  # A JSON value can parse successfully without being an event object. Report
+  # that record, keep its readable siblings, and make the incomplete trail
+  # ineligible for --sync instead of leaking a raw TypeError.
+  def test_log_reports_a_live_record_that_is_not_an_object
+    write_trace
+    write_raw_event("b1", "array", [1, 2, 3])
+
+    result = run_log("shakacode/example#104", "--format", "tsv")
+    sync = run_log("--sync")
+
+    assert_equal 0, result.status.exitstatus, result.stderr
+    assert_includes result.stderr, "live event record is not an object at events/b1/array.json"
+    assert_includes result.stderr, "this trail may be incomplete"
+    refute_match(/TypeError|no implicit conversion/, result.stderr, "must not leak a raw type error")
+    refute_match(%r{\bfrom .*bin/agent-coord:\d+}, result.stderr, "must not leak a Ruby backtrace")
+    assert_equal %w[e1 e2 e3 e4 e5], tsv_rows_event_ids(result), "the readable events must survive"
+    assert_equal 2, sync.status.exitstatus, "a mirror must not be written over the shortened trail"
+    assert_includes sync.stderr, "refusing to sync an incomplete trail: events"
+    refute_path_exists File.join(@state_root, "log.tsv")
+  end
+
+  private
+
+  def write_raw_event(batch_id, name, record)
+    path = File.join(@state_root, "events", batch_id, "#{name}.json")
+    FileUtils.mkdir_p(File.dirname(path))
+    File.write(path, "#{JSON.generate(record)}\n")
+  end
+
+  def tsv_rows_event_ids(result)
+    result.stdout.lines.map { |line| line.split("\t").fetch(TSV_EVENT_ID_COLUMN) }
+  end
+end
+
 # Events that `gc` compacted into `archive/` are still this work item's custody
 # trail (issue #139). Before the archive was read, `log` answered "no events"
 # for completed work -- the same words it uses for work that never happened --
