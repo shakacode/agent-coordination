@@ -4,14 +4,34 @@
 require "open3"
 require "yaml"
 
+$stderr.set_encoding(Encoding::UTF_8)
+
+def changed_paths(output)
+  # Keep this UTF-8 path parser aligned with config-check and the embedded Ruby
+  # parser in validate.
+  # Git emits raw filename bytes. Preserve valid UTF-8 exactly for policy
+  # matching, but reject invalid bytes instead of conflating paths via scrub.
+  utf8 = output.dup.force_encoding(Encoding::UTF_8)
+  abort "Changed simulation paths must be valid UTF-8." unless utf8.valid_encoding?
+
+  utf8.split("\0")
+end
+
+# Keep diagnostic escaping aligned with config-check and the embedded Ruby in
+# validate. Match policy against raw valid UTF-8, but never emit control or
+# format characters.
+def diagnostic_path(path)
+  path.gsub(/[\p{Cc}\p{Cf}]/u) { |character| character.dump[1...-1] }
+end
+
 usage = "usage: seam-guard <repo_root> <base_ref> <head_ref>"
 root_arg = ARGV[0] or abort usage
 base_ref = ARGV[1] or abort usage
 head_ref = ARGV[2] or abort usage
 root = File.expand_path(root_arg)
 
-def git_capture(root, *args)
-  output, status = Open3.capture2("git", "-C", root, *args)
+def git_capture(root, *)
+  output, status = Open3.capture2("git", "-C", root, *)
   abort "Could not inspect simulation revisions." unless status.success?
 
   output
@@ -32,7 +52,7 @@ merge_tree = git_capture(root, "merge-tree", "--write-tree", base_commit, head_c
 abort "Could not resolve the simulation merge tree." if merge_tree.nil? || merge_tree.empty?
 
 changed_output = git_capture(root, "diff", "--no-renames", "--name-only", "-z", merge_base, head_commit)
-changed_paths = changed_output.split("\0")
+paths = changed_paths(changed_output)
 
 task_path = %r{\Alib/task_[[:alnum:]_]+\.rb\z}
 # Steady-state changes are deliberately narrow. Updates to this guard, CI, or
@@ -42,17 +62,23 @@ config_paths = %w[
   .agents/bin/README.md
   AGENTS.md
 ]
-task_paths, non_task_paths = changed_paths.partition { |path| path.match?(task_path) }
+task_paths, non_task_paths = paths.partition { |path| path.match?(task_path) }
 
 unless task_paths.empty?
-  abort "Task changes cannot be combined with config or unrelated paths: #{non_task_paths.join(', ')}" unless non_task_paths.empty?
+  unless non_task_paths.empty?
+    displayed_paths = non_task_paths.map { |path| diagnostic_path(path) }
+    abort "Task changes cannot be combined with config or unrelated paths: #{displayed_paths.join(', ')}"
+  end
 
   puts "TASK_ONLY"
   exit 0
 end
 
 unexpected_paths = non_task_paths - config_paths
-abort "Unexpected guarded paths: #{unexpected_paths.join(', ')}" unless unexpected_paths.empty?
+unless unexpected_paths.empty?
+  displayed_paths = unexpected_paths.map { |path| diagnostic_path(path) }
+  abort "Unexpected guarded paths: #{displayed_paths.join(', ')}"
+end
 
 # Keep these duplicated checks aligned with config-check. Duplication is
 # intentional: this base-trusted guard must never require candidate code.
@@ -76,9 +102,11 @@ abort "Agent workflow policy must be a YAML mapping." unless policy.is_a?(Hash)
 
 readme = tree_file(root, merge_tree, ".agents/bin/README.md")
 required_readme_rows = [
-  "| `validate` | Sim-aware gate: one task file runs its matching test; task/config mixes and unrelated diffs are rejected. |",
+  "| `validate` | Sim-aware gate: one task file runs its matching test; " \
+  "task/config mixes and unrelated diffs are rejected. |",
   "| `config-check` | Validate allowed config-only paths, canonical seam content, policy YAML, and script syntax. |",
-  "| `seam-guard` | Base-trusted pull-request guard; rejects changes to CI and validator entrypoints before head code runs. |"
+  "| `seam-guard` | Base-trusted pull-request guard; rejects changes to CI and " \
+  "validator entrypoints before head code runs. |"
 ]
 required_readme_texts = [
   "`Seam Guard / guard` as a required status check",
@@ -89,4 +117,4 @@ unless required_readme_rows.all? { |row| readme.include?(row) } &&
   abort "Simulation command README does not document guarded validation."
 end
 
-puts changed_paths.empty? ? "NO_CHANGES" : "CONFIG_ONLY"
+puts paths.empty? ? "NO_CHANGES" : "CONFIG_ONLY"
