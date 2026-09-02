@@ -5233,7 +5233,7 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
   end
 
   def test_thread_values_supports_a_per_call_budget_and_reports_expiry_honestly
-    thread = Thread.new { sleep 1 }
+    thread = Thread.new { Queue.new.pop }
 
     error = assert_raises(Minitest::Assertion) do
       thread_values!([thread], "slow worker", timeout: 0.01)
@@ -5241,6 +5241,7 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
 
     assert_includes error.message,
                     "timed out after 0.01s waiting for slow worker; completion assertions were not evaluated"
+    refute thread.alive?
   end
 
   def test_local_store_lists_missing_root_and_nested_prefix_as_healthy_empty_without_mutation
