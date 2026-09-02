@@ -21,9 +21,10 @@ def changed_paths(output)
 end
 
 # Keep diagnostic escaping aligned with seam-guard and the embedded Ruby in
-# validate. Match policy against raw valid UTF-8, but never emit controls.
+# validate. Match policy against raw valid UTF-8, but never emit control or
+# format characters.
 def diagnostic_path(path)
-  path.gsub(/\p{C}/u) { |character| character.dump[1...-1] }
+  path.gsub(/[\p{Cc}\p{Cf}]/u) { |character| character.dump[1...-1] }
 end
 
 root = File.expand_path("../..", __dir__)
@@ -44,7 +45,7 @@ allowed_paths = %w[
 task_path = %r{\Alib/task_[[:alnum:]_]+\.rb\z}
 # Regenerate after a reviewed validator update with:
 # ruby -rdigest -e 'puts Digest::SHA256.file(".agents/bin/validate").hexdigest'
-expected_validator_sha256 = "28a1690bdc7faa4ab8c6dc780014558bb70451af69e2a3e107254164bc662e02"
+expected_validator_sha256 = "a6d146ec50428527571ef8bb5fc509b8d705aeb2f664a1e494fc5788c257177a"
 
 base_commit, base_status = Open3.capture2("git", "-C", root, "rev-parse", "--verify", "#{base_ref}^{commit}")
 abort "Could not resolve config-check base ref." unless base_status.success?

@@ -18,9 +18,10 @@ def changed_paths(output)
 end
 
 # Keep diagnostic escaping aligned with config-check and the embedded Ruby in
-# validate. Match policy against raw valid UTF-8, but never emit controls.
+# validate. Match policy against raw valid UTF-8, but never emit control or
+# format characters.
 def diagnostic_path(path)
-  path.gsub(/\p{C}/u) { |character| character.dump[1...-1] }
+  path.gsub(/[\p{Cc}\p{Cf}]/u) { |character| character.dump[1...-1] }
 end
 
 usage = "usage: seam-guard <repo_root> <base_ref> <head_ref>"

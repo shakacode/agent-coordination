@@ -48,9 +48,9 @@ if [ -n "$base_ref" ]; then
     abort "Changed simulation paths must be valid UTF-8." unless changed.valid_encoding?
 
     # Keep diagnostic escaping aligned with config-check and seam-guard. Match
-    # policy against raw valid UTF-8, but never emit control characters.
+    # policy against raw valid UTF-8, but never emit control or format characters.
     def diagnostic_path(path)
-      path.gsub(/\p{C}/u) { |character| character.dump[1...-1] }
+      path.gsub(/[\p{Cc}\p{Cf}]/u) { |character| character.dump[1...-1] }
     end
 
     paths = changed.split("\0")
@@ -82,4 +82,10 @@ if [ -n "$base_ref" ]; then
   exit 0
 fi
 
-"$root/.agents/bin/test"
+test_runner="$root/.agents/bin/test"
+if [ ! -f "$test_runner" ] || [ ! -x "$test_runner" ]; then
+  printf 'Simulation test runner must remain executable.\n' >&2
+  exit 1
+fi
+
+"$test_runner"
