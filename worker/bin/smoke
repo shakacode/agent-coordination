@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# Requires wrangler dev already running on :8787 with token 'devtoken' provisioned.
+# Requires wrangler dev at AGENT_COORD_API_URL (default :8787) with token 'devtoken' provisioned.
 set -euo pipefail
-BASE=http://127.0.0.1:8787
+BASE="${AGENT_COORD_API_URL:-http://127.0.0.1:8787}"
 AUTH="Authorization: Bearer devtoken"
 LOWER_AUTH="Authorization: bearer devtoken"
 P="claims/shakacode/demo/smoke-$(date +%s)-$$.json"

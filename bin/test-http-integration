@@ -76,24 +76,36 @@ export WRANGLER_SEND_METRICS=false
 export WRANGLER_SEND_ERROR_REPORTS=false
 mkdir -p "$XDG_CONFIG_HOME" "$XDG_CACHE_HOME" "$WRANGLER_LOG_PATH"
 
-resolve_free_port() {
-  ruby -rsocket -e '
-    server = TCPServer.new("127.0.0.1", 0)
-    port = server.addr[1]
-    server.close
+discover_wrangler_port() {
+  ruby -e '
+    path = ARGV.fetch(0)
+    exit 1 unless File.file?(path)
+
+    port = File.foreach(path).filter_map do |line|
+      match = line.match(%r{Ready on http://(?:localhost|127[.]0[.]0[.]1):([0-9]{1,5})(?:/|[[:space:]]|$)})
+      next unless match
+
+      candidate = Integer(match[1], 10)
+      candidate if (1..65_535).cover?(candidate)
+    end.last
+
+    exit 1 unless port
+
     puts port
-  '
+  ' "$WRANGLER_OUTPUT_LOG"
 }
 
-# Resolve the port once, up front, and reuse the same value for --port, the
-# health check, and AGENT_COORD_API_URL so nothing here can disagree about
-# which port is live. Pin it via AGENT_COORD_TEST_HTTP_PORT for an operator or
-# CI job that wants a stable port; otherwise allocate an ephemeral one by
-# binding port 0 and reading back whatever the OS assigned. Binding 0 and then
-# closing it before wrangler binds the same port leaves a residual race:
-# another process could grab the port in that gap. That window is far smaller
-# than colliding on a fixed port, but it is not zero.
-HTTP_PORT="${AGENT_COORD_TEST_HTTP_PORT:-$(resolve_free_port)}"
+# Let Wrangler bind port 0 atomically by default. During startup, follow the
+# latest valid ready port for the health check and AGENT_COORD_API_URL.
+# Operators can still pin an explicit port for deterministic debugging.
+DYNAMIC_HTTP_PORT=1
+WRANGLER_PORT=0
+HTTP_PORT=""
+if [ -n "${AGENT_COORD_TEST_HTTP_PORT:-}" ] && [ "${AGENT_COORD_TEST_HTTP_PORT:-}" != "0" ]; then
+  DYNAMIC_HTTP_PORT=0
+  WRANGLER_PORT="$AGENT_COORD_TEST_HTTP_PORT"
+  HTTP_PORT="$AGENT_COORD_TEST_HTTP_PORT"
+fi
 
 TOKEN=$(ruby -rsecurerandom -e 'print SecureRandom.hex(24)')
 HASH=$(ruby -rdigest -e 'print Digest::SHA256.hexdigest(ARGV.fetch(0))' "$TOKEN")
@@ -117,6 +129,16 @@ health_ready() {
   ' "$HTTP_PORT" >/dev/null 2>&1
 }
 
+fail_wrangler_exit() {
+  if [ -z "$HTTP_PORT" ]; then
+    echo "wrangler dev exited before reporting a valid ready address"
+  else
+    echo "wrangler dev exited before becoming healthy"
+  fi
+  cat "$WRANGLER_OUTPUT_LOG"
+  exit 1
+}
+
 (cd worker && npx wrangler d1 migrations apply agent-coord --local --persist-to "$WRANGLER_STATE_DIR" >/dev/null)
 (cd worker && npx wrangler d1 execute agent-coord --local --command \
   "INSERT OR REPLACE INTO machines (machine, token_hash, created_at) VALUES ('integration', '${HASH}', '2026-07-04T00:00:00Z')" \
@@ -130,15 +152,19 @@ health_ready() {
 (cd worker && npx wrangler d1 execute agent-coord --local --command \
   "INSERT OR REPLACE INTO machines (machine, token_hash, read_prefixes, write_prefixes, created_at) VALUES ('mirrored', '${MIRRORED_HASH}', '[\"${MIRRORED_CLAIM_PREFIX}\",\"archive/${MIRRORED_CLAIM_PREFIX}\"]', '[\"${MIRRORED_CLAIM_PREFIX}\",\"archive/${MIRRORED_CLAIM_PREFIX}\"]', '2026-07-04T00:00:00Z')" \
   --persist-to "$WRANGLER_STATE_DIR" >/dev/null)
-(cd worker && npx wrangler dev --local --persist-to "$WRANGLER_STATE_DIR" --port "$HTTP_PORT" >"$WRANGLER_OUTPUT_LOG" 2>&1) &
+(cd worker && npx wrangler dev --local --persist-to "$WRANGLER_STATE_DIR" --port "$WRANGLER_PORT" >"$WRANGLER_OUTPUT_LOG" 2>&1) &
 WRANGLER_PID=$!
 set +m 2>/dev/null || true
 for _ in $(seq 1 60); do
-  process_alive "$WRANGLER_PID" || { echo "wrangler dev exited before becoming healthy"; cat "$WRANGLER_OUTPUT_LOG"; exit 1; }
-  health_ready && break
+  process_alive "$WRANGLER_PID" || fail_wrangler_exit
+  if [ "$DYNAMIC_HTTP_PORT" -eq 1 ] && discovered_port="$(discover_wrangler_port 2>/dev/null)"; then
+    HTTP_PORT="$discovered_port"
+  fi
+  [ -n "$HTTP_PORT" ] && health_ready && break
   sleep 0.5
 done
-process_alive "$WRANGLER_PID" || { echo "wrangler dev exited before becoming healthy"; cat "$WRANGLER_OUTPUT_LOG"; exit 1; }
+process_alive "$WRANGLER_PID" || fail_wrangler_exit
+[ -n "$HTTP_PORT" ] || { echo "wrangler dev never reported a valid ready address"; cat "$WRANGLER_OUTPUT_LOG"; exit 1; }
 health_ready || { echo "wrangler dev never became healthy"; cat "$WRANGLER_OUTPUT_LOG"; exit 1; }
 AGENT_COORD_API_URL="http://127.0.0.1:$HTTP_PORT" \
   AGENT_COORD_API_TOKEN="$TOKEN" \
