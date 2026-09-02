@@ -1933,17 +1933,42 @@ module AgentCoord
 
     def gc_compaction_candidates(store, now, hot_days, synthetic_hot_days)
       entries = store.list_json("events")
+      invalid_encoding_by_entry = {}.compare_by_identity
+      entries.each do |entry|
+        invalid_encoding_by_entry[entry] = gc_invalid_encoding?(entry.data)
+      end
       terminal_lanes = gc_terminal_lanes_by_provenance(entries)
       groups = entries.group_by do |entry|
-        data = entry.data
-        provenance = gc_event_provenance(entry)
-        lane = data["lane"]
-        lanes = terminal_lanes[provenance]
-        lane = lanes.first if lane.to_s.empty? && lanes&.one?
-        [*provenance, lane]
+        gc_event_compaction_group(entry, terminal_lanes)
       end
       groups.filter_map do |group, entries|
+        next if entries.any? { |entry| invalid_encoding_by_entry.fetch(entry) }
+
         gc_compaction_candidate(group, entries, now, hot_days, synthetic_hot_days)
+      end
+    end
+
+    def gc_event_compaction_group(entry, terminal_lanes)
+      data = entry.data
+      provenance = gc_event_provenance(entry)
+      lane = data["lane"]
+      lanes = terminal_lanes[provenance]
+      lane = lanes.first if lane.to_s.empty? && lanes&.one?
+      [*provenance, lane]
+    end
+
+    def gc_invalid_encoding?(value)
+      case value
+      when String
+        !value.valid_encoding?
+      when Array
+        value.any? { |item| gc_invalid_encoding?(item) }
+      when Hash
+        value.any? do |key, item|
+          gc_invalid_encoding?(key) || gc_invalid_encoding?(item)
+        end
+      else
+        false
       end
     end
 
@@ -1974,7 +1999,7 @@ module AgentCoord
     def gc_event_provenance(entry)
       data = entry.data
       batch_id = data["batch_id"].to_s
-      batch_id = AgentCoord.event_batch_from_path(entry.path) if batch_id.empty?
+      batch_id = AgentCoord.event_batch_from_path(entry.path) if batch_id.empty? || !batch_id.valid_encoding?
       [batch_id, data["repo"], data["target"]&.to_s]
     end
 
@@ -1982,7 +2007,9 @@ module AgentCoord
       entries.each_with_object({}) do |entry, lanes_by_provenance|
         data = entry.data
         lane = data["lane"]
-        next unless gc_terminal_event?(data) && !lane.to_s.empty?
+        next unless gc_terminal_identity_valid?(data)
+        next unless gc_terminal_context_valid?(data, allow_invalid_encoding: true)
+        next if lane.to_s.empty?
 
         lanes = (lanes_by_provenance[gc_event_provenance(entry)] ||= [])
         lanes << lane unless lanes.include?(lane)
@@ -2023,17 +2050,23 @@ module AgentCoord
       return false unless gc_nonempty_string?(data["event_id"])
       return false unless gc_nonempty_string?(data["target"])
 
-      data["repo"].is_a?(String) && data["repo"].match?(%r{\A[^/]+/[^/]+\z})
+      repo = data["repo"]
+      repo.is_a?(String) && repo.valid_encoding? && repo.match?(%r{\A[^/]+/[^/]+\z})
     end
 
-    def gc_terminal_context_valid?(data)
+    def gc_terminal_context_valid?(data, allow_invalid_encoding: false)
       return false unless gc_nonempty_string?(data["workspace"])
-      return false unless gc_valid_closed_by?(data["closed_by"]) && gc_valid_datetime?(data["at"])
+      return false unless gc_valid_closed_by?(data["closed_by"])
+      return false unless gc_valid_datetime?(data["at"]) ||
+                          (allow_invalid_encoding && gc_invalid_encoding?(data["at"]))
       return false unless %w[batch_id lane branch pr_state].all? do |field|
         !data.key?(field) || gc_nonempty_string?(data[field])
       end
 
-      %w[pr_url evidence_url].all? { |field| !data.key?(field) || gc_valid_http_uri?(data[field]) }
+      %w[pr_url evidence_url].all? do |field|
+        !data.key?(field) || gc_valid_http_uri?(data[field]) ||
+          (allow_invalid_encoding && gc_invalid_encoding?(data[field]))
+      end
     end
 
     def gc_nonempty_string?(value)
@@ -2041,7 +2074,8 @@ module AgentCoord
     end
 
     def gc_valid_closed_by?(value)
-      return false unless value.is_a?(Hash) && value.keys.sort == %w[agent_id machine]
+      return false unless value.is_a?(Hash) && value.length == 2
+      return false unless %w[agent_id machine].all? { |field| value.key?(field) }
 
       %w[agent_id machine].all? { |field| gc_nonempty_string?(value[field]) }
     end
@@ -2079,7 +2113,7 @@ module AgentCoord
     end
 
     def gc_valid_http_uri?(value)
-      return false unless gc_nonempty_string?(value) && !value.match?(/\s/)
+      return false unless gc_nonempty_string?(value) && value.valid_encoding? && !value.match?(/\s/)
 
       uri = URI.parse(value)
       %w[http https].include?(uri.scheme&.downcase) && !uri.host.to_s.empty?
@@ -4482,11 +4516,23 @@ module AgentCoord
     # of the positional rather than silently answering for the whole fleet.
     def log_work_item_scope(options)
       scoped = [options[:repo], options[:target]].compact
-      return options[:work_item] if scoped.empty?
-      raise Error, "give the work item either positionally or with --repo/--target, not both" if options[:work_item]
-      raise Error, "--repo and --target must be given together" unless scoped.length == 2
+      if scoped.empty?
+        work_item = options[:work_item]
+        return if work_item.to_s.empty?
 
-      "#{options[:repo]}##{options[:target]}"
+        repo, target = log_split_work_item(work_item)
+      else
+        raise Error, "give the work item either positionally or with --repo/--target, not both" if options[:work_item]
+        raise Error, "--repo and --target must be given together" unless scoped.length == 2
+
+        repo = options[:repo]
+        target = options[:target]
+        work_item = "#{repo}##{target}"
+      end
+
+      AgentCoord.validate_repo!(repo, "work item")
+      AgentCoord.validate_segment!(target, "work item target")
+      work_item
     end
 
     def log_rows(store, options)
@@ -5293,6 +5339,7 @@ module AgentCoord
         # A display limit that shrank it would understate which spellings answered.
         payload = { "work_item" => log_work_item_summary(options, matched, claims),
                     "trail" => log_trail_state,
+                    "events_suppressed" => log_events_suppressed?(rows),
                     "events" => events, "claim" => records.last }.compact
         # Oldest first, like the trail above it, so the last thing printed or listed
         # is the current one. `claim` stays the newest for consumers that read one;
@@ -5345,11 +5392,31 @@ module AgentCoord
     # A claim reaches here only when it is the latest thing known about the work
     # item, so it always belongs last: it is the answer to "where is it now".
     def log_report_trailer(options, claims, rows, stream)
-      stream.puts "no events for #{options[:work_item] || 'the current filters'}" if rows.empty?
+      if rows.empty?
+        subject = log_scrub(options[:work_item] || "the current filters")
+        if log_events_suppressed?(rows)
+          stream.puts "no events shown for #{subject} (#{log_narrowing_descriptions(options).join(', ')})"
+        else
+          stream.puts "no events for #{subject}"
+        end
+      end
       # One line per holder, oldest first: with two live alias claims, printing
       # only the newest would read as sole custody, and printing them newest-first
       # would contradict the trail's own last-line-is-current reading.
       claims.each { |claim| stream.puts log_claim_note_line(claim.fetch("record")) }
+    end
+
+    def log_events_suppressed?(rows)
+      rows.empty? && !Array(@log_scoped_rows).empty?
+    end
+
+    def log_narrowing_descriptions(options)
+      LOG_TRAIL_FILTERS.filter_map do |field|
+        next unless log_narrowing_option?(options, field)
+
+        flag = "--#{field.to_s.tr('_', '-')}"
+        log_scrub("#{flag} #{options[field]}")
+      end
     end
 
     # Columns are sized to the rows actually being rendered so a single-work-item
@@ -8307,10 +8374,12 @@ module AgentCoord
   end
 
   def self.validate_repo!(repo, field)
-    value = repo.to_s
+    value = force_utf8(repo.to_s)
+    raise Error, "invalid #{field} repo: #{utf8_diagnostic(value)}" unless value.valid_encoding?
+
     return if value.match?(%r{\A[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+\z})
 
-    raise Error, "invalid #{field} repo: #{repo}"
+    raise Error, "invalid #{field} repo: #{utf8_diagnostic(value)}"
   end
 
   def self.validate_segment!(segment, field)

@@ -365,4 +365,47 @@ class PackagingTest < Minitest::Test
     floor_tests = floor_job.fetch("steps").find { |step| step.fetch("name", "") == "Run tests" }
     assert_equal canonical_tests.fetch("run"), floor_tests.fetch("run")
   end
+
+  def test_worker_smoke_uses_wrangler_owned_default_port_and_ready_address
+    ci_jobs = YAML.safe_load_file(File.join(ROOT, ".github/workflows/ci.yml"), aliases: true).fetch("jobs")
+    smoke_step = ci_jobs.fetch("worker-smoke").fetch("steps").find do |step|
+      step.fetch("name", "") == "Run Worker smoke"
+    end
+    run = smoke_step.fetch("run")
+
+    assert_includes run, "discover_wrangler_url()"
+    assert_includes run, 'WRANGLER_PORT="${AGENT_COORD_TEST_HTTP_PORT:-0}"'
+    assert_includes run, '[ "${AGENT_COORD_TEST_HTTP_PORT:-}" != "0" ]'
+    assert_includes run, 'npx wrangler dev --local --port "$WRANGLER_PORT"'
+    assert_includes run, 'AGENT_COORD_API_URL="http://127.0.0.1:${AGENT_COORD_TEST_HTTP_PORT}"'
+    assert_includes run, 'AGENT_COORD_API_URL="$(discover_wrangler_url 2>/dev/null || true)"'
+    assert_equal 2, run.scan('curl -fsS "$AGENT_COORD_API_URL/v1/health"').length
+    refute_includes run, "net.createServer()"
+    refute_includes run, "127.0.0.1:8787"
+
+    smoke = File.read(File.join(ROOT, "worker/bin/smoke"))
+    assert_includes smoke, 'BASE="${AGENT_COORD_API_URL:-http://127.0.0.1:8787}"'
+  end
+
+  def test_http_integration_harness_uses_wrangler_owned_default_port_and_ready_address
+    harness = File.read(File.join(ROOT, "bin", "test-http-integration"))
+
+    assert_includes harness, "discover_wrangler_port()"
+    assert_includes harness, "WRANGLER_PORT=0"
+    assert_includes harness, '--port "$WRANGLER_PORT"'
+    assert_includes harness, 'DYNAMIC_HTTP_PORT=0'
+    assert_includes harness, '[ "${AGENT_COORD_TEST_HTTP_PORT:-}" != "0" ]'
+    assert_includes harness, 'HTTP_PORT="$AGENT_COORD_TEST_HTTP_PORT"'
+    refute_includes harness, "resolve_free_port()"
+  end
+
+  def test_readme_documents_the_local_http_test_port_override
+    readme = File.read(File.join(ROOT, "README.md"))
+
+    assert_includes readme, "`AGENT_COORD_TEST_HTTP_PORT`"
+    assert_match(/select a free\s+port by default/, readme)
+    assert_match(/pinned value.*numeric.*free/m, readme)
+    assert_match(/value of\s+`0` keeps Wrangler-owned allocation/m, readme)
+    assert_includes readme, "EADDRINUSE"
+  end
 end
