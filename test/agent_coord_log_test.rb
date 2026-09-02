@@ -659,6 +659,15 @@ class AgentCoordLogTest < AgentCoordLogTestCase
     end
   end
 
+  def test_log_attributes_a_hash_containing_target_option_to_the_target
+    result = run_log("--repo", "x/y", "--target", "foo#bar")
+
+    assert_equal 1, result.status.exitstatus
+    assert_includes result.stderr, "invalid work item target: foo#bar"
+    refute_includes result.stderr, "invalid work item repo"
+    refute_includes result.stdout, "no events"
+  end
+
   def test_log_accepts_real_colon_and_lane_target_forms
     %w[issue:10112 adhoc:backfill-docs pr:32389 pr:32389:qa 319: adhoc::qa :qa].each do |target|
       positional = run_log("shakacode/example##{target}")

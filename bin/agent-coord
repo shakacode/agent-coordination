@@ -4482,19 +4482,20 @@ module AgentCoord
     # of the positional rather than silently answering for the whole fleet.
     def log_work_item_scope(options)
       scoped = [options[:repo], options[:target]].compact
-      work_item = if scoped.empty?
-                    options[:work_item]
-                  else
-                    if options[:work_item]
-                      raise Error, "give the work item either positionally or with --repo/--target, not both"
-                    end
-                    raise Error, "--repo and --target must be given together" unless scoped.length == 2
+      if scoped.empty?
+        work_item = options[:work_item]
+        return if work_item.to_s.empty?
 
-                    "#{options[:repo]}##{options[:target]}"
-                  end
-      return if work_item.to_s.empty?
+        repo, target = log_split_work_item(work_item)
+      else
+        raise Error, "give the work item either positionally or with --repo/--target, not both" if options[:work_item]
+        raise Error, "--repo and --target must be given together" unless scoped.length == 2
 
-      repo, target = log_split_work_item(work_item)
+        repo = options[:repo]
+        target = options[:target]
+        work_item = "#{repo}##{target}"
+      end
+
       AgentCoord.validate_repo!(repo, "work item")
       AgentCoord.validate_segment!(target, "work item target")
       work_item
