@@ -5241,6 +5241,7 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
 
     assert_includes error.message,
                     "timed out after 0.01s waiting for slow worker; completion assertions were not evaluated"
+    thread.join(THREAD_TIMEOUT)
     refute thread.alive?
   end
 
