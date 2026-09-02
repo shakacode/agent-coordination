@@ -894,6 +894,75 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     assert_empty JSON.parse(stdout.string).fetch("actions")
   end
 
+  def test_gc_skips_invalidly_encoded_terminal_repositories_and_continues_healthy_groups
+    terminal = gc_invalid_repo_records.fetch("events/corrupt-terminal/lane_closed-corrupt.json").first
+    terminal = terminal.merge("repo" => gc_invalid_repo)
+    refute AgentCoord::Runner.new([]).send(:gc_terminal_identity_valid?, terminal)
+    %w[C C.UTF-8].product({ "dry-run" => "--dry-run", "execute" => "--execute" }.to_a).each do |locale, (mode, flag)|
+      assert_gc_invalid_event_data_mode(locale, mode, flag, :repo)
+    end
+  end
+
+  def test_gc_skips_invalidly_encoded_terminal_urls_and_continues_healthy_groups
+    invalid_url = "https://example.test/\xFF".b.force_encoding(Encoding::UTF_8)
+    refute AgentCoord::Runner.new([]).send(:gc_valid_http_uri?, invalid_url)
+    %w[C C.UTF-8].product({ "dry-run" => "--dry-run", "execute" => "--execute" }.to_a).each do |locale, (mode, flag)|
+      assert_gc_invalid_event_data_mode(locale, mode, flag, :url)
+    end
+  end
+
+  def test_gc_skips_invalidly_encoded_nested_event_values_and_continues_healthy_groups
+    %w[C C.UTF-8].product({ "dry-run" => "--dry-run", "execute" => "--execute" }.to_a).each do |locale, (mode, flag)|
+      assert_gc_invalid_event_data_mode(locale, mode, flag, :nested_value)
+    end
+  end
+
+  def test_gc_skips_invalidly_encoded_nested_event_keys_and_continues_healthy_groups
+    %w[C C.UTF-8].product({ "dry-run" => "--dry-run", "execute" => "--execute" }.to_a).each do |locale, (mode, flag)|
+      assert_gc_invalid_event_data_mode(locale, mode, flag, :nested_key)
+    end
+  end
+
+  def test_gc_leaves_an_entire_group_untouched_when_a_sibling_has_invalid_encoding
+    %w[C C.UTF-8].product({ "dry-run" => "--dry-run", "execute" => "--execute" }.to_a).each do |locale, (mode, flag)|
+      assert_gc_invalid_sibling_group_mode(locale, mode, flag)
+    end
+  end
+
+  def test_gc_leaves_lane_less_sibling_untouched_when_terminal_has_invalid_encoding
+    %w[C C.UTF-8].product({ "dry-run" => "--dry-run", "execute" => "--execute" }.to_a).each do |locale, (mode, flag)|
+      assert_gc_invalid_terminal_sibling_group_mode(locale, mode, flag, :nested_value)
+    end
+  end
+
+  def test_gc_leaves_lane_less_sibling_untouched_when_terminal_url_has_invalid_encoding
+    %w[C C.UTF-8].product({ "dry-run" => "--dry-run", "execute" => "--execute" }.to_a).each do |locale, (mode, flag)|
+      assert_gc_invalid_terminal_sibling_group_mode(locale, mode, flag, :url)
+    end
+  end
+
+  def test_gc_leaves_lane_less_sibling_untouched_when_terminal_batch_id_has_invalid_encoding
+    %w[C C.UTF-8].product({ "dry-run" => "--dry-run", "execute" => "--execute" }.to_a).each do |locale, (mode, flag)|
+      assert_gc_invalid_terminal_sibling_group_mode(locale, mode, flag, :batch_id)
+    end
+  end
+
+  def test_gc_does_not_group_synthetic_sibling_with_validly_encoded_invalid_context_terminal
+    %w[C C.UTF-8].product({ "dry-run" => "--dry-run", "execute" => "--execute" }.to_a).each do |locale, (mode, flag)|
+      assert_gc_invalid_terminal_context_sibling_mode(locale, mode, flag)
+    end
+  end
+
+  def test_gc_does_not_group_synthetic_sibling_with_encoding_corrupt_independently_invalid_context_terminal
+    context_defects = %i[missing_workspace malformed_closed_by invalid_time invalid_url]
+    matrix = context_defects.product(
+      %w[C C.UTF-8], { "dry-run" => "--dry-run", "execute" => "--execute" }.to_a
+    )
+    matrix.each do |defect, locale, (mode, flag)|
+      assert_gc_invalid_terminal_context_and_encoding_sibling_mode(locale, mode, flag, defect)
+    end
+  end
+
   def test_gc_compaction_retry_accepts_consumed_renewal_paths_without_positional_records
     at = "2026-07-01T00:00:00Z"
     entries = [
@@ -9156,6 +9225,70 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     end
   end
 
+  def test_register_batch_rejects_invalidly_encoded_repo_with_a_domain_error
+    manifest_path = File.join(@state_root, "batch-invalid-repo.json")
+    valid_repo = "shakacode/invalid"
+    invalid_repo = "shakacode/\xFF".b
+    manifest = JSON.generate(
+      "batch_id" => "batch-invalid-repo",
+      "repo" => valid_repo,
+      "lanes" => [{ "name" => "docs", "owner" => "worker-docs", "targets" => ["3972"] }]
+    ).b.sub(valid_repo.b, invalid_repo)
+    File.binwrite(manifest_path, manifest)
+
+    %w[C C.UTF-8].each do |locale|
+      result = run_agent_coord(
+        "register-batch", "--file", manifest_path,
+        env: { "LC_ALL" => locale, "LANG" => locale }
+      )
+      stderr = result.stderr.dup.force_encoding(Encoding::UTF_8)
+
+      assert_equal 1, result.status.exitstatus, locale
+      assert_predicate stderr, :valid_encoding?, locale
+      assert_includes stderr, "invalid batch repo: shakacode/�", locale
+      refute_includes stderr, "invalid byte sequence in UTF-8", locale
+      refute_includes stderr, "ArgumentError", locale
+      assert_equal manifest, File.binread(manifest_path), locale
+      refute_path_exists File.join(@state_root, "batches", "batch-invalid-repo.json"), locale
+    end
+  end
+
+  # BINARY reports every byte sequence as valid for its own encoding. An invalid
+  # AGENT_COORD_BACKEND under LC_ALL=C must still be validated as UTF-8, and its
+  # domain error must not echo the raw byte that made validation fail.
+  def test_configured_backend_rejects_binary_invalid_utf8_with_a_utf8_domain_error
+    [Encoding::UTF_8, Encoding::US_ASCII, Encoding::ASCII_8BIT].each do |encoding|
+      repository = "shakacode/state".dup.force_encoding(encoding)
+
+      assert_nil AgentCoord.validate_repo!(repository, "backend"), encoding.name
+    end
+
+    invalid_byte_error = assert_raises(AgentCoord::Error) do
+      AgentCoord.validate_repo!("shakacode/\xFF".b, "backend")
+    end
+    invalid_grammar_error = assert_raises(AgentCoord::Error) do
+      AgentCoord.validate_repo!("shakacode/not allowed".b, "backend")
+    end
+
+    assert_equal "invalid backend repo: shakacode/\uFFFD", invalid_byte_error.message
+    [invalid_byte_error, invalid_grammar_error].each do |error|
+      assert_equal Encoding::UTF_8, error.message.encoding
+      assert_predicate error.message, :valid_encoding?
+    end
+
+    result = run_command(
+      { "AGENT_COORD_BACKEND" => "shakacode/\xFF".b, "LC_ALL" => "C", "LANG" => "C" },
+      RbConfig.ruby, BIN, "status"
+    )
+    stderr = result.stderr.dup.force_encoding(Encoding::UTF_8)
+
+    assert_equal 1, result.status.exitstatus
+    assert_empty result.stdout
+    assert_predicate stderr, :valid_encoding?
+    assert_equal "invalid backend repo: shakacode/\uFFFD\n", stderr
+    refute_includes result.stderr.bytes, 0xFF
+  end
+
   # State JSON is UTF-8 by definition, but the store used to read it through
   # Encoding.default_external, which is US-ASCII under a non-UTF-8 locale. One
   # record holding a non-ASCII byte then crashed JSON.parse with
@@ -11526,6 +11659,375 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     assert_equal 0, status.status.exitstatus, status.stderr
     assert_includes status.stdout, "lane docs owner worker-docs targets 3972 status blocked live"
     assert_includes status.stdout, "deps batch-a:backend blocked_on batch-a:backend"
+  end
+
+  def assert_gc_invalid_event_data_mode(locale, mode, flag, fixture)
+    records, placeholder, invalid_bytes = gc_invalid_event_fixture(fixture)
+    state_root = File.join(@state_root, "invalid-#{fixture.to_s.tr('_', '-')}-#{locale.tr('.', '-')}-#{mode}")
+    original_corrupt_bytes = write_gc_invalid_event_records(
+      state_root, records, placeholder: placeholder, invalid_bytes: invalid_bytes
+    )
+    result = run_agent_coord(
+      "gc", flag, "--json", state_root: state_root,
+                            env: { "LC_ALL" => locale, "LANG" => locale }
+    )
+
+    assert_equal 0, result.status.exitstatus, "#{locale} #{mode}: #{result.stderr}"
+    assert_gc_stderr_has_no_encoding_exception(result.stderr)
+    actions = JSON.parse(result.stdout).fetch("actions").select { |action| action["action"] == "compact" }
+    source_paths = actions.flat_map { |action| action.fetch("source_paths") }.sort
+    assert_equal gc_record_paths(records, corrupt: false), source_paths
+    assert_gc_corrupt_records_unchanged(state_root, original_corrupt_bytes)
+    assert_gc_mode_paths(mode, state_root, actions, gc_record_paths(records, corrupt: false))
+  end
+
+  def assert_gc_invalid_sibling_group_mode(locale, mode, flag)
+    state_root = File.join(@state_root, "invalid-sibling-#{locale.tr('.', '-')}-#{mode}")
+    records = gc_invalid_sibling_group_records
+    originals = write_gc_invalid_event_records(
+      state_root, records, placeholder: "nested-corrupt-sibling".b, invalid_bytes: "nested-\xFF".b
+    )
+    result = run_agent_coord(
+      "gc", flag, "--json", state_root: state_root,
+                            env: { "LC_ALL" => locale, "LANG" => locale }
+    )
+
+    assert_equal 0, result.status.exitstatus, "#{locale} #{mode}: #{result.stderr}"
+    assert_gc_stderr_has_no_encoding_exception(result.stderr)
+    actions = JSON.parse(result.stdout).fetch("actions").select { |action| action["action"] == "compact" }
+    healthy_paths = ["events/healthy-control/lane_closed-healthy.json"]
+    source_paths = actions.flat_map { |action| action.fetch("source_paths") }.sort
+    assert_equal healthy_paths, source_paths
+    assert_gc_corrupt_records_unchanged(state_root, originals)
+    %w[
+      events/shared-corrupt-group/fresh-corrupt.json
+      events/shared-corrupt-group/lane_closed-old.json
+    ].each { |path| assert_path_exists File.join(state_root, path) }
+    assert_gc_mode_paths(mode, state_root, actions, healthy_paths)
+  end
+
+  def assert_gc_invalid_terminal_sibling_group_mode(locale, mode, flag, fixture)
+    records, placeholder, invalid_bytes = gc_invalid_terminal_sibling_group_fixture(fixture)
+    state_root = File.join(
+      @state_root, "invalid-terminal-sibling-#{fixture.to_s.tr('_', '-')}-#{locale.tr('.', '-')}-#{mode}"
+    )
+    originals = write_gc_invalid_event_records(
+      state_root, records, placeholder: placeholder, invalid_bytes: invalid_bytes
+    )
+    result = run_agent_coord(
+      "gc", flag, "--json", state_root: state_root,
+                            env: { "LC_ALL" => locale, "LANG" => locale }
+    )
+
+    assert_equal 0, result.status.exitstatus, "#{locale} #{mode}: #{result.stderr}"
+    assert_gc_stderr_has_no_encoding_exception(result.stderr)
+    actions = JSON.parse(result.stdout).fetch("actions").select { |action| action["action"] == "compact" }
+    healthy_paths = ["events/healthy-reverse-control/lane_closed-healthy.json"]
+    source_paths = actions.flat_map { |action| action.fetch("source_paths") }.sort
+    assert_equal healthy_paths, source_paths
+    assert_gc_corrupt_records_unchanged(state_root, originals)
+    %w[
+      events/reverse-corrupt-group/lane-less-synthetic.json
+      events/reverse-corrupt-group/lane_closed-corrupt.json
+    ].each { |path| assert_path_exists File.join(state_root, path) }
+    assert_gc_mode_paths(mode, state_root, actions, healthy_paths)
+  end
+
+  def assert_gc_invalid_terminal_context_sibling_mode(locale, mode, flag)
+    state_root = File.join(@state_root, "invalid-terminal-context-#{locale.tr('.', '-')}-#{mode}")
+    records = gc_invalid_terminal_context_sibling_records
+    records.each do |path, payload|
+      full_path = File.join(state_root, path)
+      FileUtils.mkdir_p(File.dirname(full_path))
+      File.write(full_path, "#{JSON.pretty_generate(payload)}\n")
+    end
+    result = run_agent_coord(
+      "gc", flag, "--json", state_root: state_root,
+                            env: { "LC_ALL" => locale, "LANG" => locale }
+    )
+
+    assert_equal 0, result.status.exitstatus, "#{locale} #{mode}: #{result.stderr}"
+    assert_gc_stderr_has_no_encoding_exception(result.stderr)
+    actions = JSON.parse(result.stdout).fetch("actions").select { |action| action["action"] == "compact" }
+    sibling_path = "events/invalid-context-group/lane-less-synthetic.json"
+    source_paths = actions.flat_map { |action| action.fetch("source_paths") }.sort
+    assert_equal [sibling_path], source_paths
+    assert_path_exists File.join(state_root, "events/invalid-context-group/lane_closed-invalid.json")
+    assert_gc_mode_paths(mode, state_root, actions, [sibling_path])
+  end
+
+  def assert_gc_invalid_terminal_context_and_encoding_sibling_mode(locale, mode, flag, defect)
+    state_root = File.join(
+      @state_root, "invalid-terminal-context-and-encoding-#{defect}-#{locale.tr('.', '-')}-#{mode}"
+    )
+    records = gc_invalid_terminal_context_and_encoding_sibling_records(defect)
+    originals = write_gc_invalid_event_records(
+      state_root, records, placeholder: "nested-context-corrupt".b, invalid_bytes: "nested-\xFF".b
+    )
+    result = run_agent_coord(
+      "gc", flag, "--json", state_root: state_root,
+                            env: { "LC_ALL" => locale, "LANG" => locale }
+    )
+
+    assert_equal 0, result.status.exitstatus, "#{defect} #{locale} #{mode}: #{result.stderr}"
+    assert_gc_stderr_has_no_encoding_exception(result.stderr)
+    actions = JSON.parse(result.stdout).fetch("actions").select { |action| action["action"] == "compact" }
+    compacted_paths = [
+      "events/context-corrupt-#{defect}/lane-less-synthetic.json",
+      "events/healthy-context-control-#{defect}/lane_closed-healthy.json"
+    ]
+    source_paths = actions.flat_map { |action| action.fetch("source_paths") }.sort
+    assert_equal compacted_paths.sort, source_paths
+    assert_gc_corrupt_records_unchanged(state_root, originals)
+    assert_gc_mode_paths(mode, state_root, actions, compacted_paths)
+  end
+
+  def gc_invalid_event_fixture(fixture)
+    case fixture
+    when :repo
+      [gc_invalid_repo_records, "shakacode/corrupt-byte".b, gc_invalid_repo.b]
+    when :url
+      [gc_invalid_url_records, "https://example.test/corrupt-byte".b, "https://example.test/\xFF".b]
+    when :nested_value
+      [gc_invalid_nested_value_records, "nested-corrupt-byte".b, "nested-\xFF".b]
+    when :nested_key
+      [gc_invalid_nested_key_records, "nested-corrupt-key".b, "nested-\xFF".b]
+    else
+      raise "unknown invalid event fixture: #{fixture.inspect}"
+    end
+  end
+
+  def assert_gc_stderr_has_no_encoding_exception(stderr)
+    refute_includes stderr, "invalid byte sequence"
+    refute_includes stderr, "ArgumentError"
+    refute_includes stderr, "JSON::GeneratorError"
+  end
+
+  def assert_gc_corrupt_records_unchanged(state_root, original_bytes)
+    original_bytes.each do |path, bytes|
+      assert_equal bytes, File.binread(File.join(state_root, path))
+    end
+  end
+
+  def assert_gc_mode_paths(mode, state_root, actions, healthy_paths)
+    execute = mode == "execute"
+    actions.each do |action|
+      archive_path = File.join(state_root, action.fetch("archive_path"))
+      execute ? assert_path_exists(archive_path) : refute_path_exists(archive_path)
+    end
+    healthy_paths.each do |path|
+      source_path = File.join(state_root, path)
+      execute ? refute_path_exists(source_path) : assert_path_exists(source_path)
+    end
+  end
+
+  def gc_invalid_repo_records
+    placeholder = "shakacode/corrupt-byte"
+    old = "2020-01-01T00:00:00Z"
+    {
+      "events/corrupt-terminal/lane_closed-corrupt.json" => [
+        valid_gc_lane_closed(
+          event_id: "lane_closed-corrupt", batch_id: "corrupt-terminal", target: "corrupt", at: old,
+          extra: { "repo" => placeholder }
+        ), true
+      ],
+      "events/corrupt-synthetic/orphan-corrupt.json" => [
+        gc_synthetic_orphan("orphan-corrupt", "corrupt-synthetic", "corrupt-orphan", placeholder, old), true
+      ],
+      "events/healthy-terminal/lane_closed-healthy.json" => [
+        valid_gc_lane_closed(
+          event_id: "lane_closed-healthy", batch_id: "healthy-terminal", target: "healthy", at: old
+        ), false
+      ],
+      "events/healthy-synthetic/orphan-healthy.json" => [
+        gc_synthetic_orphan("orphan-healthy", "healthy-synthetic", "healthy-orphan", "shakacode/example", old), false
+      ]
+    }
+  end
+
+  def gc_invalid_url_records
+    gc_invalid_terminal_records(
+      "url",
+      corrupt_extra: { "pr_url" => "https://example.test/corrupt-byte" },
+      healthy_extra: { "pr_url" => "https://example.test/pull/1" }
+    )
+  end
+
+  def gc_invalid_nested_value_records
+    gc_invalid_terminal_records(
+      "nested-value",
+      corrupt_extra: { "metadata" => { "labels" => ["nested-corrupt-byte"] } },
+      healthy_extra: { "metadata" => { "labels" => ["healthy"] } }
+    )
+  end
+
+  def gc_invalid_nested_key_records
+    gc_invalid_terminal_records(
+      "nested-key",
+      corrupt_extra: { "metadata" => { "nested-corrupt-key" => "value" } },
+      healthy_extra: { "metadata" => { "healthy-key" => "value" } }
+    )
+  end
+
+  def gc_invalid_terminal_records(label, corrupt_extra:, healthy_extra:)
+    old = "2020-01-01T00:00:00Z"
+    {
+      "events/corrupt-#{label}/lane_closed-corrupt.json" => [
+        valid_gc_lane_closed(
+          event_id: "lane_closed-corrupt-#{label}", batch_id: "corrupt-#{label}",
+          target: "corrupt-#{label}", at: old, extra: corrupt_extra
+        ), true
+      ],
+      "events/healthy-#{label}/lane_closed-healthy.json" => [
+        valid_gc_lane_closed(
+          event_id: "lane_closed-healthy-#{label}", batch_id: "healthy-#{label}",
+          target: "healthy-#{label}", at: old, extra: healthy_extra
+        ), false
+      ]
+    }
+  end
+
+  def gc_invalid_sibling_group_records
+    old = "2020-01-01T00:00:00Z"
+    fresh = Time.now.utc.iso8601
+    {
+      "events/shared-corrupt-group/lane_closed-old.json" => [
+        valid_gc_lane_closed(
+          event_id: "lane_closed-old", batch_id: "shared-corrupt-group", target: "shared", at: old,
+          extra: { "lane" => "shared-lane" }
+        ), false
+      ],
+      "events/shared-corrupt-group/fresh-corrupt.json" => [
+        {
+          "schema_version" => 1, "event_id" => "fresh-corrupt", "batch_id" => "shared-corrupt-group",
+          "type" => "phase", "repo" => "shakacode/example", "target" => "shared", "lane" => "shared-lane",
+          "phase" => "qa", "at" => fresh, "metadata" => { "label" => "nested-corrupt-sibling" }
+        }, true
+      ],
+      "events/healthy-control/lane_closed-healthy.json" => [
+        valid_gc_lane_closed(
+          event_id: "lane_closed-healthy-control", batch_id: "healthy-control", target: "healthy", at: old,
+          extra: { "lane" => "healthy-lane" }
+        ), false
+      ]
+    }
+  end
+
+  def gc_invalid_terminal_sibling_group_fixture(fixture)
+    case fixture
+    when :nested_value
+      [gc_invalid_terminal_sibling_group_records(
+        "metadata" => { "label" => "nested-corrupt-terminal" }
+      ), "nested-corrupt-terminal".b, "nested-\xFF".b]
+    when :url
+      [gc_invalid_terminal_sibling_group_records(
+        "pr_url" => "https://example.test/corrupt-terminal"
+      ), "https://example.test/corrupt-terminal".b, "https://example.test/\xFF".b]
+    when :batch_id
+      [gc_invalid_terminal_sibling_group_records({}),
+       "reverse-corrupt-group".b, "reverse-corrupt-\xFF".b]
+    else
+      raise "unknown invalid terminal sibling fixture: #{fixture.inspect}"
+    end
+  end
+
+  def gc_invalid_terminal_context_sibling_records
+    old = "2020-01-01T00:00:00Z"
+    invalid_terminal = valid_gc_lane_closed(
+      event_id: "lane_closed-invalid", batch_id: "invalid-context-group", target: "shared", at: old,
+      extra: { "lane" => "shared-lane" }
+    )
+    invalid_terminal.delete("workspace")
+    {
+      "events/invalid-context-group/lane_closed-invalid.json" => invalid_terminal,
+      "events/invalid-context-group/lane-less-synthetic.json" => gc_synthetic_orphan(
+        "lane-less-synthetic", "invalid-context-group", "shared", "shakacode/example", old
+      )
+    }
+  end
+
+  def gc_invalid_terminal_context_and_encoding_sibling_records(defect)
+    old = "2020-01-01T00:00:00Z"
+    batch_id = "context-corrupt-#{defect}"
+    invalid_terminal = valid_gc_lane_closed(
+      event_id: "lane_closed-invalid", batch_id: batch_id, target: "shared", at: old,
+      extra: { "lane" => "shared-lane", "metadata" => { "label" => "nested-context-corrupt" } }
+    )
+    case defect
+    when :missing_workspace
+      invalid_terminal.delete("workspace")
+    when :malformed_closed_by
+      invalid_terminal["closed_by"] = { "agent_id" => "gc-worker", "machine" => "test", "extra" => "no" }
+    when :invalid_time
+      invalid_terminal["at"] = "not-a-time"
+    when :invalid_url
+      invalid_terminal["pr_url"] = "file:///tmp/not-http"
+    else
+      raise "unknown terminal context defect: #{defect.inspect}"
+    end
+
+    {
+      "events/#{batch_id}/lane_closed-invalid.json" => [invalid_terminal, true],
+      "events/#{batch_id}/lane-less-synthetic.json" => [
+        gc_synthetic_orphan("lane-less-synthetic", batch_id, "shared", "shakacode/example", old), false
+      ],
+      "events/healthy-context-control-#{defect}/lane_closed-healthy.json" => [
+        valid_gc_lane_closed(
+          event_id: "lane_closed-healthy", batch_id: "healthy-context-control-#{defect}",
+          target: "healthy", at: old, extra: { "lane" => "healthy-lane" }
+        ), false
+      ]
+    }
+  end
+
+  def gc_invalid_terminal_sibling_group_records(corrupt_extra)
+    old = "2020-01-01T00:00:00Z"
+    {
+      "events/reverse-corrupt-group/lane_closed-corrupt.json" => [
+        valid_gc_lane_closed(
+          event_id: "lane_closed-corrupt", batch_id: "reverse-corrupt-group", target: "shared", at: old,
+          extra: { "lane" => "shared-lane" }.merge(corrupt_extra)
+        ), true
+      ],
+      "events/reverse-corrupt-group/lane-less-synthetic.json" => [
+        gc_synthetic_orphan(
+          "lane-less-synthetic", "reverse-corrupt-group", "shared", "shakacode/example", old
+        ), false
+      ],
+      "events/healthy-reverse-control/lane_closed-healthy.json" => [
+        valid_gc_lane_closed(
+          event_id: "lane_closed-healthy-reverse-control", batch_id: "healthy-reverse-control",
+          target: "healthy", at: old, extra: { "lane" => "healthy-lane" }
+        ), false
+      ]
+    }
+  end
+
+  def gc_synthetic_orphan(event_id, batch_id, target, repo, at)
+    {
+      "schema_version" => 1, "event_id" => event_id, "batch_id" => batch_id,
+      "type" => "phase", "repo" => repo, "target" => target, "phase" => "qa",
+      "synthetic" => true, "at" => at
+    }
+  end
+
+  def write_gc_invalid_event_records(state_root, records, placeholder:, invalid_bytes:)
+    records.each_with_object({}) do |(path, (payload, corrupt)), originals|
+      full_path = File.join(state_root, path)
+      FileUtils.mkdir_p(File.dirname(full_path))
+      bytes = "#{JSON.pretty_generate(payload)}\n".b
+      bytes.sub!(placeholder, invalid_bytes) if corrupt
+      File.binwrite(full_path, bytes)
+      originals[path] = bytes if corrupt
+    end
+  end
+
+  def gc_record_paths(records, corrupt:)
+    records.filter_map { |path, (_, record_corrupt)| path if record_corrupt == corrupt }.sort
+  end
+
+  def gc_invalid_repo
+    "shakacode/\xFF".b.force_encoding(Encoding::UTF_8)
   end
 
   def valid_gc_lane_closed(event_id:, batch_id:, target:, at:, extra: {})
