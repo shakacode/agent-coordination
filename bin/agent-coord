@@ -1890,6 +1890,8 @@ module AgentCoord
     def gc_archive_candidates(store, now, hot_days, synthetic_hot_days, prefixes = JSON_PREFIXES)
       candidates = prefixes.flat_map do |prefix|
         store.list_json(prefix).filter_map do |entry|
+          next if gc_invalid_encoding?(entry.data)
+
           reason, eligible_at = gc_archive_eligibility(entry, prefix, now)
           retention_days = entry.data["synthetic"] == true ? synthetic_hot_days : hot_days
           next unless reason && eligible_at <= now - (retention_days * 86_400)
@@ -5701,6 +5703,8 @@ module AgentCoord
     def batch_audit_report(store, batch_id)
       batch_entry = store.read_json(AgentCoord.batch_path(batch_id))
       return batch_audit_unknown_report(batch_id, "batch #{batch_id} is not registered") if batch_entry.nil?
+      return batch_audit_invalid_encoding_report(batch_id, batch_entry.path) if gc_invalid_encoding?(batch_entry.data)
+
       unless batch_entry.data.is_a?(Hash)
         return batch_audit_unknown_report(batch_id, "batch #{batch_id} state is not an object")
       end
@@ -5713,6 +5717,9 @@ module AgentCoord
       if filtered_status_list?(store, event_prefix)
         return batch_audit_unknown_report(batch_id, "event trail for #{batch_id} is filtered by a scoped token")
       end
+
+      invalid_event = event_records.find { |entry| gc_invalid_encoding?(entry.data) }
+      return batch_audit_invalid_encoding_report(batch_id, invalid_event.path) if invalid_event
 
       events = event_records.map(&:data)
       batch_context = { id: batch_id.to_s, repo: batch_entry.data["repo"] }
@@ -5732,6 +5739,11 @@ module AgentCoord
 
     def batch_audit_unknown_report(batch_id, reason)
       { "batch_id" => batch_id, "verdict" => "unknown", "reason" => reason, "lanes" => [] }
+    end
+
+    def batch_audit_invalid_encoding_report(batch_id, path)
+      safe_path = AgentCoord.utf8_diagnostic(path)
+      batch_audit_unknown_report(batch_id, "coordination state unreadable: invalid UTF-8 at #{safe_path}")
     end
 
     # Non-empty target strings declared by a lane. Mirrors validate_batch_lane!'s
