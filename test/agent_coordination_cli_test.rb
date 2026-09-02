@@ -923,6 +923,21 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     end
   end
 
+  def test_gc_skips_invalidly_encoded_archive_records_and_continues_healthy_records
+    %w[C C.UTF-8].product({ "dry-run" => "--dry-run", "execute" => "--execute" }.to_a).each do |locale, (mode, flag)|
+      assert_gc_invalid_archive_data_mode(locale, mode, flag)
+    end
+  end
+
+  def test_gc_skips_parser_rejected_invalid_utf8_archive_records_and_continues_healthy_records
+    modes = { "dry-run" => "--dry-run", "execute" => "--execute" }
+    outcomes = %w[C C.UTF-8].product(modes.to_a).map do |locale, (mode, flag)|
+      gc_parser_invalid_archive_outcome(locale, mode, flag)
+    end
+
+    outcomes.each { |outcome| assert_gc_parser_invalid_archive_outcome(outcome) }
+  end
+
   def test_gc_leaves_an_entire_group_untouched_when_a_sibling_has_invalid_encoding
     %w[C C.UTF-8].product({ "dry-run" => "--dry-run", "execute" => "--execute" }.to_a).each do |locale, (mode, flag)|
       assert_gc_invalid_sibling_group_mode(locale, mode, flag)
@@ -5413,6 +5428,14 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     assert entries.fetch(0).data.fetch("visible")
   end
 
+  def test_local_store_encoding_partition_keeps_valid_utf8_malformed_json_fail_closed
+    write_state_file("claims/broken.json", "{")
+
+    assert_raises(JSON::ParserError) do
+      AgentCoord::LocalStore.new(@state_root).list_json_partitioned_by_encoding("claims")
+    end
+  end
+
   def test_local_store_fsyncs_leaf_directory_after_atomic_rename
     store = ObservedDirectoryFsyncLocalStore.new(@state_root)
     store.write_json("batches/durable.json", { "ok" => true }, message: "durable", create: true)
@@ -5532,6 +5555,13 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     entries = store.list_json("claims")
     assert_equal [path], entries.map(&:path)
     assert_equal 2, store.tree_reads
+  end
+
+  def test_github_store_partitions_invalid_utf8_content_before_json_parse
+    partition = EncodingPartitionGitHubStore.new.list_json_partitioned_by_encoding("claims")
+
+    assert_equal ["claims/shakacode/example/healthy.json"], partition.records.map(&:path)
+    assert_equal ["claims/shakacode/example/corrupt.json"], partition.invalid_utf8_paths
   end
 
   def test_github_layout_requires_exact_prefix_nodes_to_be_trees
@@ -10761,6 +10791,20 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     assert_empty payload.fetch("lanes")
   end
 
+  def test_batch_audit_invalid_utf8_inputs_are_unknown_with_safe_diagnostics
+    %w[C C.UTF-8].product(%i[batch event], [false, true]).each do |locale, source, json|
+      assert_batch_audit_invalid_utf8_input(locale, source, json: json)
+    end
+  end
+
+  def test_batch_audit_parser_rejected_invalid_utf8_inputs_are_unknown_with_safe_diagnostics
+    outcomes = %w[C C.UTF-8].product(%i[batch event], [false, true]).map do |locale, source, json|
+      batch_audit_invalid_utf8_outcome(locale, source, json: json, parser_failure: true)
+    end
+
+    outcomes.each { |outcome| assert_batch_audit_invalid_utf8_outcome(outcome) }
+  end
+
   def test_batch_audit_does_not_false_complete_lanes_sharing_an_owner
     write_batch(
       "batch-shared-owner",
@@ -11635,6 +11679,89 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     assert_gc_mode_paths(mode, state_root, actions, gc_record_paths(records, corrupt: false))
   end
 
+  def assert_gc_invalid_archive_data_mode(locale, mode, flag)
+    state_root = File.join(@state_root, "invalid-archive-#{locale.tr('.', '-')}-#{mode}")
+    records = gc_invalid_archive_records
+    originals = write_gc_invalid_archive_records(state_root, records)
+    result = run_agent_coord(
+      "gc", flag, "--json", state_root: state_root,
+                            env: { "LC_ALL" => locale, "LANG" => locale }
+    )
+
+    assert_equal 0, result.status.exitstatus, "#{locale} #{mode}: #{result.stderr}"
+    assert_gc_stderr_has_no_encoding_exception(result.stderr)
+    actions = JSON.parse(result.stdout).fetch("actions").select { |action| action["action"] == "archive" }
+    healthy_paths = gc_record_paths(records, corrupt: false)
+    assert_equal healthy_paths, actions.map { |action| action.fetch("source_path") }.sort
+    assert_gc_corrupt_records_unchanged(state_root, originals)
+    assert_gc_mode_paths(mode, state_root, actions, healthy_paths)
+  end
+
+  def gc_parser_invalid_archive_outcome(locale, mode, flag)
+    state_root = File.join(@state_root, "parser-invalid-archive-#{locale.tr('.', '-')}-#{mode}")
+    records = gc_invalid_archive_records
+    originals = write_gc_invalid_archive_records(
+      state_root, records, invalid_bytes: "archive-\\\xFF".b
+    )
+    result = run_agent_coord(
+      "gc", flag, "--json", state_root: state_root,
+                            env: { "LC_ALL" => locale, "LANG" => locale }
+    )
+    { locale: locale, mode: mode, result: result, state_root: state_root, records: records, originals: originals }
+  end
+
+  def assert_gc_parser_invalid_archive_outcome(outcome)
+    locale, mode, result = outcome.values_at(:locale, :mode, :result)
+    assert_equal 0, result.status.exitstatus, "#{locale} #{mode}: #{result.stderr}"
+    assert_gc_stderr_has_no_encoding_exception(result.stderr)
+    actions = JSON.parse(result.stdout).fetch("actions").select { |action| action["action"] == "archive" }
+    healthy_paths = gc_record_paths(outcome.fetch(:records), corrupt: false)
+    assert_equal healthy_paths, actions.map { |action| action.fetch("source_path") }.sort
+    assert_gc_corrupt_records_unchanged(outcome.fetch(:state_root), outcome.fetch(:originals))
+    assert_gc_mode_paths(mode, outcome.fetch(:state_root), actions, healthy_paths)
+  end
+
+  def assert_batch_audit_invalid_utf8_input(locale, source, json:)
+    outcome = batch_audit_invalid_utf8_outcome(locale, source, json: json, parser_failure: false)
+    assert_batch_audit_invalid_utf8_outcome(outcome)
+  end
+
+  def batch_audit_invalid_utf8_outcome(locale, source, json:, parser_failure:)
+    kind = parser_failure ? "parser-invalid" : "invalid"
+    batch_id = "audit-#{kind}-#{source}-#{locale.tr('.', '-')}-#{json ? 'json' : 'text'}"
+    state_root = File.join(@state_root, batch_id)
+    source_path, original_bytes = write_invalid_batch_audit_state(
+      state_root, batch_id, source, parser_failure: parser_failure
+    )
+    args = ["batch-audit", "--batch-id", batch_id]
+    args << "--json" if json
+    result = run_agent_coord(
+      *args, state_root: state_root,
+             env: { "LC_ALL" => locale, "LANG" => locale }
+    )
+    {
+      locale: locale, source: source, json: json, result: result,
+      state_root: state_root, source_path: source_path, original_bytes: original_bytes
+    }
+  end
+
+  def assert_batch_audit_invalid_utf8_outcome(outcome)
+    locale, source, json, result = outcome.values_at(:locale, :source, :json, :result)
+    stdout = result.stdout.dup.force_encoding(Encoding::UTF_8)
+    stderr = result.stderr.dup.force_encoding(Encoding::UTF_8)
+
+    assert_equal 2, result.status.exitstatus, "#{locale} #{source} #{json}: #{result.stderr}"
+    assert_predicate stdout, :valid_encoding?, "#{locale} #{source} #{json} stdout"
+    assert_predicate stderr, :valid_encoding?, "#{locale} #{source} #{json} stderr"
+    assert_includes stdout, "coordination state unreadable"
+    assert_equal "unknown", JSON.parse(stdout).fetch("verdict") if json
+    refute_includes stderr, "bin/agent-coord:"
+    refute_includes stderr, "Encoding::"
+    refute_includes stderr, "invalid byte sequence"
+    assert_equal outcome.fetch(:original_bytes),
+                 File.binread(File.join(outcome.fetch(:state_root), outcome.fetch(:source_path)))
+  end
+
   def assert_gc_invalid_sibling_group_mode(locale, mode, flag)
     state_root = File.join(@state_root, "invalid-sibling-#{locale.tr('.', '-')}-#{mode}")
     records = gc_invalid_sibling_group_records
@@ -11723,6 +11850,97 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     else
       raise "unknown invalid event fixture: #{fixture.inspect}"
     end
+  end
+
+  def gc_invalid_archive_records
+    old = "2020-01-01T00:00:00Z"
+    corrupt_metadata = { "note" => "archive-corrupt-byte" }
+    {
+      "claims/shakacode/example/corrupt-claim.json" => [
+        {
+          "schema_version" => 1, "repo" => "shakacode/example", "target" => "corrupt-claim",
+          "agent_id" => "worker", "status" => "released", "updated_at" => old,
+          "metadata" => corrupt_metadata
+        }, true
+      ],
+      "heartbeats/corrupt-heartbeat.json" => [
+        {
+          "schema_version" => 1, "agent_id" => "corrupt-heartbeat", "status" => "done",
+          "updated_at" => old, "metadata" => corrupt_metadata
+        }, true
+      ],
+      "batches/corrupt-batch.json" => [
+        {
+          "schema_version" => 1, "batch_id" => "corrupt-batch", "status" => "completed",
+          "updated_at" => old, "metadata" => corrupt_metadata
+        }, true
+      ],
+      "claims/shakacode/example/healthy-claim.json" => [
+        {
+          "schema_version" => 1, "repo" => "shakacode/example", "target" => "healthy-claim",
+          "agent_id" => "worker", "status" => "released", "updated_at" => old
+        }, false
+      ],
+      "heartbeats/healthy-heartbeat.json" => [
+        {
+          "schema_version" => 1, "agent_id" => "healthy-heartbeat", "status" => "done",
+          "updated_at" => old
+        }, false
+      ],
+      "batches/healthy-batch.json" => [
+        {
+          "schema_version" => 1, "batch_id" => "healthy-batch", "status" => "completed",
+          "updated_at" => old
+        }, false
+      ]
+    }
+  end
+
+  def write_gc_invalid_archive_records(state_root, records, invalid_bytes: "archive-\xFF".b)
+    records.each_with_object({}) do |(path, (payload, corrupt)), originals|
+      full_path = File.join(state_root, path)
+      FileUtils.mkdir_p(File.dirname(full_path))
+      bytes = "#{JSON.pretty_generate(payload)}\n".b
+      bytes.sub!("archive-corrupt-byte".b, invalid_bytes) if corrupt
+      File.binwrite(full_path, bytes)
+      originals[path] = bytes if corrupt
+    end
+  end
+
+  def write_invalid_batch_audit_state(state_root, batch_id, source, parser_failure:)
+    batch = {
+      "schema_version" => 1,
+      "batch_id" => batch_id,
+      "repo" => "shakacode/example",
+      "lanes" => [{ "name" => "code", "owner" => "worker", "targets" => ["42"] }],
+      "metadata" => { "note" => source == :batch ? "audit-corrupt-byte" : "healthy" }
+    }
+    claim = {
+      "schema_version" => 1, "event_id" => "claim", "batch_id" => batch_id,
+      "type" => "claim.acquired", "repo" => "shakacode/example", "target" => "42",
+      "lane" => "code", "agent_id" => "worker", "status" => "active", "at" => "2026-08-01T00:00:00Z"
+    }
+    terminal = valid_batch_audit_terminal_event(batch_id, "code", "worker", "shakacode/example", "42")
+    terminal["workspace"] = "audit-corrupt-byte" if source == :event
+    records = {
+      "batches/#{batch_id}.json" => batch,
+      "events/#{batch_id}/claim.json" => claim,
+      "events/#{batch_id}/terminal.json" => terminal
+    }
+    corrupt_path = source == :batch ? "batches/#{batch_id}.json" : "events/#{batch_id}/terminal.json"
+    corrupt_bytes = nil
+    records.each do |path, payload|
+      full_path = File.join(state_root, path)
+      FileUtils.mkdir_p(File.dirname(full_path))
+      bytes = "#{JSON.pretty_generate(payload)}\n".b
+      if path == corrupt_path
+        invalid_bytes = parser_failure ? "audit-\\\xFF".b : "audit-\xFF".b
+        bytes.sub!("audit-corrupt-byte".b, invalid_bytes)
+        corrupt_bytes = bytes
+      end
+      File.binwrite(full_path, bytes)
+    end
+    [corrupt_path, corrupt_bytes]
   end
 
   def assert_gc_stderr_has_no_encoding_exception(stderr)
@@ -12743,6 +12961,38 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
 
     def result(stdout, stderr: "", success: true)
       AgentCoord::GhResult.new(stdout: stdout, stderr: stderr, status: FakeStatus.new(success))
+    end
+  end
+
+  class EncodingPartitionGitHubStore < AgentCoord::GitHubStore
+    def initialize
+      super(backend: "shakacode/agent-coordination-state", ref: "state")
+    end
+
+    private
+
+    def gh_api(*args)
+      prefix = "repos/shakacode/agent-coordination-state"
+      case args
+      when ["#{prefix}/git/trees/state?recursive=1"]
+        paths = %w[corrupt healthy].map do |name|
+          { "path" => "claims/shakacode/example/#{name}.json", "type" => "blob" }
+        end
+        result(JSON.generate("tree" => paths))
+      when ["#{prefix}/contents/claims/shakacode/example/corrupt.json?ref=state"]
+        bytes = JSON.generate("status" => "corrupt-placeholder").b
+        bytes.sub!("corrupt-placeholder".b, "corrupt-\\\xFF".b)
+        result(JSON.generate("content" => Base64.strict_encode64(bytes), "sha" => "sha-corrupt"))
+      when ["#{prefix}/contents/claims/shakacode/example/healthy.json?ref=state"]
+        bytes = JSON.generate("status" => "released")
+        result(JSON.generate("content" => Base64.strict_encode64(bytes), "sha" => "sha-healthy"))
+      else
+        raise "unexpected gh api #{args.inspect}"
+      end
+    end
+
+    def result(stdout)
+      AgentCoord::GhResult.new(stdout: stdout, stderr: "", status: FakeStatus.new(true))
     end
   end
 
