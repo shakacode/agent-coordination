@@ -137,18 +137,46 @@ jobs:
       - name: Run Worker smoke
         working-directory: worker
         run: |
+          discover_wrangler_url() {
+            # shellcheck disable=SC2016
+            node -e '
+              const fs = require("node:fs");
+              const log = fs.readFileSync(process.argv[1], "utf8");
+              const pattern = /Ready on http:\/\/(?:localhost|127\.0\.0\.1):([0-9]{1,5})(?:\/|\s|$)/g;
+              let url;
+              for (const match of log.matchAll(pattern)) {
+                const port = Number(match[1]);
+                if (port >= 1 && port <= 65_535) url = `http://127.0.0.1:${port}`;
+              }
+              if (url) process.stdout.write(url);
+              else process.exit(1);
+            ' /tmp/wrangler.log
+          }
+          DYNAMIC_HTTP_PORT=1
+          WRANGLER_PORT="${AGENT_COORD_TEST_HTTP_PORT:-0}"
+          AGENT_COORD_API_URL=""
+          if [ -n "${AGENT_COORD_TEST_HTTP_PORT:-}" ] && [ "${AGENT_COORD_TEST_HTTP_PORT:-}" != "0" ]; then
+            DYNAMIC_HTTP_PORT=0
+            AGENT_COORD_API_URL="http://127.0.0.1:${AGENT_COORD_TEST_HTTP_PORT}"
+          fi
           npx wrangler d1 migrations apply agent-coord --local
           npx wrangler d1 execute agent-coord --local --command "INSERT OR REPLACE INTO machines (machine, token_hash, created_at, revoked_at) VALUES ('dev', '9428e07c68054de014032f21e0716501aa937714fd31033caf589e66b276e53b', datetime('now'), NULL)"
-          npm run dev > /tmp/wrangler.log 2>&1 &
+          npx wrangler dev --local --port "$WRANGLER_PORT" > /tmp/wrangler.log 2>&1 &
           worker_pid=$!
           trap 'kill "$worker_pid" 2>/dev/null || true' EXIT
           for _ in {1..30}; do
-            if curl -fsS http://127.0.0.1:8787/v1/health >/dev/null; then
+            kill -0 "$worker_pid" 2>/dev/null || { cat /tmp/wrangler.log; exit 1; }
+            if [ "$DYNAMIC_HTTP_PORT" -eq 1 ]; then
+              AGENT_COORD_API_URL="$(discover_wrangler_url 2>/dev/null || true)"
+            fi
+            if [ -n "$AGENT_COORD_API_URL" ] && curl -fsS "$AGENT_COORD_API_URL/v1/health" >/dev/null; then
               break
             fi
             sleep 1
           done
-          curl -fsS http://127.0.0.1:8787/v1/health >/dev/null || { cat /tmp/wrangler.log; exit 1; }
+          [ -n "$AGENT_COORD_API_URL" ] || { echo "wrangler dev never reported a valid ready address"; cat /tmp/wrangler.log; exit 1; }
+          curl -fsS "$AGENT_COORD_API_URL/v1/health" >/dev/null || { cat /tmp/wrangler.log; exit 1; }
+          export AGENT_COORD_API_URL
           ./bin/smoke || { cat /tmp/wrangler.log; exit 1; }
 
   worker-integration:
