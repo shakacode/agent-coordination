@@ -100,8 +100,8 @@ class Capture3SourceScanner
         node = body
         next
       when :bodystmt
-        statements, rescue_clause, else_clause, ensure_clause = node.drop(1)
-        return node if [rescue_clause, else_clause, ensure_clause].any?
+        statements, rescue_clause, else_clause, = node.drop(1)
+        return node if [rescue_clause, else_clause].any?
       else
         return node
       end
@@ -166,6 +166,23 @@ class SubprocessCaptureGuardTest < Minitest::Test
   def test_guard_reports_a_begin_wrapped_open3_receiver
     path = "bin/new-tool"
     source = "#!/usr/bin/env ruby\n(begin; Open3; end).capture3(\"ruby\", \"-v\")\n"
+
+    offenders = unreviewed_sites(Capture3SourceScanner.new.scan(path, source))
+
+    assert_equal 1, offenders.length
+    assert_match %r{\Abin/new-tool:\d+: Open3\.capture3 in <top-level>\z}, format_site(offenders.first)
+  end
+
+  def test_guard_reports_an_ensure_wrapped_open3_receiver
+    path = "bin/new-tool"
+    source = <<~RUBY
+      #!/usr/bin/env ruby
+      (begin
+        Open3
+      ensure
+        cleanup
+      end).capture3("ruby", "-v")
+    RUBY
 
     offenders = unreviewed_sites(Capture3SourceScanner.new.scan(path, source))
 
