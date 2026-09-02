@@ -40,7 +40,10 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
   FAKE_BUNDLE = <<~RUBY
     #!/usr/bin/env ruby
     File.write(ENV.fetch("FAKE_BUNDLE_LOG"), ARGV.join(" "))
-    exit Integer(ENV.fetch("FAKE_BUNDLE_EXIT", "0")) if ARGV == %w[exec ruby test/http_backend_integration_test.rb]
+    if ARGV == %w[exec ruby test/http_backend_integration_test.rb]
+      File.write(ENV.fetch("FAKE_BUNDLE_API_URL_LOG"), ENV.fetch("AGENT_COORD_API_URL"))
+      exit Integer(ENV.fetch("FAKE_BUNDLE_EXIT", "0"))
+    end
 
     warn "unexpected bundle command: \#{ARGV.join(" ")}"
     exit 1
@@ -72,6 +75,16 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
       index && ARGV.fetch(index + 1)
     end
 
+    def respond_once(server, status, body)
+      socket = server.accept
+      while (line = socket.gets)
+        break if line.chomp.empty?
+      end
+      socket.write "HTTP/1.1 \#{status}\r\nContent-Length: \#{body.bytesize}\r\nConnection: close\r\n\r\n\#{body}"
+    ensure
+      socket&.close
+    end
+
     if ARGV[0, 5] == %w[wrangler d1 migrations apply agent-coord] &&
         ARGV.include?("--local") &&
         persist_to_arg
@@ -84,6 +97,21 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
 
       File.write(ENV.fetch("FAKE_WRANGLER_PID"), Process.pid.to_s)
       server = TCPServer.new("127.0.0.1", Integer(port))
+      ready_port = server.addr[1]
+      write_event("ready_port" => ready_port)
+      ready_url = ENV.fetch("FAKE_WRANGLER_READY_URL", "http://localhost:\#{ready_port}")
+      puts "Ready on \#{ready_url}"
+      STDOUT.flush
+      exit 1 if ENV["FAKE_WRANGLER_EXIT_AFTER_READY"] == "1"
+      if ENV["FAKE_WRANGLER_REBIND_AFTER_HEALTH"] == "1"
+        respond_once(server, "503 Service Unavailable", "no")
+        server.close
+        server = TCPServer.new("127.0.0.1", 0)
+        ready_port = server.addr[1]
+        write_event("ready_port" => ready_port)
+        puts "Ready on http://localhost:\#{ready_port}"
+        STDOUT.flush
+      end
       trap("TERM") do
         write_event("signal" => "TERM")
         File.write(ENV.fetch("FAKE_WRANGLER_STOPPED"), "1")
@@ -92,12 +120,7 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
       end
 
       loop do
-        socket = server.accept
-        while (line = socket.gets)
-          break if line.chomp.empty?
-        end
-        socket.write "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok"
-        socket.close
+        respond_once(server, "200 OK", "ok")
       end
     elsif ARGV[0, 5] == %w[wrangler d1 execute agent-coord --local] &&
         persist_to_arg &&
@@ -1309,8 +1332,64 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
       assert dev, "no wrangler dev command was recorded"
       assert_equal port.to_s, http_integration_port_arg(dev.fetch("argv")),
                    "expected AGENT_COORD_TEST_HTTP_PORT to be threaded through to wrangler dev"
+      assert_equal "http://127.0.0.1:#{port}", File.read(paths.fetch(:bundle_api_url_log))
       refute_equal "8787", http_integration_port_arg(dev.fetch("argv")),
                    "harness must not fall back to the historically hard-coded port"
+    end
+  end
+
+  def test_http_integration_harness_uses_wrangler_atomic_port_and_reported_ready_address
+    with_fake_http_harness do |env, paths|
+      result = run_command(
+        env,
+        "bash",
+        HTTP_INTEGRATION_BIN
+      )
+
+      assert_fake_http_harness_run(result, paths)
+      dev = fake_harness_events(paths).find { |event| event["argv"]&.first(2) == %w[wrangler dev] }
+      ready = fake_harness_events(paths).find { |event| event.key?("ready_port") }
+      assert dev, "no wrangler dev command was recorded"
+      assert ready, "fake Wrangler did not record its bound port"
+      assert_equal "0", http_integration_port_arg(dev.fetch("argv")),
+                   "default allocation must stay atomic inside Wrangler"
+      assert_equal "http://127.0.0.1:#{ready.fetch('ready_port')}",
+                   File.read(paths.fetch(:bundle_api_url_log))
+    end
+  end
+
+  def test_http_integration_harness_follows_the_latest_valid_ready_address
+    with_fake_http_harness do |env, paths|
+      result = run_command(
+        env.merge("FAKE_WRANGLER_REBIND_AFTER_HEALTH" => "1"),
+        "bash",
+        HTTP_INTEGRATION_BIN
+      )
+
+      assert_fake_http_harness_run(result, paths)
+      ready_ports = fake_harness_events(paths).filter_map { |event| event["ready_port"] }
+      assert_equal 2, ready_ports.size, "fake Wrangler must report the initial and rebound ports"
+      refute_equal ready_ports.first, ready_ports.last
+      assert_equal "http://127.0.0.1:#{ready_ports.last}", File.read(paths.fetch(:bundle_api_url_log))
+    end
+  end
+
+  def test_http_integration_harness_rejects_an_invalid_ready_address
+    with_fake_http_harness do |env, paths|
+      result = run_command(
+        env.merge(
+          "FAKE_WRANGLER_READY_URL" => "http://example.com:51165",
+          "FAKE_WRANGLER_EXIT_AFTER_READY" => "1"
+        ),
+        "bash",
+        HTTP_INTEGRATION_BIN
+      )
+
+      refute_equal 0, result.status.exitstatus
+      assert_includes "#{result.stdout}\n#{result.stderr}",
+                      "wrangler dev exited before reporting a valid ready address"
+      refute File.exist?(paths.fetch(:bundle_api_url_log)),
+             "backend tests must not run with an unvalidated ready address"
     end
   end
 
@@ -13349,6 +13428,7 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
       tmpdir: File.join(root, "tmp"),
       npx_log: File.join(root, "npx.jsonl"),
       bundle_log: File.join(root, "bundle.log"),
+      bundle_api_url_log: File.join(root, "bundle-api-url.log"),
       wrangler_pid: File.join(root, "wrangler.pid"),
       wrangler_stopped: File.join(root, "wrangler.stopped")
     }
@@ -13361,6 +13441,7 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
       "TMPDIR" => "#{paths.fetch(:tmpdir)}/",
       "FAKE_NPX_LOG" => paths.fetch(:npx_log),
       "FAKE_BUNDLE_LOG" => paths.fetch(:bundle_log),
+      "FAKE_BUNDLE_API_URL_LOG" => paths.fetch(:bundle_api_url_log),
       "FAKE_WRANGLER_PID" => paths.fetch(:wrangler_pid),
       "FAKE_WRANGLER_STOPPED" => paths.fetch(:wrangler_stopped)
     }

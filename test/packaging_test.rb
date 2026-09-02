@@ -383,6 +383,17 @@ class PackagingTest < Minitest::Test
     assert_includes smoke, 'BASE="${AGENT_COORD_API_URL:-http://127.0.0.1:8787}"'
   end
 
+  def test_http_integration_harness_uses_wrangler_owned_default_port_and_ready_address
+    harness = File.read(File.join(ROOT, "bin", "test-http-integration"))
+
+    assert_includes harness, "discover_wrangler_port()"
+    assert_includes harness, "WRANGLER_PORT=0"
+    assert_includes harness, '--port "$WRANGLER_PORT"'
+    assert_includes harness, 'DYNAMIC_HTTP_PORT=0'
+    assert_includes harness, 'HTTP_PORT="$AGENT_COORD_TEST_HTTP_PORT"'
+    refute_includes harness, "resolve_free_port()"
+  end
+
   def test_readme_documents_the_local_http_test_port_override
     readme = File.read(File.join(ROOT, "README.md"))
 
