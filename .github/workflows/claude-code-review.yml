@@ -6,6 +6,7 @@ on:
 
 jobs:
   claude-review:
+    if: github.actor != 'dependabot[bot]'
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -27,7 +28,6 @@ jobs:
           CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
-          allowed_bots: "dependabot[bot]"
           prompt: |
             REPO: ${{ github.repository }}
             PR NUMBER: ${{ github.event.pull_request.number }}
@@ -52,12 +52,11 @@ jobs:
       # yet the result still reports a green "pass" and posts no review. Inspect
       # the execution output and fail only that silent-success case.
       #
-      # Scoped to outcome == 'success' on purpose. When the action itself fails
-      # (missing token on Dependabot PRs, the "workflow validation failed" safety
-      # skip on PRs that edit this file, a real action error) the job is already
-      # red and the action prints its own message — re-failing here would only
-      # add a misleading one. And a successful run that legitimately skips Claude
-      # (so emits no execution_file/result) is treated as a pass, not a failure.
+      # Scoped to outcome == 'success' on purpose. A real action error already
+      # turns the job red and prints its own message, so re-failing here would
+      # only add a misleading one. A successful run that legitimately skips
+      # Claude (for example, the workflow-validation safety skip on PRs that edit
+      # this file) emits no execution_file/result and remains a pass.
       - name: Verify review completed (fail on invalid/expired token)
         if: steps.claude-review.outcome == 'success'
         env:
