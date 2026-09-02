@@ -74,13 +74,42 @@ class Capture3SourceScanner
   end
 
   def capture3_call?(node)
-    %i[call command_call].include?(node.first) && open3_receiver?(node[1]) && node.dig(3, 1) == "capture3"
+    return false unless %i[call command_call].include?(node.first) && open3_receiver?(node[1])
+
+    message = node[3]
+    message.is_a?(Array) && message[1] == "capture3"
   end
 
   def open3_receiver?(node)
-    node = node[1].last while node.is_a?(Array) && node.first == :paren && node[1].is_a?(Array) && !node[1].empty?
+    node = unwrap_transparent_receiver(node)
 
     %w[Open3 ::Open3 Object::Open3 ::Object::Open3].include?(constant_name(node))
+  end
+
+  def unwrap_transparent_receiver(node)
+    loop do
+      return node unless node.is_a?(Array)
+
+      case node.first
+      when :paren
+        statements = node[1]
+      when :begin
+        body = node[1]
+        return node unless body.is_a?(Array) && body.first == :bodystmt
+
+        node = body
+        next
+      when :bodystmt
+        statements, rescue_clause, else_clause, ensure_clause = node.drop(1)
+        return node if [rescue_clause, else_clause, ensure_clause].any?
+      else
+        return node
+      end
+
+      return node unless statements.is_a?(Array) && !statements.empty?
+
+      node = statements.last
+    end
   end
 
   def capture_site(node, definition_identity)
@@ -134,6 +163,16 @@ class SubprocessCaptureGuardTest < Minitest::Test
     assert_match %r{\Abin/new-tool:\d+: Open3\.capture3 in <top-level>\z}, format_site(offenders.first)
   end
 
+  def test_guard_reports_a_begin_wrapped_open3_receiver
+    path = "bin/new-tool"
+    source = "#!/usr/bin/env ruby\n(begin; Open3; end).capture3(\"ruby\", \"-v\")\n"
+
+    offenders = unreviewed_sites(Capture3SourceScanner.new.scan(path, source))
+
+    assert_equal 1, offenders.length
+    assert_match %r{\Abin/new-tool:\d+: Open3\.capture3 in <top-level>\z}, format_site(offenders.first)
+  end
+
   def test_guard_reports_object_qualified_open3_receivers
     path = "bin/new-tool"
     source = <<~RUBY
@@ -145,6 +184,15 @@ class SubprocessCaptureGuardTest < Minitest::Test
     offenders = unreviewed_sites(Capture3SourceScanner.new.scan(path, source))
 
     assert_equal 2, offenders.length
+  end
+
+  def test_guard_ignores_open3_call_shorthand_without_crashing
+    path = "bin/new-tool"
+    source = "#!/usr/bin/env ruby\nOpen3.()\n"
+
+    sites = Capture3SourceScanner.new.scan(path, source)
+
+    assert_empty sites
   end
 
   def test_guard_reports_a_top_level_call_in_a_reviewed_file_without_a_sorting_error
