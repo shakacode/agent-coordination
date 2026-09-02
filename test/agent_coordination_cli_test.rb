@@ -918,6 +918,18 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     end
   end
 
+  def test_gc_leaves_lane_less_sibling_untouched_when_terminal_batch_id_has_invalid_encoding
+    %w[C C.UTF-8].product({ "dry-run" => "--dry-run", "execute" => "--execute" }.to_a).each do |locale, (mode, flag)|
+      assert_gc_invalid_terminal_sibling_group_mode(locale, mode, flag, :batch_id)
+    end
+  end
+
+  def test_gc_does_not_group_synthetic_sibling_with_validly_encoded_invalid_context_terminal
+    %w[C C.UTF-8].product({ "dry-run" => "--dry-run", "execute" => "--execute" }.to_a).each do |locale, (mode, flag)|
+      assert_gc_invalid_terminal_context_sibling_mode(locale, mode, flag)
+    end
+  end
+
   def test_gc_compaction_retry_accepts_consumed_renewal_paths_without_positional_records
     at = "2026-07-01T00:00:00Z"
     entries = [
@@ -11579,6 +11591,29 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     assert_gc_mode_paths(mode, state_root, actions, healthy_paths)
   end
 
+  def assert_gc_invalid_terminal_context_sibling_mode(locale, mode, flag)
+    state_root = File.join(@state_root, "invalid-terminal-context-#{locale.tr('.', '-')}-#{mode}")
+    records = gc_invalid_terminal_context_sibling_records
+    records.each do |path, payload|
+      full_path = File.join(state_root, path)
+      FileUtils.mkdir_p(File.dirname(full_path))
+      File.write(full_path, "#{JSON.pretty_generate(payload)}\n")
+    end
+    result = run_agent_coord(
+      "gc", flag, "--json", state_root: state_root,
+                            env: { "LC_ALL" => locale, "LANG" => locale }
+    )
+
+    assert_equal 0, result.status.exitstatus, "#{locale} #{mode}: #{result.stderr}"
+    assert_gc_stderr_has_no_encoding_exception(result.stderr)
+    actions = JSON.parse(result.stdout).fetch("actions").select { |action| action["action"] == "compact" }
+    sibling_path = "events/invalid-context-group/lane-less-synthetic.json"
+    source_paths = actions.flat_map { |action| action.fetch("source_paths") }.sort
+    assert_equal [sibling_path], source_paths
+    assert_path_exists File.join(state_root, "events/invalid-context-group/lane_closed-invalid.json")
+    assert_gc_mode_paths(mode, state_root, actions, [sibling_path])
+  end
+
   def gc_invalid_event_fixture(fixture)
     case fixture
     when :repo
@@ -11720,9 +11755,27 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
       [gc_invalid_terminal_sibling_group_records(
         "pr_url" => "https://example.test/corrupt-terminal"
       ), "https://example.test/corrupt-terminal".b, "https://example.test/\xFF".b]
+    when :batch_id
+      [gc_invalid_terminal_sibling_group_records({}),
+       "reverse-corrupt-group".b, "reverse-corrupt-\xFF".b]
     else
       raise "unknown invalid terminal sibling fixture: #{fixture.inspect}"
     end
+  end
+
+  def gc_invalid_terminal_context_sibling_records
+    old = "2020-01-01T00:00:00Z"
+    invalid_terminal = valid_gc_lane_closed(
+      event_id: "lane_closed-invalid", batch_id: "invalid-context-group", target: "shared", at: old,
+      extra: { "lane" => "shared-lane" }
+    )
+    invalid_terminal.delete("workspace")
+    {
+      "events/invalid-context-group/lane_closed-invalid.json" => invalid_terminal,
+      "events/invalid-context-group/lane-less-synthetic.json" => gc_synthetic_orphan(
+        "lane-less-synthetic", "invalid-context-group", "shared", "shakacode/example", old
+      )
+    }
   end
 
   def gc_invalid_terminal_sibling_group_records(corrupt_extra)

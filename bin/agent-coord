@@ -1999,7 +1999,7 @@ module AgentCoord
     def gc_event_provenance(entry)
       data = entry.data
       batch_id = data["batch_id"].to_s
-      batch_id = AgentCoord.event_batch_from_path(entry.path) if batch_id.empty?
+      batch_id = AgentCoord.event_batch_from_path(entry.path) if batch_id.empty? || !batch_id.valid_encoding?
       [batch_id, data["repo"], data["target"]&.to_s]
     end
 
@@ -2007,7 +2007,9 @@ module AgentCoord
       entries.each_with_object({}) do |entry, lanes_by_provenance|
         data = entry.data
         lane = data["lane"]
-        next unless gc_terminal_identity_valid?(data) && !lane.to_s.empty?
+        next unless gc_terminal_identity_valid?(data)
+        next unless gc_invalid_encoding?(data) || gc_terminal_context_valid?(data)
+        next if lane.to_s.empty?
 
         lanes = (lanes_by_provenance[gc_event_provenance(entry)] ||= [])
         lanes << lane unless lanes.include?(lane)
