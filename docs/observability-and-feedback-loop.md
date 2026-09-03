@@ -73,9 +73,9 @@ vocabulary the retro depends on:
 and no length bound, and only the four above have enforced fields. **Use the
 typed forms.** The enforced fields make severity, category, reason, and kind
 reliably present in the event JSON, and since issue #112 those four fields and
-the event type itself are retained in the telemetry ledger, so friction clusters
-can be grouped there rather than only in raw records. What is still missing is
-the rollup over them — see the
+the event type itself are retained in the telemetry ledger. The scorecard now
+counts interventions, help requests, and escalations; error-category and
+measured-cost clustering remain open — see the
 [gap register](#gap-register-what-is-not-measured-yet). Typing is still the higher-leverage
 discipline, because the archived baseline shows that untyped intervention events
 were the reason interventions could only be classified by string-matching after
@@ -133,7 +133,9 @@ These are the metric paths inside the scorecard document. They come from
 [`lib/agent_coordination/scorecards.rb`](../lib/agent_coordination/scorecards.rb)
 over the views in
 [`0001_initial.sql`](../schema/telemetry-ledger/0001_initial.sql) and
-[`0003_pricing_scorecards.sql`](../schema/telemetry-ledger/0003_pricing_scorecards.sql).
+[`0003_pricing_scorecards.sql`](../schema/telemetry-ledger/0003_pricing_scorecards.sql),
+plus the operational views in
+[`0005_operational_scorecards.sql`](../schema/telemetry-ledger/0005_operational_scorecards.sql).
 The scorecard also emits a top-level `batch_id`, which is identity metadata
 rather than a metric and is not a valid hypothesis target. A kaizen target
 metric **must** be a dotted path from the table below; anything else is not
@@ -151,6 +153,24 @@ measurable and must not be accepted as a hypothesis target.
 | `review_economics.known_review_cost_microusd` | summed `priced` review cost |
 | `review_economics.unknown_review_costs` | review receipts with `pricing_status = 'unknown'` |
 | `review_economics.cost_per_actionable_finding_microusd` | `UNKNOWN` when any attributed review cost is unknown or the actionable denominator is zero |
+| `operational_load.merged_prs` | exact, same-repository merged PR denominator used for normalized operational load |
+| `operational_load.human_interventions.count` | `human_intervention` event count |
+| `operational_load.human_interventions.per_10_merged_prs` | intervention count per 10 merged PRs; `UNKNOWN` when the denominator is zero |
+| `operational_load.human_interventions.by_kind.<kind>` | intervention count for `takeover`, `supersede`, `manual-fix`, or `drain` |
+| `operational_load.human_interventions.by_kind_per_10_merged_prs.<kind>` | per-kind intervention count per 10 merged PRs; `UNKNOWN` when the denominator is zero |
+| `operational_load.help_requests.count` | `help_requested` event count |
+| `operational_load.help_requests.per_10_merged_prs` | help-request count per 10 merged PRs; `UNKNOWN` when the denominator is zero |
+| `operational_load.help_requests.by_reason.<reason>` | help-request count for `blocked-user-input`, `question`, or `permission` |
+| `operational_load.help_requests.by_reason_per_10_merged_prs.<reason>` | per-reason help-request count per 10 merged PRs; `UNKNOWN` when the denominator is zero |
+| `operational_load.escalations.count` | `escalation_requested` event count |
+| `operational_load.escalations.per_10_merged_prs` | escalation count per 10 merged PRs; `UNKNOWN` when the denominator is zero |
+| `operational_load.lane_durations.lanes` | lanes registered in the batch |
+| `operational_load.lane_durations.computable_lanes` | lanes with an exact, unambiguous claim-to-terminal duration |
+| `operational_load.lane_durations.telemetry_gap_lanes` | lanes whose duration is `UNKNOWN` because membership, endpoints, or timestamps are incomplete |
+| `operational_load.lane_durations.by_lane_seconds.<lane_id>` | seconds from first exact `claim.acquired` to first later terminal `lane_closed`, or `UNKNOWN` |
+| `operational_load.lane_durations.seconds.<summary>` | minimum, median, or maximum of computable lane durations; `UNKNOWN` when none are computable |
+| `operational_load.custody_rework.reclaims` | acquisitions immediately following a release or takeover for the same target within the batch |
+| `operational_load.custody_rework.per_10_merged_prs` | custody reclaims per 10 merged PRs; `UNKNOWN` when the denominator is zero |
 | `unknowns.non_joinable_target_observations` | target observations for this batch whose `join_status != 'exact'` |
 | `unknowns.unlinked_host_sessions_ledger_wide` | host sessions with `link_status != 'exact'` — **ledger-wide, not per-batch** |
 
@@ -180,14 +200,11 @@ permanently `inconclusive` ledger row. Where an entry records that part of a
 gap has since been closed, that part is settled — do not re-report it, and read
 the remaining scope as the live gap.
 
-- **No duration, latency, or wall-clock metric.** The scorecard emits none. The
-  `batches` table carries `registered_at` and `updated_at` and `github_prs`
-  carries `created_at` and `merged_at`, but no view derives a duration and the
-  scorecard exposes no such field. The archived baseline could reconstruct
-  claim-to-merge duration for only 1 of 107 merged PRs, and that limit has not
-  been lifted.
-- **No error or friction cluster rollup.** The underlying events now survive
-  ingest — issue #112 fixed that — but nothing rolls them up. Scope the
+- **No error-category or measured-cost friction cluster rollup.** The underlying
+  events now survive ingest — issue #112 fixed that — and issue #143 added
+  scorecard counts for interventions, help requests, and escalations. Nothing
+  yet groups `error` events by category or ranks the operational signals by
+  measured cost. Scope the
   remaining gap precisely before writing a hypothesis against it:
   - *Fixed, do not re-report.* The `EVENT_TYPES` allowlist in
     `lib/agent_coordination/harvester.rb` had been fitted to the historical
@@ -209,16 +226,17 @@ the remaining scope as the live gap.
     literally `UNKNOWN` type stays countable rather than falling back out of
     sight. `category` is sanitized the same way, so an oversized `error`
     category is bounded rather than discarded.
-  - *Still open.* No view or scorecard field groups by `event_type`, so ranking
-    error and friction clusters by measured cost is still not a one-query
-    answer from the scorecard. Issue #143 owns those fields. The ledger columns
-    they need now exist; the aggregation does not.
+  - *Fixed, do not re-report.* The operational scorecard counts
+    `human_intervention` by `kind`, `help_requested` by `reason`, and
+    `escalation_requested`, with totals and rates per 10 merged PRs.
+  - *Still open.* No view or scorecard field groups `error` by `category`, and
+    ranking error or operational-friction clusters by measured cost is still
+    not a one-query answer from the scorecard.
   - Note none of this ever affected `batch-audit`, which reads raw coordination
     state rather than the ledger.
-- **No intervention counter.** `human_intervention` events are written, are
-  visible in raw state, and since #112 are retained in the ledger with their
-  `kind` — but no scorecard field counts them. That counter is issue #143.
-- **No rework, retry, or review-round counter.**
+- **No retry or review-round counter.** Custody rework is now measurable as a
+  reclaim immediately after release or takeover, but no scorecard field counts
+  command retries or review rounds.
 - **No `pack_sha`.** No code, schema, state contract, or batch manifest in this
   repo defines or emits it; the only occurrences are in this document and the
   kaizen ledger.
