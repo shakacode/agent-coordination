@@ -3,6 +3,9 @@
 CLI, workflow helpers, Worker code, tests, and simulation fixtures for
 coordinating concurrent agent work.
 
+> **Documentation:** Explore the ShakaCode agent stack at
+> [agents.shakacode.com](https://agents.shakacode.com).
+
 A zero-config first run uses a clearly labeled local store so one person can
 try the CLI immediately. The team and multi-machine runtime path is the HTTP
 backend: `AGENT_COORD_API_URL` points the CLI at the Cloudflare Worker backed by
