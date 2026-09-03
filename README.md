@@ -698,27 +698,24 @@ and atomically renamed, then its parent directory is synced. Once `gc` prunes th
 backend, this file can be the only remaining copy, so it must never be left
 partial. Sync every state root whose history you would want to read back.
 
-Plain `grep` can then answer the same questions offline and instantly. Match on
-`#9765` rather than a bare `9765`: event ids are hex, so a bare number can also
-match incidental digits inside them.
+Plain `grep` can then answer the same questions offline and instantly. Match
+the complete repository-qualified work-item column rather than a bare number:
+the mirror spans repositories, and event ids or detail text can contain the same
+digits. Include the accepted target aliases and lane suffixes so the offline
+query covers the same event trail as `agent-coord log ShakaCode/hichee#9765`.
 
 ```bash
 agent-coord log --sync
-grep -Ei $'#(issue:|pr:)?9765(:|\t)' ~/.local/state/agent-coordination/log.tsv
+grep -Ei $'^([^\t]*\t){3}ShakaCode/hichee#(issue:|pr:)?9765(:[^\t]*)?\t' ~/.local/state/agent-coordination/log.tsv
 ```
 
 The mirror records each event's target as it was written, so `grep` does not get
-the work-item matching the command does — anchor on the spellings instead, or the
-same split this command fixes reappears offline:
-
-```bash
-grep -Ei $'#(issue:|pr:)?9765(:|\t)' ~/.local/state/agent-coordination/log.tsv
-```
+the work-item matching the command does. The expression above explicitly unions
+the bare, `issue:`, and `pr:` spellings, including their lanes.
 
 The `$'...'` quoting matters: GNU grep does not define `\t` inside an ERE, so the
-plain-quoted form matches a literal `t` rather than a tab — it finds none of the
-bare-number records this example exists to union, and matches unrelated targets
-ending in `t`. ANSI-C quoting puts a real tab in the pattern before grep sees it.
+plain-quoted form matches a literal `t` rather than a tab. ANSI-C quoting puts
+real tab boundaries around the TSV work-item column before grep sees the pattern.
 
 `-i` matters for the same reason: grep is case-sensitive by default, while the
 command folds case (below). Without it the offline union silently drops a record
