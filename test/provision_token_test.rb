@@ -177,6 +177,44 @@ class ProvisionTokenTest < Minitest::Test
     assert_includes stdout, "writes:   [\"attention/default/shakacode/agent-coordination/decision-1.json\"]"
   end
 
+  def test_attention_scope_matches_worker_active_path_length_boundary
+    stem = "attention/a/b/c/"
+    accepted = "#{stem}#{'x' * (512 - stem.bytesize - '.json'.bytesize)}.json"
+    rejected = "#{stem}#{'x' * (513 - stem.bytesize - '.json'.bytesize)}.json"
+    assert_equal 512, accepted.bytesize
+    assert_equal 513, rejected.bytesize
+
+    _, accepted_stderr, accepted_status = run_script("m5", "--local", "--read-prefix", accepted)
+    assert accepted_status.success?, accepted_stderr
+
+    _, rejected_stderr, rejected_status = run_script("m5", "--local", "--read-prefix", rejected)
+    refute rejected_status.success?
+    assert_includes rejected_stderr, "invalid read prefix"
+  end
+
+  def test_archive_scope_matches_worker_exact_path_and_prefix_length_boundaries
+    active_stem = "claims/o/r/"
+    active512 = "#{active_stem}#{'x' * (512 - active_stem.bytesize - '.json'.bytesize)}.json"
+    active513 = "#{active_stem}#{'x' * (513 - active_stem.bytesize - '.json'.bytesize)}.json"
+    archive_path520 = "archive/#{active512}"
+    archive_path521 = "archive/#{active513}"
+    prefix_stem = "archive/claims/o/"
+    archive_prefix512 = "#{prefix_stem}#{'x' * (512 - prefix_stem.bytesize)}"
+    archive_prefix513 = "#{prefix_stem}#{'x' * (513 - prefix_stem.bytesize)}"
+    assert_equal [520, 521, 512, 513],
+                 [archive_path520, archive_path521, archive_prefix512, archive_prefix513].map(&:bytesize)
+
+    [archive_path520, archive_prefix512].each do |scope|
+      _, stderr, status = run_script("m5", "--local", "--read-prefix", scope)
+      assert status.success?, stderr
+    end
+    [archive_path521, archive_prefix513].each do |scope|
+      _, stderr, status = run_script("m5", "--local", "--read-prefix", scope)
+      refute status.success?
+      assert_includes stderr, "invalid read prefix"
+    end
+  end
+
   def test_remote_mode_uses_remote_flag
     _, stderr, status = run_script("m1", "--all-state")
 

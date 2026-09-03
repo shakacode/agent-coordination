@@ -40,7 +40,15 @@ valid_prefix() {
   local active="claims(/${segment}(/${segment}(/${segment}\\.json)?)?)?|heartbeats(/${segment}\\.json)?|batches(/${segment}\\.json)?|events(/${segment}(/${segment}\\.json)?)?"
   local attention="attention(/${segment}(/${segment}(/${segment})?)?)?|attention/${segment}/${segment}/${segment}/${segment}\\.json"
   local pattern="^(${active}|${attention}|archive(/(${active}))?)$"
-  [[ "$prefix" =~ $pattern ]]
+  [[ "$prefix" =~ $pattern ]] || return 1
+  local archivable_path="claims/${segment}/${segment}/${segment}\\.json|heartbeats/${segment}\\.json|batches/${segment}\\.json|events/${segment}/${segment}\\.json"
+  local archive_path_pattern="^archive/(${archivable_path})$"
+  if [[ "$prefix" =~ $archive_path_pattern ]]; then
+    local active_path="${prefix#archive/}"
+    [[ "${#active_path}" -le 512 ]] && [[ "${#prefix}" -le 520 ]]
+  else
+    [[ "${#prefix}" -le 512 ]]
+  fi
 }
 
 while [ "$#" -gt 0 ]; do
