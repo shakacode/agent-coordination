@@ -288,7 +288,8 @@ The `operational_load` object counts the typed signals retained in `events`:
   `UNKNOWN` rate, not zero.
 - `lane_durations.by_lane_seconds.<lane_id>` measures the interval from the
   first valid `claim.acquired` event to the first later terminal signal:
-  `claim.released` or a terminal `lane_closed`. A lane must map to exactly one
+  `claim.released` or a `lane_closed` event whose terminal value is `done`,
+  `abandoned`, or `superseded`. A lane must map to exactly one
   target, and that target must map to
   exactly one lane. Missing timestamps, missing endpoints, shared targets, and
   multi-target lanes render as `UNKNOWN` and increment

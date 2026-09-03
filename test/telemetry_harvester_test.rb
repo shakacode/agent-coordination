@@ -2492,6 +2492,7 @@ class TelemetryHarvesterTest < Minitest::Test # rubocop:disable Metrics/ClassLen
       ["claim-renewal", "78", "claim.acquired", nil, "2026-07-18T01:05:00Z"],
       ["lane-close", "78", "lane_closed", "done", "2026-07-18T01:30:00Z"],
       ["gap-claim", "79", "claim.acquired", nil, "2026-07-18T01:00:00Z"],
+      ["nonterminal-close", "79", "lane_closed", "ready", "2026-07-18T01:20:00Z"],
       ["release-claim", "81", "claim.acquired", nil, "2026-07-18T01:00:00Z"],
       ["lane-release", "81", "claim.released", nil, "2026-07-18T01:45:00Z"]
     ].map do |id, target, type, terminal, at|

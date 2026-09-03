@@ -167,7 +167,7 @@ measurable and must not be accepted as a hypothesis target.
 | `operational_load.lane_durations.lanes` | lanes registered in the batch |
 | `operational_load.lane_durations.computable_lanes` | lanes with an exact, unambiguous claim-to-terminal duration |
 | `operational_load.lane_durations.telemetry_gap_lanes` | lanes whose duration is `UNKNOWN` because membership, endpoints, or timestamps are incomplete |
-| `operational_load.lane_durations.by_lane_seconds.<lane_id>` | seconds from first exact `claim.acquired` to first later `claim.released` or terminal `lane_closed`, or `UNKNOWN` |
+| `operational_load.lane_durations.by_lane_seconds.<lane_id>` | seconds from first exact `claim.acquired` to first later `claim.released` or `lane_closed` with terminal value `done`, `abandoned`, or `superseded`; otherwise `UNKNOWN` |
 | `operational_load.lane_durations.seconds.<summary>` | minimum, median, or maximum of computable lane durations; `UNKNOWN` when none are computable |
 | `operational_load.custody_rework.reclaims` | acquisitions immediately following a release or takeover for the same target within the batch |
 | `operational_load.custody_rework.per_10_merged_prs` | custody reclaims per 10 merged PRs; `UNKNOWN` when the denominator is zero |
