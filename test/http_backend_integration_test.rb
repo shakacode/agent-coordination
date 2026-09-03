@@ -69,6 +69,25 @@ class HttpBackendIntegrationTest < Minitest::Test
     assert_empty JSON.parse(output).fetch("records")
   end
 
+  def test_attention_integral_json_generation_normalization_matches_the_local_store
+    token = ENV.fetch("AGENT_COORD_API_TOKEN")
+    repository = "other/integration-#{Process.pid}-float"
+    record = attention_record.merge("repository" => repository, "id" => "integration-float", "source_generation" => 1.0)
+    path = "attention/default/#{repository}/integration-float.json"
+
+    Tempfile.create(["attention", ".json"]) do |file|
+      file.write(JSON.generate(record))
+      file.flush
+      code, output, error = cli_with_token(token, "attention-upsert", "--record-json", file.path, "--json")
+      assert_equal 0, code, error
+      assert_equal 1, JSON.parse(output).dig("record", "source_generation")
+    end
+
+    code, body = http_json("GET", state_path(path), token: token)
+    assert_equal 200, code
+    assert_equal 1, body.dig("data", "source_generation")
+  end
+
   def test_full_claim_lifecycle_and_contention
     target = "100"
     code, out, err = cli("claim", "--agent-id", "w1", "--repo", REPO, "--target", target)

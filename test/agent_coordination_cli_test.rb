@@ -4610,6 +4610,23 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     end
   end
 
+  def test_doctor_deep_traverses_dot_prefixed_attention_repository_components
+    [".github/foo", "owner/.github"].each do |repository|
+      state_root = Dir.mktmpdir("agent-coord-test")
+      broken_path = File.join(state_root, "attention", "default", repository, "broken.json")
+      FileUtils.mkdir_p(File.dirname(broken_path))
+      File.write(broken_path, "{")
+
+      result = run_agent_coord("doctor", "--deep", state_root: state_root)
+
+      assert_equal 2, result.status.exitstatus, "#{repository}: #{result.stdout} #{result.stderr}"
+      assert_includes result.stderr, "state unreadable"
+      refute_includes result.stdout, "status: ok"
+    ensure
+      FileUtils.remove_entry(state_root) if state_root && Dir.exist?(state_root)
+    end
+  end
+
   def test_stack_doctor_contains_unexpected_resource_failure_without_leaking_details
     secret = "resource-secret-value"
     store = Class.new do

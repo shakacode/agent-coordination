@@ -3936,8 +3936,7 @@ module AgentCoord
 
     def attention_resolve(options)
       require_options(options, :workspace, :repo, :attention_id, :source_generation)
-      generation = options.fetch(:source_generation)
-      validate_attention_generation!(generation, "--source-generation")
+      generation = validate_attention_generation!(options.fetch(:source_generation), "--source-generation")
 
       path = AgentCoord.attention_path(options.fetch(:workspace), options.fetch(:repo), options.fetch(:attention_id))
       store = build_store(options)
@@ -7555,13 +7554,20 @@ module AgentCoord
         raise Error, "attention-upsert requires status #{expected_status}"
       end
 
-      validate_attention_generation!(record.fetch("source_generation"), "attention source_generation")
+      record["source_generation"] = validate_attention_generation!(
+        record.fetch("source_generation"), "attention source_generation"
+      )
 
       validate_attention_source!(record.fetch("source"))
     end
 
     def validate_attention_generation!(generation, field)
-      return if generation.is_a?(Integer) && generation.between?(0, MAX_SAFE_INTEGER)
+      normalized = if generation.is_a?(Float) && generation.finite? && generation == generation.to_i
+                     generation.to_i
+                   else
+                     generation
+                   end
+      return normalized if normalized.is_a?(Integer) && normalized.between?(0, MAX_SAFE_INTEGER)
 
       raise Error, "#{field} must be an integer between 0 and #{MAX_SAFE_INTEGER}"
     end
@@ -8125,14 +8131,15 @@ module AgentCoord
     def list_json_files(directory, prefix, maximum: nil)
       pending = [directory]
       files = []
+      traverse_dot_directories = prefix.match?(%r{\Aattention(?:/|\z)})
       until pending.empty?
         current = pending.pop
         validate_list_directory!(current, prefix)
         Dir.each_child(current) do |name|
-          next if name.start_with?(".")
-
           path = File.join(current, name)
           entry = File.lstat(path)
+          next if name.start_with?(".") && !(entry.directory? && traverse_dot_directories)
+
           if entry.symlink?
             raise OperationalError, "state layout invalid: #{state_relative_path(path)} is a symlink"
           elsif entry.directory?

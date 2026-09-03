@@ -77,6 +77,7 @@ class AttentionRecordContractTest < Minitest::Test
     schema = JSONSchemer.schema(read_json(SCHEMA_PATH))
     record = read_json(File.join(FIXTURES_PATH, "valid", "attention-open.json"))
 
+    assert_empty schema.validate(record.merge("source_generation" => 1.0)).to_a
     assert_empty schema.validate(record.merge("source_generation" => 9_007_199_254_740_991)).to_a
     refute_empty schema.validate(record.merge("source_generation" => 9_007_199_254_740_992)).to_a
   end

@@ -382,6 +382,33 @@ class AttentionCliTest < Minitest::Test
     assert_equal maximum, read_record.fetch("source_generation")
   end
 
+  def test_integral_json_numeric_generation_is_normalized_before_persistence_and_output
+    assert_success upsert(record("source_generation" => 1))
+    result = upsert(record("source_generation" => 2.0))
+
+    assert_success result
+    emitted = JSON.parse(result.stdout).dig("record", "source_generation")
+    persisted = read_record.fetch("source_generation")
+    assert_instance_of Integer, emitted
+    assert_instance_of Integer, persisted
+    assert_equal 2, emitted
+    assert_equal 2, persisted
+  end
+
+  def test_attention_generation_rejects_fractional_nonfinite_and_rounded_unsafe_numbers
+    fractional = upsert(record("source_generation" => 1.5))
+    assert_equal 1, fractional.status.exitstatus
+    assert_includes fractional.stderr, "must be an integer between"
+
+    runner = AgentCoord::Runner.new([])
+    [Float::NAN, Float::INFINITY, -Float::INFINITY, 9_007_199_254_740_993.0].each do |generation|
+      error = assert_raises(AgentCoord::Error) do
+        runner.send(:validate_attention_record!, record("source_generation" => generation))
+      end
+      assert_includes error.message, "must be an integer between"
+    end
+  end
+
   def test_attention_lifecycle_rejects_stored_identity_that_does_not_match_its_path
     path = attention_file
     FileUtils.mkdir_p(File.dirname(path))
