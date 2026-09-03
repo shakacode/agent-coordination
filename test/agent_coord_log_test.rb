@@ -1693,6 +1693,21 @@ end
 # Aliases are separate leases, so neither the trail nor another alias may decide
 # whether one of them is still current.
 class AgentCoordLogAliasFreshnessTest < AgentCoordLogTestCase
+  def test_newer_nonterminal_events_do_not_suppress_a_live_claim
+    %w[phase.changed help_requested escalation_requested error human_intervention].each_with_index do |type, index|
+      target = (index + 10).to_s
+      write_claim("shakacode/example", target, "status" => "active", "agent_id" => "live-holder",
+                                                  "updated_at" => "2026-08-01T00:00:00Z")
+      write_event("b1", "e#{index}", "type" => type, "repo" => "shakacode/example", "target" => target,
+                                      "machine_id" => "m1", "host" => "codex",
+                                      "at" => "2026-08-09T00:00:00Z")
+
+      claim = JSON.parse(run_log("shakacode/example##{target}", "--json").stdout).fetch("claim")
+
+      assert_equal "live-holder", claim.fetch("agent_id"), "#{type} is not a terminal lifecycle event"
+    end
+  end
+
   def test_an_event_on_one_alias_does_not_suppress_the_other_alias_claim
     write_claim("shakacode/example", "1", "status" => "active", "agent_id" => "bare-holder",
                                           "updated_at" => "2026-08-01T00:00:00Z")
@@ -1709,18 +1724,18 @@ class AgentCoordLogAliasFreshnessTest < AgentCoordLogTestCase
     assert_equal %w[bare-holder prefixed-holder], holders.sort
   end
 
-  def test_an_alias_claim_older_than_its_own_event_is_still_superseded
+  def test_an_alias_claim_older_than_its_own_terminal_event_is_still_superseded
     write_claim("shakacode/example", "1", "status" => "active", "agent_id" => "bare-holder",
                                           "updated_at" => "2026-08-01T00:00:00Z")
     write_claim("shakacode/example", "pr:1", "status" => "active", "agent_id" => "prefixed-holder",
                                              "updated_at" => "2026-08-02T00:00:00Z")
-    write_event("b1", "e1", "type" => "claim.acquired", "repo" => "shakacode/example", "target" => "pr:1",
+    write_event("b1", "e1", "type" => "claim.released", "repo" => "shakacode/example", "target" => "pr:1",
                             "machine_id" => "m1", "host" => "codex", "at" => "2026-08-09T00:00:00Z")
 
     holders = JSON.parse(run_log("shakacode/example#1", "--json").stdout)
                   .fetch("claims").map { |claim| claim.fetch("agent_id") }
 
-    assert_equal ["bare-holder"], holders, "the prefixed lease is older than its own event"
+    assert_equal ["bare-holder"], holders, "the prefixed lease is older than its own terminal event"
   end
 
   def test_an_event_on_the_claims_own_key_still_supersedes_it
