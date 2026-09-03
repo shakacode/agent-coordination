@@ -40,6 +40,23 @@ class AttentionCliTest < Minitest::Test
     assert_equal stored, JSON.parse(get.stdout).fetch("record")
   end
 
+  def test_upsert_rejects_empty_and_invalid_utf8_record_input_cleanly
+    ["", "{\"bad\":\"\xFF\"}".b].each do |contents|
+      path = File.join(@root, "malformed-record.json")
+      File.binwrite(path, contents)
+      result = run_cli("attention-upsert", "--record-json", path, "--json")
+
+      assert_equal 1, result.status.exitstatus
+      assert_includes result.stderr, "attention record"
+      refute_includes result.stderr, "bin/agent-coord:"
+    end
+
+    error = assert_raises(AgentCoord::Error) do
+      AgentCoord::Runner.new([], stdin: StringIO.new).send(:load_attention_record, "-")
+    end
+    assert_includes error.message, "attention record"
+  end
+
   def test_upsert_rejects_a_lower_source_generation_without_replacing_state
     assert_success upsert(record("source_generation" => 5, "question" => "Current question"))
 
@@ -48,6 +65,18 @@ class AttentionCliTest < Minitest::Test
     assert_equal 2, stale.status.exitstatus
     assert_includes stale.stderr, "source generation 4 is older than stored generation 5"
     assert_equal "Current question", read_record.fetch("question")
+  end
+
+  def test_schema_valid_unicode_record_larger_than_64_kib_persists_within_worker_limit
+    large = record("choices" => Array.new(10, "😀" * 2000))
+    serialized = JSON.generate(large)
+    assert_operator serialized.bytesize, :>, 64 * 1024
+    assert_operator serialized.bytesize, :<=, 256 * 1024
+
+    result = upsert(large)
+
+    assert_success result
+    assert_operator JSON.generate(read_record).bytesize, :<=, 256 * 1024
   end
 
   def test_upsert_validates_the_merged_record_after_preserving_created_at
@@ -117,6 +146,35 @@ class AttentionCliTest < Minitest::Test
 
     assert_operator Time.iso8601(resolved.fetch("refreshed_at")), :>=, Time.iso8601(future)
     assert_operator Time.iso8601(resolved.fetch("resolved_at")), :>=, Time.iso8601(future)
+  end
+
+  def test_resolve_preserves_fractional_precision_for_future_stored_timestamps
+    created_at = "2099-01-01T00:00:00.100Z"
+    refreshed_at = "2099-01-01T00:00:00.900Z"
+    assert_success upsert(record("created_at" => created_at, "refreshed_at" => refreshed_at))
+
+    assert_success resolve(2)
+    resolved = read_record
+
+    assert_equal Time.iso8601(refreshed_at), Time.iso8601(resolved.fetch("refreshed_at"))
+    assert_equal Time.iso8601(refreshed_at), Time.iso8601(resolved.fetch("resolved_at"))
+    assert_match(/[.]\d+Z\z/, resolved.fetch("refreshed_at"))
+  end
+
+  def test_resolved_record_rejects_resolved_at_before_created_at
+    path = attention_file
+    FileUtils.mkdir_p(File.dirname(path))
+    resolved = record(
+      "status" => "resolved",
+      "resolved_at" => "2026-09-03T08:59:59Z"
+    )
+    File.write(path, JSON.generate(resolved))
+
+    result = run_cli("attention-get", "--workspace", "default", "--repo", "shakacode/agent-coordination",
+                     "--attention-id", "decision-1", "--json")
+
+    assert_equal 2, result.status.exitstatus
+    assert_includes result.stderr, "resolved_at must not precede created_at"
   end
 
   def test_list_is_open_only_bounded_and_deterministically_ranked
@@ -215,6 +273,36 @@ class AttentionCliTest < Minitest::Test
 
     assert_equal 1, result.status.exitstatus
     assert_includes result.stderr, "native_open must be available, unavailable, or unknown"
+  end
+
+  def test_upsert_rejects_open_uri_with_a_malformed_port_without_a_backtrace
+    payload = record
+    payload["source"] = payload.fetch("source").merge("open_uri" => "https://example.test:not-a-port/thread")
+
+    result = upsert(payload)
+
+    assert_equal 1, result.status.exitstatus
+    assert_includes result.stderr, "attention source open_uri must be an absolute URI"
+    refute_includes result.stderr, "bin/agent-coord:"
+  end
+
+  def test_attention_timestamps_are_bounded
+    over_bound = "2026-09-03T09:00:00.#{'1' * 50}Z"
+    {
+      "created_at" => -> { record("created_at" => over_bound) },
+      "refreshed_at" => -> { record("refreshed_at" => over_bound) },
+      "source last_seen_at" => lambda do
+        payload = record
+        payload["source"] = payload.fetch("source").merge("last_seen_at" => over_bound)
+        payload
+      end,
+      "resolved_at" => -> { record("status" => "resolved", "resolved_at" => over_bound) }
+    }.each do |field, payload|
+      error = assert_raises(AgentCoord::Error) do
+        AgentCoord::Runner.new([]).send(:validate_attention_record!, payload.call)
+      end
+      assert_includes error.message, "attention #{field} must be an RFC 3339 timestamp of at most 64 characters"
+    end
   end
 
   def test_attention_writes_obey_the_split_brain_guard

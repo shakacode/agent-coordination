@@ -29,8 +29,11 @@
         "provider": { "type": "string", "minLength": 1, "maxLength": 100 },
         "host_id": { "type": "string", "minLength": 1, "maxLength": 255 },
         "task_id": { "type": "string", "minLength": 1, "maxLength": 255 },
-        "open_uri": { "type": "string", "format": "uri", "maxLength": 2000 },
-        "last_seen_at": { "type": "string", "format": "date-time" },
+        "open_uri": {
+          "type": "string", "format": "uri", "maxLength": 2000,
+          "description": "Opaque provider-native launch target for user navigation only; consumers must not fetch it."
+        },
+        "last_seen_at": { "type": "string", "format": "date-time", "maxLength": 64 },
         "capabilities": {
           "type": "object",
           "additionalProperties": false,
@@ -79,9 +82,9 @@
         "safe_resume": { "$ref": "#/$defs/non_empty_bounded_text" },
         "source": { "$ref": "#/$defs/source" },
         "source_generation": { "type": "integer", "minimum": 0, "maximum": 9007199254740991 },
-        "created_at": { "type": "string", "format": "date-time" },
-        "refreshed_at": { "type": "string", "format": "date-time" },
-        "resolved_at": { "type": "string", "format": "date-time" }
+        "created_at": { "type": "string", "format": "date-time", "maxLength": 64 },
+        "refreshed_at": { "type": "string", "format": "date-time", "maxLength": 64 },
+        "resolved_at": { "type": "string", "format": "date-time", "maxLength": 64 }
       },
       "allOf": [
         {

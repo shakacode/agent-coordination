@@ -99,8 +99,9 @@ module AgentCoord
   MAX_ATTENTION_LIST_LIMIT = 100
   MAX_ATTENTION_SCAN_LIMIT = 1000
   MAX_SAFE_INTEGER = 9_007_199_254_740_991
-  MAX_ATTENTION_RECORD_BYTES = 64 * 1024
+  MAX_ATTENTION_RECORD_BYTES = 256 * 1024
   MAX_ATTENTION_KEY_COMPONENT_LENGTH = 160
+  MAX_ATTENTION_TIMESTAMP_LENGTH = 64
   STATE_PATH_PATTERN = %r{\A(?:
     claims/[A-Za-z0-9_.:-]+/[A-Za-z0-9_.:-]+/[A-Za-z0-9_.:-]+\.json |
     heartbeats/[A-Za-z0-9_.:-]+\.json |
@@ -3374,14 +3375,10 @@ module AgentCoord
           checks[prefix] = "ok"
         end
       rescue OperationalError => e
-        if prefix == "events" && unsupported_resource_listing?(e)
+        unsupported_note = unsupported_state_family_note(prefix)
+        if unsupported_note && unsupported_resource_listing?(e)
           checks[prefix] = "unsupported"
-          section_notes[prefix] = "event state not supported by backend"
-          next
-        end
-        if prefix == "archive" && unsupported_resource_listing?(e)
-          checks[prefix] = "unsupported"
-          section_notes[prefix] = "archive state not supported by backend"
+          section_notes[prefix] = unsupported_note
           next
         end
         if scoped_http_forbidden_listing?(e, prefix)
@@ -3414,14 +3411,21 @@ module AgentCoord
       if e.message.match?(/ failed: 403 forbidden\z/)
         return [{ prefix => "#{prefix} not readable by scoped token" }, { prefix => "forbidden" }]
       end
-      if prefix.match?(%r{\Aevents(?:/|\z)}) && unsupported_resource_listing?(e)
-        return [{ prefix => "event state not supported by backend" }, { prefix => "unsupported" }]
-      end
-      if prefix.match?(%r{\Aarchive(?:/|\z)}) && unsupported_resource_listing?(e)
-        return [{ prefix => "archive state not supported by backend" }, { prefix => "unsupported" }]
+
+      unsupported_note = unsupported_state_family_note(prefix)
+      if unsupported_note && unsupported_resource_listing?(e)
+        return [{ prefix => unsupported_note }, { prefix => "unsupported" }]
       end
 
       raise
+    end
+
+    def unsupported_state_family_note(prefix)
+      family = prefix.split("/", 2).first
+      return unless %w[events attention archive].include?(family)
+
+      label = family == "events" ? "event" : family
+      "#{label} state not supported by backend"
     end
 
     def doctor_auth_recovery_error(prefix, error, api_url: nil)
@@ -4036,7 +4040,7 @@ module AgentCoord
 
       timestamps = [now_utc, parse_time(existing.fetch("created_at")), parse_time(existing.fetch("refreshed_at"))]
       timestamps << parse_time(existing.fetch("resolved_at")) if existing["resolved_at"]
-      refreshed_at = timestamp(timestamps.max)
+      refreshed_at = attention_timestamp(timestamps.max)
       resolved_at = existing["resolved_at"] || refreshed_at
       resolved = existing.merge(
         "status" => "resolved",
@@ -7489,6 +7493,9 @@ module AgentCoord
             else
               File.open(path, "r:UTF-8") { |file| file.read(MAX_ATTENTION_RECORD_BYTES + 1) }
             end
+      raise Error, "attention record JSON must not be empty" if raw.nil? || raw.empty?
+      raise Error, "attention record JSON must be valid UTF-8" unless raw.valid_encoding?
+
       if raw.bytesize > MAX_ATTENTION_RECORD_BYTES
         raise Error,
               "attention record exceeds #{MAX_ATTENTION_RECORD_BYTES} bytes"
@@ -7606,11 +7613,13 @@ module AgentCoord
     end
 
     def validate_attention_open_uri!(value)
+      # This is an opaque provider-native launch target. Validation must never
+      # dereference it or imply that arbitrary URI schemes are network-safe.
       uri = URI.parse(value.to_s)
       return if value.is_a?(String) && !value.empty? && value.length <= 2000 && uri.scheme
 
       raise Error, "attention source open_uri must be an absolute URI"
-    rescue URI::InvalidURIError
+    rescue URI::Error
       raise Error, "attention source open_uri must be an absolute URI"
     end
 
@@ -7627,13 +7636,15 @@ module AgentCoord
     end
 
     def validate_attention_timestamp!(value, field)
-      unless value.is_a?(String) && gc_valid_datetime?(value)
-        raise Error, "attention #{field} must be an RFC 3339 timestamp"
+      unless value.is_a?(String) && value.length <= MAX_ATTENTION_TIMESTAMP_LENGTH && gc_valid_datetime?(value)
+        raise Error,
+              "attention #{field} must be an RFC 3339 timestamp of at most #{MAX_ATTENTION_TIMESTAMP_LENGTH} characters"
       end
 
       parse_time(value)
     rescue ArgumentError
-      raise Error, "attention #{field} must be an RFC 3339 timestamp"
+      raise Error,
+            "attention #{field} must be an RFC 3339 timestamp of at most #{MAX_ATTENTION_TIMESTAMP_LENGTH} characters"
     end
 
     def validate_attention_resolution!(record)
@@ -7641,6 +7652,9 @@ module AgentCoord
         raise Error, "resolved attention requires resolved_at" unless record.key?("resolved_at")
 
         validate_attention_timestamp!(record.fetch("resolved_at"), "resolved_at")
+        if parse_time(record.fetch("resolved_at")) < parse_time(record.fetch("created_at"))
+          raise Error, "attention resolved_at must not precede created_at"
+        end
       elsif record.key?("resolved_at")
         raise Error, "open attention must not contain resolved_at"
       end
@@ -7735,6 +7749,13 @@ module AgentCoord
 
     def timestamp(time)
       time.utc.iso8601
+    end
+
+    def attention_timestamp(time)
+      utc = time.utc
+      return utc.iso8601 if utc.nsec.zero?
+
+      utc.iso8601(9).sub(/0+Z\z/, "Z")
     end
 
     def parse_time(value)

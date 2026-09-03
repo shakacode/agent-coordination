@@ -23,6 +23,10 @@ class AttentionRecordContractTest < Minitest::Test
     assert_equal 160, properties.dig("repository", "maxLength")
     assert_equal 160, properties.dig("id", "maxLength")
     assert_equal 9_007_199_254_740_991, properties.dig("source_generation", "maximum")
+    %w[created_at refreshed_at resolved_at].each do |field|
+      assert_equal 64, properties.dig(field, "maxLength")
+    end
+    assert_equal 64, schema.dig("$defs", "source", "properties", "last_seen_at", "maxLength")
   end
 
   def test_valid_and_invalid_fixtures_define_the_record_contract

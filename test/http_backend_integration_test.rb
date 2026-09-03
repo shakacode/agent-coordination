@@ -49,6 +49,10 @@ class HttpBackendIntegrationTest < Minitest::Test
     assert_equal 405, code
     assert_equal "method_not_allowed", body.fetch("error")
 
+    code, body = http_json("DELETE", state_path(denied), token: token, headers: { "If-Match" => "1" })
+    assert_equal 403, code
+    assert_equal "forbidden", body.fetch("error")
+
     code, output, error = cli_with_token(
       token, "attention-resolve", "--workspace", "default", "--repo", REPO,
       "--attention-id", "integration-decision", "--source-generation", "2", "--json"

@@ -1679,7 +1679,7 @@ class HttpDoctorTest < HttpEnvTestCase
       [200, { "entries" => [] }],
       [200, { "entries" => [] }],
       [400, { "error" => "invalid_prefix" }],
-      [200, { "entries" => [] }],
+      [400, { "error" => "invalid_prefix" }],
       [400, { "error" => "invalid_prefix" }],
       [404, { "error" => "route_not_found" }]
     ]
@@ -1695,6 +1695,8 @@ class HttpDoctorTest < HttpEnvTestCase
       assert_includes payload.fetch("degraded"), "event state not supported by backend"
       assert_equal "unsupported", payload.fetch("resource_checks").fetch("archive")
       assert_includes payload.fetch("degraded"), "archive state not supported by backend"
+      assert_equal "unsupported", payload.fetch("resource_checks").fetch("attention")
+      assert_includes payload.fetch("degraded"), "attention state not supported by backend"
     end
   ensure
     stub&.shutdown
@@ -1940,6 +1942,29 @@ class HttpDoctorTest < HttpEnvTestCase
       assert_equal 0, code
       assert_equal "unsupported", payload.fetch("resource_checks").fetch("events/batch-1")
       assert_includes payload.fetch("degraded"), "event state not supported by backend"
+    end
+  ensure
+    stub&.shutdown
+  end
+
+  def test_doctor_deep_custom_attention_prefix_degrades_for_older_worker
+    stub = HttpStoreStub.new([
+                               [200, { "status" => "ok" }],
+                               [400, { "error" => "invalid_prefix" }],
+                               [404, { "error" => "route_not_found" }]
+                             ])
+    with_env("AGENT_COORD_API_URL" => stub.base_url, "AGENT_COORD_API_TOKEN" => "tok") do
+      stdout = StringIO.new
+      code = AgentCoord::Runner.new(
+        ["doctor", "--deep", "--doctor-prefix", "attention/default/shakacode/repo", "--json"],
+        stdout: stdout,
+        stderr: StringIO.new
+      ).run
+      payload = JSON.parse(stdout.string)
+
+      assert_equal 0, code
+      assert_equal "unsupported", payload.fetch("resource_checks").fetch("attention/default/shakacode/repo")
+      assert_includes payload.fetch("degraded"), "attention state not supported by backend"
     end
   ensure
     stub&.shutdown

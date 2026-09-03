@@ -36,6 +36,7 @@ class PackagingTest < Minitest::Test
     lib/agent_coordination/scorecards.rb
     schema/state/v1/attention/attention-record.schema.json
     schema/state/v1/attention/fixtures/invalid/attention-open-with-resolved-at.json
+    schema/state/v1/attention/fixtures/invalid/attention-overlong-timestamp.json
     schema/state/v1/attention/fixtures/invalid/attention-resolved-without-resolved-at.json
     schema/state/v1/attention/fixtures/invalid/attention-unknown-capability-value.json
     schema/state/v1/attention/fixtures/valid/attention-open.json

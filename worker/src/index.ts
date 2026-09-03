@@ -383,7 +383,10 @@ export default {
         return putState(request, env, path, auth.machine);
       }
       if (request.method === "DELETE") {
-        if (path.startsWith("attention/")) return json(405, { error: "method_not_allowed" });
+        if (path.startsWith("attention/")) {
+          if (!canAccessPath(auth.writePrefixes, path)) return json(403, { error: "forbidden" });
+          return json(405, { error: "method_not_allowed" });
+        }
         if (!canDeletePath(auth.writePrefixes, path)) return json(403, { error: "forbidden" });
         return deleteState(request, env, path, auth.machine);
       }
