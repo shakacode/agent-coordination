@@ -3,8 +3,13 @@
 CLI, workflow helpers, Worker code, tests, and simulation fixtures for
 coordinating concurrent agent work.
 
-> **Documentation:** Explore the ShakaCode agent stack at
-> [agents.shakacode.com](https://agents.shakacode.com).
+<p align="center">
+  <a href="https://agents.shakacode.com">
+    <img src="https://agents.shakacode.com/og.png" alt="ShakaCode Agent Workflows — Run AI coding agents in fleets, safely" width="100%">
+  </a>
+  <br>
+  <strong><a href="https://agents.shakacode.com">Documentation →</a></strong>
+</p>
 
 A zero-config first run uses a clearly labeled local store so one person can
 try the CLI immediately. The team and multi-machine runtime path is the HTTP
