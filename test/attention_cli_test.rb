@@ -247,6 +247,38 @@ class AttentionCliTest < Minitest::Test
     end
   end
 
+  def test_attention_timestamps_require_an_explicit_rfc3339_offset_in_every_timezone
+    offsetless = "2026-09-03T09:00:00"
+    timestamp_payloads = {
+      "created_at" => -> { record("created_at" => offsetless) },
+      "refreshed_at" => -> { record("refreshed_at" => offsetless) },
+      "source last_seen_at" => lambda do
+        payload = record
+        payload["source"] = payload.fetch("source").merge("last_seen_at" => offsetless)
+        payload
+      end
+    }
+
+    %w[UTC Pacific/Honolulu].each do |timezone|
+      timestamp_payloads.each do |field, payload|
+        result = upsert(payload.call, env: { "TZ" => timezone })
+
+        assert_equal 1, result.status.exitstatus, "#{field} should be rejected under #{timezone}"
+        assert_includes result.stderr, "attention #{field} must be an RFC 3339 timestamp"
+      end
+    end
+  end
+
+  def test_attention_timestamps_accept_offsets_fractions_and_lowercase_t_and_z
+    payload = record(
+      "created_at" => "2026-09-03t09:00:00.125z",
+      "refreshed_at" => "2026-09-03T11:00:00.5+02:00"
+    )
+    payload["source"] = payload.fetch("source").merge("last_seen_at" => "2026-09-03t09:20:00.25z")
+
+    assert_success upsert(payload)
+  end
+
   private
 
   def record(overrides = {})
@@ -277,8 +309,8 @@ class AttentionCliTest < Minitest::Test
     }.merge(overrides)
   end
 
-  def upsert(payload)
-    run_cli("attention-upsert", "--record-json", write_record(payload), "--json")
+  def upsert(payload, env: {})
+    run_cli("attention-upsert", "--record-json", write_record(payload), "--json", env:)
   end
 
   def write_record(payload)
@@ -297,9 +329,9 @@ class AttentionCliTest < Minitest::Test
     JSON.parse(File.read(path))
   end
 
-  def run_cli(*args)
+  def run_cli(*args, env: {})
     Open3.capture3(
-      { "XDG_CONFIG_HOME" => @config_home },
+      { "XDG_CONFIG_HOME" => @config_home }.merge(env),
       "ruby", BIN, *args, "--ignore-user-config", "--state-root", @root
     ).then { |stdout, stderr, status| Struct.new(:stdout, :stderr, :status).new(stdout, stderr, status) }
   end

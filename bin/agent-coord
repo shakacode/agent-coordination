@@ -7566,7 +7566,9 @@ module AgentCoord
     end
 
     def validate_attention_timestamp!(value, field)
-      raise Error, "attention #{field} must be an RFC 3339 timestamp" unless value.is_a?(String)
+      unless value.is_a?(String) && gc_valid_datetime?(value)
+        raise Error, "attention #{field} must be an RFC 3339 timestamp"
+      end
 
       parse_time(value)
     rescue ArgumentError
