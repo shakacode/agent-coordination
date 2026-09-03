@@ -69,6 +69,42 @@ class TelemetryHarvesterTest < Minitest::Test # rubocop:disable Metrics/ClassLen
     end
   end
 
+  def test_invalid_utf8_in_values_and_keys_is_rejected_before_ingest
+    Dir.mktmpdir("agent-coordination-ledger-invalid-utf8") do |dir| # rubocop:disable Metrics/BlockLength
+      source_path = File.join(dir, "coordination.json")
+      ledger_path = File.join(dir, "telemetry.sqlite3")
+      File.write(source_path, JSON.generate(coordination_fixture))
+
+      _stdout, stderr, status = Open3.capture3(
+        CLI, "harvest", "--ledger", ledger_path,
+        "--coordination-json", source_path, "--batch-id", "batch-fixture"
+      )
+      assert status.success?, stderr
+      original_counts = sqlite_query(
+        ledger_path,
+        "SELECT (SELECT COUNT(*) FROM batches), (SELECT COUNT(*) FROM events), " \
+        "(SELECT COUNT(*) FROM source_artifacts)"
+      )
+
+      invalid_utf8_documents.each do |location, build_document|
+        File.binwrite(source_path, build_document.call)
+        stdout, stderr, status = Open3.capture3(
+          CLI, "harvest", "--ledger", ledger_path,
+          "--coordination-json", source_path, "--batch-id", "batch-fixture"
+        )
+
+        refute status.success?, "invalid UTF-8 in a JSON #{location} must not harvest successfully"
+        assert_empty stdout
+        assert_equal "agent-coord-harvest: coordination JSON contains invalid UTF-8: #{source_path}\n", stderr
+        assert_equal original_counts, sqlite_query(
+          ledger_path,
+          "SELECT (SELECT COUNT(*) FROM batches), (SELECT COUNT(*) FROM events), " \
+          "(SELECT COUNT(*) FROM source_artifacts)"
+        ), "invalid UTF-8 in a JSON #{location} partially mutated the ledger"
+      end
+    end
+  end
+
   def test_date_range_harvest_is_inclusive_and_idempotent # rubocop:disable Metrics/MethodLength
     Dir.mktmpdir("agent-coordination-ledger-range") do |dir| # rubocop:disable Metrics/BlockLength
       source_path = File.join(dir, "coordination.json")
@@ -2028,6 +2064,26 @@ class TelemetryHarvesterTest < Minitest::Test # rubocop:disable Metrics/ClassLen
   end
 
   private
+
+  def invalid_utf8_documents
+    {
+      "value" => lambda do
+        source = coordination_fixture
+        source.fetch("events") << {
+          "id" => "event-invalid-utf8", "batch_id" => "batch-fixture",
+          "repo" => "shakacode/agent-coordination", "target" => "PLACEHOLDER",
+          "type" => "error", "severity" => "P1", "category" => "test-failure",
+          "at" => "2026-07-18T05:00:00Z"
+        }
+        JSON.generate(source).b.sub("PLACEHOLDER".b, "78\xFF".b)
+      end,
+      "key" => lambda do
+        source = coordination_fixture
+        source["PLACEHOLDER"] = "ignored"
+        JSON.generate(source).b.sub("PLACEHOLDER".b, "invalid\xFFkey".b)
+      end
+    }
+  end
 
   def parse_codex_host_session(cwd:, model:, effort:, pricing_profile:)
     records = [

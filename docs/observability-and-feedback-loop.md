@@ -9,6 +9,15 @@ The verdict record lives in the
 [observability kaizen ledger](solutions/observability-kaizen-ledger.md). A
 change that never lands a ledger row has not closed the loop.
 
+For an operator investigating one issue or pull request, the immediate read
+path is `agent-coord log OWNER/REPO#TARGET`. It combines live and archived
+coordination events into a custody trail; run `agent-coord log --sync` before
+`agent-coord gc --execute` to preserve that trail in the local mirror. See
+[Reading the trail](../README.md#reading-the-trail-where-is-the-work-on-an-issue-or-pr)
+for filters, output formats, completeness warnings, and retention details. The
+telemetry pipeline below serves cross-batch measurement rather than this
+per-work-item operational lookup.
+
 Scope: process and conventions only. This document adds no machinery. Every
 command, field, and exit code below is one that exists in this repo at the
 commit that introduced this file; the
