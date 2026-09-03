@@ -4479,7 +4479,7 @@ module AgentCoord
 
         # Claims are the final completeness check. Do not let a failed claims
         # probe mask an already-conclusive refusal for the event trail.
-        log_claim_entries(store)
+        log_claim_entries(store, context: :sync)
         raise OperationalError, "refusing to sync an incomplete trail: #{log_incomplete_prefixes}" if @log_incomplete
 
         return log_sync(log_options, rows)
@@ -5470,9 +5470,10 @@ module AgentCoord
 
     # This degradation belongs only to the read-only log view. Exact record
     # readers used by state-changing commands keep their fail-closed behavior.
-    def log_claim_entries(store)
+    def log_claim_entries(store, context: :work_item)
       claims = log_listing(store, "claims") do |reason|
-        "warning: claims #{reason}; a claim for this work item would not be reported"
+        subject = context == :sync ? "claim data" : "a claim for this work item"
+        "warning: claims #{reason}; #{subject} would not be reported"
       end
       claims.select do |candidate|
         next true if candidate.data.is_a?(Hash)
