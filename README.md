@@ -704,7 +704,7 @@ match incidental digits inside them.
 
 ```bash
 agent-coord log --sync
-grep '#9765' ~/.local/state/agent-coordination/log.tsv
+grep -Ei $'#(issue:|pr:)?9765(:|\t)' ~/.local/state/agent-coordination/log.tsv
 ```
 
 The mirror records each event's target as it was written, so `grep` does not get
