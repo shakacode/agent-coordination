@@ -525,6 +525,10 @@ bin/agent-coord status [--json] [--include-archived]
 bin/agent-coord status --repo OWNER/REPO --target ISSUE_OR_PR [--json]
 bin/agent-coord status --batch-id ID [--json]
 bin/agent-coord batch-audit --batch-id ID [--json]
+bin/agent-coord attention-upsert --record-json PATH|- [--json]
+bin/agent-coord attention-resolve --workspace WORKSPACE --repo OWNER/REPO --attention-id ID --source-generation N [--json]
+bin/agent-coord attention-get --workspace WORKSPACE --repo OWNER/REPO --attention-id ID [--json]
+bin/agent-coord attention-list --workspace WORKSPACE --repo OWNER/REPO [--include-resolved] [--limit N] [--json]
 bin/agent-coord log [OWNER/REPO#TARGET] [--since VALUE] [--machine ID] [--host codex|claude] [--type TYPE] [--limit N] [--format text|tsv] [--json] [--sync] [--include-synthetic]
 bin/agent-coord version [--json]
 bin/agent-coord config [show] [--json]
@@ -1361,6 +1365,7 @@ claims/<owner>/<repo>/<issue-or-pr>.json
 heartbeats/<agent-id>.json
 batches/<batch-id>.json
 events/<batch-id>/<event-id>.json
+attention/<workspace>/<owner>/<repo>/<attention-id>.json
 archive/claims/<owner>/<repo>/<issue-or-pr>.json
 archive/heartbeats/<agent-id>.json
 archive/batches/<batch-id>.json
@@ -1370,6 +1375,33 @@ archive/events/<batch-id>/<event-or-compaction-id>.json
 The checked-in `.gitkeep` files only preserve the directories. Schema examples
 are documented below rather than committed as live JSON records, so `status`
 does not show fake work.
+
+## Attention records
+
+`attention-upsert` persists one schema-valid open record from `--record-json`
+using the same LocalStore or HTTP CAS path as other coordination state. The
+logical key is `(workspace, repository, id)`. A lower `source_generation` is
+rejected; an equal generation may refresh an open record; reopening a resolved
+record requires a greater generation. Refreshes preserve the original
+`created_at`.
+
+`attention-resolve` changes the record to `resolved` and adds `resolved_at`
+without deleting its question, source task identity, capability truth, or
+creation time. The Worker does not permit DELETE for the attention family.
+
+`attention-get` performs an exact read. `attention-list` returns open records by
+default, accepts `--include-resolved`, and is bounded to 100 records. Its JSON
+payload includes `records`, `limit`, and `truncated`; records are ordered by the
+documented priority classes and stable creation/id ties. Consumers can rerank
+from `priority_class` and `priority_reason` without parsing Markdown.
+
+The v1 schema is
+[`schema/state/v1/attention/attention-record.schema.json`](schema/state/v1/attention/attention-record.schema.json).
+It stores provider, host, task, optional native URI, last-seen time, and explicit
+`available` / `unavailable` / `unknown` states for native open and prompt
+forwarding. It stores bounded decision context and safe-resume text, never
+transcripts or prompts. Capability state is descriptive only and cannot block
+unrelated coordination work.
 
 ## Claim Schema
 

@@ -93,11 +93,17 @@ module AgentCoord
   MACHINE_MATCH_UNVERIFIED = "unverified"
   JSON_PREFIXES = %w[claims heartbeats batches].freeze
   STATE_PREFIXES = (JSON_PREFIXES + %w[events archive]).freeze
+  ATTENTION_PRIORITIES = %w[urgent-risk unblocks-work current-head-merge product-architecture].freeze
+  ATTENTION_CAPABILITY_STATES = %w[available unavailable unknown].freeze
+  DEFAULT_ATTENTION_LIST_LIMIT = 100
+  MAX_ATTENTION_LIST_LIMIT = 100
+  MAX_ATTENTION_RECORD_BYTES = 64 * 1024
   STATE_PATH_PATTERN = %r{\A(?:
     claims/[A-Za-z0-9_.:-]+/[A-Za-z0-9_.:-]+/[A-Za-z0-9_.:-]+\.json |
     heartbeats/[A-Za-z0-9_.:-]+\.json |
     batches/[A-Za-z0-9_.:-]+\.json |
     events/[A-Za-z0-9_.:-]+/[A-Za-z0-9_.:-]+\.json |
+    attention/[A-Za-z0-9_.:-]+/[A-Za-z0-9_.:-]+/[A-Za-z0-9_.:-]+/[A-Za-z0-9_.:-]+\.json |
     archive/(?:(?:
       claims/[A-Za-z0-9_.:-]+/[A-Za-z0-9_.:-]+/[A-Za-z0-9_.:-]+\.json |
       heartbeats/[A-Za-z0-9_.:-]+\.json |
@@ -110,6 +116,7 @@ module AgentCoord
     heartbeats |
     batches |
     events(?:/[A-Za-z0-9_.:-]+)? |
+    attention(?:/[A-Za-z0-9_.:-]+(?:/[A-Za-z0-9_.:-]+(?:/[A-Za-z0-9_.:-]+)?)?)? |
     archive(?:/(?:
       claims(?:/[A-Za-z0-9_.:-]+(?:/[A-Za-z0-9_.:-]+)?)? |
       heartbeats |
@@ -434,10 +441,11 @@ module AgentCoord
     CONFIG_INDEPENDENT_COMMANDS = %w[version bootstrap demo].freeze
     KNOWN_COMMANDS = %w[
       claim release heartbeat register-batch record-event status log batch-audit
+      attention-upsert attention-resolve attention-get attention-list
       gc version config doctor bootstrap demo
     ].freeze
 
-    def run # rubocop:disable Metrics/CyclomaticComplexity
+    def run # rubocop:disable Metrics/CyclomaticComplexity, Metrics/MethodLength
       return print_help if @argv.empty? || help_request?(@argv.first)
 
       command = @argv.shift
@@ -462,6 +470,14 @@ module AgentCoord
         render_log(parse_options(command, @argv, positional: :work_item))
       when "batch-audit"
         batch_audit(parse_options(command, @argv))
+      when "attention-upsert"
+        attention_upsert(parse_options(command, @argv))
+      when "attention-resolve"
+        attention_resolve(parse_options(command, @argv))
+      when "attention-get"
+        attention_get(parse_options(command, @argv))
+      when "attention-list"
+        attention_list(parse_options(command, @argv))
       when "gc"
         gc(parse_options(command, @argv))
       when "version"
@@ -941,6 +957,14 @@ module AgentCoord
           log        trace which machine and host worked an issue or PR, and when
           batch-audit
                      report per-lane lifecycle-event completeness for a batch
+          attention-upsert
+                     create or refresh one generation-fenced attention record
+          attention-resolve
+                     resolve an attention record without deleting its audit state
+          attention-get
+                     read one exact attention record
+          attention-list
+                     list a bounded repository attention view
           gc         archive and purge terminal coordination state
           version    print CLI contract version
           config     inspect or safely persist global user configuration
@@ -998,6 +1022,7 @@ module AgentCoord
       add_gc_options(opts, options, command)
       add_status_options(opts, options, command)
       add_log_options(opts, options, command)
+      add_attention_options(opts, options, command)
       add_bootstrap_options(opts, options)
       add_config_set_options(opts, options, command)
       add_help_option(opts)
@@ -1214,6 +1239,25 @@ module AgentCoord
       opts.on("--include-synthetic", "include simulation and smoke records") { options[:include_synthetic] = true }
     end
 
+    def add_attention_options(opts, options, command)
+      return unless command.start_with?("attention-")
+
+      opts.on("--attention-id ID", "stable attention record identifier") { |value| options[:attention_id] = value }
+      opts.on("--record-json PATH", "attention-upsert only: v1 record JSON file, or - for stdin") do |value|
+        options[:record_json] = value
+      end
+      opts.on("--source-generation GENERATION", Integer,
+              "attention-resolve only: source generation resolving the record") do |value|
+        options[:source_generation] = value
+      end
+      opts.on("--include-resolved", "attention-list only: include resolved records") do
+        options[:include_resolved] = true
+      end
+      opts.on("--limit N", Integer, "attention-list only: maximum records (1-#{MAX_ATTENTION_LIST_LIMIT})") do |value|
+        options[:limit] = value
+      end
+    end
+
     def add_bootstrap_options(opts, options)
       opts.on("--install-dir PATH", "bootstrap install directory") { |value| options[:install_dir] = value }
       opts.on("--status-state-root PATH", "install agent-coord with a local status state root") do |value|
@@ -1324,6 +1368,7 @@ module AgentCoord
 
     def validate_closeout_option_usage!(command, options)
       fields = %i[terminal pr_state evidence_url workspace]
+      fields -= [:workspace] if command.start_with?("attention-")
       supplied = fields.select { |field| options.key?(field) }
       return if supplied.empty?
 
@@ -1343,7 +1388,8 @@ module AgentCoord
     end
 
     def backend_command?(command)
-      %w[claim release heartbeat register-batch record-event status log batch-audit gc doctor].include?(command)
+      %w[claim release heartbeat register-batch record-event status log batch-audit gc doctor
+         attention-upsert attention-resolve attention-get attention-list].include?(command)
     end
 
     def default_options
@@ -3849,6 +3895,147 @@ module AgentCoord
       0
     ensure
       close_store(store)
+    end
+
+    def attention_upsert(options)
+      require_options(options, :record_json)
+      requested = load_attention_record(options.fetch(:record_json))
+      validate_attention_record!(requested, expected_status: "open")
+      path = AgentCoord.attention_path(requested.fetch("workspace"), requested.fetch("repository"),
+                                       requested.fetch("id"))
+      store = build_store(options)
+      written = nil
+
+      2.times do
+        existing = store.read_json(path)
+        written = attention_upsert_payload(requested, existing&.data)
+        store.write_json(path, written, message: "Upsert attention #{requested.fetch('id')}",
+                                        sha: existing&.sha, create: existing.nil?)
+        break
+      rescue Conflict
+        written = nil
+        next
+      end
+      raise Conflict, "state changed while writing #{path}" unless written
+
+      emit_payload({ "record" => written }, options) do
+        @stdout.puts "attention #{written.fetch('id')} open at generation #{written.fetch('source_generation')}"
+      end
+      0
+    ensure
+      close_store(store) if store
+    end
+
+    def attention_resolve(options)
+      require_options(options, :workspace, :repo, :attention_id, :source_generation)
+      generation = options.fetch(:source_generation)
+      raise Error, "--source-generation must be non-negative" unless generation.is_a?(Integer) && generation >= 0
+
+      path = AgentCoord.attention_path(options.fetch(:workspace), options.fetch(:repo), options.fetch(:attention_id))
+      store = build_store(options)
+      written = nil
+      2.times do
+        existing = store.read_json(path)
+        raise OperationalError, "attention record not found: #{options.fetch(:attention_id)}" unless existing
+
+        written = attention_resolve_payload(existing.data, generation)
+        store.write_json(path, written, message: "Resolve attention #{options.fetch(:attention_id)}", sha: existing.sha)
+        break
+      rescue Conflict
+        written = nil
+        next
+      end
+      raise Conflict, "state changed while writing #{path}" unless written
+
+      emit_payload({ "record" => written }, options) do
+        @stdout.puts "attention #{written.fetch('id')} resolved at generation #{written.fetch('source_generation')}"
+      end
+      0
+    ensure
+      close_store(store) if store
+    end
+
+    def attention_get(options)
+      require_options(options, :workspace, :repo, :attention_id)
+      path = AgentCoord.attention_path(options.fetch(:workspace), options.fetch(:repo), options.fetch(:attention_id))
+      store = build_store(options)
+      entry = store.read_json(path)
+      raise OperationalError, "attention record not found: #{options.fetch(:attention_id)}" unless entry
+
+      validate_attention_record!(entry.data)
+      emit_payload({ "record" => entry.data }, options) { render_attention_text(entry.data) }
+      0
+    ensure
+      close_store(store) if store
+    end
+
+    def attention_list(options)
+      require_options(options, :workspace, :repo)
+      limit = options[:limit] || DEFAULT_ATTENTION_LIST_LIMIT
+      unless limit.is_a?(Integer) && limit.between?(1, MAX_ATTENTION_LIST_LIMIT)
+        raise Error, "--limit must be between 1 and #{MAX_ATTENTION_LIST_LIMIT}"
+      end
+
+      prefix = AgentCoord.attention_repo_prefix(options.fetch(:workspace), options.fetch(:repo))
+      store = build_store(options)
+      records = store.list_json(prefix).map(&:data)
+      records.each { |record| validate_attention_record!(record) }
+      records.select! { |record| record.fetch("status") == "open" } unless options[:include_resolved]
+      records.sort_by! do |record|
+        [ATTENTION_PRIORITIES.index(record.fetch("priority_class")), record.fetch("created_at"), record.fetch("id")]
+      end
+      truncated = records.length > limit
+      records = records.first(limit)
+      payload = { "records" => records, "limit" => limit, "truncated" => truncated }
+      emit_payload(payload, options) { records.each { |record| render_attention_text(record) } }
+      0
+    ensure
+      close_store(store) if store
+    end
+
+    def attention_upsert_payload(requested, existing)
+      return requested unless existing
+
+      validate_attention_record!(existing)
+      incoming_generation = requested.fetch("source_generation")
+      stored_generation = existing.fetch("source_generation")
+      reject_stale_attention_generation!(incoming_generation, stored_generation)
+      if existing.fetch("status") == "resolved" && incoming_generation <= stored_generation
+        raise OperationalError, "reopening attention must advance beyond resolved generation #{stored_generation}"
+      end
+      if incoming_generation == stored_generation &&
+         parse_time(requested.fetch("refreshed_at")) < parse_time(existing.fetch("refreshed_at"))
+        raise OperationalError, "attention refresh is older than the stored refresh at generation #{stored_generation}"
+      end
+
+      requested.merge("created_at" => existing.fetch("created_at")).except("resolved_at")
+    end
+
+    def attention_resolve_payload(existing, generation)
+      validate_attention_record!(existing)
+      stored_generation = existing.fetch("source_generation")
+      reject_stale_attention_generation!(generation, stored_generation)
+      return existing if existing.fetch("status") == "resolved" && generation == stored_generation
+
+      refreshed_at = timestamp(now_utc)
+      resolved_at = existing["resolved_at"] || refreshed_at
+      existing.merge(
+        "status" => "resolved",
+        "source_generation" => generation,
+        "refreshed_at" => refreshed_at,
+        "resolved_at" => resolved_at
+      )
+    end
+
+    def reject_stale_attention_generation!(incoming, stored)
+      return unless incoming < stored
+
+      raise OperationalError, "source generation #{incoming} is older than stored generation #{stored}"
+    end
+
+    def render_attention_text(record)
+      @stdout.puts "#{record.fetch('priority_class')} #{record.fetch('id')} [#{record.fetch('status')}]"
+      @stdout.puts "  #{record.fetch('question')}"
     end
 
     def write_event_record(store, options, now, output:)
@@ -7231,6 +7418,165 @@ module AgentCoord
       raise OperationalError, "batch manifest unreadable: #{e.message}"
     end
 
+    def load_attention_record(path)
+      raw = if path == "-"
+              @stdin.read(MAX_ATTENTION_RECORD_BYTES + 1)
+            else
+              File.open(path, "r:UTF-8") { |file| file.read(MAX_ATTENTION_RECORD_BYTES + 1) }
+            end
+      if raw.bytesize > MAX_ATTENTION_RECORD_BYTES
+        raise Error,
+              "attention record exceeds #{MAX_ATTENTION_RECORD_BYTES} bytes"
+      end
+
+      JSON.parse(raw)
+    rescue JSON::ParserError => e
+      raise Error, "attention record JSON invalid: #{e.message}"
+    rescue SystemCallError => e
+      raise OperationalError, "attention record unreadable: #{e.message}"
+    end
+
+    def validate_attention_record!(record, expected_status: nil)
+      raise Error, "attention record must be a JSON object" unless record.is_a?(Hash)
+
+      validate_attention_record_shape!(record)
+      validate_attention_record_identity!(record)
+      validate_attention_record_content!(record, expected_status)
+      validate_attention_record_timestamps!(record)
+      validate_attention_resolution!(record)
+      record
+    end
+
+    def validate_attention_record_shape!(record)
+      required = %w[
+        schema_version workspace id repository target status kind question choices priority_class priority_reason
+        safe_resume source source_generation created_at refreshed_at
+      ]
+      allowed = required + ["resolved_at"]
+      missing = required.reject { |field| record.key?(field) }
+      raise Error, "attention record missing #{missing.first}" unless missing.empty?
+
+      unknown = record.keys - allowed
+      raise Error, "attention record contains unknown field #{unknown.first}" unless unknown.empty?
+      raise Error, "attention schema_version must be 1" unless record["schema_version"] == 1
+    end
+
+    def validate_attention_record_identity!(record)
+      AgentCoord.validate_segment!(record.fetch("workspace"), "attention workspace")
+      AgentCoord.validate_segment!(record.fetch("id"), "attention id")
+      AgentCoord.validate_repo!(record.fetch("repository"), "attention")
+      raise Error, "attention workspace must be at most 255 characters" if record.fetch("workspace").length > 255
+      raise Error, "attention id must be at most 255 characters" if record.fetch("id").length > 255
+      raise Error, "attention repository must be at most 255 characters" if record.fetch("repository").length > 255
+    end
+
+    def validate_attention_record_content!(record, expected_status)
+      validate_attention_text!(record, "target", 2000)
+      validate_attention_text!(record, "kind", 100)
+      %w[question priority_reason safe_resume].each { |field| validate_attention_text!(record, field, 4000) }
+      validate_attention_choices!(record.fetch("choices"))
+      unless ATTENTION_PRIORITIES.include?(record.fetch("priority_class"))
+        raise Error, "attention priority_class must be #{ATTENTION_PRIORITIES.join(', ')}"
+      end
+      raise Error, "attention status must be open or resolved" unless %w[open resolved].include?(record.fetch("status"))
+      if expected_status && record.fetch("status") != expected_status
+        raise Error, "attention-upsert requires status #{expected_status}"
+      end
+
+      generation = record.fetch("source_generation")
+      unless generation.is_a?(Integer) && generation >= 0
+        raise Error,
+              "attention source_generation must be a non-negative integer"
+      end
+
+      validate_attention_source!(record.fetch("source"))
+    end
+
+    def validate_attention_record_timestamps!(record)
+      %w[created_at refreshed_at].each { |field| validate_attention_timestamp!(record.fetch(field), field) }
+      return unless parse_time(record.fetch("refreshed_at")) < parse_time(record.fetch("created_at"))
+
+      raise Error, "attention refreshed_at must not precede created_at"
+    end
+
+    def validate_attention_text!(record, field, maximum)
+      value = record.fetch(field)
+      return if value.is_a?(String) && !value.empty? && value.length <= maximum
+
+      raise Error, "attention #{field} must be a non-empty string of at most #{maximum} characters"
+    end
+
+    def validate_attention_choices!(choices)
+      unless choices.is_a?(Array) && choices.length.between?(1, 10) &&
+             choices.all? { |choice| choice.is_a?(String) && !choice.empty? && choice.length <= 2000 }
+        raise Error, "attention choices must contain 1 to 10 non-empty strings of at most 2000 characters"
+      end
+    end
+
+    def validate_attention_source!(source)
+      raise Error, "attention source must be a JSON object" unless source.is_a?(Hash)
+
+      required = %w[provider host_id task_id last_seen_at capabilities]
+      allowed = required + ["open_uri"]
+      missing = required.reject { |field| source.key?(field) }
+      raise Error, "attention source missing #{missing.first}" unless missing.empty?
+
+      unknown = source.keys - allowed
+      raise Error, "attention source contains unknown field #{unknown.first}" unless unknown.empty?
+
+      %w[provider host_id task_id].each do |field|
+        value = source.fetch(field)
+        raise Error, "attention source #{field} must be non-empty" unless value.is_a?(String) && !value.empty?
+      end
+      raise Error, "attention source provider must be at most 100 characters" if source.fetch("provider").length > 100
+
+      %w[host_id task_id].each do |field|
+        raise Error, "attention source #{field} must be at most 255 characters" if source.fetch(field).length > 255
+      end
+      validate_attention_timestamp!(source.fetch("last_seen_at"), "source last_seen_at")
+      validate_attention_open_uri!(source["open_uri"]) if source.key?("open_uri")
+      validate_attention_capabilities!(source.fetch("capabilities"))
+    end
+
+    def validate_attention_open_uri!(value)
+      uri = URI.parse(value.to_s)
+      return if value.is_a?(String) && !value.empty? && value.length <= 2000 && uri.scheme
+
+      raise Error, "attention source open_uri must be an absolute URI"
+    rescue URI::InvalidURIError
+      raise Error, "attention source open_uri must be an absolute URI"
+    end
+
+    def validate_attention_capabilities!(capabilities)
+      unless capabilities.is_a?(Hash) && capabilities.keys.sort == %w[native_open prompt_forwarding]
+        raise Error, "attention capabilities must contain only native_open and prompt_forwarding"
+      end
+
+      capabilities.each do |name, value|
+        next if ATTENTION_CAPABILITY_STATES.include?(value)
+
+        raise Error, "attention #{name} must be available, unavailable, or unknown"
+      end
+    end
+
+    def validate_attention_timestamp!(value, field)
+      raise Error, "attention #{field} must be an RFC 3339 timestamp" unless value.is_a?(String)
+
+      parse_time(value)
+    rescue ArgumentError
+      raise Error, "attention #{field} must be an RFC 3339 timestamp"
+    end
+
+    def validate_attention_resolution!(record)
+      if record.fetch("status") == "resolved"
+        raise Error, "resolved attention requires resolved_at" unless record.key?("resolved_at")
+
+        validate_attention_timestamp!(record.fetch("resolved_at"), "resolved_at")
+      elsif record.key?("resolved_at")
+        raise Error, "open attention must not contain resolved_at"
+      end
+    end
+
     def load_launch_prompt(path)
       prompt = path == "-" ? $stdin.read : File.binread(path)
       prompt = prompt.dup.force_encoding(Encoding::UTF_8)
@@ -8478,6 +8824,19 @@ module AgentCoord
   def self.event_batch_prefix(batch_id)
     validate_segment!(batch_id, "batch-id")
     "events/#{batch_id}"
+  end
+
+  def self.attention_path(workspace, repo, attention_id)
+    validate_segment!(workspace, "attention workspace")
+    validate_repo!(repo, "attention")
+    validate_segment!(attention_id, "attention id")
+    "attention/#{workspace}/#{repo}/#{attention_id}.json"
+  end
+
+  def self.attention_repo_prefix(workspace, repo)
+    validate_segment!(workspace, "attention workspace")
+    validate_repo!(repo, "attention")
+    "attention/#{workspace}/#{repo}"
   end
 
   def self.event_batch_from_path(path)

@@ -29,14 +29,17 @@ const REQUEST_ENVELOPE_BYTES = 4096;
 const MAX_ACTIVE_STATE_PATH_BYTES = 512;
 const MAX_ARCHIVE_STATE_PATH_BYTES = MAX_ACTIVE_STATE_PATH_BYTES + "archive/".length;
 const MAX_LIST_LIMIT = 1000;
-const RECORD_PATH = "(?:claims/[A-Za-z0-9_.:-]+/[A-Za-z0-9_.:-]+/[A-Za-z0-9_.:-]+\\.json"
+const ARCHIVABLE_RECORD_PATH = "(?:claims/[A-Za-z0-9_.:-]+/[A-Za-z0-9_.:-]+/[A-Za-z0-9_.:-]+\\.json"
   + "|heartbeats/[A-Za-z0-9_.:-]+\\.json"
   + "|batches/[A-Za-z0-9_.:-]+\\.json"
   + "|events/[A-Za-z0-9_.:-]+/[A-Za-z0-9_.:-]+\\.json)";
-const STATE_PATH = new RegExp(`^(?:${RECORD_PATH}|archive/${RECORD_PATH})$`);
-const ACTIVE_PREFIX = "(?:claims(?:/[A-Za-z0-9_.:-]+(?:/[A-Za-z0-9_.:-]+)?)?"
+const ATTENTION_RECORD_PATH = "attention/[A-Za-z0-9_.:-]+/[A-Za-z0-9_.:-]+/[A-Za-z0-9_.:-]+/[A-Za-z0-9_.:-]+\\.json";
+const STATE_PATH = new RegExp(`^(?:${ARCHIVABLE_RECORD_PATH}|${ATTENTION_RECORD_PATH}|archive/${ARCHIVABLE_RECORD_PATH})$`);
+const ARCHIVABLE_PREFIX = "(?:claims(?:/[A-Za-z0-9_.:-]+(?:/[A-Za-z0-9_.:-]+)?)?"
   + "|heartbeats|batches|events(?:/[A-Za-z0-9_.:-]+)?)";
-const ARCHIVE_PREFIX = `archive(?:/${ACTIVE_PREFIX})?`;
+const ATTENTION_PREFIX = "attention(?:/[A-Za-z0-9_.:-]+(?:/[A-Za-z0-9_.:-]+(?:/[A-Za-z0-9_.:-]+)?)?)?";
+const ACTIVE_PREFIX = `(?:${ARCHIVABLE_PREFIX}|${ATTENTION_PREFIX})`;
+const ARCHIVE_PREFIX = `archive(?:/${ARCHIVABLE_PREFIX})?`;
 const STATE_PREFIX = new RegExp(`^(?:${ACTIVE_PREFIX}|${ARCHIVE_PREFIX})$`);
 
 function validPath(path: string): boolean {
@@ -79,6 +82,8 @@ function exactStatePathScope(scope: string): boolean {
       return parts.length === 2;
     case "events":
       return parts.length === 3;
+    case "attention":
+      return parts.length === 5;
     default:
       return false;
   }
@@ -378,6 +383,7 @@ export default {
         return putState(request, env, path, auth.machine);
       }
       if (request.method === "DELETE") {
+        if (path.startsWith("attention/")) return json(405, { error: "method_not_allowed" });
         if (!canDeletePath(auth.writePrefixes, path)) return json(403, { error: "forbidden" });
         return deleteState(request, env, path, auth.machine);
       }

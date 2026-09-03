@@ -4,6 +4,7 @@ require "json"
 require "minitest/autorun"
 require "net/http"
 require "open3"
+require "tempfile"
 require "uri"
 
 CLI = File.expand_path("../bin/agent-coord", __dir__)
@@ -15,6 +16,55 @@ def cli(*)
 end
 
 class HttpBackendIntegrationTest < Minitest::Test
+  def test_attention_lifecycle_and_scoped_authorization_match_the_local_store
+    token = ENV.fetch("ATTENTION_AGENT_COORD_API_TOKEN")
+    record = attention_record
+    path = "attention/default/#{REPO}/integration-decision.json"
+
+    Tempfile.create(["attention", ".json"]) do |file|
+      file.write(JSON.generate(record))
+      file.flush
+      code, output, error = cli_with_token(token, "attention-upsert", "--record-json", file.path, "--json")
+      assert_equal 0, code, error
+      assert_equal record, JSON.parse(output).fetch("record")
+    end
+
+    code, body = http_json("GET", state_path(path), token: token)
+    assert_equal 200, code
+    assert_equal "attention-scoped", body.fetch("updated_by")
+    assert_equal record, body.fetch("data")
+
+    code, body = http_json("GET", "/v1/state?prefix=attention/default/shakacode", token: token)
+    assert_equal 200, code
+    assert_equal([path], body.fetch("entries").map { |entry| entry.fetch("path") })
+
+    denied = "attention/default/outside/repository/denied.json"
+    code, body = http_json(
+      "PUT", state_path(denied), token: token, headers: { "If-None-Match" => "*" }, body: { "data" => record }
+    )
+    assert_equal 403, code
+    assert_equal "forbidden", body.fetch("error")
+
+    code, body = http_json("DELETE", state_path(path), token: token, headers: { "If-Match" => "1" })
+    assert_equal 405, code
+    assert_equal "method_not_allowed", body.fetch("error")
+
+    code, output, error = cli_with_token(
+      token, "attention-resolve", "--workspace", "default", "--repo", REPO,
+      "--attention-id", "integration-decision", "--source-generation", "2", "--json"
+    )
+    assert_equal 0, code, error
+    resolved = JSON.parse(output).fetch("record")
+    assert_equal "resolved", resolved.fetch("status")
+    assert_equal record.fetch("source"), resolved.fetch("source")
+
+    code, output, error = cli_with_token(
+      token, "attention-list", "--workspace", "default", "--repo", REPO, "--json"
+    )
+    assert_equal 0, code, error
+    assert_empty JSON.parse(output).fetch("records")
+  end
+
   def test_full_claim_lifecycle_and_contention
     target = "100"
     code, out, err = cli("claim", "--agent-id", "w1", "--repo", REPO, "--target", target)
@@ -48,6 +98,38 @@ class HttpBackendIntegrationTest < Minitest::Test
     assert_equal 0, code
     payload = JSON.parse(out)
     assert_equal "w3", payload.fetch("claims").first.fetch("agent_id")
+  end
+
+  def attention_record
+    {
+      "schema_version" => 1,
+      "workspace" => "default",
+      "id" => "integration-decision",
+      "repository" => REPO,
+      "target" => "issue:292",
+      "status" => "open",
+      "kind" => "architecture",
+      "question" => "Continue the bounded backend slice?",
+      "choices" => %w[Continue Stop],
+      "priority_class" => "unblocks-work",
+      "priority_reason" => "Exercises HTTP parity",
+      "safe_resume" => "Resume the bounded implementation",
+      "source" => {
+        "provider" => "codex",
+        "host_id" => "m1",
+        "task_id" => "integration-task",
+        "last_seen_at" => "2026-09-03T09:00:00Z",
+        "capabilities" => { "native_open" => "unknown", "prompt_forwarding" => "unavailable" }
+      },
+      "source_generation" => 1,
+      "created_at" => "2026-09-03T09:00:00Z",
+      "refreshed_at" => "2026-09-03T09:00:00Z"
+    }
+  end
+
+  def cli_with_token(token, *)
+    stdout, stderr, status = Open3.capture3({ "AGENT_COORD_API_TOKEN" => token }, "ruby", CLI, *)
+    [status.exitstatus, stdout, stderr]
   end
 
   def test_concurrent_claims_have_exactly_one_winner
