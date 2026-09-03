@@ -1276,6 +1276,145 @@ class TelemetryHarvesterTest < Minitest::Test # rubocop:disable Metrics/ClassLen
     end
   end
 
+  def test_operational_scorecard_counts_interventions_and_normalizes_per_ten_merged_prs
+    source = coordination_fixture
+    source.fetch("events").concat(
+      [
+        ["takeover", "2026-07-18T01:10:00Z"],
+        ["manual-fix", "2026-07-18T01:20:00Z"]
+      ].map.with_index do |(kind, at), index|
+        {
+          "id" => "intervention-#{index}", "batch_id" => "batch-fixture",
+          "repo" => "shakacode/agent-coordination", "target" => "78",
+          "type" => "human_intervention", "kind" => kind, "at" => at
+        }
+      end
+    )
+    interventions = harvested_scorecard(source, github: true).dig("operational_load", "human_interventions")
+
+    assert_equal 2, interventions.fetch("count")
+    assert_equal 20, interventions.fetch("per_10_merged_prs")
+    assert_equal(
+      { "takeover" => 1, "supersede" => 0, "manual-fix" => 1, "drain" => 0 },
+      interventions.fetch("by_kind")
+    )
+    assert_equal(
+      { "takeover" => 10, "supersede" => 0, "manual-fix" => 10, "drain" => 0 },
+      interventions.fetch("by_kind_per_10_merged_prs")
+    )
+  end
+
+  def test_operational_scorecard_counts_help_and_escalation_load
+    source = coordination_fixture
+    %w[blocked-user-input question permission].each_with_index do |reason, index|
+      source.fetch("events") << {
+        "id" => "help-#{index}", "batch_id" => "batch-fixture",
+        "repo" => "shakacode/agent-coordination", "target" => "78",
+        "type" => "help_requested", "reason" => reason,
+        "at" => "2026-07-18T01:2#{index}:00Z"
+      }
+    end
+    source.fetch("events") << {
+      "id" => "escalation-1", "batch_id" => "batch-fixture",
+      "repo" => "shakacode/agent-coordination", "target" => "78",
+      "type" => "escalation_requested", "at" => "2026-07-18T01:30:00Z"
+    }
+    load = harvested_scorecard(source, github: true).fetch("operational_load")
+
+    assert_equal 3, load.dig("help_requests", "count")
+    assert_equal 30, load.dig("help_requests", "per_10_merged_prs")
+    assert_equal(
+      { "blocked-user-input" => 1, "question" => 1, "permission" => 1 },
+      load.dig("help_requests", "by_reason")
+    )
+    assert_equal(
+      { "blocked-user-input" => 10, "question" => 10, "permission" => 10 },
+      load.dig("help_requests", "by_reason_per_10_merged_prs")
+    )
+    assert_equal({ "count" => 1, "per_10_merged_prs" => 10 }, load.fetch("escalations"))
+  end
+
+  def test_operational_scorecard_reports_lane_durations_and_explicit_telemetry_gaps
+    source = coordination_fixture
+    source.fetch("batches").first.fetch("lanes").replace(
+      [
+        { "name" => "duration-known", "targets" => ["78"], "status" => "done" },
+        { "name" => "duration-gap", "targets" => ["79"], "status" => "done" }
+      ]
+    )
+    source.fetch("events").replace(duration_scorecard_events)
+    durations = harvested_scorecard(source).dig("operational_load", "lane_durations")
+
+    assert_equal 2, durations.fetch("lanes")
+    assert_equal 1, durations.fetch("computable_lanes")
+    assert_equal 1, durations.fetch("telemetry_gap_lanes")
+    assert_equal(
+      { "duration-gap" => "UNKNOWN", "duration-known" => 1_800 },
+      durations.fetch("by_lane_seconds")
+    )
+    assert_equal(
+      { "minimum" => 1_800, "median" => 1_800, "maximum" => 1_800 },
+      durations.fetch("seconds")
+    )
+  end
+
+  def test_operational_scorecard_counts_custody_reclaims_after_release_or_takeover
+    source = coordination_fixture
+    source.fetch("events").replace(
+      [
+        ["claim-1", "claim.acquired", nil, "2026-07-18T01:00:00Z"],
+        ["release-1", "claim.released", nil, "2026-07-18T01:10:00Z"],
+        ["claim-2", "claim.acquired", nil, "2026-07-18T01:20:00Z"],
+        ["claim-renewal", "claim.acquired", nil, "2026-07-18T01:25:00Z"],
+        ["takeover-1", "human_intervention", "takeover", "2026-07-18T01:30:00Z"],
+        ["claim-3", "claim.acquired", nil, "2026-07-18T01:40:00Z"]
+      ].map do |id, type, kind, at|
+        {
+          "id" => id, "batch_id" => "batch-fixture",
+          "repo" => "shakacode/agent-coordination", "target" => "78",
+          "type" => type, "kind" => kind, "at" => at
+        }.compact
+      end
+    )
+
+    assert_equal(
+      { "reclaims" => 2, "per_10_merged_prs" => 20 },
+      harvested_scorecard(source, github: true).dig("operational_load", "custody_rework")
+    )
+  end
+
+  def test_operational_scorecard_marks_ambiguous_lane_membership_as_duration_gaps
+    source = coordination_fixture
+    source.fetch("batches").first.fetch("lanes").replace(
+      [
+        { "name" => "shared-a", "targets" => ["78"], "status" => "done" },
+        { "name" => "shared-b", "targets" => ["78"], "status" => "done" },
+        { "name" => "multi-target", "targets" => %w[79 80], "status" => "done" }
+      ]
+    )
+    source.fetch("events").replace(complete_duration_events_for(%w[78 79 80]))
+    durations = harvested_scorecard(source).dig("operational_load", "lane_durations")
+
+    assert_equal 3, durations.fetch("telemetry_gap_lanes")
+    assert_equal ["UNKNOWN"], durations.fetch("by_lane_seconds").values.uniq
+    assert_equal(
+      { "minimum" => "UNKNOWN", "median" => "UNKNOWN", "maximum" => "UNKNOWN" },
+      durations.fetch("seconds")
+    )
+  end
+
+  def test_operational_scorecard_marks_normalized_load_unknown_without_merged_prs
+    load = harvested_scorecard(coordination_fixture).fetch("operational_load")
+
+    assert_equal 0, load.fetch("merged_prs")
+    assert_equal "UNKNOWN", load.dig("human_interventions", "per_10_merged_prs")
+    assert_equal ["UNKNOWN"], load.dig("human_interventions", "by_kind_per_10_merged_prs").values.uniq
+    assert_equal "UNKNOWN", load.dig("help_requests", "per_10_merged_prs")
+    assert_equal ["UNKNOWN"], load.dig("help_requests", "by_reason_per_10_merged_prs").values.uniq
+    assert_equal "UNKNOWN", load.dig("escalations", "per_10_merged_prs")
+    assert_equal "UNKNOWN", load.dig("custody_rework", "per_10_merged_prs")
+  end
+
   # --- issue #112: event retention -------------------------------------------
 
   # The real deliverable of #112 is the drift guard, not the current list. The
@@ -1404,8 +1543,9 @@ class TelemetryHarvesterTest < Minitest::Test # rubocop:disable Metrics/ClassLen
 
   # 0001-0003 are already applied in existing ledgers and are hash-pinned, so
   # 0004 has to be purely additive. Open a ledger that only knows 0001-0003,
-  # populate it, then reopen against the full migration set: the older hashes
-  # must still verify and the pre-existing rows must simply gain NULL columns.
+  # populate it, then reopen against the current migration set: the older
+  # hashes must still verify and the pre-existing rows must simply gain NULL
+  # columns while later additive views also apply.
   def test_event_retention_migration_applies_additively_to_an_existing_ledger
     Dir.mktmpdir("agent-coordination-ledger-migration") do |dir|
       ledger_path = File.join(dir, "telemetry.sqlite3")
@@ -1415,12 +1555,43 @@ class TelemetryHarvesterTest < Minitest::Test # rubocop:disable Metrics/ClassLen
 
       AgentCoord::Telemetry::Ledger.new(ledger_path)
 
-      assert_equal before + ["0004_event_type_retention"],
+      assert_equal before + %w[0004_event_type_retention 0005_operational_scorecards],
                    sqlite_query(ledger_path, "SELECT version FROM schema_migrations ORDER BY version")
       assert_equal ["pre-existing|lane_closed|NULL|NULL|NULL|NULL|NULL"], sqlite_query(
         ledger_path,
         "SELECT event_ref, event_type, COALESCE(event_type_raw, 'NULL'), COALESCE(severity, 'NULL'), " \
         "COALESCE(category, 'NULL'), COALESCE(kind, 'NULL'), COALESCE(reason, 'NULL') FROM events"
+      )
+    end
+  end
+
+  def test_operational_scorecard_migration_upgrades_an_existing_event_ledger
+    Dir.mktmpdir("agent-coordination-operational-migration") do |dir|
+      ledger_path = File.join(dir, "telemetry.sqlite3")
+      older = File.join(dir, "migrations")
+      FileUtils.mkdir_p(older)
+      migrations = Dir.glob(File.join(ROOT, "schema", "telemetry-ledger", "*.sql"))
+      migrations.take(4).each { |path| FileUtils.cp(path, older) }
+
+      AgentCoord::Telemetry::Ledger.new(ledger_path, migrations_path: older)
+      assert_equal(
+        %w[0001_initial 0002_host_usage 0003_pricing_scorecards 0004_event_type_retention],
+        sqlite_query(ledger_path, "SELECT version FROM schema_migrations ORDER BY version")
+      )
+
+      AgentCoord::Telemetry::Ledger.new(ledger_path)
+
+      assert_equal ["0005_operational_scorecards"], sqlite_query(
+        ledger_path, "SELECT version FROM schema_migrations WHERE version = '0005_operational_scorecards'"
+      )
+      assert_equal(
+        %w[custody_rework_scorecard lane_duration_scorecard operational_event_scorecard],
+        sqlite_query(
+          ledger_path,
+          "SELECT name FROM sqlite_master WHERE type = 'view' AND name LIKE '%scorecard' " \
+          "AND name IN ('custody_rework_scorecard', 'lane_duration_scorecard', " \
+          "'operational_event_scorecard') ORDER BY name"
+        )
       )
     end
   end
@@ -2243,14 +2414,17 @@ class TelemetryHarvesterTest < Minitest::Test # rubocop:disable Metrics/ClassLen
     ]
   end
 
-  # A ledger built from every migration except the last one, holding an event
-  # row written before the event-retention columns existed.
+  # A ledger built from exactly 0001-0003, holding an event row written before
+  # the event-retention columns existed.
   def seed_ledger_without_event_retention(dir, ledger_path)
     older = File.join(dir, "migrations")
     FileUtils.mkdir_p(older)
     migrations = Dir.glob(File.join(ROOT, "schema", "telemetry-ledger", "*.sql"))
-    assert_equal "0004_event_type_retention.sql", File.basename(migrations.last)
-    migrations[0..-2].each { |path| FileUtils.cp(path, older) }
+    assert_equal(
+      %w[0001_initial.sql 0002_host_usage.sql 0003_pricing_scorecards.sql],
+      migrations.take(3).map { |path| File.basename(path) }
+    )
+    migrations.take(3).each { |path| FileUtils.cp(path, older) }
 
     ledger = AgentCoord::Telemetry::Ledger.new(ledger_path, migrations_path: older)
     ledger.execute(
@@ -2285,6 +2459,61 @@ class TelemetryHarvesterTest < Minitest::Test # rubocop:disable Metrics/ClassLen
     stdout, stderr, status = Open3.capture3(env, RbConfig.ruby, COORD_CLI, *args)
     assert status.success?, "agent-coord #{args.first} failed:\n#{stdout}\n#{stderr}"
     stdout
+  end
+
+  def harvested_scorecard(source, github: false)
+    Dir.mktmpdir("agent-coordination-scorecard") do |dir|
+      source_path = File.join(dir, "coordination.json")
+      ledger_path = File.join(dir, "telemetry.sqlite3")
+      File.write(source_path, JSON.generate(source))
+      harvest_args = [CLI, "harvest", "--ledger", ledger_path, "--coordination-json", source_path]
+      if github
+        github_path = File.join(dir, "github.json")
+        FileUtils.cp(File.join(FIXTURES, "github.json"), github_path)
+        harvest_args.push("--github-json", github_path)
+      end
+      harvest_args.push("--batch-id", "batch-fixture")
+      _stdout, stderr, status = Open3.capture3(*harvest_args)
+      assert status.success?, stderr
+
+      stdout, stderr, status = Open3.capture3(
+        CLI, "scorecard", "--ledger", ledger_path, "--batch-id", "batch-fixture"
+      )
+      assert status.success?, stderr
+      JSON.parse(stdout)
+    end
+  end
+
+  def duration_scorecard_events
+    [
+      ["claim-start", "78", "claim.acquired", nil, "2026-07-18T01:00:00Z"],
+      ["same-time-close", "78", "lane_closed", "done", "2026-07-18T01:00:00Z"],
+      ["claim-renewal", "78", "claim.acquired", nil, "2026-07-18T01:05:00Z"],
+      ["lane-close", "78", "lane_closed", "done", "2026-07-18T01:30:00Z"],
+      ["gap-claim", "79", "claim.acquired", nil, "2026-07-18T01:00:00Z"]
+    ].map do |id, target, type, terminal, at|
+      {
+        "id" => id, "batch_id" => "batch-fixture", "repo" => "shakacode/agent-coordination",
+        "target" => target, "type" => type, "terminal" => terminal, "at" => at
+      }.compact
+    end
+  end
+
+  def complete_duration_events_for(targets)
+    targets.each_with_index.flat_map do |target, index|
+      [
+        {
+          "id" => "claim-#{target}", "batch_id" => "batch-fixture",
+          "repo" => "shakacode/agent-coordination", "target" => target,
+          "type" => "claim.acquired", "at" => "2026-07-18T01:00:00Z"
+        },
+        {
+          "id" => "close-#{target}", "batch_id" => "batch-fixture",
+          "repo" => "shakacode/agent-coordination", "target" => target,
+          "type" => "lane_closed", "terminal" => "done", "at" => "2026-07-18T01:0#{index + 1}:00Z"
+        }
+      ]
+    end
   end
 
   def sqlite_query(ledger_path, sql)
