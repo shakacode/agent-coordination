@@ -438,10 +438,12 @@ the active terminal:
 export PATH="$HOME/.local/bin:$PATH"
 ```
 
-An entry written by a pre-#205 release under a different locale encoding may
-not match the now-stable generated line. The first post-upgrade `bootstrap` can
-therefore append exactly one new, cosmetic duplicate PATH entry. The next run
-matches the new line and converges without appending another entry.
+When the install path contains non-ASCII characters, an entry written by a
+pre-#205 release under a different locale encoding may not match the now-stable
+generated line. ASCII-only paths produce the same bytes and do not hit this
+case. The first post-upgrade `bootstrap` can therefore append exactly one new,
+cosmetic duplicate PATH entry. The next run matches the new line and converges
+without appending another entry.
 
 The CLI intentionally does not guess which legacy encoding produced an older
 entry or rewrite the user's shell profile. A false match could make `bootstrap`
