@@ -5477,11 +5477,13 @@ module AgentCoord
       end
       claims.select do |candidate|
         next true if candidate.data.is_a?(Hash)
+
         # A malformed sibling cannot shorten a scoped answer when its path
         # proves that it belongs to a different work item. Unscoped --sync
         # deliberately keeps the fleet-wide completeness check.
-        if wanted_identity &&
-           !log_identity_match?(log_claim_path_identity(candidate), wanted_identity, lane_exact: true)
+        path_identity = log_claim_path_identity(candidate)
+        if wanted_identity && path_identity &&
+           !log_identity_match?(path_identity, wanted_identity, lane_exact: true)
           next false
         end
 
@@ -5537,7 +5539,12 @@ module AgentCoord
     end
 
     def log_claim_path_identity(entry)
-      log_identity(AgentCoord.repo_from_claim_path(entry.path), AgentCoord.target_from_path(entry.path))
+      path = entry.path
+      return unless path.is_a?(String) && path.valid_encoding?
+
+      log_identity(AgentCoord.repo_from_claim_path(path), AgentCoord.target_from_path(path))
+    rescue ArgumentError
+      nil
     end
 
     # Claims written before repo/target became explicit payload fields carry them

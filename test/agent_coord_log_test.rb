@@ -2071,6 +2071,31 @@ class AgentCoordLogClaimRecordResilienceTest < AgentCoordLogTestCase
     assert_equal "readable-worker", payload.fetch("claim").fetch("agent_id")
   end
 
+  # An invalidly encoded path cannot prove that a malformed claim belongs to a
+  # different work item. Degrade conservatively and scrub the diagnostic.
+  def test_log_scrubs_invalid_utf8_before_matching_a_non_object_claim_path
+    good = AgentCoord::StoredJson.new(
+      path: "claims/shakacode/example/issue:104.json",
+      data: { "repo" => "shakacode/example", "target" => "issue:104" }
+    )
+    invalid_path = "claims/shakacode/example/issue:104-\xE2.json".b.force_encoding(Encoding::UTF_8)
+    bad = AgentCoord::StoredJson.new(path: invalid_path, data: [1, 2, 3])
+    store = Object.new
+    store.define_singleton_method(:list_json) { |_prefix, &_handler| [good, bad] }
+    stderr = StringIO.new
+    runner = AgentCoord::Runner.new([], stderr: stderr)
+    wanted = runner.send(:log_identity, "shakacode/example", "104")
+
+    claims = runner.send(:log_claim_entries, store, wanted_identity: wanted)
+
+    assert_equal [good], claims
+    assert_predicate stderr.string, :valid_encoding?
+    assert_includes stderr.string,
+                    "live claim record is not an object at claims/shakacode/example/issue:104-\uFFFD.json"
+    refute_match(/ArgumentError|invalid byte sequence/, stderr.string)
+    assert_equal "claims", runner.send(:log_incomplete_prefixes)
+  end
+
   def test_log_refuses_to_sync_past_a_non_object_claim_record
     write_event("b1", "e1", "type" => "claim.acquired", "repo" => "shakacode/example", "target" => "104",
                             "machine_id" => "m1", "host" => "codex", "at" => "2026-08-03T02:40:16Z")
