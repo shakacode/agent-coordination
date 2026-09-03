@@ -2165,7 +2165,8 @@ class LogHttpBackendTest < HttpEnvTestCase
                                [200, { "entries" => [
                                  { "path" => "events/b1/e1.json", "data" => event, "version" => 1 }
                                ] }],
-                               [400, { "error" => "invalid_prefix" }]
+                               [400, { "error" => "invalid_prefix" }],
+                               [200, { "entries" => [] }]
                              ])
     with_env("AGENT_COORD_API_URL" => stub.base_url, "AGENT_COORD_API_TOKEN" => "tok",
              "AGENT_COORD_STATUS_STATE_ROOT" => root) do
@@ -2177,6 +2178,7 @@ class LogHttpBackendTest < HttpEnvTestCase
       assert_includes err, "archived events not supported by backend"
       refute_includes err, "may be incomplete"
       refute_includes err, "refusing to sync"
+      assert_includes stub.requests.map { |request| request[:path] }, "/v1/state?prefix=claims"
     end
   ensure
     stub.shutdown

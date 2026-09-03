@@ -4473,9 +4473,13 @@ module AgentCoord
       rows = log_rows(store, options)
       log_note_archived(options)
       if options[:sync]
-        log_claim_entries(store)
         # A partial listing would write a partial mirror that later reads as
         # complete -- the same hazard the narrowing options are rejected for.
+        raise OperationalError, "refusing to sync an incomplete trail: #{log_incomplete_prefixes}" if @log_incomplete
+
+        # Claims are the final completeness check. Do not let a failed claims
+        # probe mask an already-conclusive refusal for the event trail.
+        log_claim_entries(store)
         raise OperationalError, "refusing to sync an incomplete trail: #{log_incomplete_prefixes}" if @log_incomplete
 
         return log_sync(log_options, rows)
