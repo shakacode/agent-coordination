@@ -7478,7 +7478,7 @@ module AgentCoord
       AgentCoord.validate_attention_key_component!(record.fetch("repository"), "repository")
       AgentCoord.validate_segment!(record.fetch("workspace"), "attention workspace")
       AgentCoord.validate_segment!(record.fetch("id"), "attention id")
-      AgentCoord.validate_repo!(record.fetch("repository"), "attention")
+      AgentCoord.validate_attention_repo!(record.fetch("repository"))
     end
 
     def validate_attention_record_content!(record, expected_status)
@@ -8804,6 +8804,14 @@ module AgentCoord
     raise Error, "attention #{field} must be at most #{MAX_ATTENTION_KEY_COMPONENT_LENGTH} characters"
   end
 
+  def self.validate_attention_repo!(repo)
+    validate_repo!(repo, "attention")
+    owner, name = repo.split("/", 2)
+    return unless repo.include?("..") || owner == "." || name == "."
+
+    raise Error, "invalid attention repo: #{utf8_diagnostic(repo)}"
+  end
+
   # Renaming a file into place is not durable until the directory entry itself
   # reaches stable storage, so every atomic replacement in this file follows its
   # rename with this.
@@ -8851,7 +8859,7 @@ module AgentCoord
     validate_attention_key_component!(repo, "repository")
     validate_attention_key_component!(attention_id, "id")
     validate_segment!(workspace, "attention workspace")
-    validate_repo!(repo, "attention")
+    validate_attention_repo!(repo)
     validate_segment!(attention_id, "attention id")
     "attention/#{workspace}/#{repo}/#{attention_id}.json"
   end
@@ -8860,7 +8868,7 @@ module AgentCoord
     validate_attention_key_component!(workspace, "workspace")
     validate_attention_key_component!(repo, "repository")
     validate_segment!(workspace, "attention workspace")
-    validate_repo!(repo, "attention")
+    validate_attention_repo!(repo)
     "attention/#{workspace}/#{repo}"
   end
 

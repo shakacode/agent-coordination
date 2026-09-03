@@ -54,6 +54,20 @@ class AttentionRecordContractTest < Minitest::Test
     refute_empty schema.validate(record.merge("safe_resume" => "x" * 4001)).to_a
   end
 
+  def test_repository_storage_grammar_rejects_dot_aliases_but_allows_dot_prefixed_names
+    schema = JSONSchemer.schema(read_json(SCHEMA_PATH))
+    record = read_json(File.join(FIXTURES_PATH, "valid", "attention-open.json"))
+
+    ["foo..bar/repo", "owner/foo..bar", "./foo", "repo/."].each do |repository|
+      refute_empty schema.validate(record.merge("repository" => repository)).to_a,
+                   "expected #{repository.inspect} to be rejected"
+    end
+    [".github/foo", "shakacode/.github"].each do |repository|
+      assert_empty schema.validate(record.merge("repository" => repository)).to_a,
+                   "expected #{repository.inspect} to conform"
+    end
+  end
+
   private
 
   def fixture_files(kind)

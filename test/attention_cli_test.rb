@@ -279,6 +279,23 @@ class AttentionCliTest < Minitest::Test
     end
   end
 
+  def test_attention_repository_storage_grammar_rejects_dot_aliases_and_persists_dot_prefixed_names
+    ["foo..bar/repo", "owner/foo..bar", "./foo", "repo/."].each do |repository|
+      result = upsert(record("repository" => repository))
+
+      assert_equal 1, result.status.exitstatus, "#{repository.inspect} should be rejected"
+      assert_includes result.stderr, "invalid attention repo"
+    end
+    assert_empty Dir[File.join(@root, "attention", "**", "*.json")]
+
+    [".github/foo", "shakacode/.github"].each do |repository|
+      result = upsert(record("repository" => repository))
+
+      assert_success result
+      assert File.file?(File.join(@root, "attention", "default", repository, "decision-1.json"))
+    end
+  end
+
   def test_attention_timestamps_require_an_explicit_rfc3339_offset_in_every_timezone
     offsetless = "2026-09-03T09:00:00"
     timestamp_payloads = {
