@@ -8142,10 +8142,13 @@ module AgentCoord
         Dir.each_child(current) do |name|
           path = File.join(current, name)
           entry = File.lstat(path)
-          next if name.start_with?(".") && !(entry.directory? && traverse_dot_directories)
+          hidden = name.start_with?(".")
+          next if hidden && !traverse_dot_directories
 
           if entry.symlink?
             raise OperationalError, "state layout invalid: #{state_relative_path(path)} is a symlink"
+          elsif hidden && !entry.directory?
+            next
           elsif entry.directory?
             pending << path
           elsif entry.file? && name.end_with?(".json")

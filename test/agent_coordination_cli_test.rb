@@ -4627,6 +4627,25 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     end
   end
 
+  def test_doctor_deep_rejects_dot_prefixed_attention_repository_symlinks
+    [".github", "owner/.github"].product([[], ["--doctor-prefix", "attention"]]).each do |link, scope|
+      state_root = Dir.mktmpdir("agent-coord-test")
+      target = Dir.mktmpdir("agent-coord-symlink-target")
+      link_path = File.join(state_root, "attention", "default", link)
+      FileUtils.mkdir_p(File.dirname(link_path))
+      File.symlink(target, link_path)
+
+      result = run_agent_coord("doctor", "--deep", *scope, state_root: state_root)
+
+      assert_equal 2, result.status.exitstatus, "#{link} #{scope}: #{result.stdout} #{result.stderr}"
+      assert_includes result.stderr, "is a symlink"
+      refute_includes result.stdout, "status: ok"
+    ensure
+      FileUtils.remove_entry(state_root) if state_root && Dir.exist?(state_root)
+      FileUtils.remove_entry(target) if target && Dir.exist?(target)
+    end
+  end
+
   def test_stack_doctor_contains_unexpected_resource_failure_without_leaking_details
     secret = "resource-secret-value"
     store = Class.new do
