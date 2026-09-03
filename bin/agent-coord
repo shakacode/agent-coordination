@@ -4061,7 +4061,7 @@ module AgentCoord
     end
 
     def validate_stored_attention!(entry)
-      stored_path = AgentCoord.utf8_diagnostic(entry.path.to_s)
+      stored_path = log_scrub(entry.path)
       unless valid_stored_json_encoding?(entry.data)
         raise malformed_stored_attention_error(entry.path, Encoding::InvalidByteSequenceError.new)
       end
@@ -4075,7 +4075,7 @@ module AgentCoord
     rescue OperationalError
       raise
     rescue Error, KeyError, TypeError => e
-      raise OperationalError, "invalid stored attention record at #{stored_path}: #{e.message}"
+      raise OperationalError, "invalid stored attention record at #{stored_path}: #{log_scrub(e.message)}"
     end
 
     def read_attention_entry(store, path)
@@ -4085,8 +4085,8 @@ module AgentCoord
     end
 
     def malformed_stored_attention_error(path, error)
-      safe_path = AgentCoord.utf8_diagnostic(path.to_s)
-      safe_error = AgentCoord.utf8_diagnostic(error.message.to_s)
+      safe_path = log_scrub(path)
+      safe_error = log_scrub(error.message)
       OperationalError.new("malformed stored JSON at #{safe_path}: #{safe_error}")
     end
 

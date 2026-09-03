@@ -465,6 +465,45 @@ class AttentionCliTest < Minitest::Test
     end
   end
 
+  def test_attention_get_and_list_scrub_controls_from_stored_validation_errors
+    path = attention_file
+    FileUtils.mkdir_p(File.dirname(path))
+    File.write(path, JSON.generate(record.merge("unknown\e]0;owned\a\nfield" => true)))
+
+    [
+      run_cli("attention-get", "--workspace", "default", "--repo", "shakacode/agent-coordination",
+              "--attention-id", "decision-1", "--json"),
+      run_cli("attention-list", "--workspace", "default", "--repo", "shakacode/agent-coordination", "--json")
+    ].each do |result|
+      assert_equal 2, result.status.exitstatus
+      assert_includes result.stderr, "invalid stored attention record"
+      assert_includes result.stderr, "attention/default/shakacode/agent-coordination/decision-1.json"
+      assert_includes result.stderr, "unknown field"
+      refute_includes result.stderr, "\e"
+      refute_includes result.stderr, "\a"
+      refute_match(AgentCoord::LOG_CONTROL_CHARACTERS, result.stderr)
+    end
+  end
+
+  def test_attention_get_and_list_scrub_controls_from_malformed_json_errors
+    path = attention_file
+    FileUtils.mkdir_p(File.dirname(path))
+    File.binwrite(path, "{\"hostile\":\e]0;owned\a}")
+
+    [
+      run_cli("attention-get", "--workspace", "default", "--repo", "shakacode/agent-coordination",
+              "--attention-id", "decision-1", "--json"),
+      run_cli("attention-list", "--workspace", "default", "--repo", "shakacode/agent-coordination", "--json")
+    ].each do |result|
+      assert_equal 2, result.status.exitstatus
+      assert_includes result.stderr, "malformed stored JSON"
+      assert_includes result.stderr, "attention/default/shakacode/agent-coordination/decision-1.json"
+      refute_includes result.stderr, "\e"
+      refute_includes result.stderr, "\a"
+      refute_match(AgentCoord::LOG_CONTROL_CHARACTERS, result.stderr)
+    end
+  end
+
   def test_attention_list_requests_the_hard_scan_cap
     store = Class.new do
       attr_reader :maximum
