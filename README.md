@@ -438,6 +438,15 @@ the active terminal:
 export PATH="$HOME/.local/bin:$PATH"
 ```
 
+An entry written by a pre-#205 release under a different locale encoding may
+not match the now-stable generated line. The first post-upgrade `bootstrap` can
+therefore append exactly one new, cosmetic duplicate PATH entry. The next run
+matches the new line and converges without appending another entry.
+
+The CLI intentionally does not guess which legacy encoding produced an older
+entry or rewrite the user's shell profile. A false match could make `bootstrap`
+omit the required PATH entry, which is worse than one duplicate.
+
 Run `agent-coord doctor` after setup. The default doctor is intentionally
 lightweight: it verifies backend access and the expected state layout without
 downloading and parsing every JSON record. On an unconfigured first run it
