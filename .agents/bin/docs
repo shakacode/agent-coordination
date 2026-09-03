@@ -2,6 +2,7 @@
 # frozen_string_literal: true
 
 require "json"
+require "digest"
 require "open3"
 require "optparse"
 require "pathname"
@@ -38,24 +39,162 @@ def local_destination?(destination)
   !destination.empty? && !destination.start_with?("/", "//") && !destination.match?(/\A[a-z][a-z0-9+.-]*:/i)
 end
 
+def without_container_prefix(line)
+  content = line
+  operations = []
+  loop do
+    if (prefix = content.match(/\A {0,3}>[ \t]?/))
+      operations << [:blockquote]
+    elsif (prefix = content.match(/\A {0,3}(?:[-+*]|\d{1,9}[.)])[ \t]+/))
+      operations << [:indent, prefix[0].length]
+    else
+      break
+    end
+    content = content[prefix[0].length..]
+  end
+  [content, operations]
+end
+
+def blockquote_content(line)
+  content = line
+  depth = 0
+  loop do
+    stripped = content.sub(/\A {0,3}>[ \t]?/, "")
+    break if stripped == content
+
+    content = stripped
+    depth += 1
+  end
+  [content, depth]
+end
+
+def apply_container_operations(line, operations)
+  operations.reduce(line) do |content, (type, width)|
+    if type == :blockquote
+      prefix = content.match(/\A {0,3}>[ \t]?/)
+      break unless prefix
+
+      content[prefix[0].length..]
+    else
+      break unless content.start_with?(" " * width)
+
+      content[width..]
+    end
+  end
+end
+
+def blockquote_operations(depth)
+  Array.new(depth) { [:blockquote] }
+end
+
+def fence_opening_candidates(line, list_context)
+  content, operations = without_container_prefix(line)
+  candidates = [[content, operations]]
+  return candidates unless list_context
+
+  outer_operations = blockquote_operations(list_context.fetch(:blockquote_depth))
+  outer_operations << [:indent, list_context.fetch(:indent)]
+  outer_content = apply_container_operations(line, outer_operations)
+  return candidates unless outer_content
+
+  content, inner_operations = without_container_prefix(outer_content)
+  candidates << [content, outer_operations + inner_operations]
+  candidates
+end
+
+def fence_finding(fence)
+  {
+    "line" => fence.fetch(:line),
+    "sha256" => "sha256:#{Digest::SHA256.hexdigest(fence.fetch(:content).join)}"
+  }
+end
+
+def valid_fence_baseline?(baseline)
+  baseline.all? do |path, entries|
+    next false unless path.is_a?(String) && entries.is_a?(Array)
+
+    identities = entries.filter_map do |entry|
+      next unless entry.is_a?(Hash) && entry.keys.sort == %w[line sha256]
+      next unless entry["line"].is_a?(Integer) && entry["line"].positive?
+      next unless entry["sha256"].is_a?(String) && entry["sha256"].match?(/\Asha256:[0-9a-f]{64}\z/)
+
+      [entry["line"], entry["sha256"]]
+    end
+    identities.length == entries.length && identities.uniq.length == identities.length
+  end
+end
+
+def list_context_for_line(line, current_context)
+  content, blockquote_depth = blockquote_content(line)
+  if content.strip.empty?
+    return current_context if current_context&.fetch(:blockquote_depth) == blockquote_depth
+
+    return nil
+  end
+
+  offset = if current_context && current_context.fetch(:blockquote_depth) == blockquote_depth &&
+              content.start_with?(" " * current_context.fetch(:indent))
+             current_context.fetch(:indent)
+           else
+             0
+           end
+  marker = content[offset..].match(/\A {0,3}(?:[-+*]|\d{1,9}[.)])[ \t]+/)
+  return { indent: offset + marker[0].length, blockquote_depth: blockquote_depth } if marker
+  return current_context if current_context && offset == current_context.fetch(:indent)
+
+  nil
+end
+
+def consume_fence_line(line:, line_number:, fence:, list_context:, findings:)
+  if fence
+    fence.fetch(:content) << line
+    marker = Regexp.escape(fence.fetch(:character))
+    length = fence.fetch(:length)
+    fence_line = apply_container_operations(line, fence.fetch(:container_operations))
+    if fence_line&.match?(/\A {0,3}#{marker}{#{length},}[ \t]*\r?\n?\z/)
+      findings << fence_finding(fence) if fence.fetch(:unlabelled)
+      fence = nil
+    end
+    return [true, fence]
+  end
+
+  opening = fence_opening_candidates(line, list_context).find do |content, _operations|
+    content.match?(/\A {0,3}(`{3,}|~{3,})([^\r\n]*)/)
+  end
+  return [false, nil] unless opening
+
+  fence_line, container_operations = opening
+  match = fence_line.match(/\A {0,3}(`{3,}|~{3,})([^\r\n]*)/)
+
+  [
+    true,
+    {
+      character: match[1][0],
+      length: match[1].length,
+      container_operations: container_operations,
+      line: line_number,
+      content: [line],
+      unlabelled: match[2].strip.empty?
+    }
+  ]
+end
+
 def scan_document(repo_root:, path:, unlabelled_fences:, anchors:, link_targets:)
   fence = nil
+  list_context = nil
   anchor_counts = {}
   anchors[path]
 
   File.foreach(File.join(repo_root, path), encoding: "UTF-8").with_index(1) do |line, line_number|
-    if fence
-      marker = Regexp.escape(fence.fetch(:character))
-      length = fence.fetch(:length)
-      fence = nil if line.match?(/\A {0,3}#{marker}{#{length},}[ \t]*\r?\n?\z/)
-      next
-    end
-
-    if (match = line.match(/\A {0,3}(`{3,}|~{3,})([^\r\n]*)/))
-      fence = { character: match[1][0], length: match[1].length }
-      unlabelled_fences[path] << line_number if match[2].strip.empty?
-      next
-    end
+    list_context = list_context_for_line(line, list_context) unless fence
+    consumed, fence = consume_fence_line(
+      line: line,
+      line_number: line_number,
+      fence: fence,
+      list_context: list_context,
+      findings: unlabelled_fences[path]
+    )
+    next if consumed
 
     if (heading = line.match(/\A {0,3}\#{1,6}[ \t]+(.+?)[ \t]*\r?\n?\z/))
       anchors[path][github_anchor(heading[1], anchor_counts)] = true
@@ -74,11 +213,46 @@ def scan_document(repo_root:, path:, unlabelled_fences:, anchors:, link_targets:
       link_targets << [path, line_number, destination] if local_destination?(destination)
     end
   end
+  unlabelled_fences[path] << fence_finding(fence) if fence&.fetch(:unlabelled)
+end
+
+def resolve_commit(repo_root, ref)
+  output, = Open3.capture3("git", "-C", repo_root, "rev-parse", "--verify", "#{ref}^{commit}")
+  commit = output.strip
+  commit if commit.match?(/\A[0-9a-f]{40}\z/)
+end
+
+def paths_changed_from(repo_root, base)
+  base_output, base_error, base_status = Open3.capture3(
+    "git", "-C", repo_root, "merge-base", "HEAD", base
+  )
+  abort base_error unless base_status.success?
+  diff_output, diff_error, diff_status = Open3.capture3(
+    "git", "-C", repo_root, "diff", "--name-only", "-z", "--diff-filter=ACMR",
+    base_output.strip, "--"
+  )
+  abort diff_error unless diff_status.success?
+  diff_output.split("\0")
+end
+
+def changed_paths(repo_root:, tracked_paths:, requested_base:)
+  return tracked_paths unless resolve_commit(repo_root, "HEAD")
+
+  base = if requested_base
+           resolve_commit(repo_root, requested_base) || abort("Cannot resolve docs base ref: #{requested_base}")
+         else
+           resolve_commit(repo_root, "origin/main")
+         end
+  return paths_changed_from(repo_root, base) if base
+
+  working_paths = paths_changed_from(repo_root, resolve_commit(repo_root, "HEAD"))
+  working_paths.empty? ? tracked_paths : working_paths
 end
 
 options = { repo_root: File.expand_path("../..", __dir__) }
 OptionParser.new do |parser|
   parser.on("--repo-root PATH") { |path| options[:repo_root] = File.expand_path(path) }
+  parser.on("--base REF") { |ref| options[:base] = ref }
 end.parse!
 
 repo_root = options.fetch(:repo_root)
@@ -89,7 +263,14 @@ abort tracked_error unless tracked_status.success?
 
 tracked_paths = tracked_output.split("\0")
 tracked = tracked_paths.to_h { |path| [path, true] }
-markdown_paths = tracked_paths.select { |path| File.extname(path).downcase == ".md" }
+changed_paths = changed_paths(
+  repo_root: repo_root,
+  tracked_paths: tracked_paths,
+  requested_base: options[:base]
+)
+markdown_paths = changed_paths.select do |path|
+  tracked[path] && File.extname(path).downcase == ".md"
+end
 errors = []
 unlabelled_fences = Hash.new { |paths, path| paths[path] = [] }
 anchors = Hash.new { |documents, path| documents[path] = {} }
@@ -120,6 +301,15 @@ link_targets.each do |path, line_number, destination|
     next
   end
 
+  if fragment && tracked[resolved] && File.extname(resolved).downcase == ".md" && !anchors.key?(resolved)
+    scan_document(
+      repo_root: repo_root,
+      path: resolved,
+      unlabelled_fences: Hash.new { |paths, document| paths[document] = [] },
+      anchors: anchors,
+      link_targets: []
+    )
+  end
   next if fragment.nil? || fragment.empty? || !anchors.key?(resolved)
   next if anchors[resolved][URI::DEFAULT_PARSER.unescape(fragment)]
 
@@ -144,21 +334,49 @@ unless baseline.is_a?(Hash) && baseline["version"] == 1 && baseline["unlabelled_
 end
 
 allowances = baseline.fetch("unlabelled_code_fences")
-unless allowances.all? { |path, count| path.is_a?(String) && count.is_a?(Integer) && count >= 0 }
-  warn ".agents/docs-lint-baseline.json: fence allowances must be non-negative integers keyed by path"
+unless valid_fence_baseline?(allowances)
+  warn ".agents/docs-lint-baseline.json: fence entries must bind a unique positive line and sha256 digest by path"
   exit 2
 end
-(unlabelled_fences.keys | allowances.keys).sort.each do |path|
-  line_numbers = unlabelled_fences.fetch(path, [])
-  allowance = allowances.fetch(path, 0)
 
-  if line_numbers.length < allowance
-    errors << "#{path}: baseline permits #{allowance} unlabelled code fences, but found #{line_numbers.length}"
+scanned_paths = markdown_paths.to_h { |path| [path, true] }
+allowances.each_key do |path|
+  unless tracked[path] && File.extname(path).downcase == ".md"
+    errors << "#{path}: baselined document is not a tracked Markdown file"
     next
   end
+  next if scanned_paths[path]
 
-  line_numbers.drop(allowance).each do |line_number|
-    errors << "#{path}:#{line_number}: unlabelled code fence"
+  scan_document(
+    repo_root: repo_root,
+    path: path,
+    unlabelled_fences: unlabelled_fences,
+    anchors: anchors,
+    link_targets: []
+  )
+end
+
+matched_findings = Hash.new { |paths, path| paths[path] = {} }
+allowances.each do |path, entries|
+  entries.each do |entry|
+    identity = [entry.fetch("line"), entry.fetch("sha256")]
+    finding = unlabelled_fences.fetch(path, []).find do |candidate|
+      [candidate.fetch("line"), candidate.fetch("sha256")] == identity
+    end
+    if finding
+      matched_findings[path][identity] = true
+    else
+      errors << "#{path}:#{entry.fetch('line')}: baselined unlabelled code fence no longer matches"
+    end
+  end
+end
+
+markdown_paths.sort.each do |path|
+  unlabelled_fences.fetch(path, []).each do |finding|
+    identity = [finding.fetch("line"), finding.fetch("sha256")]
+    next if matched_findings[path][identity]
+
+    errors << "#{path}:#{finding.fetch('line')}: unlabelled code fence"
   end
 end
 
