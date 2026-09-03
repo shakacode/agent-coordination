@@ -1996,12 +1996,12 @@ class AgentCoordLogClaimRecordResilienceTest < AgentCoordLogTestCase
     write_claim("shakacode/example", "104",
                 "status" => "active", "agent_id" => "readable-worker", "machine_id" => "m1",
                 "host" => "codex", "updated_at" => "2026-08-03T03:00:00Z")
-    write_raw_claim("array", [1, 2, 3])
+    write_raw_claim("issue:104", [1, 2, 3])
 
     result = run_log("shakacode/example#104")
 
     assert_equal 0, result.status.exitstatus, result.stderr
-    assert_includes result.stderr, "live claim record is not an object at claims/shakacode/example/array.json"
+    assert_includes result.stderr, "live claim record is not an object at claims/shakacode/example/issue:104.json"
     assert_includes result.stderr, "this trail may be incomplete"
     refute_match(/TypeError|no implicit conversion/, result.stderr, "must not leak a raw type error")
     refute_match(%r{\bfrom .*bin/agent-coord:\d+}, result.stderr, "must not leak a Ruby backtrace")
@@ -2016,46 +2016,59 @@ class AgentCoordLogClaimRecordResilienceTest < AgentCoordLogTestCase
     write_claim("shakacode/example", "104",
                 "status" => "active", "agent_id" => "readable-worker", "machine_id" => "m1",
                 "host" => "codex", "updated_at" => "2026-08-03T03:00:00Z")
-    { "null" => nil, "boolean" => false, "number" => 7, "string" => "claim" }.each do |name, record|
-      write_raw_claim(name, record)
-    end
+    [nil, false, 7, "claim"].each do |record|
+      write_raw_claim("issue:104", record)
 
-    text = run_log("shakacode/example#104")
-    tsv = run_log("shakacode/example#104", "--format", "tsv")
-    json = run_log("shakacode/example#104", "--json")
+      text = run_log("shakacode/example#104")
+      tsv = run_log("shakacode/example#104", "--format", "tsv")
+      json = run_log("shakacode/example#104", "--json")
 
-    [text, tsv, json].each do |result|
-      assert_equal 0, result.status.exitstatus, result.stderr
-      %w[null boolean number string].each do |name|
+      [text, tsv, json].each do |result|
+        assert_equal 0, result.status.exitstatus, result.stderr
         assert_includes result.stderr,
-                        "live claim record is not an object at claims/shakacode/example/#{name}.json"
+                        "live claim record is not an object at claims/shakacode/example/issue:104.json"
+        refute_match(/TypeError|NoMethodError|undefined method|no implicit conversion/, result.stderr)
+        refute_match(%r{\bfrom .*bin/agent-coord:\d+}, result.stderr)
       end
-      refute_match(/TypeError|NoMethodError|undefined method|no implicit conversion/, result.stderr)
-      refute_match(%r{\bfrom .*bin/agent-coord:\d+}, result.stderr)
+      assert_includes text.stdout, "claim.acquired"
+      assert_includes text.stdout, "readable-worker"
+      assert_includes tsv.stdout, "\te1\t"
+      assert_includes tsv.stderr, "readable-worker"
+      payload = JSON.parse(json.stdout)
+      event_ids = payload.fetch("events").map { |event| event.fetch("event_id") }
+      assert_equal ["e1"], event_ids
+      assert_equal "readable-worker", payload.fetch("claim").fetch("agent_id")
+      assert_equal "incomplete", payload.fetch("trail")
     end
-    assert_includes text.stdout, "claim.acquired"
-    assert_includes text.stdout, "readable-worker"
-    assert_includes tsv.stdout, "\te1\t"
-    assert_includes tsv.stderr, "readable-worker"
-    payload = JSON.parse(json.stdout)
-    event_ids = payload.fetch("events").map { |event| event.fetch("event_id") }
-    assert_equal ["e1"], event_ids
-    assert_equal "readable-worker", payload.fetch("claim").fetch("agent_id")
-    assert_equal "incomplete", payload.fetch("trail")
   end
 
   def test_log_scrubs_a_control_character_from_a_non_object_claim_path_through_the_cli
-    write_event("b1", "e1", "type" => "claim.acquired", "repo" => "shakacode/example", "target" => "104",
-                            "machine_id" => "m1", "host" => "codex", "at" => "2026-08-03T02:40:16Z")
-    write_raw_claim("bad-\nclaim", [1, 2, 3])
+    write_raw_claim("issue:104\n", [1, 2, 3])
 
     result = run_log("shakacode/example#104", "--json")
 
     assert_equal 0, result.status.exitstatus, result.stderr
     assert_predicate result.stderr, :valid_encoding?
-    assert_includes result.stderr, "live claim record is not an object at claims/shakacode/example/bad- claim.json"
+    assert_includes result.stderr, "live claim record is not an object at claims/shakacode/example/issue:104 .json"
     refute_match(%r{ArgumentError|invalid byte sequence|bin/agent-coord:\d+}, result.stderr)
     assert_equal "incomplete", JSON.parse(result.stdout).fetch("trail")
+  end
+
+  def test_log_ignores_a_non_object_claim_outside_the_scoped_work_item
+    write_event("b1", "e1", "type" => "claim.acquired", "repo" => "shakacode/example", "target" => "104",
+                            "machine_id" => "m1", "host" => "codex", "at" => "2026-08-03T02:40:16Z")
+    write_claim("shakacode/example", "104",
+                "status" => "active", "agent_id" => "readable-worker", "machine_id" => "m1",
+                "host" => "codex", "updated_at" => "2026-08-03T03:00:00Z")
+    write_raw_claim("unrelated", [1, 2, 3])
+
+    result = run_log("shakacode/example#104", "--json")
+
+    assert_equal 0, result.status.exitstatus, result.stderr
+    refute_includes result.stderr, "claims/shakacode/example/unrelated.json"
+    payload = JSON.parse(result.stdout)
+    assert_equal "complete", payload.fetch("trail")
+    assert_equal "readable-worker", payload.fetch("claim").fetch("agent_id")
   end
 
   def test_log_refuses_to_sync_past_a_non_object_claim_record

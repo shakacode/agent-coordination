@@ -5470,13 +5470,20 @@ module AgentCoord
 
     # This degradation belongs only to the read-only log view. Exact record
     # readers used by state-changing commands keep their fail-closed behavior.
-    def log_claim_entries(store, context: :work_item)
+    def log_claim_entries(store, context: :work_item, wanted_identity: nil)
       claims = log_listing(store, "claims") do |reason|
         subject = context == :sync ? "claim data" : "a claim for this work item"
         "warning: claims #{reason}; #{subject} would not be reported"
       end
       claims.select do |candidate|
         next true if candidate.data.is_a?(Hash)
+        # A malformed sibling cannot shorten a scoped answer when its path
+        # proves that it belongs to a different work item. Unscoped --sync
+        # deliberately keeps the fleet-wide completeness check.
+        if wanted_identity &&
+           !log_identity_match?(log_claim_path_identity(candidate), wanted_identity, lane_exact: true)
+          next false
+        end
 
         message = "warning: live claim record is not an object at #{candidate.path}; " \
                   "this trail may be incomplete"
@@ -5493,8 +5500,8 @@ module AgentCoord
       # would answer a question the operator did not ask.
       return [] if LOG_TRAIL_FILTERS.any? { |field| log_narrowing_option?(options, field) }
 
-      claims = log_claim_entries(store)
       wanted_identity = log_identity(*log_split_work_item(wanted))
+      claims = log_claim_entries(store, wanted_identity: wanted_identity)
       matches = claims.select do |candidate|
         next false if candidate.data["synthetic"] && !options[:include_synthetic]
 
@@ -5527,6 +5534,10 @@ module AgentCoord
 
     def log_claim_identity(entry)
       log_identity(log_claim_repo(entry), log_claim_target(entry))
+    end
+
+    def log_claim_path_identity(entry)
+      log_identity(AgentCoord.repo_from_claim_path(entry.path), AgentCoord.target_from_path(entry.path))
     end
 
     # Claims written before repo/target became explicit payload fields carry them
