@@ -4,7 +4,10 @@ require "fileutils"
 require "json"
 require "minitest/autorun"
 require "open3"
+require "stringio"
 require "tmpdir"
+
+load File.expand_path("../bin/agent-coord", __dir__)
 
 # `agent-coord log` renders the per-work-item custody trail already carried by
 # the event store (issue #129). These tests pin the operator contract: which
@@ -1892,6 +1895,94 @@ class AgentCoordLogLimitProvenanceTest < AgentCoordLogTestCase
     payload = JSON.parse(run_log("shakacode/example#1", "--json").stdout)
 
     assert_equal ["issue:1", "pr:1"], payload.dig("work_item", "matched_targets")
+  end
+end
+
+# A damaged live event record must shorten only that record, not the whole
+# read-only custody trail. The shortened result is still incomplete and cannot
+# be persisted by --sync.
+class AgentCoordLogLiveRecordResilienceTest < AgentCoordLogTestCase
+  TSV_EVENT_ID_COLUMN = 10
+
+  # A single unreadable live record must not hide the readable custody events
+  # beside it. The warning also marks the trail incomplete so --sync cannot
+  # persist the shortened view as a complete mirror.
+  def test_log_degrades_when_a_live_record_file_is_unreadable
+    write_trace
+    unreadable = File.join(@state_root, "events", "b1", "e3.json")
+    FileUtils.chmod(0o000, unreadable)
+
+    result = run_log("shakacode/example#104", "--format", "tsv")
+    sync = run_log("--sync")
+
+    assert_equal 0, result.status.exitstatus, result.stderr
+    assert_includes result.stderr, "events unreadable"
+    assert_includes result.stderr, "this trail may be incomplete"
+    refute_match(/SystemCallError|Errno::/, result.stderr, "must not leak the exception class")
+    refute_match(%r{\bfrom .*bin/agent-coord:\d+}, result.stderr, "must not leak a Ruby backtrace")
+    assert_equal %w[e1 e2 e4 e5], tsv_rows_event_ids(result), "only the unreadable event is omitted"
+    assert_equal 2, sync.status.exitstatus, "a mirror must not be written over the shortened trail"
+    assert_includes sync.stderr, "refusing to sync an incomplete trail: events"
+    refute_path_exists File.join(@state_root, "log.tsv")
+  ensure
+    FileUtils.chmod(0o600, unreadable) if unreadable && File.exist?(unreadable)
+  end
+
+  # A JSON value can parse successfully without being an event object. Report
+  # that record, keep its readable siblings, and make the incomplete trail
+  # ineligible for --sync instead of leaking a raw TypeError.
+  def test_log_reports_a_live_record_that_is_not_an_object
+    write_trace
+    write_raw_event("b1", "array", [1, 2, 3])
+
+    result = run_log("shakacode/example#104", "--format", "tsv")
+    sync = run_log("--sync")
+
+    assert_equal 0, result.status.exitstatus, result.stderr
+    assert_includes result.stderr, "live event record is not an object at events/b1/array.json"
+    assert_includes result.stderr, "this trail may be incomplete"
+    refute_match(/TypeError|no implicit conversion/, result.stderr, "must not leak a raw type error")
+    refute_match(%r{\bfrom .*bin/agent-coord:\d+}, result.stderr, "must not leak a Ruby backtrace")
+    assert_equal %w[e1 e2 e3 e4 e5], tsv_rows_event_ids(result), "the readable events must survive"
+    assert_equal 2, sync.status.exitstatus, "a mirror must not be written over the shortened trail"
+    assert_includes sync.stderr, "refusing to sync an incomplete trail: events"
+    refute_path_exists File.join(@state_root, "log.tsv")
+  end
+
+  # Unix filenames can carry bytes that are not valid UTF-8. The record is
+  # already being reported as incomplete, so its diagnostic path must be made
+  # printable instead of letting the scrubber raise and hide every good event.
+  def test_log_scrubs_invalid_utf8_from_a_non_object_live_record_path
+    good = AgentCoord::StoredJson.new(
+      path: "events/b1/e1.json",
+      data: { "event_id" => "e1", "batch_id" => "b1", "type" => "claim.acquired",
+              "repo" => "shakacode/example", "target" => "104", "at" => "2026-08-03T02:40:16Z" }
+    )
+    bad = AgentCoord::StoredJson.new(path: "events/b1/bad-\xE2.json".b, data: [1, 2, 3])
+    store = Object.new
+    store.define_singleton_method(:list_json) { |prefix, &_handler| prefix == "events" ? [good, bad] : [] }
+    stderr = StringIO.new
+    runner = AgentCoord::Runner.new([], stderr: stderr)
+
+    rows = runner.send(:log_event_rows, store)
+
+    assert_equal ["e1"], rows.map { |row| row.fetch("event_id") }, "the readable event must survive"
+    assert_predicate stderr.string, :valid_encoding?
+    assert_includes stderr.string, "live event record is not an object at events/b1/bad-\uFFFD.json"
+    refute_match(/ArgumentError|invalid byte sequence/, stderr.string, "must not leak the failed scrub")
+    assert_equal "events", runner.send(:log_incomplete_prefixes), "--sync must see an incomplete trail"
+  end
+
+  private
+
+  def write_raw_event(batch_id, name, record)
+    path = File.join(@state_root, "events", batch_id, "#{name}.json")
+    FileUtils.mkdir_p(File.dirname(path))
+    File.write(path, "#{JSON.generate(record)}\n")
+  end
+
+  def tsv_rows_event_ids(result)
+    result.stdout.lines.map { |line| line.split("\t").fetch(TSV_EVENT_ID_COLUMN) }
   end
 end
 
