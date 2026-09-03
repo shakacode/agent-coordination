@@ -319,6 +319,9 @@ module AgentCoord
     end
   end
 
+  class ScanLimitExceeded < OperationalError
+  end
+
   class ClaimRefused < Error
     def initialize(message, exit_code: EXIT_CLAIM_REFUSED)
       super(message.start_with?("CLAIM_REFUSED") ? message : "CLAIM_REFUSED: #{message}", exit_code: exit_code)
@@ -3367,8 +3370,10 @@ module AgentCoord
       section_notes = {}
       checks = {}
       STATE_PREFIXES.each do |prefix|
-        store.list_json(prefix)
-        if filtered_status_list?(store, prefix)
+        if list_doctor_resource(store, prefix)
+          checks[prefix] = "incomplete"
+          section_notes[prefix] = doctor_scan_incomplete_note(prefix)
+        elsif filtered_status_list?(store, prefix)
           checks[prefix] = "filtered"
           section_notes[prefix] = "#{prefix} filtered by scoped token"
         else
@@ -3401,7 +3406,9 @@ module AgentCoord
         return [{}, { prefix => "ok" }]
       end
 
-      store.list_json(prefix)
+      if list_doctor_resource(store, prefix)
+        return [{ prefix => doctor_scan_incomplete_note(prefix) }, { prefix => "incomplete" }]
+      end
       return [{}, { prefix => "ok" }] unless filtered_status_list?(store, prefix)
 
       [{ prefix => "#{prefix} filtered by scoped token" }, { prefix => "filtered" }]
@@ -7532,7 +7539,7 @@ module AgentCoord
       raise Error, "attention record missing #{missing.first}" unless missing.empty?
 
       unknown = record.keys - allowed
-      raise Error, "attention record contains unknown field #{unknown.first}" unless unknown.empty?
+      raise Error, "attention record contains unknown field #{log_scrub(unknown.first)}" unless unknown.empty?
       raise Error, "attention schema_version must be 1" unless record["schema_version"] == 1
     end
 
@@ -7606,7 +7613,7 @@ module AgentCoord
       raise Error, "attention source missing #{missing.first}" unless missing.empty?
 
       unknown = source.keys - allowed
-      raise Error, "attention source contains unknown field #{unknown.first}" unless unknown.empty?
+      raise Error, "attention source contains unknown field #{log_scrub(unknown.first)}" unless unknown.empty?
 
       %w[provider host_id task_id].each do |field|
         value = source.fetch(field)
@@ -7881,14 +7888,33 @@ module AgentCoord
     def check_state_readable!(store)
       section_notes = {}
       STATE_PREFIXES.each do |prefix|
-        store.list_json(prefix)
-        section_notes[prefix] = "#{prefix} filtered by scoped token" if filtered_status_list?(store, prefix)
+        if list_doctor_resource(store, prefix)
+          section_notes[prefix] = doctor_scan_incomplete_note(prefix)
+        elsif filtered_status_list?(store, prefix)
+          section_notes[prefix] = "#{prefix} filtered by scoped token"
+        end
       rescue OperationalError => e
         raise unless scoped_http_forbidden_listing?(e, prefix)
 
         section_notes[prefix] = "#{prefix} not readable by scoped token"
       end
       section_notes
+    end
+
+    def list_doctor_resource(store, prefix)
+      unless prefix.split("/", 2).first == "attention"
+        store.list_json(prefix)
+        return false
+      end
+
+      store.list_json(prefix, maximum: MAX_ATTENTION_SCAN_LIMIT)
+      false
+    rescue ScanLimitExceeded
+      true
+    end
+
+    def doctor_scan_incomplete_note(prefix)
+      "#{prefix} scan stopped at #{MAX_ATTENTION_SCAN_LIMIT} records; full validation is incomplete"
     end
 
     def install_link(source, destination)
@@ -8154,7 +8180,7 @@ module AgentCoord
           elsif entry.file? && name.end_with?(".json")
             files << path
             if maximum && files.length > maximum
-              raise OperationalError, "state prefix #{prefix} exceeds scan maximum #{maximum}"
+              raise ScanLimitExceeded, "state prefix #{prefix} exceeds scan maximum #{maximum}"
             end
           end
         end
@@ -8298,7 +8324,7 @@ module AgentCoord
         next unless node["type"] == "blob" && path&.start_with?("#{prefix}/") && path.end_with?(".json")
 
         if maximum && matched >= maximum
-          raise OperationalError, "backend list #{prefix} exceeds scan maximum #{maximum}"
+          raise ScanLimitExceeded, "backend list #{prefix} exceeds scan maximum #{maximum}"
         end
 
         matched += 1
@@ -8463,7 +8489,7 @@ module AgentCoord
         @list_filtered[prefix] = true if body["filtered"] == true
         page_entries = parse_list_entries(body, prefix)
         if maximum && page_entries.length > remaining
-          raise OperationalError, "http backend list #{prefix} exceeds scan maximum #{maximum}"
+          raise ScanLimitExceeded, "http backend list #{prefix} exceeds scan maximum #{maximum}"
         end
 
         entries.concat(page_entries)
@@ -8471,7 +8497,7 @@ module AgentCoord
         break unless cursor
 
         if maximum && entries.length >= maximum
-          raise OperationalError, "http backend list #{prefix} exceeds scan maximum #{maximum}"
+          raise ScanLimitExceeded, "http backend list #{prefix} exceeds scan maximum #{maximum}"
         end
 
         if seen_cursors[cursor]

@@ -4646,6 +4646,60 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     end
   end
 
+  def test_deep_doctor_bounds_attention_directory_probes_without_failing_on_the_cap
+    store = Class.new do
+      attr_reader :calls
+
+      def initialize
+        @calls = []
+      end
+
+      def list_json(prefix, maximum: nil)
+        @calls << [prefix, maximum]
+        return [] unless prefix.start_with?("attention")
+
+        raise AgentCoord::ScanLimitExceeded, "attention scan cap reached"
+      end
+
+      def filtered_list?(_prefix) = false
+    end.new
+    runner = AgentCoord::Runner.new([], stdout: StringIO.new, stderr: StringIO.new)
+
+    http_notes, http_checks = runner.send(:check_http_resources!, store)
+    local_notes = runner.send(:check_state_readable!, store)
+    custom_notes, custom_checks = runner.send(:check_custom_resource!, store, "attention/default/shakacode")
+
+    attention_calls = store.calls.select { |prefix, _maximum| prefix.start_with?("attention") }
+    assert_equal [
+      ["attention", 1000],
+      ["attention", 1000],
+      ["attention/default/shakacode", 1000]
+    ], attention_calls
+    assert_equal "incomplete", http_checks.fetch("attention")
+    assert_includes http_notes.fetch("attention"), "full validation is incomplete"
+    assert_includes local_notes.fetch("attention"), "full validation is incomplete"
+    assert_equal "incomplete", custom_checks.fetch("attention/default/shakacode")
+    assert_includes custom_notes.fetch("attention/default/shakacode"), "full validation is incomplete"
+  end
+
+  def test_stack_deep_doctor_degrades_when_attention_scan_exceeds_the_cap
+    state_root = Dir.mktmpdir("agent-coord-attention-doctor")
+    directory = File.join(state_root, "attention", "default", "org", "repo")
+    FileUtils.mkdir_p(directory)
+    1001.times { |index| File.write(File.join(directory, "#{index}.json"), "{}") }
+
+    result = run_agent_coord("doctor", "--stack-json", "--deep", "--state-root", state_root,
+                             state_root: state_root)
+
+    assert_equal 1, result.status.exitstatus, result.stderr
+    report = JSON.parse(result.stdout)
+    resource_check = report.fetch("checks").find { |check| check.fetch("id") == "resources.deep" }
+    assert_equal "degraded", resource_check.fetch("status")
+    assert_includes resource_check.dig("details", "notes", "attention"), "full validation is incomplete"
+  ensure
+    FileUtils.remove_entry(state_root) if state_root && Dir.exist?(state_root)
+  end
+
   def test_stack_doctor_contains_unexpected_resource_failure_without_leaking_details
     secret = "resource-secret-value"
     store = Class.new do
@@ -6226,7 +6280,7 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
 
       def verify_layout!(_prefixes); end
 
-      def list_json(_prefix)
+      def list_json(_prefix, maximum: nil) # rubocop:disable Lint/UnusedMethodArgument
         []
       end
 

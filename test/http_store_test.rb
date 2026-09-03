@@ -2031,7 +2031,10 @@ class HttpDoctorTest < HttpEnvTestCase
                    "events" => "forbidden", "attention" => "forbidden", "archive" => "forbidden"
                  }, payload.fetch("resource_checks"))
     assert_equal "scoped", payload.dig("identity", "machine")
-    prefixes = %w[claims heartbeats batches events attention archive].map { |prefix| "/v1/state?prefix=#{prefix}" }
+    prefixes = %w[claims heartbeats batches events attention archive].map do |prefix|
+      suffix = prefix == "attention" ? "&limit=1000" : ""
+      "/v1/state?prefix=#{prefix}#{suffix}"
+    end
     assert_equal(["/v1/health", *prefixes, "/v1/whoami"], stub.requests.map { |request| request[:path] })
   end
 end

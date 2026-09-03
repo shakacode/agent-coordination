@@ -57,6 +57,23 @@ class AttentionCliTest < Minitest::Test
     assert_includes error.message, "attention record"
   end
 
+  def test_upsert_scrubs_controls_from_unknown_top_level_and_source_fields
+    hostile_key = "unknown\e]0;owned\a\t\r\nfield"
+    top_level = record.merge(hostile_key => true)
+    nested_source = record
+    nested_source["source"] = nested_source.fetch("source").merge(hostile_key => true)
+
+    [top_level, nested_source].each do |payload|
+      result = upsert(payload)
+
+      assert_equal 1, result.status.exitstatus
+      assert_includes result.stderr, "contains unknown field"
+      refute_includes result.stderr, "\e"
+      refute_includes result.stderr, "\a"
+      refute_match(AgentCoord::LOG_CONTROL_CHARACTERS, result.stderr)
+    end
+  end
+
   def test_upsert_rejects_a_lower_source_generation_without_replacing_state
     assert_success upsert(record("source_generation" => 5, "question" => "Current question"))
 
