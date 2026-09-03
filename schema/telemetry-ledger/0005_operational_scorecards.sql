@@ -102,8 +102,10 @@ terminal_events AS (
    AND events.repo = eligible_lane_targets.repo
    AND events.target = eligible_lane_targets.target
    AND events.join_status = 'exact'
-   AND events.event_type = 'lane_closed'
-   AND events.terminal IS NOT NULL
+   AND (
+     events.event_type = 'claim.released'
+     OR (events.event_type = 'lane_closed' AND events.terminal IS NOT NULL)
+   )
    AND unixepoch(events.observed_at) > claim_starts.claim_started_at
   GROUP BY claim_starts.batch_id, claim_starts.lane_id, claim_starts.claim_started_at
 )

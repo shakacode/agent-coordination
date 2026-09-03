@@ -1339,21 +1339,22 @@ class TelemetryHarvesterTest < Minitest::Test # rubocop:disable Metrics/ClassLen
     source.fetch("batches").first.fetch("lanes").replace(
       [
         { "name" => "duration-known", "targets" => ["78"], "status" => "done" },
-        { "name" => "duration-gap", "targets" => ["79"], "status" => "done" }
+        { "name" => "duration-gap", "targets" => ["79"], "status" => "done" },
+        { "name" => "duration-release", "targets" => ["81"], "status" => "done" }
       ]
     )
     source.fetch("events").replace(duration_scorecard_events)
     durations = harvested_scorecard(source).dig("operational_load", "lane_durations")
 
-    assert_equal 2, durations.fetch("lanes")
-    assert_equal 1, durations.fetch("computable_lanes")
+    assert_equal 3, durations.fetch("lanes")
+    assert_equal 2, durations.fetch("computable_lanes")
     assert_equal 1, durations.fetch("telemetry_gap_lanes")
     assert_equal(
-      { "duration-gap" => "UNKNOWN", "duration-known" => 1_800 },
+      { "duration-gap" => "UNKNOWN", "duration-known" => 1_800, "duration-release" => 2_700 },
       durations.fetch("by_lane_seconds")
     )
     assert_equal(
-      { "minimum" => 1_800, "median" => 1_800, "maximum" => 1_800 },
+      { "minimum" => 1_800, "median" => 2_250.0, "maximum" => 2_700 },
       durations.fetch("seconds")
     )
   end
@@ -2490,7 +2491,9 @@ class TelemetryHarvesterTest < Minitest::Test # rubocop:disable Metrics/ClassLen
       ["same-time-close", "78", "lane_closed", "done", "2026-07-18T01:00:00Z"],
       ["claim-renewal", "78", "claim.acquired", nil, "2026-07-18T01:05:00Z"],
       ["lane-close", "78", "lane_closed", "done", "2026-07-18T01:30:00Z"],
-      ["gap-claim", "79", "claim.acquired", nil, "2026-07-18T01:00:00Z"]
+      ["gap-claim", "79", "claim.acquired", nil, "2026-07-18T01:00:00Z"],
+      ["release-claim", "81", "claim.acquired", nil, "2026-07-18T01:00:00Z"],
+      ["lane-release", "81", "claim.released", nil, "2026-07-18T01:45:00Z"]
     ].map do |id, target, type, terminal, at|
       {
         "id" => id, "batch_id" => "batch-fixture", "repo" => "shakacode/agent-coordination",

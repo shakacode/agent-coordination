@@ -287,8 +287,9 @@ The `operational_load` object counts the typed signals retained in `events`:
   rounded to three decimal places. A batch with no such merged PR has an
   `UNKNOWN` rate, not zero.
 - `lane_durations.by_lane_seconds.<lane_id>` measures the interval from the
-  first valid `claim.acquired` event to the first later terminal `lane_closed`
-  event. A lane must map to exactly one target, and that target must map to
+  first valid `claim.acquired` event to the first later terminal signal:
+  `claim.released` or a terminal `lane_closed`. A lane must map to exactly one
+  target, and that target must map to
   exactly one lane. Missing timestamps, missing endpoints, shared targets, and
   multi-target lanes render as `UNKNOWN` and increment
   `lane_durations.telemetry_gap_lanes`.
