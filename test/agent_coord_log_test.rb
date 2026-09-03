@@ -1986,6 +1986,100 @@ class AgentCoordLogLiveRecordResilienceTest < AgentCoordLogTestCase
   end
 end
 
+# A valid JSON value under claims/ is not necessarily a claim object. The
+# read-only log command must keep the readable custody data instead of leaking
+# a Ruby type error from the damaged record.
+class AgentCoordLogClaimRecordResilienceTest < AgentCoordLogTestCase
+  def test_log_reports_a_claim_record_that_is_not_an_object
+    write_event("b1", "e1", "type" => "claim.acquired", "repo" => "shakacode/example", "target" => "104",
+                            "machine_id" => "m1", "host" => "codex", "at" => "2026-08-03T02:40:16Z")
+    write_claim("shakacode/example", "104",
+                "status" => "active", "agent_id" => "readable-worker", "machine_id" => "m1",
+                "host" => "codex", "updated_at" => "2026-08-03T03:00:00Z")
+    write_raw_claim("array", [1, 2, 3])
+
+    result = run_log("shakacode/example#104")
+
+    assert_equal 0, result.status.exitstatus, result.stderr
+    assert_includes result.stderr, "live claim record is not an object at claims/shakacode/example/array.json"
+    assert_includes result.stderr, "this trail may be incomplete"
+    refute_match(/TypeError|no implicit conversion/, result.stderr, "must not leak a raw type error")
+    refute_match(%r{\bfrom .*bin/agent-coord:\d+}, result.stderr, "must not leak a Ruby backtrace")
+    assert_includes result.stdout, "claim active"
+    assert_includes result.stdout, "readable-worker"
+    assert_includes result.stdout, "claim.acquired"
+  end
+
+  def test_log_keeps_readable_siblings_in_every_format_around_scalar_claim_records
+    write_event("b1", "e1", "type" => "claim.acquired", "repo" => "shakacode/example", "target" => "104",
+                            "machine_id" => "m1", "host" => "codex", "at" => "2026-08-03T02:40:16Z")
+    write_claim("shakacode/example", "104",
+                "status" => "active", "agent_id" => "readable-worker", "machine_id" => "m1",
+                "host" => "codex", "updated_at" => "2026-08-03T03:00:00Z")
+    { "null" => nil, "boolean" => false, "number" => 7, "string" => "claim" }.each do |name, record|
+      write_raw_claim(name, record)
+    end
+
+    text = run_log("shakacode/example#104")
+    tsv = run_log("shakacode/example#104", "--format", "tsv")
+    json = run_log("shakacode/example#104", "--json")
+
+    [text, tsv, json].each do |result|
+      assert_equal 0, result.status.exitstatus, result.stderr
+      %w[null boolean number string].each do |name|
+        assert_includes result.stderr,
+                        "live claim record is not an object at claims/shakacode/example/#{name}.json"
+      end
+      refute_match(/TypeError|NoMethodError|undefined method|no implicit conversion/, result.stderr)
+      refute_match(%r{\bfrom .*bin/agent-coord:\d+}, result.stderr)
+    end
+    assert_includes text.stdout, "claim.acquired"
+    assert_includes text.stdout, "readable-worker"
+    assert_includes tsv.stdout, "\te1\t"
+    assert_includes tsv.stderr, "readable-worker"
+    payload = JSON.parse(json.stdout)
+    event_ids = payload.fetch("events").map { |event| event.fetch("event_id") }
+    assert_equal ["e1"], event_ids
+    assert_equal "readable-worker", payload.fetch("claim").fetch("agent_id")
+    assert_equal "incomplete", payload.fetch("trail")
+  end
+
+  def test_log_scrubs_a_control_character_from_a_non_object_claim_path_through_the_cli
+    write_event("b1", "e1", "type" => "claim.acquired", "repo" => "shakacode/example", "target" => "104",
+                            "machine_id" => "m1", "host" => "codex", "at" => "2026-08-03T02:40:16Z")
+    write_raw_claim("bad-\nclaim", [1, 2, 3])
+
+    result = run_log("shakacode/example#104", "--json")
+
+    assert_equal 0, result.status.exitstatus, result.stderr
+    assert_predicate result.stderr, :valid_encoding?
+    assert_includes result.stderr, "live claim record is not an object at claims/shakacode/example/bad- claim.json"
+    refute_match(%r{ArgumentError|invalid byte sequence|bin/agent-coord:\d+}, result.stderr)
+    assert_equal "incomplete", JSON.parse(result.stdout).fetch("trail")
+  end
+
+  def test_log_refuses_to_sync_past_a_non_object_claim_record
+    write_event("b1", "e1", "type" => "claim.acquired", "repo" => "shakacode/example", "target" => "104",
+                            "machine_id" => "m1", "host" => "codex", "at" => "2026-08-03T02:40:16Z")
+    write_raw_claim("null", nil)
+
+    result = run_log("--sync")
+
+    assert_equal 2, result.status.exitstatus, result.stderr
+    assert_includes result.stderr, "live claim record is not an object at claims/shakacode/example/null.json"
+    assert_includes result.stderr, "refusing to sync an incomplete trail: claims"
+    refute_path_exists File.join(@state_root, "log.tsv")
+  end
+
+  private
+
+  def write_raw_claim(name, record)
+    path = File.join(@state_root, "claims", "shakacode", "example", "#{name}.json")
+    FileUtils.mkdir_p(File.dirname(path))
+    File.write(path, "#{JSON.generate(record)}\n")
+  end
+end
+
 # Events that `gc` compacted into `archive/` are still this work item's custody
 # trail (issue #139). Before the archive was read, `log` answered "no events"
 # for completed work -- the same words it uses for work that never happened --
