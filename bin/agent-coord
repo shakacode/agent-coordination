@@ -5332,8 +5332,9 @@ module AgentCoord
       scrubbed.each { |row| @stdout.puts log_text_line(row, widths) }
     end
 
-    # A claim reaches here only when it is the latest thing known about the work
-    # item, so it always belongs last: it is the answer to "where is it now".
+    # A claim reaches here only when no newer terminal event ended its custody.
+    # It belongs last because the trailer answers "where is it now", even when a
+    # newer nonterminal event appears in the chronological trail above it.
     def log_report_trailer(options, claims, rows, stream)
       stream.puts "no events for #{options[:work_item] || 'the current filters'}" if rows.empty?
       # One line per holder, oldest first: with two live alias claims, printing

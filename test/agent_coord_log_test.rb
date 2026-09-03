@@ -1697,10 +1697,10 @@ class AgentCoordLogAliasFreshnessTest < AgentCoordLogTestCase
     %w[phase.changed help_requested escalation_requested error human_intervention].each_with_index do |type, index|
       target = (index + 10).to_s
       write_claim("shakacode/example", target, "status" => "active", "agent_id" => "live-holder",
-                                                  "updated_at" => "2026-08-01T00:00:00Z")
+                                               "updated_at" => "2026-08-01T00:00:00Z")
       write_event("b1", "e#{index}", "type" => type, "repo" => "shakacode/example", "target" => target,
-                                      "machine_id" => "m1", "host" => "codex",
-                                      "at" => "2026-08-09T00:00:00Z")
+                                     "machine_id" => "m1", "host" => "codex",
+                                     "at" => "2026-08-09T00:00:00Z")
 
       claim = JSON.parse(run_log("shakacode/example##{target}", "--json").stdout).fetch("claim")
 
@@ -1738,7 +1738,7 @@ class AgentCoordLogAliasFreshnessTest < AgentCoordLogTestCase
     assert_equal ["bare-holder"], holders, "the prefixed lease is older than its own terminal event"
   end
 
-  def test_an_event_on_the_claims_own_key_still_supersedes_it
+  def test_a_terminal_event_on_the_claims_own_key_still_supersedes_it
     write_claim("shakacode/example", "1", "status" => "active", "agent_id" => "bare-holder",
                                           "updated_at" => "2026-08-01T00:00:00Z")
     write_event("b1", "e1", "type" => "claim.released", "repo" => "shakacode/example", "target" => "1",
