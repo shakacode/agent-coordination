@@ -251,6 +251,10 @@ module AgentCoord
   # narrowed --sync are the same question -- "was this answer filtered?" -- so
   # they read one list and a new filter cannot be added to only one of them.
   LOG_TRAIL_FILTERS = %i[since machine host type limit].freeze
+  # Only events that end custody can make an older claim stale. Progress and
+  # operational-signal events describe a live lane and must keep its claim in
+  # the current-state trailer.
+  LOG_CLAIM_TERMINAL_TYPES = %w[claim.released lane_closed].freeze
   # Where gc puts a completed lane's events once it has compacted them and
   # deleted the hot copies. The trail is read from here as well as from `events`,
   # because a custody trail that ends when the work completes is the one case it
@@ -5328,8 +5332,9 @@ module AgentCoord
       scrubbed.each { |row| @stdout.puts log_text_line(row, widths) }
     end
 
-    # A claim reaches here only when it is the latest thing known about the work
-    # item, so it always belongs last: it is the answer to "where is it now".
+    # A claim reaches here only when no newer terminal event ended its custody.
+    # It belongs last because the trailer answers "where is it now", even when a
+    # newer nonterminal event appears in the chronological trail above it.
     def log_report_trailer(options, claims, rows, stream)
       stream.puts "no events for #{options[:work_item] || 'the current filters'}" if rows.empty?
       # One line per holder, oldest first: with two live alias claims, printing
@@ -5371,14 +5376,15 @@ module AgentCoord
       claims.reject { |claim| log_claim_superseded?(claim, rows) }
     end
 
-    # Only the claim's own literal key can supersede it. Aliases and case variants
-    # are separately claimable on case-sensitive stores, so an event under either
-    # one says nothing about whether another lease still stands. This deliberately
-    # does not decide which event types supersede a claim; it only keeps that
-    # existing decision scoped to the exact repo and target key.
+    # Only a terminal event on the claim's own literal key can supersede it.
+    # Aliases and case variants are separately claimable on case-sensitive stores,
+    # so an event under either one says nothing about whether another lease still
+    # stands. Nonterminal events on the same key describe ongoing work.
     def log_claim_superseded?(claim, rows)
       key = log_claim_event_key(claim)
-      latest = rows.select { |row| log_claim_event_key(row) == key }.last
+      latest = rows.select do |row|
+        log_claim_event_key(row) == key && LOG_CLAIM_TERMINAL_TYPES.include?(row.fetch("type"))
+      end.last
       latest && log_at_key(claim.fetch("record").fetch("updated_at")) < latest.fetch("at_key")
     end
 
