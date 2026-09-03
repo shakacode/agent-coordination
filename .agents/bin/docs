@@ -1,0 +1,166 @@
+#!/usr/bin/env ruby
+# frozen_string_literal: true
+
+require "json"
+require "open3"
+require "optparse"
+require "pathname"
+require "uri"
+
+def github_anchor(heading, used)
+  anchor = heading.sub(/[ \t]+#+[ \t]*\z/, "")
+                  .gsub(/!?\[([^\]]*)\]\([^)]+\)/, "\\1")
+                  .gsub(/\[([^\]]*)\]\[[^\]]*\]/, "\\1")
+                  .gsub(/<[^>]*>/, "")
+                  .gsub(/[`*_~]/, "")
+                  .downcase
+                  .gsub(/[^\p{Alnum}\p{M}\s_-]/u, "")
+                  .strip
+                  .gsub(/\s+/, "-")
+  candidate = anchor
+  suffix = 0
+  while used[candidate]
+    suffix += 1
+    candidate = "#{anchor}-#{suffix}"
+  end
+  used[candidate] = true
+  candidate
+end
+
+def link_destination(raw)
+  value = raw.strip
+  return value[/\A<([^>]*)>/, 1].to_s if value.start_with?("<")
+
+  value.split(/\s+/, 2).first.to_s
+end
+
+def local_destination?(destination)
+  !destination.empty? && !destination.start_with?("/", "//") && !destination.match?(/\A[a-z][a-z0-9+.-]*:/i)
+end
+
+def scan_document(repo_root:, path:, unlabelled_fences:, anchors:, link_targets:)
+  fence = nil
+  anchor_counts = {}
+  anchors[path]
+
+  File.foreach(File.join(repo_root, path), encoding: "UTF-8").with_index(1) do |line, line_number|
+    if fence
+      marker = Regexp.escape(fence.fetch(:character))
+      length = fence.fetch(:length)
+      fence = nil if line.match?(/\A {0,3}#{marker}{#{length},}[ \t]*\r?\n?\z/)
+      next
+    end
+
+    if (match = line.match(/\A {0,3}(`{3,}|~{3,})([^\r\n]*)/))
+      fence = { character: match[1][0], length: match[1].length }
+      unlabelled_fences[path] << line_number if match[2].strip.empty?
+      next
+    end
+
+    if (heading = line.match(/\A {0,3}\#{1,6}[ \t]+(.+?)[ \t]*\r?\n?\z/))
+      anchors[path][github_anchor(heading[1], anchor_counts)] = true
+    end
+    line.scan(/<a\s+[^>]*(?:id|name)=["']([^"']+)["'][^>]*>/i) do |match|
+      anchors[path][match.fetch(0)] = true
+    end
+
+    if (reference = line.match(/\A {0,3}\[[^\]]+\]:[ \t]+(<[^>]+>|\S+)/))
+      destination = link_destination(reference[1])
+      link_targets << [path, line_number, destination] if local_destination?(destination)
+    end
+
+    line.scan(/!?\[[^\]]*\]\(([^)]+)\)/) do |match|
+      destination = link_destination(match.fetch(0))
+      link_targets << [path, line_number, destination] if local_destination?(destination)
+    end
+  end
+end
+
+options = { repo_root: File.expand_path("../..", __dir__) }
+OptionParser.new do |parser|
+  parser.on("--repo-root PATH") { |path| options[:repo_root] = File.expand_path(path) }
+end.parse!
+
+repo_root = options.fetch(:repo_root)
+tracked_output, tracked_error, tracked_status = Open3.capture3(
+  "git", "-C", repo_root, "ls-files", "-z"
+)
+abort tracked_error unless tracked_status.success?
+
+tracked_paths = tracked_output.split("\0")
+tracked = tracked_paths.to_h { |path| [path, true] }
+markdown_paths = tracked_paths.select { |path| File.extname(path).downcase == ".md" }
+errors = []
+unlabelled_fences = Hash.new { |paths, path| paths[path] = [] }
+anchors = Hash.new { |documents, path| documents[path] = {} }
+link_targets = []
+
+markdown_paths.each do |path|
+  scan_document(
+    repo_root: repo_root,
+    path: path,
+    unlabelled_fences: unlabelled_fences,
+    anchors: anchors,
+    link_targets: link_targets
+  )
+end
+
+link_targets.each do |path, line_number, destination|
+  location, separator, fragment = destination.partition("#")
+  fragment = nil if separator.empty?
+  relative = URI::DEFAULT_PARSER.unescape(location.partition("?").first)
+  resolved = if relative.empty?
+               path
+             else
+               Pathname.new(File.join(File.dirname(path), relative)).cleanpath.to_s
+             end
+  exists = tracked[resolved] || tracked_paths.any? { |candidate| candidate.start_with?("#{resolved}/") }
+  unless exists
+    errors << "#{path}:#{line_number}: broken relative link: #{destination}"
+    next
+  end
+
+  next if fragment.nil? || fragment.empty? || !anchors.key?(resolved)
+  next if anchors[resolved][URI::DEFAULT_PARSER.unescape(fragment)]
+
+  errors << "#{path}:#{line_number}: broken anchor: #{destination}"
+end
+
+baseline_path = File.join(repo_root, ".agents/docs-lint-baseline.json")
+begin
+  baseline = if File.file?(baseline_path)
+               JSON.parse(File.read(baseline_path, encoding: "UTF-8"))
+             else
+               { "version" => 1, "unlabelled_code_fences" => {} }
+             end
+rescue JSON::ParserError => e
+  warn ".agents/docs-lint-baseline.json: invalid JSON: #{e.message.lines.first.chomp}"
+  exit 2
+end
+
+unless baseline.is_a?(Hash) && baseline["version"] == 1 && baseline["unlabelled_code_fences"].is_a?(Hash)
+  warn ".agents/docs-lint-baseline.json: expected version 1 with an unlabelled_code_fences object"
+  exit 2
+end
+
+allowances = baseline.fetch("unlabelled_code_fences")
+unless allowances.all? { |path, count| path.is_a?(String) && count.is_a?(Integer) && count >= 0 }
+  warn ".agents/docs-lint-baseline.json: fence allowances must be non-negative integers keyed by path"
+  exit 2
+end
+(unlabelled_fences.keys | allowances.keys).sort.each do |path|
+  line_numbers = unlabelled_fences.fetch(path, [])
+  allowance = allowances.fetch(path, 0)
+
+  if line_numbers.length < allowance
+    errors << "#{path}: baseline permits #{allowance} unlabelled code fences, but found #{line_numbers.length}"
+    next
+  end
+
+  line_numbers.drop(allowance).each do |line_number|
+    errors << "#{path}:#{line_number}: unlabelled code fence"
+  end
+end
+
+warn errors.join("\n") unless errors.empty?
+exit(errors.empty? ? 0 : 1)
