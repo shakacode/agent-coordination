@@ -81,8 +81,10 @@ rm ./agent-coordination-VERSION.gem
 Generated `.gem` files are local artifacts and should not be committed. See the
 [Changelog](CHANGELOG.md) for release-facing changes and the
 [Worker state protocol with `curl`](docs/protocol-curl.md) for placeholder-only
-HTTP examples. See the [local telemetry ledger](docs/telemetry-ledger.md) for
-fixture-backed harvesting, privacy boundaries, pricing, and scorecard queries.
+HTTP examples. For observability, see the
+[operational feedback loop](docs/observability-and-feedback-loop.md), the
+[local telemetry ledger](docs/telemetry-ledger.md), and the
+[observability kaizen ledger](docs/solutions/observability-kaizen-ledger.md).
 
 ## Zero-config local first run
 
@@ -630,10 +632,17 @@ One line per event, oldest first. Nothing is inferred beyond ordering by time:
 | Was it moved? | Any line where the machine, host, or agent column changes, plus `handoff` and `claim.released` rows |
 | When was it last worked on? | The timestamp on the last line |
 
+#### Filters and output
+
 Filter a broader feed with `--since` (a `3d`/`12h`/`30m` duration or an ISO8601
 timestamp), `--machine`, `--host`, `--type`, and `--limit`. `--host` takes either
 a family (`codex`, `claude`) or any recorded spelling (`claude-code`,
 `codex-subagent`), since both normalize to the same family.
+
+`--format tsv` emits a tab-separated record that also carries the unnormalized
+host and the event id, and `--json` emits the same fields as structured output.
+
+#### Archive completeness
 
 Events that `gc` has compacted into `archive/events` are part of the trail, not a
 separate view of it, so there is no `--include-archived` to pass: a completed
@@ -672,55 +681,48 @@ When included they are marked `[synthetic]` in text output and carry `synthetic`
 and `synthetic_kind` columns in tsv and JSON, so a simulation row that has been
 merged into the mirror cannot later be read as real work.
 
-`--sync` mirrors the complete trail and rejects every narrowing option, including
-a work item, and keeps the file in timestamp order so its last line is the
-current state the same way the command's own last line is. It never drops a row
-it has already recorded, and it deduplicates under an exclusive lock (held on a
-`log.tsv.lock` sidecar) so a cron sync and an operator sync cannot both publish
-the same rows. The file is replaced atomically rather than rewritten in place:
-once `gc` prunes the backend the mirror can be the only remaining copy, so a
-crash must never be able to leave it partial.
+#### Durable mirror
 
-Ordering is by parsed instant, not by the rendered string, so timestamps carrying
-an offset sort correctly. An event recorded without a timestamp sorts first, not
-last, and no `--since` window includes it — sorting it last would have made an
-undated legacy event read as the current state.
+**Run `agent-coord log --sync` before `agent-coord gc --execute`.** The sync
+merges the complete trail into `<state-root>/log.tsv` and rejects every narrowing
+option, including a work item. It preserves rows already in the mirror,
+deduplicates the result, and keeps it in timestamp order, so the last line remains
+the current state even when a later sync discovers an older event. Ordering uses
+the parsed instant rather than the rendered string; timestamps with offsets sort
+correctly, and an undated legacy event sorts first and is excluded from every
+`--since` window.
 
-`--format tsv` emits a tab-separated record that also carries the unnormalized
-host and the event id, and `--json` emits the same fields as structured output.
-`--sync` appends unseen rows to `<state-root>/log.tsv`, so plain `grep` answers
-the same questions offline and instantly:
+An exclusive lock on the `log.tsv.lock` sidecar prevents concurrent syncs from
+publishing duplicate rows. The mirror is written to a temporary file, flushed,
+and atomically renamed, then its parent directory is synced. Once `gc` prunes the
+backend, this file can be the only remaining copy, so it must never be left
+partial. Sync every state root whose history you would want to read back.
+
+Plain `grep` can then answer the same questions offline and instantly. Match
+the complete repository-qualified work-item column rather than a bare number:
+the mirror spans repositories, and event ids or detail text can contain the same
+digits. Include the accepted target aliases and lane suffixes so the offline
+query covers the same event trail as `agent-coord log ShakaCode/hichee#9765`.
 
 ```bash
-agent-coord log --sync && grep 9765 ~/.local/state/agent-coordination/log.tsv
+agent-coord log --sync
+grep -Ei $'^([^\t]*\t){3}ShakaCode/hichee#(issue:|pr:)?9765(:[^\t]*)?\t' ~/.local/state/agent-coordination/log.tsv
 ```
 
-Because `--sync` only ever appends, that local trail keeps history after `gc`
-prunes the hot events behind it. Match on `#9765` rather than a bare `9765`:
-event ids are hex, so a bare number also matches incidental digits inside them.
 The mirror records each event's target as it was written, so `grep` does not get
-the work-item matching the command does — anchor on the spellings instead, or the
-same split this command fixes reappears offline:
-
-```bash
-grep -Ei $'#(issue:|pr:)?9765(:|\t)' ~/.local/state/agent-coordination/log.tsv
-```
+the work-item matching the command does. The expression above explicitly unions
+the bare, `issue:`, and `pr:` spellings, including their lanes.
 
 The `$'...'` quoting matters: GNU grep does not define `\t` inside an ERE, so the
-plain-quoted form matches a literal `t` rather than a tab — it finds none of the
-bare-number records this example exists to union, and matches unrelated targets
-ending in `t`. ANSI-C quoting puts a real tab in the pattern before grep sees it.
+plain-quoted form matches a literal `t` rather than a tab. ANSI-C quoting puts
+real tab boundaries around the TSV work-item column before grep sees the pattern.
 
 `-i` matters for the same reason: grep is case-sensitive by default, while the
 command folds case (below). Without it the offline union silently drops a record
 written as `Issue:9765` or `PR:9765` — a partial trail, which is what anchoring on
 the spellings is here to prevent.
 
-**Run `agent-coord log --sync` before `agent-coord gc --execute`.** Treat it as a
-precondition rather than a convenience: the mirror is the only copy that survives
-both halves of retention. Compaction drops the source events it does not retain
-as soon as it runs, and `delete_after` removes the envelope holding the rest 30
-days later. Sync every state root whose history you would want to read back.
+#### Matching and claim fallback
 
 Matching is case-insensitive for the work item, machine, host, and type. That
 matters for the work item in particular, because the event store has recorded the

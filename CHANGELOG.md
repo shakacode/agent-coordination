@@ -41,122 +41,16 @@ when releases begin.
   classified rather than surfaced by the drift view -- is closed by the issue
   #171 entry under Fixed below.
 
-- An `agent-coord log` command that renders the per-work-item custody trail the
-  event store already records, so an operator can ask where the work on one issue
-  or PR stands without reading the full coordination dump (issue #129).
-  `agent-coord log OWNER/REPO#TARGET` prints one line per event, oldest first,
-  with columns for timestamp, machine, host family, work item, event type, phase,
-  agent, and detail. Where a work item sits now is the last line; a move is a
-  change in the machine, host, or agent column; when it was last worked on is the
-  timestamp. The command derives no verdict beyond ordering events by time.
-  Filters: `--since` (a `3d`/`12h`/`30m` duration or an ISO8601 timestamp),
-  `--machine`, `--host`, `--type`, and `--limit`. Output: aligned text by default,
-  `--format tsv` for a tab-separated record that also carries the unnormalized
-  host and the event id, or `--json`. `--sync` appends unseen rows to
-  `<state-root>/log.tsv` so plain `grep` answers the same questions offline, and
-  because it only ever appends, that local trail survives `gc` pruning the hot
-  events behind it. Simulation and smoke records are excluded unless
-  `--include-synthetic` is passed. The many recorded spellings of `host` (`codex`,
-  `codex-subagent`, `codex-desktop`, `codex-collaboration@its`, `claude-code`)
-  normalize onto the `codex`/`claude` families already used by
-  `lib/agent_coordination/host_adapters.rb`, with the raw value preserved in the
-  tsv column beside it. Events recorded before machine stamping report `?` rather
-  than an inferred machine. `log` is read-only: it never writes coordination
-  state, and it is not a split-brain write command, so it keeps the existing
-  advisory that warns when local state is being read instead of the fleet.
-  Work-item, machine, host, and type matching is case-insensitive, because the
-  event store has recorded the same repository under more than one casing and an
-  exact match would split one work item's history into two partial answers. When
-  a work item has no events at all, any claim record for it is reported instead
-  of a bare "no events", so a claim written before lifecycle auto-emit does not
-  read as absent custody. `--sync` reads and writes the mirror as UTF-8 rather
-  than trusting the locale; under a non-UTF-8 locale a row carrying a non-ASCII
-  character would otherwise never match the line regenerated from state and would
-  re-append on every sync. Events are ordered on a parsed instant rather than on
-  the rendered string, so timestamps carrying an offset or fractional seconds
-  order correctly and an undated legacy event sorts first rather than last
-  (sorting it last would have made it read as the current state); `--since` never
-  includes undated events. `--limit` rejects a negative value and cannot be
-  combined with `--sync`, which would otherwise mirror only the most recent slice
-  and lose the rest once `gc` pruned the events behind it. Every tsv field is
-  scrubbed of tabs and newlines, not just `detail`, so agent-supplied text cannot
-  invent a column or split a row. Under `--format tsv` the empty-result note goes
-  to stderr rather than into the data stream. When a scoped token returns a
-  partial event listing, `log` warns that the trail may be incomplete instead of
-  presenting it as whole, and a scoped or unsupported listing degrades to an empty
-  trail with a warning rather than crashing a read-only query. `--sync` refuses to
-  write a mirror from an incomplete listing, since a partial mirror would later
-  read as complete. A claims lookup
-  that cannot be read warns too, so "this token cannot read claims" no longer
-  prints identically to "this work item has no claim". An explicitly selected
-  backend is never replaced by the local status root. Options may precede the
-  positional work item, so `log --json OWNER/REPO#1` parses. `--sync` mirrors the
-  complete trail and rejects any narrowing option, because appending a narrow sync
-  and then a broader one would place older events after newer ones and the file's
-  last line would stop being the current state. The mirror is deduplicated and
-  appended under one exclusive lock, so two writers cannot both decide the same
-  rows are new. Text columns are scrubbed of tabs and newlines like the tsv ones,
-  so agent-supplied text cannot split one printed event across two lines. A
-  filtered claims listing warns as well, so a hidden claim does not read as an
-  absent one, and when a repository is recorded under two casings the newest of
-  the matching claims is the one reported. The mirror is kept in timestamp order
-  rather than appended blindly, since a later sync can still discover an older
-  event and the file's last line has to stay the current state. `--sync` honors
-  `--json`. The claim note is built from claim fields directly rather than through
-  the event projection, which had printed a claim whose status is `active` as
-  `phase active`, and it is scrubbed like every other output path. Instants are
-  compared exactly rather than through a float. The mirror is replaced
-  atomically -- written to a temporary file, flushed, then renamed -- because
-  after `gc` prunes the backend it can be the only remaining copy of a row, and
-  a crash partway through an in-place rewrite would destroy it; the exclusive
-  lock moved to a `log.tsv.lock` sidecar so it survives that replacement.
-  `--include-synthetic` is allowed with `--sync`, since it widens the mirror
-  rather than narrowing it, and rejecting it left simulation history with no way
-  to be preserved before `gc` pruned it. The `--repo OWNER/REPO --target
-  ISSUE_OR_PR` options that every command advertises now scope the trail as an
-  alternate spelling of the positional, rather than being accepted and ignored
-  while the whole feed was printed; giving the work item both ways is an error.
-  `--format` is validated on the `--sync` path too. The mirror breaks
-  same-timestamp ties on event id exactly as the command does, so a grep of the
-  file and a `log` invocation cannot disagree about what happened last, and a
-  mirror an operator restricted keeps its mode across replacement. `--host`
-  accepts any recorded spelling rather than only the normalized family name, so
-  `--host claude-code` matches the claude family instead of silently matching
-  nothing. Zero-padded durations such as `--since 08h` are read as decimal;
-  `Kernel#Integer` had treated the leading zero as octal, raising an uncaught
-  error for `08`/`09` and reading `010d` as eight days. Synthetic rows carry
-  `synthetic` and `synthetic_kind` columns in tsv and JSON and a `[synthetic]`
-  marker in text, so simulation history merged into the mirror by
-  `--sync --include-synthetic` cannot later be mistaken for real work. Rendered
-  text and tsv strip C0 control characters and DEL as well as tabs and line
-  endings, so an ANSI escape recorded in an event message cannot clear or rewrite
-  the trail on the reader's terminal; JSON is left alone because its encoder
-  escapes these already. Publishing the mirror fsyncs the parent directory after
-  the rename, the way `LocalStore` already does, since a rename is not durable
-  until the directory entry reaches stable storage, and the temporary file it
-  renames from is created exclusively under an unpredictable name so a symlink
-  planted at that path cannot be followed; a mirror that does not yet exist
-  follows the operator's umask, while an existing file's mode is reasserted
-  across replacement. Filesystem faults while writing the
-  mirror are reported as operational errors rather than a Ruby backtrace. The
-  control scrub covers C1 controls as well as C0 and DEL, since terminals that
-  decode C1 act on `U+009B` the way they act on `ESC[`. A positive `--limit` no
-  longer suppresses the claim fallback, because it removes nothing from a trail
-  that was already empty. Under `--json` the claim is a structured object rather
-  than a preformatted sentence. The `--sync` narrowing error names real flags
-  instead of a `--work-item` option that does not exist. A claim is reported
-  whenever it is newer than the last event, not only when there are no events at
-  all: `claim` permits omitting `--batch-id` and no lifecycle event is emitted
-  without a batch, so a work item can carry stale events and a live claim at the
-  same time, and answering with the last event would have named the wrong place.
-  A claim whose lease has run out is reported as `lease elapsed <time>` in text
-  and carries `lease_elapsed`/`expires_at` in JSON rather than being presented as
-  current custody; the fleet holds many claims left active with a lease long past,
-  and recency alone does not make one live. The elapsed lease is reported as a
-  fact rather than as expired custody, because whether custody truly ended also
-  depends on the holder's heartbeat, and deciding that here would be the state
-  inference this command exists to avoid. A synthetic claim is marked the way synthetic
-  events are.
+- Added `agent-coord log` for reading a work item's custody trail without
+  inspecting the full coordination dump (issue #129). It combines live and
+  archived events in timestamp order, reports machine and host attribution, and
+  falls back to claim records when they are newer than the last event.
+  Filters cover time, machine, host, and event type; output is available as
+  aligned text, TSV, or JSON, with explicit warnings for incomplete reads.
+  `--sync` merges the complete, unnarrowed trail into a locked, UTF-8,
+  timestamp-ordered `log.tsv` mirror and replaces it atomically without dropping
+  recorded rows, preserving history across `gc`. Synthetic records remain
+  excluded unless explicitly included and are marked in every output format.
 - An `AGENT_COORD_LOCAL` environment opt-in that explicitly selects the implicit
   local backend. It accepts `1`, `true`, or `yes` (case-insensitive); any other
   value, including empty and `0`, is not an opt-in. Setting it both satisfies the

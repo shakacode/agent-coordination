@@ -76,10 +76,11 @@ transcript — the batch instructions, the target list, "what was I doing" — i
 gone. The coordination plane is deliberately designed so **nothing important
 lives only in a chat**: batch instructions are registered *before* launch,
 claims record branch and PR, phase heartbeats record how far work got, and
-handoffs record what's next. Recovery from any dead session is: read the lane's
-record, supersede the claim, continue. The dashboard's job is the inverse —
-surfacing lanes whose sessions went quiet *before* you notice a PR sat idle for
-a day.
+handoffs record what's next. Recovery starts with
+`agent-coord log OWNER/REPO#TARGET`, which reads the work item's live and
+archived custody trail. Inspect the lane record, supersede the claim when the
+holder is dead, and continue. The dashboard's job is the inverse — surfacing
+lanes whose sessions went quiet *before* you notice a PR sat idle for a day.
 
 ## Use case 5: Pairing — two humans, one fleet
 
