@@ -22,6 +22,7 @@ class AttentionRecordContractTest < Minitest::Test
     assert_equal 160, properties.dig("workspace", "maxLength")
     assert_equal 160, properties.dig("repository", "maxLength")
     assert_equal 160, properties.dig("id", "maxLength")
+    assert_equal 9_007_199_254_740_991, properties.dig("source_generation", "maximum")
   end
 
   def test_valid_and_invalid_fixtures_define_the_record_contract
@@ -66,6 +67,14 @@ class AttentionRecordContractTest < Minitest::Test
       assert_empty schema.validate(record.merge("repository" => repository)).to_a,
                    "expected #{repository.inspect} to conform"
     end
+  end
+
+  def test_source_generation_is_bounded_to_json_safe_integers
+    schema = JSONSchemer.schema(read_json(SCHEMA_PATH))
+    record = read_json(File.join(FIXTURES_PATH, "valid", "attention-open.json"))
+
+    assert_empty schema.validate(record.merge("source_generation" => 9_007_199_254_740_991)).to_a
+    refute_empty schema.validate(record.merge("source_generation" => 9_007_199_254_740_992)).to_a
   end
 
   private

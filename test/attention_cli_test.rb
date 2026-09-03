@@ -157,8 +157,9 @@ class AttentionCliTest < Minitest::Test
     store = Class.new do
       attr_reader :listed_prefix
 
-      def list_json(prefix)
+      def list_json(prefix, maximum: nil)
         @listed_prefix = prefix
+        @maximum = maximum
         []
       end
 
@@ -279,6 +280,87 @@ class AttentionCliTest < Minitest::Test
     end
   end
 
+  def test_attention_generation_is_bounded_to_json_safe_integers_for_upsert_and_resolve
+    maximum = 9_007_199_254_740_991
+    assert_success upsert(record("source_generation" => maximum))
+
+    oversized_upsert = upsert(record("source_generation" => maximum + 1))
+    assert_equal 1, oversized_upsert.status.exitstatus
+    assert_includes oversized_upsert.stderr, "between 0 and #{maximum}"
+
+    oversized_resolve = resolve(maximum + 1)
+    assert_equal 1, oversized_resolve.status.exitstatus
+    assert_includes oversized_resolve.stderr, "between 0 and #{maximum}"
+    assert_equal maximum, read_record.fetch("source_generation")
+  end
+
+  def test_attention_lifecycle_rejects_stored_identity_that_does_not_match_its_path
+    path = attention_file
+    FileUtils.mkdir_p(File.dirname(path))
+
+    attention_lifecycle_commands.each do |command|
+      File.write(path, JSON.generate(record("id" => "different-id")))
+      result = command.call
+
+      assert_equal 2, result.status.exitstatus
+      assert_includes result.stderr, "stored attention identity does not match path"
+      assert_includes result.stderr, "attention/default/shakacode/agent-coordination/decision-1.json"
+      refute_includes result.stderr, "bin/agent-coord:"
+    end
+  end
+
+  def test_attention_lifecycle_reports_malformed_stored_json_as_path_scoped_operational_error
+    path = attention_file
+    FileUtils.mkdir_p(File.dirname(path))
+
+    ["{not-json", "{\"bad\":\"\xFF\"}".b].each do |payload|
+      attention_lifecycle_commands.each do |command|
+        File.binwrite(path, payload)
+        result = command.call
+
+        assert_equal 2, result.status.exitstatus
+        assert_includes result.stderr, "malformed stored JSON"
+        assert_includes result.stderr, "attention/default/shakacode/agent-coordination/decision-1.json"
+        refute_includes result.stderr, "bin/agent-coord:"
+      end
+    end
+  end
+
+  def test_attention_list_requests_the_hard_scan_cap
+    store = Class.new do
+      attr_reader :maximum
+
+      def list_json(_prefix, maximum: nil)
+        @maximum = maximum
+        []
+      end
+
+      def filtered_list?(_prefix) = false
+      def close; end
+    end.new
+    runner = AgentCoord::Runner.new([], stdout: StringIO.new, stderr: StringIO.new)
+    runner.define_singleton_method(:build_store) { |_options| store }
+
+    runner.send(:attention_list, { workspace: "default", repo: "shakacode/agent-coordination", json: true })
+
+    assert_equal 1000, store.maximum
+  end
+
+  def test_local_attention_scan_fails_before_parsing_more_than_the_hard_cap
+    directory = File.dirname(attention_file)
+    FileUtils.mkdir_p(directory)
+    1001.times { |index| File.write(File.join(directory, format("%04d.json", index)), "{not-json") }
+
+    error = assert_raises(AgentCoord::OperationalError) do
+      AgentCoord::LocalStore.new(@root).list_json(
+        "attention/default/shakacode/agent-coordination", maximum: 1000
+      )
+    end
+
+    assert_includes error.message, "exceeds scan maximum 1000"
+    refute_includes error.message, "malformed stored JSON"
+  end
+
   def test_attention_repository_storage_grammar_rejects_dot_aliases_and_persists_dot_prefixed_names
     ["foo..bar/repo", "owner/foo..bar", "./foo", "repo/."].each do |repository|
       result = upsert(record("repository" => repository))
@@ -330,6 +412,18 @@ class AttentionCliTest < Minitest::Test
 
   private
 
+  def attention_lifecycle_commands
+    [
+      lambda do
+        run_cli("attention-get", "--workspace", "default", "--repo", "shakacode/agent-coordination",
+                "--attention-id", "decision-1", "--json")
+      end,
+      -> { resolve(2) },
+      -> { upsert(record("source_generation" => 2)) },
+      -> { run_cli("attention-list", "--workspace", "default", "--repo", "shakacode/agent-coordination", "--json") }
+    ]
+  end
+
   def record(overrides = {})
     {
       "schema_version" => 1,
@@ -374,8 +468,12 @@ class AttentionCliTest < Minitest::Test
   end
 
   def read_record(id = "decision-1")
-    path = File.join(@root, "attention", "default", "shakacode", "agent-coordination", "#{id}.json")
+    path = attention_file(id)
     JSON.parse(File.read(path))
+  end
+
+  def attention_file(id = "decision-1")
+    File.join(@root, "attention", "default", "shakacode", "agent-coordination", "#{id}.json")
   end
 
   def run_cli(*args, env: {})

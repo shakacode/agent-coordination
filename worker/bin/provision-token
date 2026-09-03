@@ -38,7 +38,8 @@ valid_prefix() {
   [[ "$prefix" != *//* ]] || return 1
   local segment='[A-Za-z0-9_.:-]+'
   local active="claims(/${segment}(/${segment}(/${segment}\\.json)?)?)?|heartbeats(/${segment}\\.json)?|batches(/${segment}\\.json)?|events(/${segment}(/${segment}\\.json)?)?"
-  local pattern="^(${active}|archive(/(${active}))?)$"
+  local attention="attention(/${segment}(/${segment}(/${segment})?)?)?|attention/${segment}/${segment}/${segment}/${segment}\\.json"
+  local pattern="^(${active}|${attention}|archive(/(${active}))?)$"
   [[ "$prefix" =~ $pattern ]]
 }
 

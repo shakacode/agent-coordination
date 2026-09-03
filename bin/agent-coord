@@ -97,6 +97,8 @@ module AgentCoord
   ATTENTION_CAPABILITY_STATES = %w[available unavailable unknown].freeze
   DEFAULT_ATTENTION_LIST_LIMIT = 100
   MAX_ATTENTION_LIST_LIMIT = 100
+  MAX_ATTENTION_SCAN_LIMIT = 1000
+  MAX_SAFE_INTEGER = 9_007_199_254_740_991
   MAX_ATTENTION_RECORD_BYTES = 64 * 1024
   MAX_ATTENTION_KEY_COMPONENT_LENGTH = 160
   STATE_PATH_PATTERN = %r{\A(?:
@@ -3908,7 +3910,8 @@ module AgentCoord
       written = nil
 
       2.times do
-        existing = store.read_json(path)
+        existing = read_attention_entry(store, path)
+        validate_stored_attention!(existing) if existing
         written = attention_upsert_payload(requested, existing&.data)
         store.write_json(path, written, message: "Upsert attention #{requested.fetch('id')}",
                                         sha: existing&.sha, create: existing.nil?)
@@ -3930,15 +3933,16 @@ module AgentCoord
     def attention_resolve(options)
       require_options(options, :workspace, :repo, :attention_id, :source_generation)
       generation = options.fetch(:source_generation)
-      raise Error, "--source-generation must be non-negative" unless generation.is_a?(Integer) && generation >= 0
+      validate_attention_generation!(generation, "--source-generation")
 
       path = AgentCoord.attention_path(options.fetch(:workspace), options.fetch(:repo), options.fetch(:attention_id))
       store = build_store(options)
       written = nil
       2.times do
-        existing = store.read_json(path)
+        existing = read_attention_entry(store, path)
         raise OperationalError, "attention record not found: #{options.fetch(:attention_id)}" unless existing
 
+        validate_stored_attention!(existing)
         written = attention_resolve_payload(existing.data, generation)
         store.write_json(path, written, message: "Resolve attention #{options.fetch(:attention_id)}", sha: existing.sha)
         break
@@ -3960,10 +3964,10 @@ module AgentCoord
       require_options(options, :workspace, :repo, :attention_id)
       path = AgentCoord.attention_path(options.fetch(:workspace), options.fetch(:repo), options.fetch(:attention_id))
       store = build_store(options)
-      entry = store.read_json(path)
+      entry = read_attention_entry(store, path)
       raise OperationalError, "attention record not found: #{options.fetch(:attention_id)}" unless entry
 
-      validate_attention_record!(entry.data)
+      validate_stored_attention!(entry)
       emit_payload({ "record" => entry.data }, options) { render_attention_text(entry.data) }
       0
     ensure
@@ -3979,13 +3983,18 @@ module AgentCoord
 
       prefix = AgentCoord.attention_repo_prefix(options.fetch(:workspace), options.fetch(:repo))
       store = build_store(options)
-      entries = store.list_json(prefix)
+      entries = store.list_json(prefix, maximum: MAX_ATTENTION_SCAN_LIMIT) do |path, error|
+        raise malformed_stored_attention_error(path, error)
+      end
+      if entries.length > MAX_ATTENTION_SCAN_LIMIT
+        raise OperationalError, "attention list exceeds scan maximum #{MAX_ATTENTION_SCAN_LIMIT}"
+      end
       if filtered_status_list?(store, prefix)
         raise OperationalError, "attention list is filtered and incomplete for the scoped token"
       end
 
+      entries.each { |entry| validate_stored_attention!(entry) }
       records = entries.map(&:data)
-      records.each { |record| validate_attention_record!(record) }
       records.select! { |record| record.fetch("status") == "open" } unless options[:include_resolved]
       records.sort_by! do |record|
         [ATTENTION_PRIORITIES.index(record.fetch("priority_class")), parse_time(record.fetch("created_at")),
@@ -4042,6 +4051,51 @@ module AgentCoord
       return unless incoming < stored
 
       raise OperationalError, "source generation #{incoming} is older than stored generation #{stored}"
+    end
+
+    def validate_stored_attention!(entry)
+      stored_path = AgentCoord.utf8_diagnostic(entry.path.to_s)
+      unless valid_stored_json_encoding?(entry.data)
+        raise malformed_stored_attention_error(entry.path, Encoding::InvalidByteSequenceError.new)
+      end
+
+      validate_attention_record!(entry.data)
+      expected_path = AgentCoord.attention_path(entry.data.fetch("workspace"), entry.data.fetch("repository"),
+                                                entry.data.fetch("id"))
+      return entry if entry.path == expected_path
+
+      raise OperationalError, "stored attention identity does not match path #{stored_path}"
+    rescue OperationalError
+      raise
+    rescue Error, KeyError, TypeError => e
+      raise OperationalError, "invalid stored attention record at #{stored_path}: #{e.message}"
+    end
+
+    def read_attention_entry(store, path)
+      store.read_json(path)
+    rescue JSON::ParserError, EncodingError => e
+      raise malformed_stored_attention_error(path, e)
+    end
+
+    def malformed_stored_attention_error(path, error)
+      safe_path = AgentCoord.utf8_diagnostic(path.to_s)
+      safe_error = AgentCoord.utf8_diagnostic(error.message.to_s)
+      OperationalError.new("malformed stored JSON at #{safe_path}: #{safe_error}")
+    end
+
+    def valid_stored_json_encoding?(value)
+      case value
+      when String
+        value.valid_encoding?
+      when Array
+        value.all? { |item| valid_stored_json_encoding?(item) }
+      when Hash
+        value.all? do |key, item|
+          valid_stored_json_encoding?(key) && valid_stored_json_encoding?(item)
+        end
+      else
+        true
+      end
     end
 
     def render_attention_text(record)
@@ -7494,13 +7548,15 @@ module AgentCoord
         raise Error, "attention-upsert requires status #{expected_status}"
       end
 
-      generation = record.fetch("source_generation")
-      unless generation.is_a?(Integer) && generation >= 0
-        raise Error,
-              "attention source_generation must be a non-negative integer"
-      end
+      validate_attention_generation!(record.fetch("source_generation"), "attention source_generation")
 
       validate_attention_source!(record.fetch("source"))
+    end
+
+    def validate_attention_generation!(generation, field)
+      return if generation.is_a?(Integer) && generation.between?(0, MAX_SAFE_INTEGER)
+
+      raise Error, "#{field} must be an integer between 0 and #{MAX_SAFE_INTEGER}"
     end
 
     def validate_attention_record_timestamps!(record)
@@ -7943,15 +7999,15 @@ module AgentCoord
       end
     end
 
-    def list_json(prefix)
+    def list_json(prefix, maximum: nil)
       directory = readable_list_directory(prefix)
       return [] unless directory
 
-      list_json_files(directory, prefix).filter_map do |file|
+      list_json_files(directory, prefix, maximum:).filter_map do |file|
         path = file.delete_prefix("#{@root}/")
         begin
           StoredJson.new(path: path, data: JSON.parse(File.read(file, encoding: "UTF-8")), sha: file_sha(file))
-        rescue SystemCallError => e
+        rescue SystemCallError, JSON::ParserError, EncodingError => e
           raise unless block_given?
 
           yield path, e
@@ -8045,13 +8101,13 @@ module AgentCoord
       target
     end
 
-    def list_json_files(directory, prefix)
+    def list_json_files(directory, prefix, maximum: nil)
       pending = [directory]
       files = []
       until pending.empty?
         current = pending.pop
         validate_list_directory!(current, prefix)
-        Dir.children(current).each do |name|
+        Dir.each_child(current) do |name|
           next if name.start_with?(".")
 
           path = File.join(current, name)
@@ -8062,6 +8118,9 @@ module AgentCoord
             pending << path
           elsif entry.file? && name.end_with?(".json")
             files << path
+            if maximum && files.length > maximum
+              raise OperationalError, "state prefix #{prefix} exceeds scan maximum #{maximum}"
+            end
           end
         end
       end
@@ -8195,14 +8254,29 @@ module AgentCoord
       invalidate_read_cache(path)
     end
 
-    def list_json(prefix)
+    def list_json(prefix, maximum: nil)
       AgentCoord.safe_path!(prefix)
-      tree_nodes.filter_map do |node|
+      entries = []
+      matched = 0
+      tree_nodes.each do |node|
         path = node["path"]
         next unless node["type"] == "blob" && path&.start_with?("#{prefix}/") && path.end_with?(".json")
 
-        read_json(path)
+        if maximum && matched >= maximum
+          raise OperationalError, "backend list #{prefix} exceeds scan maximum #{maximum}"
+        end
+
+        matched += 1
+        begin
+          entry = read_json(path)
+          entries << entry if entry
+        rescue JSON::ParserError, EncodingError => e
+          raise unless block_given?
+
+          yield path, e
+        end
       end
+      entries
     end
 
     def delete_json(path, message:, sha:)
@@ -8338,7 +8412,7 @@ module AgentCoord
                      sha: fetch_field(body, "version", "read #{path}").to_s)
     end
 
-    def list_json(prefix)
+    def list_json(prefix, maximum: nil)
       AgentCoord.safe_path!(prefix)
       entries = []
       cursor = nil
@@ -8346,14 +8420,24 @@ module AgentCoord
       @list_filtered[prefix] = false
 
       loop do
-        response = request(Net::HTTP::Get, state_list_path(prefix, cursor))
+        remaining = maximum && (maximum - entries.length)
+        response = request(Net::HTTP::Get, state_list_path(prefix, cursor, remaining))
         raise OperationalError, http_error("list #{prefix}", response) unless response.code == "200"
 
         body = parsed_json_object(response, "list #{prefix}")
         @list_filtered[prefix] = true if body["filtered"] == true
-        entries.concat(parse_list_entries(body, prefix))
+        page_entries = parse_list_entries(body, prefix)
+        if maximum && page_entries.length > remaining
+          raise OperationalError, "http backend list #{prefix} exceeds scan maximum #{maximum}"
+        end
+
+        entries.concat(page_entries)
         cursor = next_list_cursor(body, prefix)
         break unless cursor
+
+        if maximum && entries.length >= maximum
+          raise OperationalError, "http backend list #{prefix} exceeds scan maximum #{maximum}"
+        end
 
         if seen_cursors[cursor]
           message = "http backend list #{prefix} returned malformed response: repeated next_cursor"
@@ -8464,9 +8548,10 @@ module AgentCoord
       URI::DEFAULT_PARSER.escape(value.to_s, PERCENT_ENCODE_UNSAFE)
     end
 
-    def state_list_path(prefix, cursor)
+    def state_list_path(prefix, cursor, limit = nil)
       query = { "prefix" => prefix }
       query["cursor"] = cursor if cursor
+      query["limit"] = limit if limit
       "/v1/state?#{URI.encode_www_form(query)}"
     end
 

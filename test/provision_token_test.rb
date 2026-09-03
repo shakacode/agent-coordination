@@ -162,6 +162,21 @@ class ProvisionTokenTest < Minitest::Test
     assert_includes stdout, "writes:   [\"archive/claims/shakacode/example/42.json\"]"
   end
 
+  def test_provisions_attention_directory_and_exact_record_scopes
+    stdout, stderr, status = run_script(
+      "attention-reader",
+      "--local",
+      "--read-prefix",
+      "attention/default/shakacode/agent-coordination",
+      "--write-prefix",
+      "attention/default/shakacode/agent-coordination/decision-1.json"
+    )
+
+    assert status.success?, stderr
+    assert_includes stdout, "reads:    [\"attention/default/shakacode/agent-coordination\"]"
+    assert_includes stdout, "writes:   [\"attention/default/shakacode/agent-coordination/decision-1.json\"]"
+  end
+
   def test_remote_mode_uses_remote_flag
     _, stderr, status = run_script("m1", "--all-state")
 

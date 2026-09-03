@@ -330,6 +330,22 @@ class HttpStoreReadTest < HttpStoreTestCase
     end
   end
 
+  def test_list_json_applies_a_hard_maximum_to_worker_pagination
+    body = {
+      "entries" => [{ "path" => "attention/default/o/r/a.json", "data" => {}, "version" => 1 }],
+      "next_cursor" => "attention/default/o/r/a.json"
+    }
+    with_stub([[200, body]]) do |store, stub|
+      error = assert_raises(AgentCoord::OperationalError) do
+        store.list_json("attention/default/o/r", maximum: 1)
+      end
+
+      assert_includes error.message, "exceeds scan maximum 1"
+      assert_equal "/v1/state?prefix=attention%2Fdefault%2Fo%2Fr&limit=1", stub.requests.first[:path]
+      assert_equal 1, stub.requests.length
+    end
+  end
+
   def test_list_json_rejects_malformed_next_cursor
     with_stub([[200, { "entries" => [], "next_cursor" => [] }]]) do |store, _|
       error = assert_raises(AgentCoord::OperationalError) { store.list_json("heartbeats") }
