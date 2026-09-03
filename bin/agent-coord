@@ -3983,7 +3983,8 @@ module AgentCoord
       records.each { |record| validate_attention_record!(record) }
       records.select! { |record| record.fetch("status") == "open" } unless options[:include_resolved]
       records.sort_by! do |record|
-        [ATTENTION_PRIORITIES.index(record.fetch("priority_class")), record.fetch("created_at"), record.fetch("id")]
+        [ATTENTION_PRIORITIES.index(record.fetch("priority_class")), parse_time(record.fetch("created_at")),
+         record.fetch("id")]
       end
       truncated = records.length > limit
       records = records.first(limit)
@@ -4039,8 +4040,8 @@ module AgentCoord
     end
 
     def render_attention_text(record)
-      @stdout.puts "#{record.fetch('priority_class')} #{record.fetch('id')} [#{record.fetch('status')}]"
-      @stdout.puts "  #{record.fetch('question')}"
+      @stdout.puts "#{record.fetch('priority_class')} #{log_scrub(record.fetch('id'))} [#{record.fetch('status')}]"
+      @stdout.puts "  #{log_scrub(record.fetch('question'))}"
     end
 
     def write_event_record(store, options, now, output:)
@@ -7467,12 +7468,12 @@ module AgentCoord
     end
 
     def validate_attention_record_identity!(record)
-      AgentCoord.validate_segment!(record.fetch("workspace"), "attention workspace")
-      AgentCoord.validate_segment!(record.fetch("id"), "attention id")
-      AgentCoord.validate_repo!(record.fetch("repository"), "attention")
       AgentCoord.validate_attention_key_component!(record.fetch("workspace"), "workspace")
       AgentCoord.validate_attention_key_component!(record.fetch("id"), "id")
       AgentCoord.validate_attention_key_component!(record.fetch("repository"), "repository")
+      AgentCoord.validate_segment!(record.fetch("workspace"), "attention workspace")
+      AgentCoord.validate_segment!(record.fetch("id"), "attention id")
+      AgentCoord.validate_repo!(record.fetch("repository"), "attention")
     end
 
     def validate_attention_record_content!(record, expected_status)
@@ -8790,6 +8791,7 @@ module AgentCoord
   end
 
   def self.validate_attention_key_component!(value, field)
+    raise Error, "attention #{field} must be a string" unless value.is_a?(String)
     return if value.length <= MAX_ATTENTION_KEY_COMPONENT_LENGTH
 
     raise Error, "attention #{field} must be at most #{MAX_ATTENTION_KEY_COMPONENT_LENGTH} characters"
@@ -8838,20 +8840,20 @@ module AgentCoord
   end
 
   def self.attention_path(workspace, repo, attention_id)
-    validate_segment!(workspace, "attention workspace")
-    validate_repo!(repo, "attention")
-    validate_segment!(attention_id, "attention id")
     validate_attention_key_component!(workspace, "workspace")
     validate_attention_key_component!(repo, "repository")
     validate_attention_key_component!(attention_id, "id")
+    validate_segment!(workspace, "attention workspace")
+    validate_repo!(repo, "attention")
+    validate_segment!(attention_id, "attention id")
     "attention/#{workspace}/#{repo}/#{attention_id}.json"
   end
 
   def self.attention_repo_prefix(workspace, repo)
-    validate_segment!(workspace, "attention workspace")
-    validate_repo!(repo, "attention")
     validate_attention_key_component!(workspace, "workspace")
     validate_attention_key_component!(repo, "repository")
+    validate_segment!(workspace, "attention workspace")
+    validate_repo!(repo, "attention")
     "attention/#{workspace}/#{repo}"
   end
 

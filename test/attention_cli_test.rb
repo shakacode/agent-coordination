@@ -4,8 +4,11 @@ require "fileutils"
 require "json"
 require "minitest/autorun"
 require "open3"
+require "stringio"
 require "time"
 require "tmpdir"
+
+load File.expand_path("../bin/agent-coord", __dir__)
 
 class AttentionCliTest < Minitest::Test
   ROOT = File.expand_path("..", __dir__)
@@ -138,6 +141,39 @@ class AttentionCliTest < Minitest::Test
                  JSON.parse(included.stdout).fetch("records").map { |item| item.fetch("id") })
   end
 
+  def test_list_orders_rfc3339_timestamps_by_instant_not_source_text
+    assert_success upsert(record("id" => "offset-earlier", "created_at" => "2026-09-03T10:00:00+02:00"))
+    assert_success upsert(record("id" => "whole-second", "created_at" => "2026-09-03T09:00:00Z"))
+    assert_success upsert(record("id" => "fractional-later", "created_at" => "2026-09-03T09:00:00.1Z"))
+
+    result = run_cli("attention-list", "--workspace", "default", "--repo", "shakacode/agent-coordination", "--json")
+
+    assert_success result
+    ids = JSON.parse(result.stdout).fetch("records").map { |item| item.fetch("id") }
+    assert_equal %w[offset-earlier whole-second fractional-later], ids
+  end
+
+  def test_text_render_scrubs_id_and_question_without_changing_json
+    hostile_id = "decision\nrow\e]0;owned\a\u0000"
+    hostile_question = "choose\r\ncarefully\e]8;;https://example.invalid\a link\e]8;;\a\u0085"
+    hostile = record("id" => hostile_id, "question" => hostile_question)
+    text = StringIO.new
+    runner = AgentCoord::Runner.new([], stdout: text, stderr: StringIO.new)
+
+    runner.send(:render_attention_text, hostile)
+
+    rendered = text.string
+    assert_equal 2, rendered.lines.length
+    refute_match(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F\u0080-\u009F]/, rendered)
+    assert_includes rendered, "decision row]0;owned"
+    assert_includes rendered, "choose carefully]8;;https://example.invalid link]8;;"
+
+    json = StringIO.new
+    AgentCoord::Runner.new([], stdout: json, stderr: StringIO.new)
+                      .send(:emit_payload, { "record" => hostile }, { json: true }) { flunk "rendered text for JSON" }
+    assert_equal hostile, JSON.parse(json.string).fetch("record")
+  end
+
   def test_upsert_rejects_invalid_capability_truth
     invalid = record
     invalid.fetch("source").fetch("capabilities")["native_open"] = "untested"
@@ -198,6 +234,16 @@ class AttentionCliTest < Minitest::Test
       result = upsert(record(field => value))
       assert_equal 1, result.status.exitstatus, "#{field} should be rejected"
       assert_includes result.stderr, "attention #{field} must be at most 160 characters"
+    end
+  end
+
+  def test_attention_identity_key_components_must_be_strings
+    %w[workspace id repository].product([123, true]).each do |field, value|
+      result = upsert(record(field => value))
+
+      assert_equal 1, result.status.exitstatus, "#{field}=#{value.inspect} should be rejected"
+      assert_includes result.stderr, "attention #{field} must be a string"
+      refute_includes result.stderr, "bin/agent-coord:"
     end
   end
 
