@@ -1640,6 +1640,7 @@ class HttpDoctorTest < HttpEnvTestCase
       [403, { "error" => "forbidden" }],
       [403, { "error" => "forbidden" }],
       [403, { "error" => "forbidden" }],
+      [403, { "error" => "forbidden" }],
       [200, { "machine" => "scoped", "read_prefixes" => ["claims/x/y"], "write_prefixes" => [] }]
     ]
     stub = HttpStoreStub.new(responses)
@@ -1662,6 +1663,7 @@ class HttpDoctorTest < HttpEnvTestCase
       [200, { "entries" => [] }],
       [200, { "entries" => [] }],
       [400, { "error" => "invalid_prefix" }],
+      [200, { "entries" => [] }],
       [400, { "error" => "invalid_prefix" }],
       [404, { "error" => "route_not_found" }]
     ]
@@ -1733,6 +1735,7 @@ class HttpDoctorTest < HttpEnvTestCase
   def test_doctor_deep_tolerates_worker_without_whoami_route
     responses = [
       [200, { "status" => "ok" }],
+      [200, { "entries" => [] }],
       [200, { "entries" => [] }],
       [200, { "entries" => [] }],
       [200, { "entries" => [] }],
@@ -1934,6 +1937,7 @@ class HttpDoctorTest < HttpEnvTestCase
       [200, { "entries" => [] }],
       [200, { "entries" => [] }],
       [200, { "entries" => [] }],
+      [200, { "entries" => [] }],
       [200, { "machine" => "operator", "read_prefixes" => [""], "write_prefixes" => [""] }]
     ]
     stub = HttpStoreStub.new(responses)
@@ -1976,16 +1980,17 @@ class HttpDoctorTest < HttpEnvTestCase
       "heartbeats not readable by scoped token",
       "batches not readable by scoped token",
       "events not readable by scoped token",
+      "attention not readable by scoped token",
       "archive not readable by scoped token"
     ]
     expected_notes.each { |note| assert_includes payload.fetch("degraded"), note }
     assert_equal expected_notes.first, payload.fetch("section_notes").fetch("claims")
     assert_equal({
                    "claims" => "filtered", "heartbeats" => "forbidden", "batches" => "forbidden",
-                   "events" => "forbidden", "archive" => "forbidden"
+                   "events" => "forbidden", "attention" => "forbidden", "archive" => "forbidden"
                  }, payload.fetch("resource_checks"))
     assert_equal "scoped", payload.dig("identity", "machine")
-    prefixes = %w[claims heartbeats batches events archive].map { |prefix| "/v1/state?prefix=#{prefix}" }
+    prefixes = %w[claims heartbeats batches events attention archive].map { |prefix| "/v1/state?prefix=#{prefix}" }
     assert_equal(["/v1/health", *prefixes, "/v1/whoami"], stub.requests.map { |request| request[:path] })
   end
 end

@@ -4,6 +4,7 @@ require "fileutils"
 require "json"
 require "minitest/autorun"
 require "open3"
+require "time"
 require "tmpdir"
 
 class AttentionCliTest < Minitest::Test
@@ -44,6 +45,20 @@ class AttentionCliTest < Minitest::Test
     assert_equal 2, stale.status.exitstatus
     assert_includes stale.stderr, "source generation 4 is older than stored generation 5"
     assert_equal "Current question", read_record.fetch("question")
+  end
+
+  def test_upsert_validates_the_merged_record_after_preserving_created_at
+    assert_success upsert(record("source_generation" => 1,
+                                 "created_at" => "2099-09-03T09:00:00Z",
+                                 "refreshed_at" => "2099-09-03T09:20:00Z"))
+
+    invalid_merge = upsert(record("source_generation" => 2,
+                                  "created_at" => "2026-09-03T09:00:00Z",
+                                  "refreshed_at" => "2026-09-03T09:20:00Z"))
+
+    assert_equal 1, invalid_merge.status.exitstatus
+    assert_includes invalid_merge.stderr, "refreshed_at must not precede created_at"
+    assert_equal 1, read_record.fetch("source_generation")
   end
 
   def test_refresh_preserves_created_at_and_resolved_record_requires_a_newer_generation_to_reopen
@@ -90,6 +105,17 @@ class AttentionCliTest < Minitest::Test
     assert_equal 7, read_record.fetch("source_generation")
   end
 
+  def test_resolve_keeps_timestamps_monotonic_when_stored_refresh_is_in_the_future
+    future = "2099-09-03T09:20:00Z"
+    assert_success upsert(record("created_at" => "2099-09-03T09:00:00Z", "refreshed_at" => future))
+
+    assert_success resolve(2)
+    resolved = read_record
+
+    assert_operator Time.iso8601(resolved.fetch("refreshed_at")), :>=, Time.iso8601(future)
+    assert_operator Time.iso8601(resolved.fetch("resolved_at")), :>=, Time.iso8601(future)
+  end
+
   def test_list_is_open_only_bounded_and_deterministically_ranked
     assert_success upsert(record("id" => "architecture", "priority_class" => "product-architecture"))
     assert_success upsert(record("id" => "unblocks", "priority_class" => "unblocks-work"))
@@ -120,6 +146,59 @@ class AttentionCliTest < Minitest::Test
 
     assert_equal 1, result.status.exitstatus
     assert_includes result.stderr, "native_open must be available, unavailable, or unknown"
+  end
+
+  def test_attention_writes_obey_the_split_brain_guard
+    env_dir = File.join(@config_home, "agent-coord")
+    FileUtils.mkdir_p(env_dir)
+    env_file = File.join(env_dir, "http-env.sh")
+    File.write(env_file, "AGENT_COORD_API_URL=https://fleet.example\n")
+
+    blocked_upsert = implicit_cli("attention-upsert", "--record-json", write_record(record), "--json")
+    blocked_resolve = implicit_cli(
+      "attention-resolve", "--workspace", "default", "--repo", "shakacode/agent-coordination",
+      "--attention-id", "decision-1", "--source-generation", "2", "--json"
+    )
+
+    [blocked_upsert, blocked_resolve].each do |result|
+      assert_equal 2, result.status.exitstatus
+      assert_includes result.stderr, "split-brain configuration"
+      assert_includes result.stderr, env_file
+    end
+  end
+
+  def test_attention_reads_prefer_the_status_state_root
+    assert_success upsert(record)
+
+    get = status_cli("attention-get", "--workspace", "default", "--repo", "shakacode/agent-coordination",
+                     "--attention-id", "decision-1", "--json")
+    list = status_cli("attention-list", "--workspace", "default", "--repo", "shakacode/agent-coordination",
+                      "--json")
+
+    assert_success get
+    assert_equal "decision-1", JSON.parse(get.stdout).dig("record", "id")
+    assert_success list
+    listed_ids = JSON.parse(list.stdout).fetch("records").map { |item| item.fetch("id") }
+    assert_equal ["decision-1"], listed_ids
+  end
+
+  def test_attention_key_components_are_bounded_to_keep_paths_under_worker_limit
+    repository = "#{'o' * 79}/#{'r' * 80}"
+    boundary = record("workspace" => "w" * 160, "repository" => repository, "id" => "i" * 160)
+
+    assert_success upsert(boundary)
+    path = File.join("attention", boundary.fetch("workspace"), repository, "#{boundary.fetch('id')}.json")
+    assert_equal 497, path.bytesize
+
+    {
+      "workspace" => "w" * 161,
+      "repository" => "#{'o' * 80}/#{'r' * 80}",
+      "id" => "i" * 161
+    }.each do |field, value|
+      result = upsert(record(field => value))
+      assert_equal 1, result.status.exitstatus, "#{field} should be rejected"
+      assert_includes result.stderr, "attention #{field} must be at most 160 characters"
+    end
   end
 
   private
@@ -153,9 +232,13 @@ class AttentionCliTest < Minitest::Test
   end
 
   def upsert(payload)
+    run_cli("attention-upsert", "--record-json", write_record(payload), "--json")
+  end
+
+  def write_record(payload)
     file = File.join(@root, "record.json")
     File.write(file, JSON.generate(payload))
-    run_cli("attention-upsert", "--record-json", file, "--json")
+    file
   end
 
   def resolve(generation, id: "decision-1")
@@ -172,6 +255,35 @@ class AttentionCliTest < Minitest::Test
     Open3.capture3(
       { "XDG_CONFIG_HOME" => @config_home },
       "ruby", BIN, *args, "--ignore-user-config", "--state-root", @root
+    ).then { |stdout, stderr, status| Struct.new(:stdout, :stderr, :status).new(stdout, stderr, status) }
+  end
+
+  def implicit_cli(*args)
+    Open3.capture3(
+      {
+        "XDG_CONFIG_HOME" => @config_home,
+        "XDG_STATE_HOME" => @root,
+        "AGENT_COORD_API_URL" => nil,
+        "AGENT_COORD_API_TOKEN" => nil,
+        "AGENT_COORD_STATE_ROOT" => nil,
+        "AGENT_COORD_STATUS_STATE_ROOT" => nil,
+        "AGENT_COORD_LOCAL" => nil
+      },
+      "ruby", BIN, *args
+    ).then { |stdout, stderr, status| Struct.new(:stdout, :stderr, :status).new(stdout, stderr, status) }
+  end
+
+  def status_cli(*args)
+    Open3.capture3(
+      {
+        "XDG_CONFIG_HOME" => @config_home,
+        "XDG_STATE_HOME" => File.join(@root, "unused-state-home"),
+        "AGENT_COORD_API_URL" => nil,
+        "AGENT_COORD_API_TOKEN" => nil,
+        "AGENT_COORD_STATE_ROOT" => nil,
+        "AGENT_COORD_STATUS_STATE_ROOT" => @root
+      },
+      "ruby", BIN, *args
     ).then { |stdout, stderr, status| Struct.new(:stdout, :stderr, :status).new(stdout, stderr, status) }
   end
 

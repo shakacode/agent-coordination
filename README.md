@@ -1383,13 +1383,16 @@ using the same LocalStore or HTTP CAS path as other coordination state. The
 logical key is `(workspace, repository, id)`. A lower `source_generation` is
 rejected; an equal generation may refresh an open record; reopening a resolved
 record requires a greater generation. Refreshes preserve the original
-`created_at`.
+`created_at`. Each key component is limited to 160 ASCII characters, making the
+longest attention storage path 497 bytes—below the Worker's 512-byte active-path
+limit.
 
 `attention-resolve` changes the record to `resolved` and adds `resolved_at`
 without deleting its question, source task identity, capability truth, or
 creation time. The Worker does not permit DELETE for the attention family.
 
-`attention-get` performs an exact read. `attention-list` returns open records by
+`attention-get` performs an exact read. Both read commands prefer
+`AGENT_COORD_STATUS_STATE_ROOT`, like `status`. `attention-list` returns open records by
 default, accepts `--include-resolved`, and is bounded to 100 records. Its JSON
 payload includes `records`, `limit`, and `truncated`; records are ordered by the
 documented priority classes and stable creation/id ties. Consumers can rerank

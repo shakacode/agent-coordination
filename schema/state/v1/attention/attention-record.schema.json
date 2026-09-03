@@ -8,7 +8,7 @@
   "x-logical-key": ["workspace", "repository", "id"],
   "x-storage-key": {
     "template": "attention/{workspace}/{repository_owner}/{repository_name}/{id}.json",
-    "segment_encoding": "Every path segment uses the existing agent-coord safe segment grammar: ASCII alphanumeric, underscore, dot, colon, and hyphen. repository is split at its single slash into owner and name."
+    "segment_encoding": "workspace, repository, and id are each limited to 160 ASCII characters. Path segments use the existing agent-coord safe segment grammar: ASCII alphanumeric, underscore, dot, colon, and hyphen. repository is split at its single slash into owner and name. The longest valid key is 497 bytes, below the Worker's 512-byte active-path limit."
   },
   "$ref": "#/$defs/attention_record",
   "$defs": {
@@ -54,10 +54,10 @@
         "schema_version": { "const": 1 },
         "workspace": {
           "type": "string", "pattern": "^[A-Za-z0-9_:-]+(?:[.][A-Za-z0-9_:-]+)*$",
-          "maxLength": 255, "default": "default"
+          "maxLength": 160, "default": "default"
         },
-        "id": { "type": "string", "pattern": "^[A-Za-z0-9_:-]+(?:[.][A-Za-z0-9_:-]+)*$", "maxLength": 255 },
-        "repository": { "type": "string", "pattern": "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$", "maxLength": 255 },
+        "id": { "type": "string", "pattern": "^[A-Za-z0-9_:-]+(?:[.][A-Za-z0-9_:-]+)*$", "maxLength": 160 },
+        "repository": { "type": "string", "pattern": "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$", "maxLength": 160 },
         "target": { "type": "string", "minLength": 1, "maxLength": 2000 },
         "status": { "enum": ["open", "resolved"] },
         "kind": { "type": "string", "minLength": 1, "maxLength": 100 },

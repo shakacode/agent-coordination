@@ -18,6 +18,10 @@ class AttentionRecordContractTest < Minitest::Test
     assert_equal %w[workspace repository id], schema.fetch("x-logical-key")
     assert_equal "attention/{workspace}/{repository_owner}/{repository_name}/{id}.json",
                  schema.dig("x-storage-key", "template")
+    properties = schema.dig("$defs", "attention_record", "properties")
+    assert_equal 160, properties.dig("workspace", "maxLength")
+    assert_equal 160, properties.dig("repository", "maxLength")
+    assert_equal 160, properties.dig("id", "maxLength")
   end
 
   def test_valid_and_invalid_fixtures_define_the_record_contract

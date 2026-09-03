@@ -92,12 +92,13 @@ module AgentCoord
   MACHINE_MATCH_MISMATCH = "mismatch"
   MACHINE_MATCH_UNVERIFIED = "unverified"
   JSON_PREFIXES = %w[claims heartbeats batches].freeze
-  STATE_PREFIXES = (JSON_PREFIXES + %w[events archive]).freeze
+  STATE_PREFIXES = (JSON_PREFIXES + %w[events attention archive]).freeze
   ATTENTION_PRIORITIES = %w[urgent-risk unblocks-work current-head-merge product-architecture].freeze
   ATTENTION_CAPABILITY_STATES = %w[available unavailable unknown].freeze
   DEFAULT_ATTENTION_LIST_LIMIT = 100
   MAX_ATTENTION_LIST_LIMIT = 100
   MAX_ATTENTION_RECORD_BYTES = 64 * 1024
+  MAX_ATTENTION_KEY_COMPONENT_LENGTH = 160
   STATE_PATH_PATTERN = %r{\A(?:
     claims/[A-Za-z0-9_.:-]+/[A-Za-z0-9_.:-]+/[A-Za-z0-9_.:-]+\.json |
     heartbeats/[A-Za-z0-9_.:-]+\.json |
@@ -1569,7 +1570,7 @@ module AgentCoord
     # decision and silently answers from local state for a request that named a
     # different backend, so do not reintroduce one.
     def status_read_command?(command)
-      %w[status log doctor batch-audit].include?(command)
+      %w[status log doctor batch-audit attention-get attention-list].include?(command)
     end
 
     def warn_consumer_split_brain(command, options)
@@ -1595,7 +1596,7 @@ module AgentCoord
     # Commands that mutate coordination state. gc only prunes an already chosen
     # root, and read commands keep the advisory warning, so neither hard stops.
     def split_brain_write_command?(command)
-      %w[claim release heartbeat record-event register-batch].include?(command)
+      %w[claim release heartbeat record-event register-batch attention-upsert attention-resolve].include?(command)
     end
 
     # Commands that surface the split-brain condition themselves, and so must not
@@ -4008,7 +4009,8 @@ module AgentCoord
         raise OperationalError, "attention refresh is older than the stored refresh at generation #{stored_generation}"
       end
 
-      requested.merge("created_at" => existing.fetch("created_at")).except("resolved_at")
+      merged = requested.merge("created_at" => existing.fetch("created_at")).except("resolved_at")
+      validate_attention_record!(merged, expected_status: "open")
     end
 
     def attention_resolve_payload(existing, generation)
@@ -4017,14 +4019,17 @@ module AgentCoord
       reject_stale_attention_generation!(generation, stored_generation)
       return existing if existing.fetch("status") == "resolved" && generation == stored_generation
 
-      refreshed_at = timestamp(now_utc)
+      timestamps = [now_utc, parse_time(existing.fetch("created_at")), parse_time(existing.fetch("refreshed_at"))]
+      timestamps << parse_time(existing.fetch("resolved_at")) if existing["resolved_at"]
+      refreshed_at = timestamp(timestamps.max)
       resolved_at = existing["resolved_at"] || refreshed_at
-      existing.merge(
+      resolved = existing.merge(
         "status" => "resolved",
         "source_generation" => generation,
         "refreshed_at" => refreshed_at,
         "resolved_at" => resolved_at
       )
+      validate_attention_record!(resolved)
     end
 
     def reject_stale_attention_generation!(incoming, stored)
@@ -7465,9 +7470,9 @@ module AgentCoord
       AgentCoord.validate_segment!(record.fetch("workspace"), "attention workspace")
       AgentCoord.validate_segment!(record.fetch("id"), "attention id")
       AgentCoord.validate_repo!(record.fetch("repository"), "attention")
-      raise Error, "attention workspace must be at most 255 characters" if record.fetch("workspace").length > 255
-      raise Error, "attention id must be at most 255 characters" if record.fetch("id").length > 255
-      raise Error, "attention repository must be at most 255 characters" if record.fetch("repository").length > 255
+      AgentCoord.validate_attention_key_component!(record.fetch("workspace"), "workspace")
+      AgentCoord.validate_attention_key_component!(record.fetch("id"), "id")
+      AgentCoord.validate_attention_key_component!(record.fetch("repository"), "repository")
     end
 
     def validate_attention_record_content!(record, expected_status)
@@ -8784,6 +8789,12 @@ module AgentCoord
     raise PathValidationError, "invalid #{field}: #{segment}"
   end
 
+  def self.validate_attention_key_component!(value, field)
+    return if value.length <= MAX_ATTENTION_KEY_COMPONENT_LENGTH
+
+    raise Error, "attention #{field} must be at most #{MAX_ATTENTION_KEY_COMPONENT_LENGTH} characters"
+  end
+
   # Renaming a file into place is not durable until the directory entry itself
   # reaches stable storage, so every atomic replacement in this file follows its
   # rename with this.
@@ -8830,12 +8841,17 @@ module AgentCoord
     validate_segment!(workspace, "attention workspace")
     validate_repo!(repo, "attention")
     validate_segment!(attention_id, "attention id")
+    validate_attention_key_component!(workspace, "workspace")
+    validate_attention_key_component!(repo, "repository")
+    validate_attention_key_component!(attention_id, "id")
     "attention/#{workspace}/#{repo}/#{attention_id}.json"
   end
 
   def self.attention_repo_prefix(workspace, repo)
     validate_segment!(workspace, "attention workspace")
     validate_repo!(repo, "attention")
+    validate_attention_key_component!(workspace, "workspace")
+    validate_attention_key_component!(repo, "repository")
     "attention/#{workspace}/#{repo}"
   end
 
