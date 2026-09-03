@@ -3979,7 +3979,12 @@ module AgentCoord
 
       prefix = AgentCoord.attention_repo_prefix(options.fetch(:workspace), options.fetch(:repo))
       store = build_store(options)
-      records = store.list_json(prefix).map(&:data)
+      entries = store.list_json(prefix)
+      if filtered_status_list?(store, prefix)
+        raise OperationalError, "attention list is filtered and incomplete for the scoped token"
+      end
+
+      records = entries.map(&:data)
       records.each { |record| validate_attention_record!(record) }
       records.select! { |record| record.fetch("status") == "open" } unless options[:include_resolved]
       records.sort_by! do |record|

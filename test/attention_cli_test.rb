@@ -153,6 +153,38 @@ class AttentionCliTest < Minitest::Test
     assert_equal %w[offset-earlier whole-second fractional-later], ids
   end
 
+  def test_list_refuses_a_filtered_http_result_instead_of_reporting_false_completeness
+    store = Class.new do
+      attr_reader :listed_prefix
+
+      def list_json(prefix)
+        @listed_prefix = prefix
+        []
+      end
+
+      def filtered_list?(prefix)
+        prefix == @listed_prefix
+      end
+
+      def close; end
+    end.new
+    stdout = StringIO.new
+    runner = AgentCoord::Runner.new([], stdout:, stderr: StringIO.new)
+    runner.define_singleton_method(:build_store) { |_options| store }
+
+    error = assert_raises(AgentCoord::OperationalError) do
+      runner.send(
+        :attention_list,
+        { workspace: "default", repo: "shakacode/agent-coordination", limit: 100, json: true }
+      )
+    end
+
+    assert_equal "attention/default/shakacode/agent-coordination", store.listed_prefix
+    assert_includes error.message, "attention list is filtered"
+    assert_includes error.message, "incomplete"
+    assert_empty stdout.string
+  end
+
   def test_text_render_scrubs_id_and_question_without_changing_json
     hostile_id = "decision\nrow\e]0;owned\a\u0000"
     hostile_question = "choose\r\ncarefully\e]8;;https://example.invalid\a link\e]8;;\a\u0085"
