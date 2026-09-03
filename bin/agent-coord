@@ -4680,6 +4680,7 @@ module AgentCoord
     def log_event_rows(store)
       seen = {}
       rows = log_event_entries(store).filter_map do |entry|
+        log_validate_record_encoding!(entry)
         data = entry.data
         unless data.is_a?(Hash)
           log_live_event_incomplete(entry, "live event record is not an object")
@@ -4696,6 +4697,13 @@ module AgentCoord
       rows + log_archived_event_rows(store, seen)
     end
 
+    def log_validate_record_encoding!(entry)
+      return unless gc_invalid_encoding?(entry.data)
+
+      raise OperationalError,
+            "state unreadable: invalid UTF-8 in persisted log record at #{log_scrub(entry.path)}"
+    end
+
     def log_live_event_incomplete(entry, reason)
       message = "warning: #{reason} at #{entry.path}; this trail may be incomplete"
       log_note_incomplete("events", log_scrub(message))
@@ -4708,6 +4716,7 @@ module AgentCoord
     # interleave rather than arriving in two blocks.
     def log_archived_event_rows(store, seen)
       log_archived_event_entries(store).flat_map do |entry|
+        log_validate_record_encoding!(entry)
         # Records first. log_archived_event_data is what rejects a record this
         # version cannot read, and the ledger entry reaches into the same
         # envelope, so building it ahead of that check let a record that is not

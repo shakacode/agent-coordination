@@ -2118,6 +2118,101 @@ class AgentCoordLogClaimRecordResilienceTest < AgentCoordLogTestCase
   end
 end
 
+# Invalid encoding is different from an unreadable or structurally malformed
+# record: identity cannot be compared safely, so omitting it would claim that a
+# partial trail is complete. The log request must fail before rendering any
+# healthy sibling and must never rewrite the stored bytes.
+class AgentCoordLogInvalidEncodingTest < AgentCoordLogTestCase
+  LOCALES = %w[C C.UTF-8].freeze
+
+  def test_log_fails_closed_on_invalid_utf8_live_event_values
+    write_event("b1", "healthy", "type" => "claim.acquired", "repo" => "shakacode/example", "target" => "42",
+                                 "machine_id" => "m5", "host" => "codex", "at" => "2026-08-01T00:00:00Z")
+    corrupt = write_corrupt_event("corrupt-repo", "corrupt-\xFF".b)
+    original = File.binread(corrupt)
+
+    LOCALES.each do |locale|
+      result = run_log("shakacode/example#42", "--format", "tsv", env: { "LC_ALL" => locale, "LANG" => locale })
+
+      assert_equal 2, result.status.exitstatus, locale
+      assert_empty result.stdout, "a corrupt record must block the healthy sibling under #{locale}"
+      assert_equal "state unreadable: invalid UTF-8 in persisted log record at events/b1/corrupt.json\n",
+                   result.stderr, locale
+      assert_predicate result.stderr, :valid_encoding?, locale
+      refute_match(/ArgumentError|Encoding::CompatibilityError|JSON::GeneratorError/, result.stderr, locale)
+      refute_match(%r{\bfrom .*bin/agent-coord:\d+}, result.stderr, locale)
+      assert_equal original, File.binread(corrupt), "source bytes changed under #{locale}"
+    end
+  end
+
+  def test_log_fails_closed_on_recursively_invalid_utf8_archive_keys
+    write_event("b2", "healthy", "type" => "claim.acquired", "repo" => "shakacode/example", "target" => "42",
+                                 "machine_id" => "m5", "host" => "codex", "at" => "2026-08-02T00:00:00Z")
+    corrupt = write_corrupt_archive_key
+    original = File.binread(corrupt)
+
+    LOCALES.each do |locale|
+      result = run_log("shakacode/example#42", "--format", "tsv", env: { "LC_ALL" => locale, "LANG" => locale })
+
+      assert_equal 2, result.status.exitstatus, locale
+      assert_empty result.stdout, "a corrupt archive must block the healthy live event under #{locale}"
+      assert_equal "state unreadable: invalid UTF-8 in persisted log record at " \
+                   "archive/events/b1/compacted.json\n", result.stderr, locale
+      assert_predicate result.stderr, :valid_encoding?, locale
+      refute_match(/ArgumentError|Encoding::CompatibilityError|JSON::GeneratorError/, result.stderr, locale)
+      refute_match(%r{\bfrom .*bin/agent-coord:\d+}, result.stderr, locale)
+      assert_equal original, File.binread(corrupt), "source bytes changed under #{locale}"
+    end
+  end
+
+  private
+
+  def write_corrupt_event(needle, replacement)
+    path = File.join(@state_root, "events", "b1", "corrupt.json")
+    FileUtils.mkdir_p(File.dirname(path))
+    record = {
+      "schema_version" => 2,
+      "event_id" => "corrupt",
+      "batch_id" => "b1",
+      "type" => "phase.changed",
+      "repo" => "shakacode/#{needle}",
+      "target" => "42",
+      "phase" => "qa",
+      "at" => "2026-08-01T01:00:00Z"
+    }
+    bytes = "#{JSON.generate(record)}\n".b.sub(needle.b, replacement)
+    File.binwrite(path, bytes)
+    path
+  end
+
+  def write_corrupt_archive_key
+    path = File.join(@state_root, "archive", "events", "b1", "compacted.json")
+    FileUtils.mkdir_p(File.dirname(path))
+    event = {
+      "schema_version" => 2,
+      "event_id" => "archived",
+      "batch_id" => "b1",
+      "type" => "phase.changed",
+      "repo" => "shakacode/example",
+      "target" => "42",
+      "phase" => "qa",
+      "at" => "2026-08-01T00:00:00Z",
+      "metadata" => { "corrupt-key" => "value" }
+    }
+    envelope = {
+      "schema_version" => 1,
+      "record_family" => "compacted_events",
+      "source_paths" => ["events/b1/archived.json"],
+      "archived_at" => "2026-08-02T00:00:00Z",
+      "delete_after" => "2099-01-01T00:00:00Z",
+      "records" => [event]
+    }
+    bytes = "#{JSON.generate(envelope)}\n".b.sub("corrupt-key".b, "corrupt-\xFF".b)
+    File.binwrite(path, bytes)
+    path
+  end
+end
+
 # Events that `gc` compacted into `archive/` are still this work item's custody
 # trail (issue #139). Before the archive was read, `log` answered "no events"
 # for completed work -- the same words it uses for work that never happened --
