@@ -79,7 +79,7 @@ class AttentionCliTest < Minitest::Test
     assert_operator JSON.generate(read_record).bytesize, :<=, 256 * 1024
   end
 
-  def test_upsert_validates_the_merged_record_after_preserving_created_at
+  def test_upsert_rejects_a_refresh_older_than_the_preserved_timestamps
     assert_success upsert(record("source_generation" => 1,
                                  "created_at" => "2099-09-03T09:00:00Z",
                                  "refreshed_at" => "2099-09-03T09:20:00Z"))
@@ -88,9 +88,20 @@ class AttentionCliTest < Minitest::Test
                                   "created_at" => "2026-09-03T09:00:00Z",
                                   "refreshed_at" => "2026-09-03T09:20:00Z"))
 
-    assert_equal 1, invalid_merge.status.exitstatus
-    assert_includes invalid_merge.stderr, "refreshed_at must not precede created_at"
+    assert_equal 2, invalid_merge.status.exitstatus
+    assert_includes invalid_merge.stderr, "attention refresh is older than the stored refresh"
     assert_equal 1, read_record.fetch("source_generation")
+  end
+
+  def test_higher_generation_upsert_rejects_an_older_refresh_timestamp
+    assert_success upsert(record("source_generation" => 1, "refreshed_at" => "2026-09-03T10:00:00Z"))
+
+    stale_refresh = upsert(record("source_generation" => 2, "refreshed_at" => "2026-09-03T09:30:00Z"))
+
+    assert_equal 2, stale_refresh.status.exitstatus
+    assert_includes stale_refresh.stderr, "attention refresh is older than the stored refresh"
+    assert_equal 1, read_record.fetch("source_generation")
+    assert_equal "2026-09-03T10:00:00Z", read_record.fetch("refreshed_at")
   end
 
   def test_refresh_preserves_created_at_and_resolved_record_requires_a_newer_generation_to_reopen
@@ -105,7 +116,8 @@ class AttentionCliTest < Minitest::Test
     assert_equal 2, refused.status.exitstatus
     assert_includes refused.stderr, "must advance beyond resolved generation 6"
 
-    assert_success upsert(record("source_generation" => 7, "question" => "Reopened question"))
+    assert_success upsert(record("source_generation" => 7, "question" => "Reopened question",
+                                 "refreshed_at" => "2099-09-03T09:20:00Z"))
     reopened = read_record
     assert_equal "open", reopened.fetch("status")
     refute reopened.key?("resolved_at")
@@ -159,6 +171,18 @@ class AttentionCliTest < Minitest::Test
     assert_equal Time.iso8601(refreshed_at), Time.iso8601(resolved.fetch("refreshed_at"))
     assert_equal Time.iso8601(refreshed_at), Time.iso8601(resolved.fetch("resolved_at"))
     assert_match(/[.]\d+Z\z/, resolved.fetch("refreshed_at"))
+  end
+
+  def test_resolve_preserves_more_than_nine_fractional_digits_from_the_latest_stored_timestamp
+    created_at = "2099-01-01T00:00:00.00000000009Z"
+    refreshed_at = "2099-01-01T00:00:00.00000000010Z"
+    assert_success upsert(record("created_at" => created_at, "refreshed_at" => refreshed_at))
+
+    assert_success resolve(2)
+    resolved = read_record
+
+    assert_equal refreshed_at, resolved.fetch("refreshed_at")
+    assert_equal refreshed_at, resolved.fetch("resolved_at")
   end
 
   def test_resolved_record_rejects_resolved_at_before_created_at

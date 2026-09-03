@@ -4022,8 +4022,7 @@ module AgentCoord
       if existing.fetch("status") == "resolved" && incoming_generation <= stored_generation
         raise OperationalError, "reopening attention must advance beyond resolved generation #{stored_generation}"
       end
-      if incoming_generation == stored_generation &&
-         parse_time(requested.fetch("refreshed_at")) < parse_time(existing.fetch("refreshed_at"))
+      if parse_time(requested.fetch("refreshed_at")) < parse_time(existing.fetch("refreshed_at"))
         raise OperationalError, "attention refresh is older than the stored refresh at generation #{stored_generation}"
       end
 
@@ -4037,9 +4036,14 @@ module AgentCoord
       reject_stale_attention_generation!(generation, stored_generation)
       return existing if existing.fetch("status") == "resolved" && generation == stored_generation
 
-      timestamps = [now_utc, parse_time(existing.fetch("created_at")), parse_time(existing.fetch("refreshed_at"))]
-      timestamps << parse_time(existing.fetch("resolved_at")) if existing["resolved_at"]
-      refreshed_at = attention_timestamp(timestamps.max)
+      latest_stored_at = [existing["resolved_at"], existing.fetch("refreshed_at"),
+                          existing.fetch("created_at")].compact.max_by { |value| parse_time(value) }
+      now = now_utc
+      refreshed_at = if now > parse_time(latest_stored_at)
+                       attention_timestamp(now)
+                     else
+                       latest_stored_at
+                     end
       resolved_at = existing["resolved_at"] || refreshed_at
       resolved = existing.merge(
         "status" => "resolved",
