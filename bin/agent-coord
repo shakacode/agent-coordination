@@ -1305,6 +1305,7 @@ module AgentCoord
     def finalize_options(command, options)
       validate_doctor_prefix!(command, options)
       validate_closeout_option_usage!(command, options)
+      validate_attention_option_usage!(command, options)
       validate_register_batch_option_usage!(command, options)
       validate_config_set_backend_option_usage!(command, options)
       validate_user_config_bypass_option_usage!(command, options)
@@ -1397,6 +1398,14 @@ module AgentCoord
       raise Error, "terminal-only options require --type lane_closed" if command == "record-event"
 
       raise Error, "--#{supplied.first.to_s.tr('_', '-')} is only valid with terminal closeout"
+    end
+
+    def validate_attention_option_usage!(command, options)
+      selector = %i[workspace repo target].find { |field| options.key?(field) }
+      return unless command == "attention-upsert" && selector
+
+      flag = selector.to_s.tr("_", "-")
+      raise Error, "--#{flag} is not valid for attention-upsert; #{flag} comes from --record-json"
     end
 
     def backend_command?(command)
@@ -3963,6 +3972,8 @@ module AgentCoord
 
         validate_stored_attention!(existing)
         written = attention_resolve_payload(existing.data, generation)
+        break if written.equal?(existing.data)
+
         store.write_json(path, written, message: "Resolve attention #{options.fetch(:attention_id)}", sha: existing.sha)
         break
       rescue Conflict

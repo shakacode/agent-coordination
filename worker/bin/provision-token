@@ -126,7 +126,7 @@ while [ "$#" -gt 0 ]; do
     --read-prefix)
       [ "$#" -ge 2 ] || usage
       [ -n "$2" ] || { echo "prefix cannot be empty; pass --all-state for all-state access" >&2; exit 1; }
-      valid_prefix "$2" || { echo "invalid read prefix: $2" >&2; exit 1; }
+      valid_prefix "$2" || { echo "invalid read prefix" >&2; exit 1; }
       READ_PREFIXES_GIVEN=1
       READ_PREFIXES+=("$2")
       shift 2
@@ -134,7 +134,7 @@ while [ "$#" -gt 0 ]; do
     --write-prefix)
       [ "$#" -ge 2 ] || usage
       [ -n "$2" ] || { echo "prefix cannot be empty; pass --all-state for all-state access" >&2; exit 1; }
-      valid_prefix "$2" || { echo "invalid write prefix: $2" >&2; exit 1; }
+      valid_prefix "$2" || { echo "invalid write prefix" >&2; exit 1; }
       WRITE_PREFIXES_GIVEN=1
       WRITE_PREFIXES+=("$2")
       shift 2

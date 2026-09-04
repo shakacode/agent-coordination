@@ -222,7 +222,7 @@ class ProvisionTokenTest < Minitest::Test
       _, stderr, status = run_script("m5", "--local", flag, "attention/default/owner/repo#{suffix}")
 
       refute status.success?, "expected #{flag} suffix #{suffix.inspect} to be rejected"
-      assert_includes stderr, "invalid #{flag.delete_prefix('--').tr('-', ' ')}"
+      assert_equal "invalid #{flag.delete_prefix('--').tr('-', ' ')}\n", stderr
       refute_path_exists @npx_args_file
     end
   end

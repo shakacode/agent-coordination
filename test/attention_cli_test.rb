@@ -182,14 +182,14 @@ class AttentionCliTest < Minitest::Test
     assert_equal 6, resolved.fetch("source_generation")
     assert_equal original.fetch("created_at"), resolved.fetch("created_at")
     assert_equal original.fetch("source"), resolved.fetch("source")
-    assert resolved.fetch("resolved_at").end_with?("Z")
-    assert_equal resolved.fetch("resolved_at"), resolved.fetch("refreshed_at")
+    assert resolved.fetch("resolved_at").end_with?("Z") && resolved["resolved_at"] == resolved["refreshed_at"]
 
-    resolved_at = resolved.fetch("resolved_at")
+    before = File.stat(attention_file)
     assert_success resolve(6)
-    assert_equal resolved_at, read_record.fetch("resolved_at")
+    assert_equal [before.ino, before.mtime], [File.stat(attention_file).ino, File.stat(attention_file).mtime]
+    assert_equal resolved.fetch("resolved_at"), read_record.fetch("resolved_at")
     assert_success resolve(7)
-    assert_equal resolved_at, read_record.fetch("resolved_at")
+    assert_equal resolved.fetch("resolved_at"), read_record.fetch("resolved_at")
     assert_equal 7, read_record.fetch("source_generation")
   end
 
@@ -650,10 +650,15 @@ class AttentionCliTest < Minitest::Test
   end
 
   def test_attention_commands_reject_options_owned_by_other_attention_commands
+    path = "#{@root}/attention"
+    { "workspace" => "other", "repo" => "other/repo", "target" => "other" }.each do |selector, value|
+      result = run_cli("attention-upsert", "--#{selector}", value, "--record-json", write_record(record))
+      assert !result.status.success? && result.stderr.include?("--#{selector} is not valid") && !Dir.exist?(path)
+    end
+
     common = ["--workspace", "default", "--repo", "shakacode/agent-coordination"]
-    record_path = write_record(record)
     command_arguments = {
-      "attention-upsert" => ["--record-json", record_path],
+      "attention-upsert" => ["--record-json", write_record(record)],
       "attention-resolve" => common + ["--attention-id", "decision-1", "--source-generation", "2"],
       "attention-get" => common + ["--attention-id", "decision-1"],
       "attention-list" => common
