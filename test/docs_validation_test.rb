@@ -107,6 +107,56 @@ end
 class DocsValidationTest < Minitest::Test
   include DocsValidationAssertions
 
+  def test_checks_utf8_tracked_paths_in_the_c_locale
+    with_repository do |repo|
+      write(repo, "README.md", "[Guide](café.md#guide)\n")
+      write(repo, "café.md", "# Guide\n")
+      track(repo, "README.md", "café.md")
+      commit(repo, "Add Unicode documentation")
+
+      stdout, stderr, status = Open3.capture3(
+        { "LC_ALL" => "C", "LANG" => "C", "RUBYOPT" => nil },
+        CHECKER, "--repo-root", repo
+      )
+
+      assert status.success?, stderr
+      assert_empty stdout
+      assert_empty stderr
+    end
+  end
+
+  def test_checks_utf8_changed_paths_in_the_c_locale
+    with_repository do |repo|
+      write(repo, "café.md", "# Guide\n")
+      track(repo, "café.md")
+      commit(repo, "Add Unicode documentation")
+      write(repo, "café.md", "[Missing](missing.md)\n")
+
+      _stdout, stderr, status = Open3.capture3(
+        { "LC_ALL" => "C", "LANG" => "C", "RUBYOPT" => nil },
+        CHECKER, "--repo-root", repo, "--base", "HEAD"
+      )
+
+      refute status.success?
+      assert_equal "café.md:1: broken relative link: missing.md\n", stderr
+    end
+  end
+
+  def test_reports_invalid_utf8_git_path_output_without_a_backtrace
+    with_repository do |repo|
+      write(repo, "fake-bin/git", "#!/bin/sh\nprintf '\\377\\000'\n")
+      FileUtils.chmod("u+x", File.join(repo, "fake-bin/git"))
+
+      _stdout, stderr, status = Open3.capture3(
+        { "PATH" => "#{repo}/fake-bin:#{ENV.fetch('PATH')}", "LC_ALL" => "C", "RUBYOPT" => nil },
+        CHECKER, "--repo-root", repo
+      )
+
+      refute status.success?
+      assert_equal "git ls-files: paths must be valid UTF-8\n", stderr
+    end
+  end
+
   def test_reports_a_broken_relative_link
     with_repository do |repo|
       write(repo, "README.md", "See [missing](docs/missing.md).\n")

@@ -19,6 +19,9 @@ Run `bundle install` before calling `.agents/bin/docs` directly. The command
 loads the repository's bundle even from another working directory. It checks
 tracked local destinations in rendered links and images, including reference
 links at their use sites. Unused reference definitions are not checked.
+Undefined reference syntax is literal text, not a rendered link.
+When `--base` or `origin/main` is available, link and new-fence checks cover
+changed Markdown. Without a known base, they cover all tracked Markdown.
 Legacy fence allowances still match the exact original source lines and bytes,
 including container prefixes and line endings.
 

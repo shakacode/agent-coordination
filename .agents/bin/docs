@@ -128,6 +128,13 @@ def resolve_commit(repo_root, ref)
   commit if commit.match?(/\A[0-9a-f]{40}\z/)
 end
 
+def git_paths(output, command:)
+  output.force_encoding(Encoding::UTF_8)
+  abort "git #{command}: paths must be valid UTF-8" unless output.valid_encoding?
+
+  output.split("\0")
+end
+
 def paths_changed_from(repo_root, base)
   base_output, base_error, base_status = Open3.capture3(
     "git", "-C", repo_root, "merge-base", "HEAD", base
@@ -138,7 +145,7 @@ def paths_changed_from(repo_root, base)
     base_output.strip, "--"
   )
   abort diff_error unless diff_status.success?
-  diff_output.split("\0")
+  git_paths(diff_output, command: "diff")
 end
 
 def changed_paths(repo_root:, tracked_paths:, requested_base:)
@@ -166,7 +173,7 @@ tracked_output, tracked_error, tracked_status = Open3.capture3(
 )
 abort tracked_error unless tracked_status.success?
 
-tracked_paths = tracked_output.split("\0")
+tracked_paths = git_paths(tracked_output, command: "ls-files")
 tracked = tracked_paths.to_h { |path| [path, true] }
 tracked_directories = tracked_directory_index(tracked_paths)
 changed_paths = changed_paths(
