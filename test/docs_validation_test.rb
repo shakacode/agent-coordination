@@ -93,8 +93,8 @@ module DocsValidationAssertions
     write(repo, ".agents/docs-lint-baseline.json", JSON.pretty_generate(baseline))
   end
 
-  def run_checker(repo)
-    Open3.capture3(CHECKER, "--repo-root", repo)
+  def run_checker(repo, *)
+    Open3.capture3(CHECKER, "--repo-root", repo, *)
   end
 
   def copy_validation_scripts(repo)
@@ -311,7 +311,7 @@ class DocsValidationTest < Minitest::Test
       commit(repo, "Add existing documentation")
       write(repo, "README.md", "# Updated guide\n")
 
-      stdout, stderr, status = run_checker(repo)
+      stdout, stderr, status = run_checker(repo, "--base", "HEAD")
 
       assert status.success?, stderr
       assert_empty stdout
@@ -345,6 +345,24 @@ class DocsValidationTest < Minitest::Test
 
       refute status.success?
       assert_includes stderr, "README.md:1: broken relative link: missing.md"
+    end
+  end
+
+  def test_checks_committed_markdown_without_a_base_despite_unrelated_dirty_files
+    with_repository do |repo|
+      write(repo, "README.md", "See [missing](missing.md).\n")
+      write(repo, "helper.rb", "puts :before\n")
+      track(repo, "README.md", "helper.rb")
+      commit(repo, "Add documentation and code")
+
+      %i[clean unstaged staged].each do |state|
+        write(repo, "helper.rb", "puts :after\n") if state == :unstaged
+        track(repo, "helper.rb") if state == :staged
+        _stdout, stderr, status = run_checker(repo)
+
+        refute status.success?, state
+        assert_includes stderr, "README.md:1: broken relative link: missing.md"
+      end
     end
   end
 
@@ -700,6 +718,22 @@ class DocsValidationAnchorAndIntegrationTest < Minitest::Test
     end
   end
 
+  def test_preserves_raw_implicit_list_fence_baseline_identity
+    ["\n", "\r\n"].each do |newline|
+      with_repository do |repo|
+        fence = "- ```#{newline}  legacy#{newline}#{newline}"
+        write(repo, "README.md", "#{fence}[Visible](missing-after-container.md)#{newline}")
+        write_fence_baseline(repo, "README.md", line: 1, content: fence)
+        track(repo, "README.md", ".agents/docs-lint-baseline.json")
+
+        _stdout, stderr, status = run_checker(repo)
+
+        refute status.success?
+        assert_equal "README.md:4: broken relative link: missing-after-container.md\n", stderr
+      end
+    end
+  end
+
   def test_bootstraps_its_bundle_outside_the_repository_without_inherited_bundler
     with_repository do |repo|
       write(repo, "README.md", "# Fixture\n")
@@ -988,7 +1022,7 @@ class DocsValidationAnchorAndIntegrationTest < Minitest::Test
       commit(repo, "Add existing documentation")
       write(repo, "README.md", "See the [archive](legacy.md#archive).\n")
 
-      stdout, stderr, status = run_checker(repo)
+      stdout, stderr, status = run_checker(repo, "--base", "HEAD")
 
       assert status.success?, stderr
       assert_empty stdout

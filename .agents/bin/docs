@@ -66,6 +66,11 @@ def raw_node_source(node, lines)
   position = node.source_position
   first_line = position.fetch(:start_line) - 1
   last_line = position.fetch(:end_line) - 1
+  if node.type == :code_block && node.fenced?
+    # Comrak can truncate the end position of an implicitly closed list fence.
+    # Its parsed content still accounts for each original body line.
+    last_line = [last_line, first_line + node.string_content.count("\n")].max
+  end
   source = lines[first_line..last_line].join
   return source unless node.type == :html_inline
 
@@ -146,8 +151,7 @@ def changed_paths(repo_root:, tracked_paths:, requested_base:)
          end
   return paths_changed_from(repo_root, base) if base
 
-  working_paths = paths_changed_from(repo_root, resolve_commit(repo_root, "HEAD"))
-  working_paths.empty? ? tracked_paths : working_paths
+  tracked_paths
 end
 
 options = { repo_root: File.expand_path("../..", __dir__) }
