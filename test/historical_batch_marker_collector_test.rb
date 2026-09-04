@@ -13,7 +13,10 @@ module HistoricalBatchMarkerCollectorInputValidationTests
     invalid_pull_requests = [
       nil,
       { "repository" => 7, "number" => 7, "url" => "https://github.com/example/alpha/pull/7" },
-      { "repository" => "example/alpha", "number" => "7", "url" => "https://github.com/example/alpha/pull/7" }
+      { "repository" => "example/alpha", "number" => "7", "url" => "https://github.com/example/alpha/pull/7" },
+      { "repository" => "example/alpha", "number" => 7 },
+      { "repository" => "example/alpha", "number" => 7, "url" => 7 },
+      { "repository" => "example/alpha", "number" => 7, "url" => "https://github.com/example/beta/pull/7" }
     ]
 
     invalid_pull_requests.each do |pull_request|
@@ -36,6 +39,18 @@ module HistoricalBatchMarkerCollectorInputValidationTests
       refute status.success?, stdout
       assert_includes stderr, "GraphQL response failed closed"
     end
+  end
+
+  def test_live_collection_rejects_non_hash_rest_rows_without_dereferencing_them
+    projection, stdout, stderr, status = run_live_api(
+      graphql_stdout: JSON.generate(valid_live_graphql_response(comments_truncated: true)),
+      rest_stdout: JSON.generate([[nil]])
+    )
+
+    refute status.success?, stdout
+    assert_equal ["comments_error:https://github.com/example/alpha/pull/7"], projection.fetch("search_errors")
+    assert_includes stderr, "paginated response shape is invalid"
+    assert_includes stderr, "live collection is incomplete or malformed"
   end
 end
 

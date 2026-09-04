@@ -54,7 +54,10 @@ def paginated_bodies(endpoint, response_digest)
   return [nil, stderr] unless status.success?
 
   response_digest.update(stdout)
-  [JSON.parse(stdout).flatten.map { |row| row["body"] }, nil]
+  rows = JSON.parse(stdout).flatten
+  return [nil, "paginated response shape is invalid"] unless rows.all?(Hash)
+
+  [rows.map { |row| row["body"] }, nil]
 end
 
 def valid_fixture?(fixture)
@@ -236,7 +239,8 @@ end
 def live_collection(source, collector_sha256)
   pull_requests = source.fetch("github").fetch("pull_requests")
   unless pull_requests.is_a?(Array) && pull_requests.all? do |pr|
-    pr.is_a?(Hash) && pr["repository"].is_a?(String) && pr["number"].is_a?(Integer)
+    pr.is_a?(Hash) && pr["repository"].is_a?(String) && pr["number"].is_a?(Integer) &&
+    pr["url"] == "https://github.com/#{pr['repository']}/pull/#{pr['number']}"
   end
     abort "live source pull requests are invalid"
   end
