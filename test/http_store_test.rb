@@ -2165,7 +2165,8 @@ class LogHttpBackendTest < HttpEnvTestCase
                                [200, { "entries" => [
                                  { "path" => "events/b1/e1.json", "data" => event, "version" => 1 }
                                ] }],
-                               [400, { "error" => "invalid_prefix" }]
+                               [400, { "error" => "invalid_prefix" }],
+                               [200, { "entries" => [] }]
                              ])
     with_env("AGENT_COORD_API_URL" => stub.base_url, "AGENT_COORD_API_TOKEN" => "tok",
              "AGENT_COORD_STATUS_STATE_ROOT" => root) do
@@ -2177,6 +2178,7 @@ class LogHttpBackendTest < HttpEnvTestCase
       assert_includes err, "archived events not supported by backend"
       refute_includes err, "may be incomplete"
       refute_includes err, "refusing to sync"
+      assert_includes stub.requests.map { |request| request[:path] }, "/v1/state?prefix=claims"
     end
   ensure
     stub.shutdown
@@ -2207,6 +2209,42 @@ class LogHttpBackendTest < HttpEnvTestCase
 
       assert_equal 2, code
       assert_includes err, "refusing to sync an incomplete trail: events"
+    end
+  ensure
+    stub.shutdown
+  end
+
+  # Claims are part of the completeness proof even though the mirror itself is
+  # event-only. A token that cannot read live claims cannot prove that a damaged
+  # claim was not omitted, so --sync must fail closed and explain the fleet-wide
+  # probe without pretending that it was scoped to one work item.
+  def test_log_sync_refuses_when_the_claim_listing_is_forbidden
+    stub = HttpStoreStub.new([[200, { "entries" => [] }], [200, { "entries" => [] }],
+                              [403, { "error" => "forbidden" }]])
+    with_env("AGENT_COORD_API_URL" => stub.base_url, "AGENT_COORD_API_TOKEN" => "tok") do
+      code, _out, err = run_cli(["log", "--sync"], {})
+
+      assert_equal 2, code
+      assert_includes err, "claims not readable by scoped token; claim data would not be reported"
+      assert_includes err, "refusing to sync an incomplete trail: claims"
+      refute_includes err, "a claim for this work item"
+    end
+  ensure
+    stub.shutdown
+  end
+
+  # Unlike archive/*, claims is a live prefix: an older backend that cannot
+  # list it is missing the source answer rather than proving the source empty.
+  def test_log_sync_refuses_when_the_claim_listing_is_unsupported
+    stub = HttpStoreStub.new([[200, { "entries" => [] }], [200, { "entries" => [] }],
+                              [400, { "error" => "invalid_prefix" }]])
+    with_env("AGENT_COORD_API_URL" => stub.base_url, "AGENT_COORD_API_TOKEN" => "tok") do
+      code, _out, err = run_cli(["log", "--sync"], {})
+
+      assert_equal 2, code
+      assert_includes err, "claims not supported by backend; claim data would not be reported"
+      assert_includes err, "refusing to sync an incomplete trail: claims"
+      refute_includes err, "a claim for this work item"
     end
   ensure
     stub.shutdown
