@@ -941,6 +941,49 @@ class DocsValidationAnchorAndIntegrationTest < Minitest::Test
     end
   end
 
+  def test_accepts_quoted_and_unquoted_html_anchor_values
+    ["", "\"", "'"].each do |quote|
+      with_repository do |repo|
+        write(repo, "README.md", <<~MARKDOWN)
+          <a id=#{quote}foo#{quote}></a>
+          <a name=#{quote}bar#{quote}></a>
+          <a id=#{quote}a&amp;b#{quote}></a>
+          <a id="self-closing"/>
+
+          [Foo](#foo) [Bar](#bar) [Entity](#a&b) [Self closing](#self-closing)
+        MARKDOWN
+        track(repo, "README.md")
+
+        stdout, stderr, status = run_checker(repo)
+
+        assert status.success?, stderr
+        assert_empty stdout
+        assert_empty stderr
+      end
+    end
+  end
+
+  def test_does_not_accept_invalid_or_non_anchor_html_attribute_values
+    with_repository do |repo|
+      write(repo, "README.md", <<~MARKDOWN)
+        <a data-id=fake></a>
+        <a id=invalid=value></a>
+        <!-- <a id=commented></a> -->
+        <a id=slash/>
+
+        [Fake](#fake) [Invalid](#invalid) [Commented](#commented) [Slash](#slash)
+      MARKDOWN
+      track(repo, "README.md")
+
+      _stdout, stderr, status = run_checker(repo)
+
+      refute status.success?
+      assert_equal %w[fake invalid commented slash].map { |anchor|
+        "README.md:6: broken anchor: ##{anchor}\n"
+      }.join, stderr
+    end
+  end
+
   def test_checks_anchors_in_unchanged_link_targets
     with_repository do |repo|
       write(repo, "README.md", "See [section](guide.md#present-section).\n")
