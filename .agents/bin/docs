@@ -494,6 +494,7 @@ end
 
 def scan_inline_links(line, line_number, context)
   syntax = without_inline_code_spans(line)
+  syntax = syntax.gsub(/<!--.*?-->/m) { |comment| comment.gsub(/[^\r\n]/, " ") }
   destinations, = inline_link_destinations(syntax)
   destinations.each do |raw_destination, opening|
     destination = link_destination(raw_destination)
@@ -685,6 +686,10 @@ def scan_document(repo_root:, path:, unlabelled_fences:, anchors:, link_targets:
   anchors[path]
 
   File.foreach(File.join(repo_root, path), encoding: "UTF-8").with_index(1) do |line, line_number|
+    if fence && html_comment_content(line, fence.fetch(:container_operations)).nil?
+      unlabelled_fences[path] << fence_finding(fence) if fence.fetch(:unlabelled)
+      fence = nil
+    end
     context[:list_context] = list_context_for_line(line, context[:list_context]) unless fence
     if !fence && consume_html_comment_line?(line, context.fetch(:list_context), indented_code)
       context.delete(:pending_reference)

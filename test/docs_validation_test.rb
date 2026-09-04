@@ -666,6 +666,54 @@ end
 class DocsValidationAnchorAndIntegrationTest < Minitest::Test
   include DocsValidationAssertions
 
+  def test_ends_fenced_code_when_its_container_ends
+    [
+      "> ```text\n> [literal](ignored.md)\n[real](missing.md)\n",
+      "- ```text\n  [literal](ignored.md)\n[real](missing.md)\n",
+      "> - ```text\n>   [literal](ignored.md)\n> [real](missing.md)\n",
+      "- - ```text\n    [literal](ignored.md)\n  [real](missing.md)\n"
+    ].each do |document|
+      assert_document_reports_broken_link(document, line: 3)
+    end
+  end
+
+  def test_preserves_blank_lines_inside_list_fences
+    assert_document_passes("- ```text\n\n  [literal](missing.md)\n  ```\n")
+  end
+
+  def test_ignores_inline_html_comments_but_checks_surrounding_links
+    with_repository do |repo|
+      write(
+        repo, "README.md",
+        "[before](missing-before.md) <!-- [example](ignored.md) --> [after](missing-after.md)\n"
+      )
+      track(repo, "README.md")
+
+      _stdout, stderr, status = run_checker(repo)
+
+      refute status.success?
+      assert_includes stderr, "README.md:1: broken relative link: missing-before.md"
+      assert_includes stderr, "README.md:1: broken relative link: missing-after.md"
+      refute_includes stderr, "ignored.md"
+    end
+  end
+
+  def test_ignores_multiline_inline_html_comments_and_preserves_visible_line_numbers
+    with_repository do |repo|
+      write(
+        repo, "README.md",
+        "> Text <!--\n> [example](ignored.md)\n> --> [real](missing.md)\n"
+      )
+      track(repo, "README.md")
+
+      _stdout, stderr, status = run_checker(repo)
+
+      refute status.success?
+      assert_includes stderr, "README.md:3: broken relative link: missing.md"
+      refute_includes stderr, "ignored.md"
+    end
+  end
+
   def test_reports_a_broken_markdown_anchor
     with_repository do |repo|
       write(repo, "README.md", "See [missing section](guide.md#missing-section).\n")
