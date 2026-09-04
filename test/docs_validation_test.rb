@@ -7,7 +7,53 @@ require "minitest/autorun"
 require "open3"
 require "tmpdir"
 
+module DocsValidationAssertions
+  HTML_COMMENT_CONTAINER_DOCUMENTS = [
+    "> <!--\n> [literal](missing.md)\n> -->\n",
+    "> > <!--\n> > [literal](missing.md)\n> > -->\n",
+    "- <!--\n\n  [literal](missing.md)\n  -->\n",
+    "- - <!--\n\n    [literal](missing.md)\n    -->\n",
+    "> - <!--\n>\n>   [literal](missing.md)\n>   -->\n",
+    "> - - <!--\n>\n>     [literal](missing.md)\n>     -->\n"
+  ].freeze
+  HTML_COMMENT_EXIT_DOCUMENTS = [
+    "> <!--\n[real](missing.md)\n-->\n",
+    "> > <!--\n> [real](missing.md)\n> -->\n",
+    "- <!--\n[real](missing.md)\n-->\n",
+    "- - <!--\n  [real](missing.md)\n  -->\n",
+    "> - <!--\n[real](missing.md)\n-->\n",
+    "> - - <!--\n>   [real](missing.md)\n>   -->\n"
+  ].freeze
+
+  def assert_document_passes(content)
+    with_repository do |repo|
+      write(repo, "README.md", content)
+      track(repo, "README.md")
+
+      stdout, stderr, status = run_checker(repo)
+
+      assert status.success?, stderr
+      assert_empty stdout
+      assert_empty stderr
+    end
+  end
+
+  def assert_document_reports_broken_link(content, line:)
+    with_repository do |repo|
+      write(repo, "README.md", content)
+      track(repo, "README.md")
+
+      _stdout, stderr, status = run_checker(repo)
+
+      refute status.success?
+      assert_includes stderr, "README.md:#{line}: broken relative link: missing.md"
+    end
+  end
+end
+
 class DocsValidationTest < Minitest::Test
+  include DocsValidationAssertions
+
   ROOT = File.expand_path("..", __dir__)
   CHECKER = File.join(ROOT, ".agents/bin/docs")
 
@@ -129,6 +175,81 @@ class DocsValidationTest < Minitest::Test
       assert_empty stdout
       assert_includes stderr, "README.md:3: unlabelled code fence"
       refute_includes stderr, "README.md:5"
+    end
+  end
+
+  def test_rejects_a_backtick_in_a_backtick_fence_info_string
+    assert_document_reports_broken_link("```ruby`invalid\n[broken](missing.md)\n", line: 2)
+  end
+
+  def test_allows_backticks_in_a_tilde_fence_info_string
+    assert_document_passes("~~~markdown `example`\n[example](missing.md)\n~~~\n")
+  end
+
+  def test_ignores_link_syntax_inside_an_indented_code_block
+    assert_document_passes("Example:\n\n    [literal](missing.md)\n")
+  end
+
+  def test_allows_indented_code_after_heading_and_thematic_break_blocks
+    assert_document_passes(<<~MARKDOWN)
+      # ATX
+          [atx](missing-atx.md)
+      Setext
+      ------
+          [setext](missing-setext.md)
+      ----
+          [break](missing-break.md)
+    MARKDOWN
+  end
+
+  def test_allows_indented_code_after_an_empty_atx_heading
+    assert_document_passes("##\n    [literal](missing.md)\n")
+  end
+
+  def test_allows_indented_code_after_an_html_comment_block
+    assert_document_passes("<!--\ncomment\n-->\n    [literal](missing.md)\n")
+  end
+
+  def test_keeps_html_comments_active_inside_their_opening_container
+    DocsValidationAssertions::HTML_COMMENT_CONTAINER_DOCUMENTS.each do |document|
+      assert_document_passes(document)
+    end
+  end
+
+  def test_checks_links_after_their_html_comment_container_ends
+    DocsValidationAssertions::HTML_COMMENT_EXIT_DOCUMENTS.each do |document|
+      assert_document_reports_broken_link(document, line: 2)
+    end
+  end
+
+  def test_ignores_link_syntax_inside_a_container_indented_code_block
+    assert_document_passes("> - Example\n>\n>       [literal](missing.md)\n")
+  end
+
+  def test_ignores_link_syntax_inside_a_blockquote_indented_code_block
+    assert_document_passes(">     [literal](missing.md)\n")
+  end
+
+  def test_checks_a_link_in_a_two_space_list_continuation
+    assert_document_reports_broken_link("- Paragraph\n  [real](missing.md)\n", line: 2)
+  end
+
+  def test_ignores_link_syntax_inside_a_six_space_list_code_block
+    assert_document_passes("- Example\n\n      [literal](missing.md)\n")
+  end
+
+  def test_checks_an_indented_link_that_continues_a_paragraph
+    assert_document_reports_broken_link("Paragraph\n    [real](missing.md)\n", line: 2)
+  end
+
+  def test_checks_lazy_blockquote_paragraph_continuations
+    [
+      "> Paragraph\n    [real](missing.md)\n",
+      "> Paragraph\n     [real](missing.md)\n",
+      "> > Paragraph\n>     [real](missing.md)\n",
+      "> - Paragraph\n      [real](missing.md)\n"
+    ].each do |document|
+      assert_document_reports_broken_link(document, line: 2)
     end
   end
 

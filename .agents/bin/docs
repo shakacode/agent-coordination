@@ -317,7 +317,7 @@ end
 
 def container_heading(line, list_context)
   container_content_candidates(line, list_context).filter_map do |content, _operations|
-    content.match(/\A {0,3}\#{1,6}[ \t]+(.+?)[ \t]*\r?\n?\z/)
+    content.match(/\A {0,3}\#{1,6}(?:[ \t]+(.*?)[ \t]*)?\r?\n?\z/)
   end.first
 end
 
@@ -388,7 +388,8 @@ def consume_fence_line(line:, line_number:, fence:, list_context:, findings:)
   end
 
   opening = container_content_candidates(line, list_context).find do |content, _operations|
-    content.match?(/\A {0,3}(`{3,}|~{3,})([^\r\n]*)/)
+    match = content.match(/\A {0,3}(`{3,}|~{3,})([^\r\n]*)/)
+    match && (match[1].start_with?("~") || !match[2].include?("`"))
   end
   return [false, nil] unless opening
 
@@ -408,39 +409,171 @@ def consume_fence_line(line:, line_number:, fence:, list_context:, findings:)
   ]
 end
 
+def list_item_start?(line)
+  content, = blockquote_content(line)
+  content.match?(/\A {0,3}(?:[-+*]|\d{1,9}[.)])[ \t]+/)
+end
+
+def container_drop?(previous, current)
+  previous && current.length < previous.length && previous.take(current.length) == current
+end
+
+def reset_indented_code_at_container_boundary(line, operations, state)
+  previous = state[:container_operations]
+  changed = previous != operations
+  new_list_item = list_item_start?(line)
+
+  state[:active] = false if changed || new_list_item
+  state[:paragraph_active] = false if new_list_item || (changed && !container_drop?(previous, operations))
+  state[:container_operations] = operations
+end
+
+def consume_indented_code_line(line:, list_context:, state:)
+  container_content, operations = container_content_candidates(line, list_context).last
+  reset_indented_code_at_container_boundary(line, operations, state)
+  indented_content = without_indentation(container_content, 4)
+  if state.fetch(:active)
+    return [true, container_content] if container_content.strip.empty? || indented_content
+
+    state[:active] = false
+  elsif !state.fetch(:paragraph_active) && indented_content
+    state[:active] = true
+    return [true, container_content]
+  end
+
+  [false, container_content]
+end
+
+def scan_markup_line(line, line_number, context)
+  path = context.fetch(:path)
+  list_context = context.fetch(:list_context)
+  anchors = context.fetch(:anchors)
+  link_targets = context.fetch(:link_targets)
+  syntax_line = without_inline_code_spans(line)
+  heading = container_heading(line, list_context)
+  anchors[path][github_anchor(heading[1].to_s, context.fetch(:anchor_counts))] = true if heading
+  syntax_line.scan(/<a\b[^>]*\s(?:id|name)\s*=\s*["']([^"']+)["'][^>]*>/i) do |match|
+    anchors[path][match.fetch(0)] = true
+  end
+
+  if (reference = syntax_line.match(/\A {0,3}\[[^\]]+\]:[ \t]+(<[^>]+>|\S+)/))
+    destination = link_destination(reference[1])
+    link_targets << [path, line_number, destination] if local_destination?(destination)
+  end
+
+  inline_link_destinations(syntax_line).each do |raw_destination|
+    destination = link_destination(raw_destination)
+    link_targets << [path, line_number, destination] if local_destination?(destination)
+  end
+  heading
+end
+
+def paragraph_active_after?(content, heading, was_active)
+  value = content.chomp
+  return false if value.strip.empty? || heading
+  return false if value.match?(/\A {0,3}(?:(?:\*[ \t]*){3,}|(?:_[ \t]*){3,}|(?:-[ \t]*){3,})\z/)
+  return false if was_active && value.match?(/\A {0,3}(?:=+|-+)[ \t]*\z/)
+
+  true
+end
+
+def scan_non_fence_line(line, line_number, context, indented_code)
+  indented, container_content = consume_indented_code_line(
+    line: line,
+    list_context: context.fetch(:list_context),
+    state: indented_code
+  )
+  return if indented
+
+  heading = scan_markup_line(line, line_number, context)
+  indented_code[:paragraph_active] = paragraph_active_after?(
+    container_content,
+    heading,
+    indented_code.fetch(:paragraph_active)
+  )
+end
+
+def reset_code_block_state(state)
+  state[:active] = false
+  state[:paragraph_active] = false
+  state[:container_operations] = nil
+end
+
+def apply_blank_container_operation(content, type, width)
+  return without_indentation(content, width) || (content if content.strip.empty?) unless type == :blockquote
+
+  prefix = content.match(/\A {0,3}>[ \t]?/)
+  content[prefix[0].length..] if prefix
+end
+
+def blank_container_content(line, operations)
+  content = operations.reduce(line) do |candidate, (type, width)|
+    candidate && apply_blank_container_operation(candidate, type, width)
+  end
+  content if content&.strip&.empty?
+end
+
+def html_comment_content(line, operations)
+  apply_container_operations(line, operations) || blank_container_content(line, operations)
+end
+
+def consume_html_comment_line?(line, list_context, state)
+  if (operations = state.fetch(:html_comment_operations))
+    content = html_comment_content(line, operations)
+    if content
+      state[:html_comment_operations] = nil if content.include?("-->")
+      return true
+    end
+
+    state[:html_comment_operations] = nil
+  end
+
+  opening = container_content_candidates(line, list_context).reverse.find do |content, _operations|
+    content.match?(/\A {0,3}<!--/)
+  end
+  return false unless opening
+
+  content, operations = opening
+  marker = content.match(/\A {0,3}<!--/)
+  reset_code_block_state(state)
+  state[:html_comment_operations] = operations unless content[marker.end(0)..].include?("-->")
+  true
+end
+
 def scan_document(repo_root:, path:, unlabelled_fences:, anchors:, link_targets:)
   fence = nil
-  list_context = nil
-  anchor_counts = {}
+  indented_code = {
+    active: false,
+    paragraph_active: false,
+    container_operations: nil,
+    html_comment_operations: nil
+  }
+  context = {
+    path: path,
+    list_context: nil,
+    anchor_counts: {},
+    anchors: anchors,
+    link_targets: link_targets
+  }
   anchors[path]
 
   File.foreach(File.join(repo_root, path), encoding: "UTF-8").with_index(1) do |line, line_number|
-    list_context = list_context_for_line(line, list_context) unless fence
+    context[:list_context] = list_context_for_line(line, context[:list_context]) unless fence
+    next if !fence && consume_html_comment_line?(line, context.fetch(:list_context), indented_code)
+
     consumed, fence = consume_fence_line(
       line: line,
       line_number: line_number,
       fence: fence,
-      list_context: list_context,
+      list_context: context.fetch(:list_context),
       findings: unlabelled_fences[path]
     )
-    next if consumed
-
-    syntax_line = without_inline_code_spans(line)
-    heading = container_heading(line, list_context)
-    anchors[path][github_anchor(heading[1], anchor_counts)] = true if heading
-    syntax_line.scan(/<a\b[^>]*\s(?:id|name)\s*=\s*["']([^"']+)["'][^>]*>/i) do |match|
-      anchors[path][match.fetch(0)] = true
+    if consumed
+      reset_code_block_state(indented_code)
+      next
     end
 
-    if (reference = syntax_line.match(/\A {0,3}\[[^\]]+\]:[ \t]+(<[^>]+>|\S+)/))
-      destination = link_destination(reference[1])
-      link_targets << [path, line_number, destination] if local_destination?(destination)
-    end
-
-    inline_link_destinations(syntax_line).each do |raw_destination|
-      destination = link_destination(raw_destination)
-      link_targets << [path, line_number, destination] if local_destination?(destination)
-    end
+    scan_non_fence_line(line, line_number, context, indented_code)
   end
   unlabelled_fences[path] << fence_finding(fence) if fence&.fetch(:unlabelled)
 end
