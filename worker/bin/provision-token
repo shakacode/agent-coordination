@@ -34,6 +34,7 @@ fi
 
 valid_prefix() {
   local prefix="$1"
+  [[ "$prefix" =~ ^[A-Za-z0-9_./:-]+$ ]] || return 1
   [[ "$prefix" != *..* ]] || return 1
   [[ "$prefix" != *//* ]] || return 1
   [[ "$prefix" != */ ]] || return 1
@@ -168,21 +169,18 @@ elif [ "$READ_PREFIXES_GIVEN" -ne 1 ] && [ "$WRITE_PREFIXES_GIVEN" -ne 1 ]; then
 fi
 
 json_array() {
-  local out="["
-  local separator=""
-  local prefix
-  # Prefix validation disallows quotes and backslashes, so these strings are safe
-  # to embed in the JSON payload and the single-quoted SQL literal below. Keep
-  # valid_prefix in sync if the allowed character set ever changes.
-  for prefix in "$@"; do
-    out="${out}${separator}\"${prefix}\""
-    separator=","
-  done
-  printf '%s]' "$out"
+  "$NODE_BIN" -e 'process.stdout.write(JSON.stringify(process.argv.slice(1)))' -- "$@"
+}
+
+sql_literal() {
+  local value="$1"
+  value=${value//\'/\'\'}
+  printf "'%s'" "$value"
 }
 
 OPENSSL_BIN="${OPENSSL_BIN:-openssl}"
 NPX_BIN="${NPX_BIN:-npx}"
+NODE_BIN="${NODE_BIN:-node}"
 
 TOKEN=$("$OPENSSL_BIN" rand -hex 24)
 HASH=$(printf %s "$TOKEN" | "$OPENSSL_BIN" dgst -sha256 -r | cut -d' ' -f1)
@@ -196,7 +194,9 @@ if [ "${#WRITE_PREFIXES[@]}" -eq 0 ]; then
 else
   WRITE_PREFIX_JSON=$(json_array "${WRITE_PREFIXES[@]}")
 fi
-SQL="INSERT INTO machines (machine, token_hash, read_prefixes, write_prefixes, created_at) VALUES ('${MACHINE}', '${HASH}', '${READ_PREFIX_JSON}', '${WRITE_PREFIX_JSON}', strftime('%Y-%m-%dT%H:%M:%SZ','now'))"
+READ_PREFIX_SQL=$(sql_literal "$READ_PREFIX_JSON")
+WRITE_PREFIX_SQL=$(sql_literal "$WRITE_PREFIX_JSON")
+SQL="INSERT INTO machines (machine, token_hash, read_prefixes, write_prefixes, created_at) VALUES ('${MACHINE}', '${HASH}', ${READ_PREFIX_SQL}, ${WRITE_PREFIX_SQL}, strftime('%Y-%m-%dT%H:%M:%SZ','now'))"
 if [ "$ROTATE" -eq 1 ]; then
   SQL+=" ON CONFLICT(machine) DO UPDATE SET token_hash=excluded.token_hash, read_prefixes=excluded.read_prefixes, write_prefixes=excluded.write_prefixes, created_at=excluded.created_at, revoked_at=NULL"
 fi

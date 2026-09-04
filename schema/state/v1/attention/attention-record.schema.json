@@ -21,6 +21,13 @@
       "enum": ["available", "unavailable", "unknown"],
       "description": "Capability truth only. Unknown or untested behavior remains unknown; unavailable behavior is never simulated."
     },
+    "timestamp": {
+      "type": "string",
+      "format": "date-time",
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}[Tt][0-9]{2}:[0-9]{2}:[0-5][0-9](?:[.][0-9]+)?(?:[Zz]|[+-][0-9]{2}:[0-9]{2})$",
+      "maxLength": 64,
+      "description": "RFC 3339 timestamp with an explicit offset and seconds from 00 through 59; leap-second spellings are excluded so every accepted value has unambiguous ordering in supported runtimes."
+    },
     "source": {
       "type": "object",
       "additionalProperties": false,
@@ -33,7 +40,7 @@
           "type": "string", "format": "uri", "maxLength": 2000,
           "description": "Opaque provider-native launch target for user navigation only; consumers must not fetch it."
         },
-        "last_seen_at": { "type": "string", "format": "date-time", "maxLength": 64 },
+        "last_seen_at": { "$ref": "#/$defs/timestamp" },
         "capabilities": {
           "type": "object",
           "additionalProperties": false,
@@ -82,9 +89,9 @@
         "safe_resume": { "$ref": "#/$defs/non_empty_bounded_text" },
         "source": { "$ref": "#/$defs/source" },
         "source_generation": { "type": "integer", "minimum": 0, "maximum": 9007199254740991 },
-        "created_at": { "type": "string", "format": "date-time", "maxLength": 64 },
-        "refreshed_at": { "type": "string", "format": "date-time", "maxLength": 64 },
-        "resolved_at": { "type": "string", "format": "date-time", "maxLength": 64 }
+        "created_at": { "$ref": "#/$defs/timestamp" },
+        "refreshed_at": { "$ref": "#/$defs/timestamp" },
+        "resolved_at": { "$ref": "#/$defs/timestamp" }
       },
       "allOf": [
         {

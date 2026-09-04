@@ -215,6 +215,18 @@ class ProvisionTokenTest < Minitest::Test
     end
   end
 
+  def test_attention_scope_rejects_multiline_and_control_suffixes_before_provisioning
+    suffixes = ["\nuntrusted", "\n'", "\n\\", "\rforged", "\tforged", "\eforged"]
+
+    %w[--read-prefix --write-prefix].product(suffixes).each do |flag, suffix|
+      _, stderr, status = run_script("m5", "--local", flag, "attention/default/owner/repo#{suffix}")
+
+      refute status.success?, "expected #{flag} suffix #{suffix.inspect} to be rejected"
+      assert_includes stderr, "invalid #{flag.delete_prefix('--').tr('-', ' ')}"
+      refute_path_exists @npx_args_file
+    end
+  end
+
   def test_archive_scope_matches_worker_exact_path_and_prefix_length_boundaries
     active_stem = "claims/o/r/"
     active512 = "#{active_stem}#{'x' * (512 - active_stem.bytesize - '.json'.bytesize)}.json"

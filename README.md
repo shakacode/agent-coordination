@@ -1390,6 +1390,8 @@ limit.
 `attention-resolve` changes the record to `resolved` and adds `resolved_at`
 without deleting its question, source task identity, capability truth, or
 creation time. The Worker does not permit DELETE for the attention family.
+Attention timestamps require an explicit RFC 3339 offset and seconds from 00
+through 59; leap-second spellings are rejected so ordering remains unambiguous.
 
 `attention-get` performs an exact read. Both read commands prefer
 `AGENT_COORD_STATUS_STATE_ROOT`, like `status`. `attention-list` returns open records by

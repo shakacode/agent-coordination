@@ -624,16 +624,12 @@ class AttentionCliTest < Minitest::Test
     assert_success upsert(payload)
   end
 
-  def test_attention_timestamps_reject_arbitrary_leap_seconds
-    ["2026-01-01T12:00:60Z", "2026-01-31T23:59:60Z", "2016-12-31T23:59:60+01:00"].each do |timestamp|
+  def test_attention_timestamps_reject_leap_seconds
+    ["2026-01-01T12:00:60Z", "2016-12-31T23:59:60Z", "2016-12-31T18:59:60-05:00"].each do |timestamp|
       result = upsert(record("created_at" => timestamp))
 
       assert_equal 1, result.status.exitstatus
       assert_includes result.stderr, "attention created_at must be an RFC 3339 timestamp"
-    end
-
-    ["2016-12-31T23:59:60Z", "2016-12-31T18:59:60-05:00"].each do |timestamp|
-      assert_success upsert(record("created_at" => timestamp))
     end
   end
 

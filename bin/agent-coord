@@ -102,12 +102,6 @@ module AgentCoord
   MAX_ATTENTION_RECORD_BYTES = 256 * 1024
   MAX_ATTENTION_KEY_COMPONENT_LENGTH = 160
   MAX_ATTENTION_TIMESTAMP_LENGTH = 64
-  RFC3339_LEAP_SECOND_DATES = %w[
-    1972-06-30 1972-12-31 1973-12-31 1974-12-31 1975-12-31 1976-12-31 1977-12-31
-    1978-12-31 1979-12-31 1981-06-30 1982-06-30 1983-06-30 1985-06-30 1987-12-31
-    1989-12-31 1990-12-31 1992-06-30 1993-06-30 1994-06-30 1995-12-31 1997-06-30
-    1998-12-31 2005-12-31 2008-12-31 2012-06-30 2015-06-30 2016-12-31
-  ].freeze
   STATE_PATH_PATTERN = %r{\A(?:
     claims/[A-Za-z0-9_.:-]+/[A-Za-z0-9_.:-]+/[A-Za-z0-9_.:-]+\.json |
     heartbeats/[A-Za-z0-9_.:-]+\.json |
@@ -7680,7 +7674,7 @@ module AgentCoord
     def validate_attention_timestamp!(value, field)
       match = value.match(RFC3339_PATTERN) if value.is_a?(String)
       unless value.is_a?(String) && value.length <= MAX_ATTENTION_TIMESTAMP_LENGTH && match &&
-             valid_attention_leap_second?(value, match) && gc_valid_datetime?(value)
+             match[:second].to_i < 60 && gc_valid_datetime?(value)
         raise Error,
               "attention #{field} must be an RFC 3339 timestamp of at most #{MAX_ATTENTION_TIMESTAMP_LENGTH} characters"
       end
@@ -7689,15 +7683,6 @@ module AgentCoord
     rescue ArgumentError
       raise Error,
             "attention #{field} must be an RFC 3339 timestamp of at most #{MAX_ATTENTION_TIMESTAMP_LENGTH} characters"
-    end
-
-    def valid_attention_leap_second?(value, match)
-      return true unless match[:second].to_i == 60
-
-      utc = DateTime.iso8601(value, Date::GREGORIAN).new_offset(0)
-      utc.strftime("%H:%M") == "23:59" && RFC3339_LEAP_SECOND_DATES.include?(utc.strftime("%Y-%m-%d"))
-    rescue ArgumentError
-      false
     end
 
     def validate_attention_resolution!(record)
