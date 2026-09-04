@@ -762,6 +762,25 @@ class DocsValidationAnchorAndIntegrationTest < Minitest::Test
     end
   end
 
+  def test_preserves_heading_edge_spaces_left_after_symbol_removal
+    with_repository do |repo|
+      write(
+        repo, "README.md",
+        "[leading](guide.md#-getting-started) [trailing](guide.md#overview-) " \
+        "[duplicate](guide.md#-getting-started-1) [ordinary](guide.md#ordinary-heading)\n"
+      )
+      write(
+        repo, "guide.md",
+        "# 🚀 Getting Started\n\n# Overview ✨\n\n# 🚀 Getting Started\n\n#   Ordinary Heading   \n"
+      )
+      track(repo, "README.md", "guide.md")
+
+      _stdout, stderr, status = run_checker(repo)
+
+      assert status.success?, stderr
+    end
+  end
+
   def test_checks_image_destinations_inside_link_labels
     with_repository do |repo|
       write(

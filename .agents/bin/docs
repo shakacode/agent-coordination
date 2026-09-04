@@ -22,7 +22,7 @@ def heading_text(node)
 end
 
 def github_anchor(heading, used)
-  anchor = heading.downcase.gsub(/[^\p{Alnum}\p{M}\s_-]/u, "").strip.gsub(/\s/, "-")
+  anchor = heading.downcase.gsub(/[^\p{Alnum}\p{M}\s_-]/u, "").gsub(/\s/, "-")
   candidate = anchor
   suffix = 0
   while used[candidate]
