@@ -89,6 +89,68 @@ module HistoricalBatchMarkerCollectorInputValidationTests
     end
   end
 
+  def test_graphql_body_values_must_be_strings
+    malformed_responses = [
+      valid_live_graphql_response.tap { |response| response.dig("data", "repository", "pr7")["body"] = nil },
+      valid_live_graphql_response.tap do |response|
+        response.dig("data", "repository", "pr7", "comments", "nodes") << {}
+      end,
+      valid_live_graphql_response.tap do |response|
+        response.dig("data", "repository", "pr7", "reviews", "nodes") << { "body" => 7 }
+      end,
+      valid_live_graphql_response.tap do |response|
+        comments = { "pageInfo" => { "hasNextPage" => false }, "nodes" => [{ "body" => nil }] }
+        response.dig("data", "repository", "pr7", "reviewThreads", "nodes") << { "comments" => comments }
+      end
+    ]
+
+    malformed_responses.each do |response|
+      stdout, stderr, status = run_graphql_fixture(response)
+
+      refute status.success?, stdout
+      assert_includes stderr, "GraphQL response failed closed"
+    end
+  end
+
+  def test_live_collection_rejects_case_insensitive_duplicate_sources
+    source = {
+      "github" => {
+        "pull_requests" => [
+          { "repository" => "example/alpha", "number" => 7, "url" => "https://github.com/example/alpha/pull/7" },
+          { "repository" => "Example/Alpha", "number" => 7, "url" => "https://github.com/Example/Alpha/pull/7" }
+        ]
+      }
+    }
+
+    _projection, stdout, stderr, status = run_live_api(
+      graphql_stdout: JSON.generate(valid_live_graphql_response), rest_stdout: "[]", source: source
+    )
+
+    refute status.success?, stdout
+    assert_includes stderr, "live source pull requests are invalid"
+  end
+
+  def test_paginated_rest_result_must_extend_the_graphql_prefix
+    response = valid_live_graphql_response(comments_truncated: true)
+    response.dig("data", "repository", "pr7", "comments", "nodes") << { "body" => "GraphQL prefix" }
+    invalid_rest_pages = [
+      [],
+      [{ "body" => "GraphQL prefix" }],
+      [{ "body" => "different" }, { "body" => "additional" }]
+    ]
+
+    invalid_rest_pages.each do |rows|
+      projection, stdout, stderr, status = run_live_api(
+        graphql_stdout: JSON.generate(response), rest_stdout: JSON.generate([rows])
+      )
+
+      refute status.success?, stdout
+      assert_equal ["comments_error:https://github.com/example/alpha/pull/7"], projection.fetch("search_errors")
+      assert_includes stderr, "paginated response does not extend GraphQL prefix"
+      assert_includes stderr, "live collection is incomplete or malformed"
+    end
+  end
+
   def run_json_mode_payload(mode, payload)
     Dir.mktmpdir("historical-marker-json-input") do |dir|
       input_path = File.join(dir, "input.json")

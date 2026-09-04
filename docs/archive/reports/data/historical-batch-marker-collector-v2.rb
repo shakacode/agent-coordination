@@ -244,14 +244,19 @@ def fixture_collection(fixture, collector_sha256)
   }
 end
 
-def live_collection(source, collector_sha256)
-  pull_requests = source.fetch("github").fetch("pull_requests")
-  unless pull_requests.is_a?(Array) && pull_requests.all? do |pr|
+def valid_live_pull_requests?(pull_requests)
+  return false unless pull_requests.is_a?(Array) && pull_requests.all? do |pr|
     pr.is_a?(Hash) && pr["repository"].is_a?(String) && pr["number"].is_a?(Integer) &&
     pr["url"] == "https://github.com/#{pr['repository']}/pull/#{pr['number']}"
   end
-    abort "live source pull requests are invalid"
-  end
+
+  identities = pull_requests.map { |pr| [pr.fetch("repository").downcase, pr.fetch("number")] }
+  identities.uniq.length == identities.length
+end
+
+def live_collection(source, collector_sha256)
+  pull_requests = source.fetch("github").fetch("pull_requests")
+  abort "live source pull requests are invalid" unless valid_live_pull_requests?(pull_requests)
 
   query_digest = Digest::SHA256.new
   response_digest = Digest::SHA256.new
@@ -368,16 +373,21 @@ def collect_live_pr(pull_request, node, response_digest, errors)
 end
 
 def valid_live_pr_node?(node)
-  return false unless node.is_a?(Hash) && node.key?("body")
-  return false unless %w[comments reviews reviewThreads].all? { |name| valid_connection?(node[name]) }
+  return false unless node.is_a?(Hash) && node["body"].is_a?(String)
+  return false unless %w[comments reviews].all? { |name| valid_body_connection?(node[name]) }
+  return false unless valid_connection?(node["reviewThreads"])
 
-  node.dig("reviewThreads", "nodes").all? { |thread| valid_connection?(thread["comments"]) }
+  node.dig("reviewThreads", "nodes").all? { |thread| valid_body_connection?(thread["comments"]) }
 end
 
 def valid_connection?(connection)
   connection.is_a?(Hash) && connection["nodes"].is_a?(Array) &&
     connection["nodes"].all?(Hash) &&
     [true, false].include?(connection.dig("pageInfo", "hasNextPage"))
+end
+
+def valid_body_connection?(connection)
+  valid_connection?(connection) && connection["nodes"].all? { |row| row["body"].is_a?(String) }
 end
 
 def paginate_live_surfaces(pull_request, node, context)
@@ -412,9 +422,11 @@ end
 
 def replace_paginated_surface(pull_request, field, endpoint, context)
   bodies, error = paginated_bodies(endpoint, context.fetch(:response_digest))
-  if bodies
+  prefix = context.fetch(:surfaces).fetch(field)
+  if bodies && bodies.length > prefix.length && bodies.first(prefix.length) == prefix
     context.fetch(:surfaces)[field] = bodies
   else
+    error ||= "paginated response does not extend GraphQL prefix"
     context.fetch(:errors) << "#{field}_error:#{pull_request.fetch('url')}"
     warn utf8_diagnostic(error)
   end
