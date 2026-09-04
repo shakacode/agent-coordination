@@ -45,7 +45,7 @@ def github_anchor(heading, used)
            .downcase
            .gsub(/[^\p{Alnum}\p{M}\s_-]/u, "")
            .strip
-           .gsub(/\s+/, "-")
+           .gsub(/\s/, "-")
   candidate = anchor
   suffix = 0
   while used[candidate]
@@ -214,7 +214,7 @@ def inline_link_destination_start(line, cursor)
   end
 end
 
-def inline_link_destinations(line)
+def inline_link_destinations(line, images_only: false)
   destinations = []
   cursor = 0
   while (candidate = inline_link_destination_start(line, cursor))
@@ -225,7 +225,16 @@ def inline_link_destinations(line)
       next
     end
 
-    destinations << [line[destination_start...closing], opening]
+    unless images_only
+      label_start = opening + 1
+      label_destinations, = inline_link_destinations(line[label_start...(destination_start - 2)], images_only: true)
+      label_destinations.each do |destination, label_opening|
+        destinations << [destination, label_start + label_opening]
+      end
+    end
+    if !images_only || (opening.positive? && line[opening - 1] == "!" && !escaped_at?(line, opening - 1))
+      destinations << [line[destination_start...closing], opening]
+    end
     cursor = closing + 1
   end
   [destinations, nil]
@@ -539,7 +548,7 @@ def scan_markup_line(line, content, line_number, context)
   end
 
   reference_line = false
-  if (reference = syntax_line.match(/\A {0,3}\[[^\]]+\]:[ \t]+(<[^>]+>|\S+)/))
+  if (reference = syntax_line.match(/\A {0,3}\[[^\]]+\]:[ \t]*(<[^>]+>|\S+)/))
     destination = link_destination(reference[1])
     link_targets << [path, line_number, destination] if local_destination?(destination)
     reference_line = true

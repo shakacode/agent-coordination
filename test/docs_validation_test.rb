@@ -666,6 +666,50 @@ end
 class DocsValidationAnchorAndIntegrationTest < Minitest::Test
   include DocsValidationAssertions
 
+  def test_preserves_repeated_heading_spaces_in_github_anchors
+    with_repository do |repo|
+      write(repo, "README.md", "[contract](guide.md#legacy--non-stack-cli-contract-and-exit-codes)\n")
+      write(repo, "guide.md", "# Legacy / Non-Stack CLI Contract And Exit Codes\n")
+      track(repo, "README.md", "guide.md")
+
+      _stdout, stderr, status = run_checker(repo)
+
+      assert status.success?, stderr
+    end
+  end
+
+  def test_checks_image_destinations_inside_link_labels
+    with_repository do |repo|
+      write(
+        repo, "README.md",
+        "[![preview](missing.png)](https://example.com)\n" \
+        "[![valid](present.png)](https://example.com)\n" \
+        "[outer](https://example.com/![literal](ignored.png))\n" \
+        "[title](https://example.com \"![literal](ignored-title.png)\")\n"
+      )
+      write(repo, "present.png", "image fixture")
+      track(repo, "README.md", "present.png")
+
+      _stdout, stderr, status = run_checker(repo)
+
+      refute status.success?
+      assert_equal "README.md:1: broken relative link: missing.png\n", stderr
+    end
+  end
+
+  def test_checks_reference_definitions_without_postcolon_whitespace
+    with_repository do |repo|
+      write(repo, "README.md", "[guide]:missing.md\n[valid]:present.md\n[external]:https://example.com\n")
+      write(repo, "present.md", "# Present\n")
+      track(repo, "README.md", "present.md")
+
+      _stdout, stderr, status = run_checker(repo)
+
+      refute status.success?
+      assert_equal "README.md:1: broken relative link: missing.md\n", stderr
+    end
+  end
+
   def test_ends_fenced_code_when_its_container_ends
     [
       "> ```text\n> [literal](ignored.md)\n[real](missing.md)\n",
