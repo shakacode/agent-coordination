@@ -111,7 +111,7 @@ def collect_markers(pull_request, matches, findings)
     texts.compact.each do |text|
       exact_html_markers(text).each { |marker| matches << marker_row(pull_request, surface, marker) }
       blocks = review_finding_blocks(text)
-      malformed += 1 if review_finding_fence_candidate?(text) && blocks.empty?
+      malformed += review_finding_fence_candidate_count(text) - blocks.length
       blocks.each do |raw|
         malformed += parse_review_findings(raw, pull_request, surface, matches, findings)
       end
@@ -129,8 +129,8 @@ def review_finding_blocks(text)
   text.scan(/^```json[ \t]+review-findings\n(.*?)^```\s*$/m).flatten
 end
 
-def review_finding_fence_candidate?(text)
-  text.match?(/^```json[ \t]+review-findings(?:\s|$)/)
+def review_finding_fence_candidate_count(text)
+  text.scan(/^```json[ \t]+review-findings(?:\s|$)/).length
 end
 
 def marker_row(pull_request, surface, marker)

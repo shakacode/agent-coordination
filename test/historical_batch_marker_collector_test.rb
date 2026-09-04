@@ -166,6 +166,18 @@ module HistoricalBatchMarkerCollectorInputValidationTests
     end
   end
 
+  def test_unmatched_review_finding_fence_is_counted_after_a_valid_block
+    fixture = JSON.parse(File.read(self.class::FIXTURE))
+    body = fixture.dig("pull_requests", 0, "surfaces", "body", 0)
+    fixture.dig("pull_requests", 0, "surfaces", "body")[0] = "#{body}\n```json review-findings\n{"
+
+    projection, stderr, status = collect_fixture_result(fixture, collector: self.class::LIVE_COLLECTOR)
+
+    refute status.success?
+    assert_equal 1, projection.fetch("malformed_severity_candidates")
+    assert_includes stderr, "malformed severity candidate"
+  end
+
   def run_json_mode_payload(mode, payload)
     Dir.mktmpdir("historical-marker-json-input") do |dir|
       input_path = File.join(dir, "input.json")
@@ -815,20 +827,24 @@ class HistoricalBatchMarkerCollectorTest < Minitest::Test
     projection
   end
 
-  def collect_fixture_result(fixture)
+  def collect_fixture_result(fixture, collector: ARCHIVED_COLLECTOR)
     Dir.mktmpdir("marker-collector-test") do |dir|
       fixture_path = File.join(dir, "fixture.json")
       output_path = File.join(dir, "projection.json")
       File.write(fixture_path, JSON.pretty_generate(fixture))
-      stdout, stderr, status = run_archived_collector("fixture", fixture_path, output_path)
+      stdout, stderr, status = run_collector(collector, "fixture", fixture_path, output_path)
       projection = File.exist?(output_path) ? JSON.parse(File.read(output_path)) : nil
       [projection, [stdout, stderr].reject(&:empty?).join("\n"), status]
     end
   end
 
-  def run_archived_collector(*arguments)
+  def run_archived_collector(*)
+    run_collector(ARCHIVED_COLLECTOR, *)
+  end
+
+  def run_collector(collector, *arguments)
     Bundler.with_unbundled_env do
-      Open3.capture3(RbConfig.ruby, ARCHIVED_COLLECTOR, *arguments)
+      Open3.capture3(RbConfig.ruby, collector, *arguments)
     end
   end
 
