@@ -1,6 +1,7 @@
 # frozen_string_literal: true
 
 require "bundler"
+require "base64"
 require "json"
 require "minitest/autorun"
 require "open3"
@@ -9,9 +10,13 @@ require "tmpdir"
 
 class HistoricalBatchMarkerCollectorTest < Minitest::Test
   ROOT = File.expand_path("..", __dir__)
-  COLLECTOR = File.join(
+  ARCHIVED_COLLECTOR = File.join(
     ROOT,
     "docs/archive/reports/data/2026-07-18-historical-batch-baseline-marker-collector.rb"
+  )
+  LIVE_COLLECTOR = File.join(
+    ROOT,
+    "docs/archive/reports/data/historical-batch-marker-collector-v2.rb"
   )
   REVIEW_VALIDATOR = File.join(
     ROOT,
@@ -66,7 +71,7 @@ class HistoricalBatchMarkerCollectorTest < Minitest::Test
   end
 
   def test_validate_accepts_frozen_projection
-    _stdout, stderr, status = run_collector("validate", SOURCE)
+    _stdout, stderr, status = run_archived_collector("validate", SOURCE)
 
     assert status.success?, stderr
   end
@@ -79,7 +84,7 @@ class HistoricalBatchMarkerCollectorTest < Minitest::Test
     Dir.mktmpdir("marker-projection-test") do |dir|
       path = File.join(dir, "source.json")
       File.write(path, JSON.generate(source))
-      _stdout, stderr, status = run_collector("validate", path)
+      _stdout, stderr, status = run_archived_collector("validate", path)
 
       refute status.success?
       assert_includes stderr, "marker projection failed validation"
@@ -257,6 +262,148 @@ class HistoricalBatchMarkerCollectorTest < Minitest::Test
     assert_includes stderr, "pagination is incomplete"
   end
 
+  def test_live_collection_normalizes_valid_utf8_from_graphql_and_rest_under_ascii_locale
+    graphql_response = valid_live_graphql_response(comments_truncated: true)
+    rest_response = [[{ "body" => "REST naïve" }]]
+
+    projection, stdout, stderr, status = run_live_api(
+      graphql_stdout: JSON.generate(graphql_response),
+      rest_stdout: JSON.generate(rest_response)
+    )
+
+    assert status.success?, [stdout, stderr].reject(&:empty?).join("\n")
+    assert_equal 1, projection.dig("collection_provenance", "surface_row_counts", "comments")
+    assert_equal 1, projection.dig("collection_provenance", "pagination_requests", "comments")
+    assert_equal true, projection.dig("collection_provenance", "pagination_complete")
+  end
+
+  def test_live_collection_scrubs_diagnostic_bytes_without_rewriting_payloads
+    invalid_diagnostic = "gh failed: caf\xFF".b
+
+    _projection, stdout, stderr, status = run_live_api(
+      graphql_stdout: "",
+      rest_stdout: "[]",
+      graphql_stderr: invalid_diagnostic,
+      graphql_status: 1
+    )
+
+    refute status.success?, stdout
+    assert_predicate stderr, :valid_encoding?
+    assert_includes stderr, "gh failed: caf�"
+    assert_includes stderr, "live collection is incomplete or malformed"
+  end
+
+  def test_live_collection_ignores_malformed_stdout_when_graphql_command_fails
+    projection, stdout, stderr, status = run_live_api(
+      graphql_stdout: "unused caf\xFF".b,
+      rest_stdout: "[]",
+      graphql_stderr: "graphql failed",
+      graphql_status: 1
+    )
+
+    refute status.success?, stdout
+    refute_nil projection
+    assert_equal ["graphql_error:example/alpha"], projection.fetch("search_errors")
+    assert_includes stderr, "graphql failed"
+    refute_includes stderr, "invalid byte sequence in UTF-8"
+  end
+
+  def test_live_collection_ignores_malformed_stdout_when_rest_command_fails
+    projection, stdout, _stderr, status = run_live_api(
+      graphql_stdout: JSON.generate(valid_live_graphql_response(comments_truncated: true)),
+      rest_stdout: "unused caf\xFF".b,
+      rest_status: 1
+    )
+
+    refute status.success?, stdout
+    refute_nil projection
+    assert_equal ["comments_error:https://github.com/example/alpha/pull/7"], projection.fetch("search_errors")
+  end
+
+  def test_live_collection_rejects_malformed_utf8_api_payload_without_scrubbing
+    malformed_payload = JSON.generate(valid_live_graphql_response).b.sub(
+      "GraphQL café".b,
+      "GraphQL caf\xFF".b
+    )
+
+    projection, stdout, stderr, status = run_live_api(
+      graphql_stdout: malformed_payload,
+      rest_stdout: "[]"
+    )
+
+    refute status.success?, stdout
+    assert_nil projection
+    assert_match(/invalid byte sequence in UTF-8|JSON::ParserError|Encoding::InvalidByteSequenceError/, stderr)
+  end
+
+  def test_live_collection_rejects_malformed_utf8_in_ignored_graphql_field
+    response = valid_live_graphql_response.merge("extensions" => { "ignored" => "café" })
+    malformed_payload = JSON.generate(response).b.sub("café".b, "caf\xFF".b)
+
+    projection, stdout, stderr, status = run_live_api(
+      graphql_stdout: malformed_payload,
+      rest_stdout: "[]"
+    )
+
+    refute status.success?, stdout
+    assert_nil projection
+    assert_match(/invalid byte sequence in UTF-8|JSON::ParserError|Encoding::InvalidByteSequenceError/, stderr)
+  end
+
+  def test_live_collection_rejects_malformed_json_api_payload
+    projection, stdout, stderr, status = run_live_api(
+      graphql_stdout: '{"data":',
+      rest_stdout: "[]"
+    )
+
+    refute status.success?, stdout
+    assert_equal ["graphql_response_invalid:example/alpha"], projection.fetch("search_errors")
+    assert_includes stderr, "live collection is incomplete or malformed"
+  end
+
+  def test_live_collection_rejects_malformed_utf8_rest_payload_without_scrubbing
+    malformed_payload = JSON.generate([[{ "body" => "REST naïve" }]]).b.sub(
+      "REST naïve".b,
+      "REST na\xFFve".b
+    )
+
+    projection, stdout, stderr, status = run_live_api(
+      graphql_stdout: JSON.generate(valid_live_graphql_response(comments_truncated: true)),
+      rest_stdout: malformed_payload
+    )
+
+    refute status.success?, stdout
+    assert_nil projection
+    assert_match(/invalid byte sequence in UTF-8|JSON::ParserError|Encoding::InvalidByteSequenceError/, stderr)
+  end
+
+  def test_live_collection_rejects_malformed_utf8_in_ignored_rest_field
+    malformed_payload = JSON.generate([[{ "body" => nil, "ignored" => "café" }]]).b.sub(
+      "café".b,
+      "caf\xFF".b
+    )
+
+    projection, stdout, stderr, status = run_live_api(
+      graphql_stdout: JSON.generate(valid_live_graphql_response(comments_truncated: true)),
+      rest_stdout: malformed_payload
+    )
+
+    refute status.success?, stdout
+    assert_nil projection
+    assert_match(/invalid byte sequence in UTF-8|JSON::ParserError|Encoding::InvalidByteSequenceError/, stderr)
+  end
+
+  def test_live_collection_rejects_malformed_json_rest_payload
+    projection, stdout, stderr, status = run_live_api(
+      graphql_stdout: JSON.generate(valid_live_graphql_response(comments_truncated: true)),
+      rest_stdout: '[[{"body":'
+    )
+
+    refute status.success?, stdout
+    assert_nil projection
+    assert_match(/JSON::ParserError/, stderr)
+  end
+
   def test_malformed_severity_candidate_is_rejected
     fixture = JSON.parse(File.read(FIXTURE))
     body = fixture.dig("pull_requests", 0, "surfaces", "body", 0)
@@ -288,6 +435,26 @@ class HistoricalBatchMarkerCollectorTest < Minitest::Test
 
     refute status.success?
     assert_includes stderr, "graphql_response_error:example/alpha"
+  end
+
+  def test_graphql_fixture_normalizes_valid_utf8_under_ascii_locale
+    stdout, stderr, status = run_graphql_fixture(valid_live_graphql_response, ascii_locale: true)
+
+    assert status.success?, stderr
+    assert_equal "GRAPHQL_RESPONSE_OK\n", stdout
+  end
+
+  def test_graphql_fixture_rejects_malformed_utf8_without_scrubbing
+    malformed_payload = JSON.generate(valid_live_graphql_response).b.sub(
+      "GraphQL café".b,
+      "GraphQL caf\xFF".b
+    )
+
+    stdout, stderr, status = run_graphql_fixture_payload(malformed_payload, ascii_locale: true)
+
+    refute status.success?, stdout
+    assert_empty stdout
+    assert_equal "invalid byte sequence in UTF-8\n", stderr
   end
 
   def test_missing_graphql_connection_shape_fails_closed
@@ -479,7 +646,7 @@ class HistoricalBatchMarkerCollectorTest < Minitest::Test
     Dir.mktmpdir("marker-projection-test") do |dir|
       path = File.join(dir, "source.json")
       File.write(path, JSON.generate(document))
-      run_collector("validate", path)
+      run_archived_collector("validate", path)
     end
   end
 
@@ -494,23 +661,118 @@ class HistoricalBatchMarkerCollectorTest < Minitest::Test
       fixture_path = File.join(dir, "fixture.json")
       output_path = File.join(dir, "projection.json")
       File.write(fixture_path, JSON.pretty_generate(fixture))
-      stdout, stderr, status = run_collector("fixture", fixture_path, output_path)
+      stdout, stderr, status = run_archived_collector("fixture", fixture_path, output_path)
       projection = File.exist?(output_path) ? JSON.parse(File.read(output_path)) : nil
       [projection, [stdout, stderr].reject(&:empty?).join("\n"), status]
     end
   end
 
-  def run_collector(*arguments)
+  def run_archived_collector(*arguments)
     Bundler.with_unbundled_env do
-      Open3.capture3(RbConfig.ruby, COLLECTOR, *arguments)
+      Open3.capture3(RbConfig.ruby, ARCHIVED_COLLECTOR, *arguments)
     end
   end
 
-  def run_graphql_fixture(response)
+  def run_graphql_fixture(response, ascii_locale: false)
+    run_graphql_fixture_payload(JSON.generate(response), ascii_locale: ascii_locale)
+  end
+
+  def run_graphql_fixture_payload(payload, ascii_locale: false)
     Dir.mktmpdir("graphql-marker-fixture") do |dir|
       path = File.join(dir, "response.json")
-      File.write(path, JSON.generate(response))
-      run_collector("graphql-fixture", path, "example/alpha")
+      File.binwrite(path, payload)
+      environment = ascii_locale ? ascii_locale_environment(dir) : {}
+      Bundler.with_unbundled_env do
+        Open3.capture3(environment, RbConfig.ruby, LIVE_COLLECTOR, "graphql-fixture", path, "example/alpha")
+      end
     end
+  end
+
+  def run_live_api(graphql_stdout:, rest_stdout:, graphql_stderr: "", graphql_status: 0, rest_status: 0)
+    Dir.mktmpdir("historical-marker-live-api") do |dir|
+      write_fake_gh(
+        dir,
+        graphql_stdout: graphql_stdout,
+        rest_stdout: rest_stdout,
+        graphql_stderr: graphql_stderr,
+        statuses: { graphql: graphql_status, rest: rest_status }
+      )
+      source_path, output_path = write_live_source(dir)
+      stdout, stderr, status = Bundler.with_unbundled_env do
+        Open3.capture3(
+          ascii_locale_environment(dir),
+          RbConfig.ruby,
+          LIVE_COLLECTOR,
+          "live",
+          source_path,
+          output_path
+        )
+      end
+      projection = JSON.parse(File.read(output_path)) if File.file?(output_path)
+      [projection, stdout, stderr, status]
+    end
+  end
+
+  def write_live_source(dir)
+    source_path = File.join(dir, "source.json")
+    output_path = File.join(dir, "projection.json")
+    source = {
+      "github" => {
+        "pull_requests" => [
+          {
+            "repository" => "example/alpha",
+            "number" => 7,
+            "url" => "https://github.com/example/alpha/pull/7"
+          }
+        ]
+      }
+    }
+    File.write(source_path, JSON.generate(source))
+    [source_path, output_path]
+  end
+
+  def ascii_locale_environment(dir)
+    {
+      "LC_ALL" => "C",
+      "LANG" => "C",
+      "PATH" => [dir, ENV.fetch("PATH")].join(File::PATH_SEPARATOR)
+    }
+  end
+
+  def valid_live_graphql_response(comments_truncated: false)
+    {
+      "data" => {
+        "repository" => {
+          "pr7" => {
+            "url" => "https://github.com/example/alpha/pull/7",
+            "body" => "GraphQL café",
+            "comments" => { "pageInfo" => { "hasNextPage" => comments_truncated }, "nodes" => [] },
+            "reviews" => { "pageInfo" => { "hasNextPage" => false }, "nodes" => [] },
+            "reviewThreads" => { "pageInfo" => { "hasNextPage" => false }, "nodes" => [] }
+          }
+        }
+      }
+    }
+  end
+
+  def write_fake_gh(dir, graphql_stdout:, rest_stdout:, graphql_stderr:, statuses:)
+    encoded_graphql = Base64.strict_encode64(graphql_stdout.b)
+    encoded_rest = Base64.strict_encode64(rest_stdout.b)
+    encoded_graphql_stderr = Base64.strict_encode64(graphql_stderr.b)
+    script = <<~RUBY
+      #!/usr/bin/env ruby
+      require "base64"
+      graphql = ARGV.include?("graphql")
+      stdout = graphql ? #{encoded_graphql.dump} : #{encoded_rest.dump}
+      stderr = graphql ? #{encoded_graphql_stderr.dump} : ""
+      STDOUT.binmode
+      STDERR.binmode
+      STDOUT.write(Base64.strict_decode64(stdout))
+      STDERR.write(Base64.strict_decode64(stderr)) unless stderr.empty?
+      exit(graphql ? #{statuses.fetch(:graphql)} : #{statuses.fetch(:rest)})
+    RUBY
+    path = File.join(dir, "gh")
+    File.write(path, script)
+    File.chmod(0o755, path)
   end
 end
