@@ -235,6 +235,12 @@ end
 
 def live_collection(source, collector_sha256)
   pull_requests = source.fetch("github").fetch("pull_requests")
+  unless pull_requests.is_a?(Array) && pull_requests.all? do |pr|
+    pr.is_a?(Hash) && pr["repository"].is_a?(String) && pr["number"].is_a?(Integer)
+  end
+    abort "live source pull requests are invalid"
+  end
+
   query_digest = Digest::SHA256.new
   response_digest = Digest::SHA256.new
   graphql_requests = 0
@@ -357,6 +363,7 @@ end
 
 def valid_connection?(connection)
   connection.is_a?(Hash) && connection["nodes"].is_a?(Array) &&
+    connection["nodes"].all?(Hash) &&
     [true, false].include?(connection.dig("pageInfo", "hasNextPage"))
 end
 

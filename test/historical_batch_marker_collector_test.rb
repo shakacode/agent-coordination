@@ -8,6 +8,37 @@ require "open3"
 require "rbconfig"
 require "tmpdir"
 
+module HistoricalBatchMarkerCollectorInputValidationTests
+  def test_live_collection_rejects_malformed_source_pull_requests_before_query_construction
+    invalid_pull_requests = [
+      nil,
+      { "repository" => 7, "number" => 7, "url" => "https://github.com/example/alpha/pull/7" },
+      { "repository" => "example/alpha", "number" => "7", "url" => "https://github.com/example/alpha/pull/7" }
+    ]
+
+    invalid_pull_requests.each do |pull_request|
+      source = { "github" => { "pull_requests" => [pull_request] } }
+      _projection, stdout, stderr, status = run_live_api(
+        graphql_stdout: JSON.generate(valid_live_graphql_response), rest_stdout: "[]", source: source
+      )
+
+      refute status.success?, stdout
+      assert_includes stderr, "live source pull requests are invalid"
+    end
+  end
+
+  def test_non_hash_graphql_connection_nodes_fail_closed
+    %w[comments reviewThreads].each do |connection|
+      response = valid_live_graphql_response
+      response.dig("data", "repository", "pr7", connection, "nodes") << nil
+      stdout, stderr, status = run_graphql_fixture(response)
+
+      refute status.success?, stdout
+      assert_includes stderr, "GraphQL response failed closed"
+    end
+  end
+end
+
 class HistoricalBatchMarkerCollectorTest < Minitest::Test
   ROOT = File.expand_path("..", __dir__)
   ARCHIVED_COLLECTOR = File.join(
@@ -688,16 +719,16 @@ class HistoricalBatchMarkerCollectorTest < Minitest::Test
     end
   end
 
-  def run_live_api(graphql_stdout:, rest_stdout:, graphql_stderr: "", graphql_status: 0, rest_status: 0)
+  def run_live_api(graphql_stdout:, rest_stdout:, source: nil, graphql_stderr: "", **statuses)
     Dir.mktmpdir("historical-marker-live-api") do |dir|
       write_fake_gh(
         dir,
         graphql_stdout: graphql_stdout,
         rest_stdout: rest_stdout,
         graphql_stderr: graphql_stderr,
-        statuses: { graphql: graphql_status, rest: rest_status }
+        statuses: { graphql: statuses.fetch(:graphql_status, 0), rest: statuses.fetch(:rest_status, 0) }
       )
-      source_path, output_path = write_live_source(dir)
+      source_path, output_path = write_live_source(dir, source: source)
       stdout, stderr, status = Bundler.with_unbundled_env do
         Open3.capture3(
           ascii_locale_environment(dir),
@@ -713,10 +744,10 @@ class HistoricalBatchMarkerCollectorTest < Minitest::Test
     end
   end
 
-  def write_live_source(dir)
+  def write_live_source(dir, source: nil)
     source_path = File.join(dir, "source.json")
     output_path = File.join(dir, "projection.json")
-    source = {
+    source ||= {
       "github" => {
         "pull_requests" => [
           {
@@ -776,3 +807,5 @@ class HistoricalBatchMarkerCollectorTest < Minitest::Test
     File.chmod(0o755, path)
   end
 end
+
+HistoricalBatchMarkerCollectorTest.include(HistoricalBatchMarkerCollectorInputValidationTests)
