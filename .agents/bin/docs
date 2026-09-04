@@ -90,8 +90,14 @@ end
 def record_html_anchors(node, lines, anchors)
   source = raw_node_source(node, lines)
   source = source.gsub(/<!--.*?-->/m, "")
-  source.scan(/<a\b[^>]*\s(?:id|name)\s*=\s*(?:"([^"]+)"|'([^']+)'|([^\s"'=<>`]+))(?=\s|\/?>)[^>]*>/i) do |match|
-    anchors[CGI.unescapeHTML(match.compact.first)] = true
+  attribute = %r{\s+([a-z_:][a-z0-9_.:-]*)(?:\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'=<>`]+)))?(?=\s|/?>)}i
+  source.scan(%r{<a(?=\s|/?>)(?:[^"'<>]|"[^"]*"|'[^']*')*>}i) do |tag|
+    tag.scan(attribute) do |name, *values|
+      next unless %w[id name].include?(name.downcase)
+
+      value = values.compact.first
+      anchors[CGI.unescapeHTML(value)] = true if value && !value.empty?
+    end
   end
 end
 

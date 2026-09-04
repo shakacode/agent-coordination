@@ -984,6 +984,26 @@ class DocsValidationAnchorAndIntegrationTest < Minitest::Test
     end
   end
 
+  def test_ignores_anchor_attribute_text_inside_other_quoted_values
+    ["\"", "'"].each do |quote|
+      with_repository do |repo|
+        write(repo, "README.md", <<~MARKDOWN)
+          <a id=before label=#{quote}anchor id=fake-id name=fake-name > text#{quote} name=after></a>
+
+          [Before](#before) [After](#after) [Fake ID](#fake-id) [Fake name](#fake-name)
+        MARKDOWN
+        track(repo, "README.md")
+
+        _stdout, stderr, status = run_checker(repo)
+
+        refute status.success?
+        assert_equal %w[fake-id fake-name].map { |anchor|
+          "README.md:3: broken anchor: ##{anchor}\n"
+        }.join, stderr
+      end
+    end
+  end
+
   def test_checks_anchors_in_unchanged_link_targets
     with_repository do |repo|
       write(repo, "README.md", "See [section](guide.md#present-section).\n")
