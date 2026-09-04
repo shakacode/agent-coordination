@@ -49,13 +49,21 @@ def utf8_diagnostic(text)
   text.dup.force_encoding(Encoding::UTF_8).scrub
 end
 
+def read_utf8_file(path)
+  contents = File.binread(path).force_encoding(Encoding::UTF_8)
+  abort "invalid byte sequence in UTF-8" unless contents.valid_encoding?
+
+  contents
+end
+
 def paginated_bodies(endpoint, response_digest)
   stdout, stderr, status = capture3_utf8("gh", "api", "--paginate", "--slurp", endpoint)
   return [nil, stderr] unless status.success?
 
   response_digest.update(stdout)
   rows = JSON.parse(stdout).flatten
-  return [nil, "paginated response shape is invalid"] unless rows.all?(Hash)
+  valid_rows = rows.all? { |row| row.is_a?(Hash) && row["body"].is_a?(String) }
+  return [nil, "paginated response shape is invalid"] unless valid_rows
 
   [rows.map { |row| row["body"] }, nil]
 end
@@ -288,7 +296,8 @@ end
 
 def graphql_repository_data(raw_response, repository, errors)
   response = JSON.parse(raw_response)
-  if response["errors"].is_a?(Array) && response["errors"].any?
+  response_errors = response["errors"]
+  if !response_errors.nil? && (!response_errors.is_a?(Array) || response_errors.any?)
     errors << "graphql_response_error:#{repository}"
     return nil
   end
@@ -520,7 +529,7 @@ mode = ARGV.shift
 case mode
 when "fixture"
   abort "usage: #{$PROGRAM_NAME} fixture FIXTURE_JSON OUTPUT_JSON" unless ARGV.length == 2
-  fixture = JSON.parse(File.read(ARGV.fetch(0)))
+  fixture = JSON.parse(read_utf8_file(ARGV.fetch(0)))
   abort "fixture schema is invalid" unless valid_fixture?(fixture)
   collection = fixture_collection(fixture, collector_sha256)
   projection = build_projection(collection, archived_collector_sha256: collector_sha256)
@@ -530,7 +539,7 @@ when "fixture"
   abort "fixture projection failed validation" unless valid_projection?(projection, collector_sha256)
 when "live"
   abort "usage: #{$PROGRAM_NAME} live SOURCE_JSON OUTPUT_JSON" unless ARGV.length == 2
-  source = JSON.parse(File.read(ARGV.fetch(0)))
+  source = JSON.parse(read_utf8_file(ARGV.fetch(0)))
   collection = live_collection(source, collector_sha256)
   projection = build_projection(collection, archived_collector_sha256: collector_sha256)
   write_projection(ARGV.fetch(1), projection)
@@ -540,7 +549,7 @@ when "live"
   end
 when "validate"
   abort "usage: #{$PROGRAM_NAME} validate PROJECTION_OR_SOURCE_JSON" unless ARGV.length == 1
-  document = JSON.parse(File.read(ARGV.fetch(0)))
+  document = JSON.parse(read_utf8_file(ARGV.fetch(0)))
   projection = projection_from_document(document)
   expected_urls = document.dig("github", "pull_requests")&.map { |pr| pr.fetch("url") }
   unless valid_projection?(projection, collector_sha256, expected_pr_urls: expected_urls)
@@ -550,8 +559,7 @@ when "validate"
 when "graphql-fixture"
   abort "usage: #{$PROGRAM_NAME} graphql-fixture RESPONSE_JSON REPOSITORY" unless ARGV.length == 2
   errors = []
-  response = File.binread(ARGV.fetch(0)).force_encoding(Encoding::UTF_8)
-  abort "invalid byte sequence in UTF-8" unless response.valid_encoding?
+  response = read_utf8_file(ARGV.fetch(0))
 
   data = graphql_repository_data(response, ARGV.fetch(1), errors)
   valid_nodes = data.is_a?(Hash) && data.values.all? { |node| valid_live_pr_node?(node) }

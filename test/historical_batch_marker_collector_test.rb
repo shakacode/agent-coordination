@@ -41,16 +41,64 @@ module HistoricalBatchMarkerCollectorInputValidationTests
     end
   end
 
-  def test_live_collection_rejects_non_hash_rest_rows_without_dereferencing_them
-    projection, stdout, stderr, status = run_live_api(
-      graphql_stdout: JSON.generate(valid_live_graphql_response(comments_truncated: true)),
-      rest_stdout: JSON.generate([[nil]])
-    )
+  def test_live_collection_rejects_malformed_rest_rows_without_dereferencing_them
+    [nil, {}, { "body" => nil }, { "body" => 7 }].each do |row|
+      projection, stdout, stderr, status = run_live_api(
+        graphql_stdout: JSON.generate(valid_live_graphql_response(comments_truncated: true)),
+        rest_stdout: JSON.generate([[row]])
+      )
 
-    refute status.success?, stdout
-    assert_equal ["comments_error:https://github.com/example/alpha/pull/7"], projection.fetch("search_errors")
-    assert_includes stderr, "paginated response shape is invalid"
-    assert_includes stderr, "live collection is incomplete or malformed"
+      refute status.success?, stdout
+      assert_equal ["comments_error:https://github.com/example/alpha/pull/7"], projection.fetch("search_errors")
+      assert_includes stderr, "paginated response shape is invalid"
+      assert_includes stderr, "live collection is incomplete or malformed"
+    end
+  end
+
+  def test_graphql_errors_fail_closed_unless_nil_or_empty
+    [[{ "message" => "synthetic partial response" }], { "message" => "error" }, "synthetic error", {}].each do |errors|
+      _stdout, stderr, status = run_graphql_fixture(valid_live_graphql_response.merge("errors" => errors))
+
+      refute status.success?
+      assert_includes stderr, "graphql_response_error:example/alpha"
+    end
+
+    [nil, []].each do |errors|
+      stdout, stderr, status = run_graphql_fixture(valid_live_graphql_response.merge("errors" => errors))
+
+      assert status.success?, stderr
+      assert_equal "GRAPHQL_RESPONSE_OK\n", stdout
+    end
+  end
+
+  def test_json_file_modes_reject_malformed_utf8_at_the_input_boundary
+    live_source = { "ignored" => "café", "github" => { "pull_requests" => [] } }
+    payloads = {
+      "fixture" => File.binread(self.class::FIXTURE).sub("Synthetic risk".b, "Synthetic r\xFFsk".b),
+      "live" => JSON.generate(live_source).b.sub("café".b, "caf\xFF".b),
+      "validate" => File.binread(self.class::SOURCE).sub(
+        "historical-batch-baseline-source".b, "historical-batch-baseline-sourc\xFF".b
+      )
+    }
+
+    payloads.each do |mode, payload|
+      stdout, stderr, status = run_json_mode_payload(mode, payload)
+
+      refute status.success?, stdout
+      assert_equal "invalid byte sequence in UTF-8\n", stderr
+    end
+  end
+
+  def run_json_mode_payload(mode, payload)
+    Dir.mktmpdir("historical-marker-json-input") do |dir|
+      input_path = File.join(dir, "input.json")
+      output_path = File.join(dir, "output.json")
+      File.binwrite(input_path, payload)
+      arguments = mode == "validate" ? [mode, input_path] : [mode, input_path, output_path]
+      Bundler.with_unbundled_env do
+        Open3.capture3(ascii_locale_environment(dir), RbConfig.ruby, self.class::LIVE_COLLECTOR, *arguments)
+      end
+    end
   end
 end
 
@@ -469,18 +517,6 @@ class HistoricalBatchMarkerCollectorTest < Minitest::Test
 
     refute status.success?
     assert_includes stderr, "fixture schema is invalid"
-  end
-
-  def test_graphql_errors_fail_closed_even_with_partial_data
-    response = {
-      "data" => { "repository" => {} },
-      "errors" => [{ "message" => "synthetic partial response" }]
-    }
-
-    _stdout, stderr, status = run_graphql_fixture(response)
-
-    refute status.success?
-    assert_includes stderr, "graphql_response_error:example/alpha"
   end
 
   def test_graphql_fixture_normalizes_valid_utf8_under_ascii_locale
