@@ -302,7 +302,7 @@ end
 def graphql_repository_data(raw_response, repository, errors)
   response = JSON.parse(raw_response)
   response_errors = response["errors"]
-  if !response_errors.nil? && (!response_errors.is_a?(Array) || response_errors.any?)
+  if !response_errors.nil? && (!response_errors.is_a?(Array) || !response_errors.empty?)
     errors << "graphql_response_error:#{repository}"
     return nil
   end

@@ -56,7 +56,8 @@ module HistoricalBatchMarkerCollectorInputValidationTests
   end
 
   def test_graphql_errors_fail_closed_unless_nil_or_empty
-    [[{ "message" => "synthetic partial response" }], { "message" => "error" }, "synthetic error", {}].each do |errors|
+    [[{ "message" => "synthetic partial response" }], [nil], [false],
+     { "message" => "error" }, "synthetic error", {}].each do |errors|
       _stdout, stderr, status = run_graphql_fixture(valid_live_graphql_response.merge("errors" => errors))
 
       refute status.success?
