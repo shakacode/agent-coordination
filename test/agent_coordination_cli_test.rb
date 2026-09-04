@@ -5892,6 +5892,128 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     assert_equal "codex_thread_id", heartbeat.fetch("session_source")
   end
 
+  def test_non_ascii_environment_identity_renews_as_the_same_machine_under_an_ascii_locale
+    ascii_locale = { "LC_ALL" => "C", "LANG" => "C" }
+    identity = { "AGENT_COORD_MACHINE_ID" => "máquina", "CODEX_THREAD_ID" => "sesión-42" }
+    first = run_agent_coord(
+      "heartbeat", "--agent-id", "worker-identity",
+      env: ascii_locale.merge(identity)
+    )
+    assert_equal 0, first.status.exitstatus, first.stderr
+    refute_includes first.stderr, "passed as BINARY"
+
+    renewal = run_agent_coord(
+      "heartbeat", "--agent-id", "worker-identity",
+      env: ascii_locale.merge("AGENT_COORD_MACHINE_ID" => "máquina")
+    )
+
+    assert_equal 0, renewal.status.exitstatus, renewal.stderr
+    refute_includes renewal.stderr, "passed as BINARY"
+    heartbeat = JSON.parse(File.read(File.join(@state_root, "heartbeats", "worker-identity.json"), encoding: "UTF-8"))
+    assert_equal "máquina", heartbeat.fetch("machine_id")
+    assert_equal "sesión-42", heartbeat.fetch("session_id")
+    assert_equal "codex_thread_id", heartbeat.fetch("session_source")
+  end
+
+  def test_non_ascii_environment_identity_still_detects_cross_machine_and_session_writes
+    ascii_locale = { "LC_ALL" => "C", "LANG" => "C" }
+    first = run_agent_coord(
+      "heartbeat", "--agent-id", "worker-identity",
+      env: ascii_locale.merge("AGENT_COORD_MACHINE_ID" => "máquina-a", "CODEX_THREAD_ID" => "sesión-a")
+    )
+    assert_equal 0, first.status.exitstatus, first.stderr
+
+    cross_machine = run_agent_coord(
+      "heartbeat", "--agent-id", "worker-identity",
+      env: ascii_locale.merge("AGENT_COORD_MACHINE_ID" => "máquina-b")
+    )
+    assert_equal 0, cross_machine.status.exitstatus, cross_machine.stderr
+    heartbeat = JSON.parse(File.read(File.join(@state_root, "heartbeats", "worker-identity.json"), encoding: "UTF-8"))
+    assert_equal "máquina-b", heartbeat.fetch("machine_id")
+    refute heartbeat.key?("session_id")
+    refute heartbeat.key?("session_source")
+
+    cross_session = run_agent_coord(
+      "heartbeat", "--agent-id", "worker-identity",
+      env: ascii_locale.merge("AGENT_COORD_SESSION_ID" => "sesión-b")
+    )
+    assert_equal 0, cross_session.status.exitstatus, cross_session.stderr
+    heartbeat = JSON.parse(File.read(File.join(@state_root, "heartbeats", "worker-identity.json"), encoding: "UTF-8"))
+    assert_equal "sesión-b", heartbeat.fetch("session_id")
+    assert_equal "agent_coord_session_id", heartbeat.fetch("session_source")
+    refute heartbeat.key?("machine_id")
+  end
+
+  def test_invalid_environment_machine_identity_does_not_break_unrelated_read_only_commands
+    with_private_user_config("AGENT_COORD_MACHINE_ID=stored-machine\n") do |config_home|
+      result = run_agent_coord(
+        "status", "--json",
+        env: {
+          "XDG_CONFIG_HOME" => config_home,
+          "AGENT_COORD_MACHINE_ID" => "machine-\xFF".b,
+          "LC_ALL" => "C",
+          "LANG" => "C"
+        }
+      )
+
+      assert_equal 0, result.status.exitstatus, result.stderr
+      assert_kind_of Hash, JSON.parse(result.stdout)
+      refute_includes result.stderr, "AGENT_COORD_MACHINE_ID must be valid UTF-8"
+    end
+  end
+
+  def test_invalid_environment_identity_is_rejected_before_writes_and_deep_doctor_reporting
+    {
+      "AGENT_COORD_MACHINE_ID" => "machine-\xFF".b,
+      "AGENT_COORD_SESSION_ID" => "session-\xFF".b,
+      "CODEX_THREAD_ID" => "thread-\xFF".b
+    }.each_with_index do |(name, value), index|
+      agent_id = "worker-invalid-env-#{index}"
+      env = { name => value, "LC_ALL" => "C", "LANG" => "C" }
+
+      write = run_agent_coord("heartbeat", "--agent-id", agent_id, env: env)
+
+      assert_equal 1, write.status.exitstatus, name
+      assert_includes write.stderr, "#{name} must be valid UTF-8", name
+      refute_includes write.stderr, "JSON::GeneratorError", name
+      refute_path_exists File.join(@state_root, "heartbeats", "#{agent_id}.json"), name
+
+      doctor = run_agent_coord("doctor", "--deep", "--json", env: env)
+
+      assert_equal 1, doctor.status.exitstatus, name
+      assert_includes doctor.stderr, "#{name} must be valid UTF-8", name
+      assert_empty doctor.stdout, name
+    end
+  end
+
+  def test_environment_identity_transcodes_declared_encodings_and_retags_binary
+    {
+      "AGENT_COORD_MACHINE_ID" => ["machine-caf\xE9".b.force_encoding(Encoding::ISO_8859_1), "machine-café"],
+      "AGENT_COORD_SESSION_ID" => ["session-café".b, "session-café"],
+      "CODEX_THREAD_ID" => ["thread-ascii".dup.force_encoding(Encoding::US_ASCII), "thread-ascii"]
+    }.each do |name, (input, expected)|
+      normalized = AgentCoord.environment_identity_value(name, env: { name => input })
+
+      assert_equal expected, normalized, name
+      assert_equal Encoding::UTF_8, normalized.encoding, name
+    end
+  end
+
+  def test_environment_identity_rejects_invalid_bytes_in_every_declared_encoding
+    {
+      "utf-8 tagged" => "machine-\xFF".b.force_encoding(Encoding::UTF_8),
+      "binary tagged" => "machine-\xFF".b,
+      "us-ascii tagged" => "machine-\xE9".b.force_encoding(Encoding::US_ASCII)
+    }.each do |label, value|
+      error = assert_raises(AgentCoord::Error, label) do
+        AgentCoord.environment_identity_value("AGENT_COORD_MACHINE_ID", env: { "AGENT_COORD_MACHINE_ID" => value })
+      end
+
+      assert_equal "AGENT_COORD_MACHINE_ID must be valid UTF-8: machine-\uFFFD", error.message, label
+      assert_predicate error.message, :valid_encoding?, label
+    end
+  end
+
   def test_cross_machine_heartbeat_renewal_with_session_writes_the_new_tuple
     first = run_agent_coord(
       "heartbeat", "--agent-id", "worker-identity",
@@ -6145,6 +6267,22 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
       assert_equal "codex-thread-42", identity.fetch("session_id")
       assert_equal "codex_thread_id", identity.fetch("session_source")
       assert_equal "m5", identity.fetch("token_machine")
+      assert_equal "match", identity.fetch("machine_match")
+    end
+  end
+
+  def test_doctor_deep_http_matches_binary_tagged_non_ascii_environment_identity
+    with_identity_env(
+      "AGENT_COORD_MACHINE_ID" => "máquina".b,
+      "CODEX_THREAD_ID" => "sesión-42".b
+    ) do
+      stdout = StringIO.new
+      runner = doctor_identity_runner(stdout, token_machine: "máquina")
+
+      assert_equal 0, runner.run
+      identity = JSON.parse(stdout.string).fetch("environment_identity")
+      assert_equal "máquina", identity.fetch("machine_id")
+      assert_equal "sesión-42", identity.fetch("session_id")
       assert_equal "match", identity.fetch("machine_match")
     end
   end

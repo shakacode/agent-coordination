@@ -598,7 +598,10 @@ module AgentCoord
         # A whitespace-only process value is not a selection: the downstream
         # readers strip before testing for empty, so treating it as present here
         # would drop the saved value without anything taking its place.
-        next unless AgentCoord.environment_identity_value(key, env: @process_config).nil?
+        # Presence is byte-safe here because unrelated read-only commands do not
+        # consume identity values. The write/deep-doctor seams validate them
+        # when they are actually used.
+        next unless @process_config.fetch(key, nil).to_s.b.strip.empty?
 
         ENV[key] = value
         @injected_user_config_keys << key
@@ -8348,9 +8351,19 @@ module AgentCoord
   # writers later record.
   def self.environment_identity_value(name, env: ENV)
     value = env.fetch(name, nil)
-    return nil unless config_value_set?(value)
+    return nil if value.nil? || value.to_s.b.strip.empty?
 
-    value.to_s.strip
+    normalized =
+      if value.to_s.encoding == Encoding::ASCII_8BIT
+        force_utf8(value.to_s)
+      else
+        value.to_s.encode(Encoding::UTF_8)
+      end
+    return normalized.strip if normalized.valid_encoding?
+
+    raise Error, "#{name} must be valid UTF-8: #{utf8_diagnostic(value)}"
+  rescue EncodingError
+    raise Error, "#{name} must be valid UTF-8: #{utf8_diagnostic(value)}"
   end
 
   def self.state_record_path?(path)
