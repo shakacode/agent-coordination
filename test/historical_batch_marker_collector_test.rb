@@ -8,7 +8,7 @@ require "open3"
 require "rbconfig"
 require "tmpdir"
 
-class HistoricalBatchMarkerCollectorTest < Minitest::Test
+class HistoricalBatchMarkerCollectorTest < Minitest::Test # rubocop:disable Metrics/ClassLength
   ROOT = File.expand_path("..", __dir__)
   ARCHIVED_COLLECTOR = File.join(
     ROOT,
@@ -415,6 +415,23 @@ class HistoricalBatchMarkerCollectorTest < Minitest::Test
     assert_includes stderr, "malformed severity candidate"
   end
 
+  def test_live_collector_rejects_non_string_target_repos_and_continues
+    [123, []].each do |repo|
+      fixture = JSON.parse(File.read(FIXTURE))
+      malformed_document = fixture_review_document(fixture)
+      malformed_document.dig("review_findings", 0, "target")["repo"] = repo
+      malformed_block = ["```json review-findings", JSON.generate(malformed_document), "```"].join("\n")
+      fixture.dig("pull_requests", 0, "surfaces", "body").unshift(malformed_block)
+
+      projection, stderr, status = collect_fixture_result(fixture, collector: LIVE_COLLECTOR)
+
+      refute status.success?
+      assert_includes stderr, "malformed severity candidate"
+      assert_equal 1, projection.fetch("malformed_severity_candidates")
+      assert_equal(["P1"], projection.fetch("severity_findings").map { |row| row.fetch("severity") })
+    end
+  end
+
   def test_unexpected_raw_surface_is_rejected
     fixture = JSON.parse(File.read(FIXTURE))
     fixture.dig("pull_requests", 0, "surfaces")["messages"] = ["synthetic"]
@@ -656,20 +673,22 @@ class HistoricalBatchMarkerCollectorTest < Minitest::Test
     projection
   end
 
-  def collect_fixture_result(fixture)
+  def collect_fixture_result(fixture, collector: ARCHIVED_COLLECTOR)
     Dir.mktmpdir("marker-collector-test") do |dir|
       fixture_path = File.join(dir, "fixture.json")
       output_path = File.join(dir, "projection.json")
       File.write(fixture_path, JSON.pretty_generate(fixture))
-      stdout, stderr, status = run_archived_collector("fixture", fixture_path, output_path)
+      stdout, stderr, status = Bundler.with_unbundled_env do
+        Open3.capture3(RbConfig.ruby, collector, "fixture", fixture_path, output_path)
+      end
       projection = File.exist?(output_path) ? JSON.parse(File.read(output_path)) : nil
       [projection, [stdout, stderr].reject(&:empty?).join("\n"), status]
     end
   end
 
-  def run_archived_collector(*arguments)
+  def run_archived_collector(...)
     Bundler.with_unbundled_env do
-      Open3.capture3(RbConfig.ruby, ARCHIVED_COLLECTOR, *arguments)
+      Open3.capture3(RbConfig.ruby, ARCHIVED_COLLECTOR, ...)
     end
   end
 

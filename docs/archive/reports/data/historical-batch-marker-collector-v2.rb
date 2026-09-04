@@ -155,7 +155,8 @@ def valid_review_document?(document, pull_request)
 end
 
 def valid_finding_target?(target, pull_request)
-  return false unless target["repo"]&.casecmp?(pull_request.fetch("repository"))
+  repo = target["repo"]
+  return false unless repo.is_a?(String) && repo.casecmp?(pull_request.fetch("repository"))
 
   target["pr"] == pull_request.fetch("number")
 end
