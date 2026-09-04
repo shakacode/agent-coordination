@@ -90,7 +90,7 @@ end
 def record_html_anchors(node, lines, anchors)
   source = raw_node_source(node, lines)
   source = source.gsub(/<!--.*?-->/m, "")
-  attribute = %r{\s+([a-z_:][a-z0-9_.:-]*)(?:\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'=<>`]+)))?(?=\s|/?>)}i
+  attribute = %r{\s+([^\s"'<>/=]+)(?:\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'=<>`]+)))?(?=\s|/?>)}
   source.scan(%r{<a(?=\s|/?>)(?:[^"'<>]|"[^"]*"|'[^']*')*>}i) do |tag|
     tag.scan(attribute) do |name, *values|
       next unless %w[id name].include?(name.downcase)

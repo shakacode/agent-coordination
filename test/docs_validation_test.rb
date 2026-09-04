@@ -985,10 +985,12 @@ class DocsValidationAnchorAndIntegrationTest < Minitest::Test
   end
 
   def test_ignores_anchor_attribute_text_inside_other_quoted_values
-    ["\"", "'"].each do |quote|
+    ["\"", "'"].product(%w[label 0label @label]).each do |quote, attribute_name|
       with_repository do |repo|
         write(repo, "README.md", <<~MARKDOWN)
-          <a id=before label=#{quote}anchor id=fake-id name=fake-name > text#{quote} name=after></a>
+          <div>
+          <a id=before #{attribute_name}=#{quote}anchor id=fake-id name=fake-name > text#{quote} name=after></a>
+          </div>
 
           [Before](#before) [After](#after) [Fake ID](#fake-id) [Fake name](#fake-name)
         MARKDOWN
@@ -998,7 +1000,7 @@ class DocsValidationAnchorAndIntegrationTest < Minitest::Test
 
         refute status.success?
         assert_equal %w[fake-id fake-name].map { |anchor|
-          "README.md:3: broken anchor: ##{anchor}\n"
+          "README.md:5: broken anchor: ##{anchor}\n"
         }.join, stderr
       end
     end
