@@ -55,6 +55,20 @@ module HistoricalBatchMarkerCollectorInputValidationTests
     end
   end
 
+  def test_live_collection_pins_github_com_for_graphql_and_rest_requests
+    projection, stdout, stderr, status, invocations = run_live_api(
+      graphql_stdout: JSON.generate(valid_live_graphql_response(comments_truncated: true)),
+      rest_stdout: JSON.generate([[{ "body" => "REST pagination" }]]),
+      gh_host: "enterprise.example"
+    )
+
+    assert status.success?, [stdout, stderr, projection].compact.join("\n")
+    assert_equal 2, invocations.length
+    invocations.each do |arguments|
+      assert_includes arguments.each_cons(2).to_a, ["--hostname", "github.com"]
+    end
+  end
+
   def test_graphql_errors_fail_closed_unless_nil_or_empty
     [[{ "message" => "synthetic partial response" }], [nil], [false],
      { "message" => "error" }, "synthetic error", {}].each do |errors|
@@ -843,9 +857,11 @@ class HistoricalBatchMarkerCollectorTest < Minitest::Test
         statuses: { graphql: statuses.fetch(:graphql_status, 0), rest: statuses.fetch(:rest_status, 0) }
       )
       source_path, output_path = write_live_source(dir, source: source)
+      environment = ascii_locale_environment(dir)
+      environment["GH_HOST"] = statuses.fetch(:gh_host) if statuses.key?(:gh_host)
       stdout, stderr, status = Bundler.with_unbundled_env do
         Open3.capture3(
-          ascii_locale_environment(dir),
+          environment,
           RbConfig.ruby,
           LIVE_COLLECTOR,
           "live",
@@ -854,7 +870,8 @@ class HistoricalBatchMarkerCollectorTest < Minitest::Test
         )
       end
       projection = JSON.parse(File.read(output_path)) if File.file?(output_path)
-      [projection, stdout, stderr, status]
+      invocations = read_gh_invocations(dir)
+      [projection, stdout, stderr, status, invocations]
     end
   end
 
@@ -900,6 +917,11 @@ class HistoricalBatchMarkerCollectorTest < Minitest::Test
     }
   end
 
+  def read_gh_invocations(dir)
+    path = File.join(dir, "gh-invocations.jsonl")
+    File.file?(path) ? File.readlines(path, chomp: true).map { |line| JSON.parse(line) } : []
+  end
+
   def write_fake_gh(dir, graphql_stdout:, rest_stdout:, graphql_stderr:, statuses:)
     encoded_graphql = Base64.strict_encode64(graphql_stdout.b)
     encoded_rest = Base64.strict_encode64(rest_stdout.b)
@@ -907,6 +929,8 @@ class HistoricalBatchMarkerCollectorTest < Minitest::Test
     script = <<~RUBY
       #!/usr/bin/env ruby
       require "base64"
+      require "json"
+      File.open(#{File.join(dir, 'gh-invocations.jsonl').dump}, "a") { |file| file.puts(JSON.generate(ARGV)) }
       graphql = ARGV.include?("graphql")
       stdout = graphql ? #{encoded_graphql.dump} : #{encoded_rest.dump}
       stderr = graphql ? #{encoded_graphql_stderr.dump} : ""

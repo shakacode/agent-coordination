@@ -57,7 +57,9 @@ def read_utf8_file(path)
 end
 
 def paginated_bodies(endpoint, response_digest)
-  stdout, stderr, status = capture3_utf8("gh", "api", "--paginate", "--slurp", endpoint)
+  stdout, stderr, status = capture3_utf8(
+    "gh", "api", "--hostname", "github.com", "--paginate", "--slurp", endpoint
+  )
   return [nil, stderr] unless status.success?
 
   response_digest.update(stdout)
@@ -270,7 +272,9 @@ def live_collection(source, collector_sha256)
       query = marker_query(owner, name, slice)
       query_digest.update(query)
       graphql_requests += 1
-      stdout, stderr, status = capture3_utf8("gh", "api", "graphql", "-f", "query=#{query}")
+      stdout, stderr, status = capture3_utf8(
+        "gh", "api", "--hostname", "github.com", "graphql", "-f", "query=#{query}"
+      )
       unless status.success?
         errors << "graphql_error:#{repository}"
         warn utf8_diagnostic(stderr)
