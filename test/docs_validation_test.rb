@@ -170,6 +170,21 @@ class DocsValidationTest < Minitest::Test
     end
   end
 
+  def test_reports_invalid_percent_decoded_paths_as_broken_relative_links
+    ["%00", "%FF"].each do |destination|
+      with_repository do |repo|
+        write(repo, "README.md", "[invalid](#{destination})\n")
+        track(repo, "README.md")
+
+        stdout, stderr, status = run_checker(repo)
+
+        refute status.success?
+        assert_empty stdout
+        assert_equal "README.md:1: broken relative link: #{destination}\n", stderr
+      end
+    end
+  end
+
   def test_accepts_balanced_parentheses_in_a_link_destination
     with_repository do |repo|
       write(repo, "README.md", "See [the file](foo(bar).md \"A (file)\").\n")

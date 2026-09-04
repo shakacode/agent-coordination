@@ -201,6 +201,7 @@ end
 
 def resolved_link_path(path, location)
   relative = URI::DEFAULT_PARSER.unescape(location.partition("?").first)
+  return unless relative.valid_encoding? && !relative.include?("\0")
   return path if relative.empty?
 
   target = relative.start_with?("/") ? relative.delete_prefix("/") : File.join(File.dirname(path), relative)
