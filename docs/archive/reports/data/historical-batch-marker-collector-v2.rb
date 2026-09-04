@@ -427,13 +427,21 @@ end
 def replace_paginated_surface(pull_request, field, endpoint, context)
   bodies, error = paginated_bodies(endpoint, context.fetch(:response_digest))
   prefix = context.fetch(:surfaces).fetch(field)
-  if bodies && bodies.length > prefix.length && bodies.first(prefix.length) == prefix
+  if paginated_surface_extension?(field, prefix, bodies)
     context.fetch(:surfaces)[field] = bodies
   else
     error ||= "paginated response does not extend GraphQL prefix"
     context.fetch(:errors) << "#{field}_error:#{pull_request.fetch('url')}"
     warn utf8_diagnostic(error)
   end
+end
+
+def paginated_surface_extension?(field, prefix, bodies)
+  return false unless bodies && bodies.length > prefix.length
+  return bodies.first(prefix.length) == prefix unless field == "review_thread_comments"
+
+  available = bodies.tally
+  prefix.tally.all? { |body, count| available.fetch(body, 0) >= count }
 end
 
 def projection_from_document(document)

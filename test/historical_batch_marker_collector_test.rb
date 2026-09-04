@@ -166,6 +166,36 @@ module HistoricalBatchMarkerCollectorInputValidationTests
     end
   end
 
+  def test_review_thread_rest_pagination_accepts_an_interleaved_superset
+    response = graphql_response_with_review_threads(%w[A1 A3], %w[B2])
+    rest_bodies = %w[A1 B2 A3 C4]
+
+    projection, stdout, stderr, status = run_live_api(
+      graphql_stdout: JSON.generate(response),
+      rest_stdout: JSON.generate([rest_bodies.map { |body| { "body" => body } }])
+    )
+
+    assert status.success?, [stdout, stderr].join("\n")
+    assert_equal 4,
+                 projection.dig(
+                   "collection_provenance", "per_pr_evidence", 0, "surface_row_counts", "review_thread_comments"
+                 )
+  end
+
+  def test_review_thread_rest_pagination_preserves_duplicate_occurrences
+    response = graphql_response_with_review_threads(%w[duplicate duplicate])
+
+    projection, stdout, stderr, status = run_live_api(
+      graphql_stdout: JSON.generate(response),
+      rest_stdout: JSON.generate([[{ "body" => "duplicate" }, { "body" => "other" }, { "body" => "added" }]])
+    )
+
+    refute status.success?, stdout
+    assert_equal ["review_thread_comments_error:https://github.com/example/alpha/pull/7"],
+                 projection.fetch("search_errors")
+    assert_includes stderr, "paginated response does not extend GraphQL prefix"
+  end
+
   def test_unmatched_review_finding_fence_is_counted_after_a_valid_block
     fixture = JSON.parse(File.read(self.class::FIXTURE))
     body = fixture.dig("pull_requests", 0, "surfaces", "body", 0)
@@ -176,6 +206,20 @@ module HistoricalBatchMarkerCollectorInputValidationTests
     refute status.success?
     assert_equal 1, projection.fetch("malformed_severity_candidates")
     assert_includes stderr, "malformed severity candidate"
+  end
+
+  def graphql_response_with_review_threads(*thread_bodies)
+    response = valid_live_graphql_response
+    threads = response.dig("data", "repository", "pr7", "reviewThreads")
+    threads["nodes"] = thread_bodies.map.with_index do |bodies, index|
+      {
+        "comments" => {
+          "pageInfo" => { "hasNextPage" => index.zero? },
+          "nodes" => bodies.map { |body| { "body" => body } }
+        }
+      }
+    end
+    response
   end
 
   def run_json_mode_payload(mode, payload)
