@@ -4,7 +4,7 @@
 ENV["BUNDLE_GEMFILE"] ||= File.expand_path("../../Gemfile", __dir__)
 require "bundler/setup"
 require "commonmarker"
-require "cgi"
+require "nokogiri"
 require "json"
 require "digest"
 require "open3"
@@ -87,16 +87,11 @@ def raw_node_source(node, lines)
   end
 end
 
-def record_html_anchors(node, lines, anchors)
-  source = raw_node_source(node, lines)
-  source = source.gsub(/<!--.*?-->/m, "")
-  attribute = %r{\s+([^\s"'<>/=]+)(?:\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'=<>`]+)))?(?=\s|/?>)}
-  source.scan(%r{<a(?=\s|/?>)(?:[^"'<>]|"[^"]*"|'[^']*')*>}i) do |tag|
-    tag.scan(attribute) do |name, *values|
-      next unless %w[id name].include?(name.downcase)
-
-      value = values.compact.first
-      anchors[CGI.unescapeHTML(value)] = true if value && !value.empty?
+def record_html_anchors(document, anchors)
+  rendered = document.to_html(options: { render: { unsafe: true } })
+  Nokogiri::HTML5.fragment(rendered).css("a[id], a[name]").each do |anchor|
+    [anchor["id"], anchor["name"]].compact.each do |value|
+      anchors[value] = true unless value.empty?
     end
   end
 end
@@ -115,8 +110,6 @@ def scan_document(repo_root:, path:, unlabelled_fences:, anchors:, link_targets:
     when :link, :image
       destination = node.url
       link_targets << [path, node.source_position.fetch(:start_line), destination] if local_destination?(destination)
-    when :html_inline, :html_block
-      record_html_anchors(node, lines, document_anchors)
     when :code_block
       next unless node.fenced? && node.fence_info.strip.empty?
 
@@ -126,6 +119,7 @@ def scan_document(repo_root:, path:, unlabelled_fences:, anchors:, link_targets:
       }
     end
   end
+  record_html_anchors(document, document_anchors)
 end
 
 def resolve_commit(repo_root, ref)

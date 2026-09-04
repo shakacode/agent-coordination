@@ -941,6 +941,32 @@ class DocsValidationAnchorAndIntegrationTest < Minitest::Test
     end
   end
 
+  def test_ignores_anchor_markup_inside_another_elements_attribute
+    with_repository do |repo|
+      write(repo, "README.md", <<~MARKDOWN)
+        <div data="<a id=fake>"></div>
+
+        See [fake](#fake).
+      MARKDOWN
+      track(repo, "README.md")
+
+      _stdout, stderr, status = run_checker(repo)
+
+      refute status.success?
+      assert_equal "README.md:3: broken anchor: #fake\n", stderr
+    end
+  end
+
+  def test_accepts_an_anchor_revealed_by_rendered_script_tag_filtering
+    assert_document_passes(<<~MARKDOWN)
+      <script>
+      const example = '<a id=fake>';
+      </script>
+
+      [Fake](#fake)
+    MARKDOWN
+  end
+
   def test_accepts_quoted_and_unquoted_html_anchor_values
     ["", "\"", "'"].each do |quote|
       with_repository do |repo|

@@ -20,6 +20,10 @@ loads the repository's bundle even from another working directory. It checks
 tracked local destinations in rendered links and images, including reference
 links at their use sites. Unused reference definitions are not checked.
 Undefined reference syntax is literal text, not a rendered link.
+Nokogiri parses explicit anchors from Commonmarker's rendered HTML. The lockfile
+includes native packages for arm64 macOS and x86-64 Linux plus a generic `ruby`
+fallback, which requires compiling Nokogiri's native extension with a compatible
+C toolchain.
 When `--base` or `origin/main` is available, link and new-fence checks cover
 changed Markdown. Without a known base, they cover all tracked Markdown.
 Legacy fence allowances still match the exact original source lines and bytes,
