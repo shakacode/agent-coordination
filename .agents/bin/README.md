@@ -8,7 +8,7 @@ is absent means that capability is n/a in this repository.
 | Script | Purpose | This repo runs |
 | --- | --- | --- |
 | `setup` | Install dependencies | n/a |
-| `validate` | Pre-push gate | `bundle exec rubocop` |
+| `validate` | Pre-push gate | `bundle exec rubocop`, then `.agents/bin/docs` |
 | `test` | Run tests | CI's non-integration unit and simulation test scope |
 | `lint` | Lint / format | n/a |
 | `build` | Build / type-check | n/a |

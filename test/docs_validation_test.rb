@@ -8,6 +8,10 @@ require "open3"
 require "tmpdir"
 
 module DocsValidationAssertions
+  ROOT = File.expand_path("..", __dir__)
+  CHECKER = File.join(ROOT, ".agents/bin/docs")
+  VALIDATE = File.join(ROOT, ".agents/bin/validate")
+
   HTML_COMMENT_CONTAINER_DOCUMENTS = [
     "> <!--\n> [literal](missing.md)\n> -->\n",
     "> > <!--\n> > [literal](missing.md)\n> > -->\n",
@@ -49,13 +53,59 @@ module DocsValidationAssertions
       assert_includes stderr, "README.md:#{line}: broken relative link: missing.md"
     end
   end
+
+  private
+
+  def with_repository
+    Dir.mktmpdir("agent-docs-check") do |repo|
+      system("git", "init", "--quiet", repo, exception: true)
+      yield repo
+    end
+  end
+
+  def write(repo, path, content)
+    absolute = File.join(repo, path)
+    FileUtils.mkdir_p(File.dirname(absolute))
+    File.write(absolute, content)
+  end
+
+  def track(repo, *paths)
+    system("git", "-C", repo, "add", "--", *paths, exception: true)
+  end
+
+  def commit(repo, message)
+    system(
+      "git", "-C", repo,
+      "-c", "user.name=Docs Validation Test",
+      "-c", "user.email=docs-validation@example.invalid",
+      "commit", "--quiet", "-m", message,
+      exception: true
+    )
+  end
+
+  def write_fence_baseline(repo, path, line:, content:)
+    baseline = {
+      "version" => 1,
+      "unlabelled_code_fences" => {
+        path => [{ "line" => line, "sha256" => "sha256:#{Digest::SHA256.hexdigest(content)}" }]
+      }
+    }
+    write(repo, ".agents/docs-lint-baseline.json", JSON.pretty_generate(baseline))
+  end
+
+  def run_checker(repo)
+    Open3.capture3(CHECKER, "--repo-root", repo)
+  end
+
+  def copy_validation_scripts(repo)
+    FileUtils.mkdir_p(File.join(repo, ".agents/bin"))
+    FileUtils.cp(CHECKER, File.join(repo, ".agents/bin/docs"))
+    FileUtils.cp(VALIDATE, File.join(repo, ".agents/bin/validate"))
+  end
 end
 
 class DocsValidationTest < Minitest::Test
   include DocsValidationAssertions
-
-  ROOT = File.expand_path("..", __dir__)
-  CHECKER = File.join(ROOT, ".agents/bin/docs")
 
   def test_reports_a_broken_relative_link
     with_repository do |repo|
@@ -512,6 +562,43 @@ class DocsValidationTest < Minitest::Test
     end
   end
 
+  def test_checks_single_slash_links_from_the_repository_root
+    with_repository do |repo|
+      write(repo, "guide.md", "# Guide\n")
+      write(
+        repo,
+        "docs/nested/index.md",
+        "[root](/) [file](/guide.md?view=full#guide) [directory](/docs) " \
+        "[normalized](/docs/../guide.md) [missing](/missing.md) " \
+        "[outside](/../outside.md)\n"
+      )
+      track(repo, "guide.md", "docs/nested/index.md")
+
+      _stdout, stderr, status = run_checker(repo)
+
+      refute status.success?
+      refute_includes stderr, "broken relative link: /\n"
+      refute_includes stderr, "broken relative link: /guide.md?view=full#guide"
+      refute_includes stderr, "broken relative link: /docs"
+      refute_includes stderr, "broken relative link: /docs/../guide.md"
+      assert_includes stderr, "docs/nested/index.md:1: broken relative link: /missing.md"
+      assert_includes stderr, "docs/nested/index.md:1: broken relative link: /../outside.md"
+    end
+  end
+
+  def test_ignores_protocol_relative_links
+    with_repository do |repo|
+      write(repo, "README.md", "See [the external guide](//example.com/missing.md).\n")
+      track(repo, "README.md")
+
+      stdout, stderr, status = run_checker(repo)
+
+      assert status.success?, stderr
+      assert_empty stdout
+      assert_empty stderr
+    end
+  end
+
   def test_allows_only_the_exact_baselined_unlabelled_fence
     with_repository do |repo|
       baselined_fence = "```\nlegacy\n```\n"
@@ -574,6 +661,10 @@ class DocsValidationTest < Minitest::Test
       assert_includes stderr, "README.md:1: unlabelled code fence"
     end
   end
+end
+
+class DocsValidationAnchorAndIntegrationTest < Minitest::Test
+  include DocsValidationAssertions
 
   def test_reports_a_broken_markdown_anchor
     with_repository do |repo|
@@ -634,11 +725,103 @@ class DocsValidationTest < Minitest::Test
     end
   end
 
+  def test_accepts_setext_heading_anchors
+    with_repository do |repo|
+      write(
+        repo,
+        "README.md",
+        "[top level](guide.md#top-level-heading) " \
+        "[multiline](guide.md#multi-line-heading) " \
+        "[quoted](guide.md#quoted-heading) " \
+        "[listed](guide.md#listed-heading) " \
+        "[nested](guide.md#nested-heading) " \
+        "[collision](guide.md#collision-1)\n"
+      )
+      write(
+        repo,
+        "guide.md",
+        "# Collision\n\nCollision\n=========\n\n" \
+        "Top level heading\n=================\n\n" \
+        "Multi\nline heading\n------------\n\n" \
+        "> Quoted heading\n> --------------\n\n" \
+        "- Listed heading\n  --------------\n\n" \
+        "> - Nested\n>   heading\n>   =======\n"
+      )
+      track(repo, "README.md", "guide.md")
+
+      stdout, stderr, status = run_checker(repo)
+
+      assert status.success?, stderr
+      assert_empty stdout
+      assert_empty stderr
+    end
+  end
+
+  def test_does_not_record_setext_anchors_across_block_boundaries
+    with_repository do |repo|
+      write(
+        repo,
+        "README.md",
+        "[blank](guide.md#blank-separated) " \
+        "[definition](guide.md#definition-targetmd) " \
+        "[code](guide.md#code-heading)\n"
+      )
+      write(
+        repo,
+        "guide.md",
+        "Blank separated\n\n=========\n\n" \
+        "[definition]: target.md\n=========\n\n    " \
+        "Code heading\n    ============\n"
+      )
+      write(repo, "target.md", "# Target\n")
+      track(repo, "README.md", "guide.md", "target.md")
+
+      _stdout, stderr, status = run_checker(repo)
+
+      refute status.success?
+      assert_includes stderr, "broken anchor: guide.md#blank-separated"
+      assert_includes stderr, "broken anchor: guide.md#definition-targetmd"
+      assert_includes stderr, "broken anchor: guide.md#code-heading"
+    end
+  end
+
   def test_uses_literal_inline_code_when_building_heading_anchors
     with_repository do |repo|
       write(repo, "README.md", "See [syntax](guide.md#syntax-textmissingmd).\n")
       write(repo, "guide.md", "# Syntax `[text](missing.md)`\n")
       track(repo, "README.md", "guide.md")
+
+      stdout, stderr, status = run_checker(repo)
+
+      assert status.success?, stderr
+      assert_empty stdout
+      assert_empty stderr
+    end
+  end
+
+  def test_preserves_literal_underscores_without_preserving_emphasis_delimiters_in_heading_anchors
+    with_repository do |repo|
+      write(
+        repo,
+        "README.md",
+        "[literal](guide.md#config-for-my_env_var) " \
+        "[duplicate](guide.md#config-for-my_env_var-1) " \
+        "[emphasis](guide.md#emphasized-heading) " \
+        "[strong](guide.md#strong-heading) " \
+        "[escaped](guide.md#_literal_) " \
+        "[code](guide.md#code-my_env_var) " \
+        "[link](guide.md#read-my_env_var)\n"
+      )
+      write(
+        repo,
+        "guide.md",
+        "# Config for MY_ENV_VAR\n\n# Config for MY_ENV_VAR\n\n" \
+        "# _Emphasized heading_\n\n# __Strong heading__\n\n" \
+        "# \\_literal\\_\n\n# Code `MY_ENV_VAR`\n\n" \
+        "# Read [MY_ENV_VAR](details.md)\n"
+      )
+      write(repo, "details.md", "# Details\n")
+      track(repo, "README.md", "guide.md", "details.md")
 
       stdout, stderr, status = run_checker(repo)
 
@@ -743,6 +926,88 @@ class DocsValidationTest < Minitest::Test
     end
   end
 
+  def test_reports_a_broken_inline_link_whose_destination_starts_on_the_next_line
+    with_repository do |repo|
+      write(repo, "README.md", "See [the guide](\n  docs/missing.md\n).\n")
+      track(repo, "README.md")
+
+      _stdout, stderr, status = run_checker(repo)
+
+      refute status.success?
+      assert_includes stderr, "README.md:1: broken relative link: docs/missing.md"
+    end
+  end
+
+  def test_reports_multiline_inline_links_with_labels_titles_and_containers
+    with_repository do |repo|
+      write(
+        repo,
+        "README.md",
+        "[the\nguide](\n  missing-top.md\n  \"A\n  title\"\n)\n\n" \
+        "> [quoted](\n>   missing-quoted.md\n> )\n\n" \
+        "- [listed](\n  missing-listed.md\n  )\n"
+      )
+      track(repo, "README.md")
+
+      _stdout, stderr, status = run_checker(repo)
+
+      refute status.success?
+      assert_includes stderr, "README.md:1: broken relative link: missing-top.md"
+      assert_includes stderr, "README.md:8: broken relative link: missing-quoted.md"
+      assert_includes stderr, "README.md:12: broken relative link: missing-listed.md"
+    end
+  end
+
+  def test_does_not_scan_multiline_link_syntax_across_block_or_code_boundaries
+    with_repository do |repo|
+      write(
+        repo,
+        "README.md",
+        "[blank](\n\nmissing-after-blank.md\n)\n\n" \
+        "`code span\n[inside](\nmissing-in-code.md\n)`\n\n" \
+        "[angle](<missing\n-angle.md>)\n\n" \
+        "[bare](missing\n-bare.md)\n\n" \
+        "[comment](\n<!--\nmissing-in-comment.md\n-->\n\n" \
+        "[real](missing-real.md)\n"
+      )
+      track(repo, "README.md")
+
+      _stdout, stderr, status = run_checker(repo)
+
+      refute status.success?
+      assert_includes stderr, "README.md:22: broken relative link: missing-real.md"
+      refute_includes stderr, "missing-after-blank.md"
+      refute_includes stderr, "missing-in-code.md"
+      refute_includes stderr, "missing-angle.md"
+      refute_includes stderr, "missing-bare.md"
+      refute_includes stderr, "missing-in-comment.md"
+    end
+  end
+
+  def test_preserves_line_numbers_after_a_multiline_inline_code_span
+    with_repository do |repo|
+      write(repo, "README.md", "`literal\ncode`\n[real](missing.md)\n")
+      track(repo, "README.md")
+
+      _stdout, stderr, status = run_checker(repo)
+
+      refute status.success?
+      assert_includes stderr, "README.md:3: broken relative link: missing.md"
+    end
+  end
+
+  def test_scans_complete_links_after_an_incomplete_inline_link_candidate
+    with_repository do |repo|
+      write(repo, "README.md", "[unfinished](destination \"title\n[real](missing.md)\n")
+      track(repo, "README.md")
+
+      _stdout, stderr, status = run_checker(repo)
+
+      refute status.success?
+      assert_includes stderr, "README.md:2: broken relative link: missing.md"
+    end
+  end
+
   def test_does_not_treat_list_content_as_a_fence_closer
     with_repository do |repo|
       write(repo, "README.md", "```markdown\n- ```\n```\n")
@@ -781,6 +1046,76 @@ class DocsValidationTest < Minitest::Test
     end
   end
 
+  def test_reports_a_broken_multiline_reference_link_definition
+    with_repository do |repo|
+      write(repo, "README.md", "[guide]:\n  docs/missing.md\n\nRead [the guide][guide].\n")
+      track(repo, "README.md")
+
+      _stdout, stderr, status = run_checker(repo)
+
+      refute status.success?
+      assert_includes stderr, "README.md:1: broken relative link: docs/missing.md"
+    end
+  end
+
+  def test_accepts_multiline_reference_destinations_and_titles
+    with_repository do |repo|
+      write(
+        repo,
+        "README.md",
+        "[bare]:\n  target.md \"Bare title\"\n" \
+        "[angle]:\n  <target.md> 'Angle title'\n\n" \
+        "Read [bare][] and [angle][].\n"
+      )
+      write(repo, "target.md", "# Target\n")
+      track(repo, "README.md", "target.md")
+
+      stdout, stderr, status = run_checker(repo)
+
+      assert status.success?, stderr
+      assert_empty stdout
+      assert_empty stderr
+    end
+  end
+
+  def test_reports_multiline_reference_destinations_inside_containers
+    with_repository do |repo|
+      write(
+        repo,
+        "README.md",
+        "> [quoted]:\n>   missing-quoted.md\n>\n" \
+        "- [listed]:\n  <missing-listed.md> \"Title\"\n"
+      )
+      track(repo, "README.md")
+
+      _stdout, stderr, status = run_checker(repo)
+
+      refute status.success?
+      assert_includes stderr, "README.md:1: broken relative link: missing-quoted.md"
+      assert_includes stderr, "README.md:4: broken relative link: missing-listed.md"
+    end
+  end
+
+  def test_does_not_carry_multiline_reference_definitions_across_block_boundaries
+    with_repository do |repo|
+      write(
+        repo,
+        "README.md",
+        "[blank]:\n\n  missing-after-blank.md\n\n" \
+        "> [quote]:\nmissing-after-quote.md\n\n" \
+        "[code]:\n\n    missing-in-code.md\n\n" \
+        "[comment]:\n<!--\nmissing-in-comment.md\n-->\n"
+      )
+      track(repo, "README.md")
+
+      stdout, stderr, status = run_checker(repo)
+
+      assert status.success?, stderr
+      assert_empty stdout
+      assert_empty stderr
+    end
+  end
+
   def test_reports_an_invalid_baseline_without_a_backtrace
     with_repository do |repo|
       write(repo, "README.md", "# Guide\n")
@@ -803,46 +1138,36 @@ class DocsValidationTest < Minitest::Test
     assert_empty stderr
   end
 
-  private
+  def test_validate_preserves_rubocop_and_runs_the_docs_gate
+    with_repository do |repo|
+      copy_validation_scripts(repo)
+      write(repo, "README.md", "See [missing](missing.md).\n")
+      track(repo, "README.md")
 
-  def with_repository
-    Dir.mktmpdir("agent-docs-check") do |repo|
-      system("git", "init", "--quiet", repo, exception: true)
-      yield repo
+      fake_bin = File.join(repo, "fake-bin")
+      bundle_log = File.join(repo, "bundle.log")
+      write(
+        repo,
+        "fake-bin/bundle",
+        "#!/bin/sh\nprintf '%s\\n' \"$*\" > \"$VALIDATE_BUNDLE_LOG\"\n"
+      )
+      FileUtils.chmod("u+x", File.join(fake_bin, "bundle"))
+
+      _stdout, stderr, status = Open3.capture3(
+        {
+          "PATH" => "#{fake_bin}:#{ENV.fetch('PATH')}",
+          "VALIDATE_BUNDLE_LOG" => bundle_log,
+          "BASH_ENV" => nil,
+          "ENV" => nil
+        },
+        File.join(repo, ".agents/bin/validate"),
+        "--force-exclusion"
+      )
+
+      refute status.success?
+      assert File.exist?(bundle_log), stderr
+      assert_equal "exec rubocop --force-exclusion\n", File.read(bundle_log)
+      assert_includes stderr, "README.md:1: broken relative link: missing.md"
     end
-  end
-
-  def write(repo, path, content)
-    absolute = File.join(repo, path)
-    FileUtils.mkdir_p(File.dirname(absolute))
-    File.write(absolute, content)
-  end
-
-  def track(repo, *paths)
-    system("git", "-C", repo, "add", "--", *paths, exception: true)
-  end
-
-  def commit(repo, message)
-    system(
-      "git", "-C", repo,
-      "-c", "user.name=Docs Validation Test",
-      "-c", "user.email=docs-validation@example.invalid",
-      "commit", "--quiet", "-m", message,
-      exception: true
-    )
-  end
-
-  def write_fence_baseline(repo, path, line:, content:)
-    baseline = {
-      "version" => 1,
-      "unlabelled_code_fences" => {
-        path => [{ "line" => line, "sha256" => "sha256:#{Digest::SHA256.hexdigest(content)}" }]
-      }
-    }
-    write(repo, ".agents/docs-lint-baseline.json", JSON.pretty_generate(baseline))
-  end
-
-  def run_checker(repo)
-    Open3.capture3(CHECKER, "--repo-root", repo)
   end
 end

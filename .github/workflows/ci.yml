@@ -30,8 +30,8 @@ jobs:
           ruby-version: .ruby-version
           bundler-cache: true
 
-      - name: Run RuboCop
-        run: bundle exec rubocop
+      - name: Run validation
+        run: .agents/bin/validate
 
   test:
     runs-on: ubuntu-latest
