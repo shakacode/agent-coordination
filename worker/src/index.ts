@@ -33,14 +33,45 @@ const ARCHIVABLE_RECORD_PATH = "(?:claims/[A-Za-z0-9_.:-]+/[A-Za-z0-9_.:-]+/[A-Z
   + "|heartbeats/[A-Za-z0-9_.:-]+\\.json"
   + "|batches/[A-Za-z0-9_.:-]+\\.json"
   + "|events/[A-Za-z0-9_.:-]+/[A-Za-z0-9_.:-]+\\.json)";
-const ATTENTION_RECORD_PATH = "attention/[A-Za-z0-9_.:-]+/[A-Za-z0-9_.:-]+/[A-Za-z0-9_.:-]+/[A-Za-z0-9_.:-]+\\.json";
-const STATE_PATH = new RegExp(`^(?:${ARCHIVABLE_RECORD_PATH}|${ATTENTION_RECORD_PATH}|archive/${ARCHIVABLE_RECORD_PATH})$`);
+const STATE_PATH = new RegExp(`^(?:${ARCHIVABLE_RECORD_PATH}|archive/${ARCHIVABLE_RECORD_PATH})$`);
 const ARCHIVABLE_PREFIX = "(?:claims(?:/[A-Za-z0-9_.:-]+(?:/[A-Za-z0-9_.:-]+)?)?"
   + "|heartbeats|batches|events(?:/[A-Za-z0-9_.:-]+)?)";
-const ATTENTION_PREFIX = "attention(?:/[A-Za-z0-9_.:-]+(?:/[A-Za-z0-9_.:-]+(?:/[A-Za-z0-9_.:-]+)?)?)?";
-const ACTIVE_PREFIX = `(?:${ARCHIVABLE_PREFIX}|${ATTENTION_PREFIX})`;
+const ACTIVE_PREFIX = ARCHIVABLE_PREFIX;
 const ARCHIVE_PREFIX = `archive(?:/${ARCHIVABLE_PREFIX})?`;
 const STATE_PREFIX = new RegExp(`^(?:${ACTIVE_PREFIX}|${ARCHIVE_PREFIX})$`);
+
+function validAttentionComponent(value: string): boolean {
+  return value.length <= 160 && /^[A-Za-z0-9_:-]+(?:\.[A-Za-z0-9_:-]+)*$/.test(value);
+}
+
+function validAttentionRepoSegment(value: string): boolean {
+  return value !== "." && !value.includes("..") && /^[A-Za-z0-9_.-]+$/.test(value);
+}
+
+function validAttentionRepository(owner: string, name: string): boolean {
+  return `${owner}/${name}`.length <= 160
+    && validAttentionRepoSegment(owner)
+    && validAttentionRepoSegment(name);
+}
+
+function validAttentionPath(path: string): boolean {
+  const parts = path.split("/");
+  if (parts.length !== 5 || parts[0] !== "attention" || !parts[4].endsWith(".json")) return false;
+  const id = parts[4].slice(0, -".json".length);
+  return validAttentionComponent(parts[1])
+    && validAttentionRepository(parts[2], parts[3])
+    && validAttentionComponent(id);
+}
+
+function validAttentionPrefix(prefix: string): boolean {
+  const parts = prefix.split("/");
+  if (parts[0] !== "attention" || parts.length > 4) return false;
+  if (parts.length === 1) return true;
+  if (!validAttentionComponent(parts[1])) return false;
+  if (parts.length === 2) return true;
+  if (!validAttentionRepoSegment(parts[2]) || parts[2].length > 158) return false;
+  return parts.length === 3 || validAttentionRepository(parts[2], parts[3]);
+}
 
 function validPath(path: string): boolean {
   const encoder = new TextEncoder();
@@ -49,14 +80,14 @@ function validPath(path: string): boolean {
   const maxPathBytes = archive ? MAX_ARCHIVE_STATE_PATH_BYTES : MAX_ACTIVE_STATE_PATH_BYTES;
   return encoder.encode(path).byteLength <= maxPathBytes
     && encoder.encode(activePath).byteLength <= MAX_ACTIVE_STATE_PATH_BYTES
-    && STATE_PATH.test(path)
+    && (STATE_PATH.test(path) || validAttentionPath(path))
     && !path.includes("..")
     && !path.includes("//");
 }
 
 function validPrefix(prefix: string): boolean {
   return new TextEncoder().encode(prefix).byteLength <= MAX_ACTIVE_STATE_PATH_BYTES
-    && STATE_PREFIX.test(prefix)
+    && (STATE_PREFIX.test(prefix) || validAttentionPrefix(prefix))
     && !prefix.includes("..")
     && !prefix.includes("//");
 }

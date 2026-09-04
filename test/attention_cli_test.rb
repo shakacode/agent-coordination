@@ -605,6 +605,69 @@ class AttentionCliTest < Minitest::Test
     assert_success upsert(payload)
   end
 
+  def test_attention_timestamps_reject_arbitrary_leap_seconds
+    ["2026-01-01T12:00:60Z", "2026-01-31T23:59:60Z", "2016-12-31T23:59:60+01:00"].each do |timestamp|
+      result = upsert(record("created_at" => timestamp))
+
+      assert_equal 1, result.status.exitstatus
+      assert_includes result.stderr, "attention created_at must be an RFC 3339 timestamp"
+    end
+
+    ["2016-12-31T23:59:60Z", "2016-12-31T18:59:60-05:00"].each do |timestamp|
+      assert_success upsert(record("created_at" => timestamp))
+    end
+  end
+
+  def test_attention_path_classifiers_enforce_the_storage_key_contract
+    assert AgentCoord.state_directory_prefix?("attention/default/shakacode/agent-coordination")
+    assert AgentCoord.state_record_path?("attention/default/shakacode/agent-coordination/decision-1.json")
+
+    invalid = [
+      "attention/default/owner:team/repo",
+      "attention/#{'w' * 161}/owner/repo",
+      "attention/default/owner/repo/.id.json",
+      "attention/default/owner/repo/#{'i' * 161}.json"
+    ]
+    invalid.each do |path|
+      refute AgentCoord.state_directory_prefix?(path), path
+      refute AgentCoord.state_record_path?(path), path
+    end
+  end
+
+  def test_attention_commands_reject_options_owned_by_other_attention_commands
+    common = ["--workspace", "default", "--repo", "shakacode/agent-coordination"]
+    record_path = write_record(record)
+    command_arguments = {
+      "attention-upsert" => ["--record-json", record_path],
+      "attention-resolve" => common + ["--attention-id", "decision-1", "--source-generation", "2"],
+      "attention-get" => common + ["--attention-id", "decision-1"],
+      "attention-list" => common
+    }
+    flag_arguments = {
+      "attention-id" => ["--attention-id", "ignored"],
+      "record-json" => ["--record-json", "ignored.json"],
+      "source-generation" => ["--source-generation", "9"],
+      "include-resolved" => ["--include-resolved"],
+      "limit" => ["--limit", "1"]
+    }
+    owned_flags = {
+      "attention-upsert" => %w[record-json],
+      "attention-resolve" => %w[attention-id source-generation],
+      "attention-get" => %w[attention-id],
+      "attention-list" => %w[include-resolved limit]
+    }
+
+    command_arguments.each do |command, arguments|
+      (flag_arguments.keys - owned_flags.fetch(command)).each do |flag|
+        invocation = [command, *arguments, *flag_arguments.fetch(flag)]
+        result = run_cli(*invocation)
+
+        assert_equal 1, result.status.exitstatus, invocation.join(" ")
+        assert_includes result.stderr, "invalid option", invocation.join(" ")
+      end
+    end
+  end
+
   private
 
   def attention_lifecycle_commands

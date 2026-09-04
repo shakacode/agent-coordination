@@ -102,6 +102,12 @@ module AgentCoord
   MAX_ATTENTION_RECORD_BYTES = 256 * 1024
   MAX_ATTENTION_KEY_COMPONENT_LENGTH = 160
   MAX_ATTENTION_TIMESTAMP_LENGTH = 64
+  RFC3339_LEAP_SECOND_DATES = %w[
+    1972-06-30 1972-12-31 1973-12-31 1974-12-31 1975-12-31 1976-12-31 1977-12-31
+    1978-12-31 1979-12-31 1981-06-30 1982-06-30 1983-06-30 1985-06-30 1987-12-31
+    1989-12-31 1990-12-31 1992-06-30 1993-06-30 1994-06-30 1995-12-31 1997-06-30
+    1998-12-31 2005-12-31 2008-12-31 2012-06-30 2015-06-30 2016-12-31
+  ].freeze
   STATE_PATH_PATTERN = %r{\A(?:
     claims/[A-Za-z0-9_.:-]+/[A-Za-z0-9_.:-]+/[A-Za-z0-9_.:-]+\.json |
     heartbeats/[A-Za-z0-9_.:-]+\.json |
@@ -1249,18 +1255,23 @@ module AgentCoord
     def add_attention_options(opts, options, command)
       return unless command.start_with?("attention-")
 
-      opts.on("--attention-id ID", "stable attention record identifier") { |value| options[:attention_id] = value }
-      opts.on("--record-json PATH", "attention-upsert only: v1 record JSON file, or - for stdin") do |value|
-        options[:record_json] = value
+      if %w[attention-get attention-resolve].include?(command)
+        opts.on("--attention-id ID", "stable attention record identifier") { |value| options[:attention_id] = value }
       end
-      opts.on("--source-generation GENERATION", Integer,
-              "attention-resolve only: source generation resolving the record") do |value|
-        options[:source_generation] = value
+      if command == "attention-upsert"
+        opts.on("--record-json PATH", "v1 attention record JSON file, or - for stdin") do |value|
+          options[:record_json] = value
+        end
       end
-      opts.on("--include-resolved", "attention-list only: include resolved records") do
-        options[:include_resolved] = true
+      if command == "attention-resolve"
+        opts.on("--source-generation GENERATION", Integer, "source generation resolving the record") do |value|
+          options[:source_generation] = value
+        end
       end
-      opts.on("--limit N", Integer, "attention-list only: maximum records (1-#{MAX_ATTENTION_LIST_LIMIT})") do |value|
+      return unless command == "attention-list"
+
+      opts.on("--include-resolved", "include resolved records") { options[:include_resolved] = true }
+      opts.on("--limit N", Integer, "maximum records (1-#{MAX_ATTENTION_LIST_LIMIT})") do |value|
         options[:limit] = value
       end
     end
@@ -7653,7 +7664,9 @@ module AgentCoord
     end
 
     def validate_attention_timestamp!(value, field)
-      unless value.is_a?(String) && value.length <= MAX_ATTENTION_TIMESTAMP_LENGTH && gc_valid_datetime?(value)
+      match = value.match(RFC3339_PATTERN) if value.is_a?(String)
+      unless value.is_a?(String) && value.length <= MAX_ATTENTION_TIMESTAMP_LENGTH && match &&
+             valid_attention_leap_second?(value, match) && gc_valid_datetime?(value)
         raise Error,
               "attention #{field} must be an RFC 3339 timestamp of at most #{MAX_ATTENTION_TIMESTAMP_LENGTH} characters"
       end
@@ -7662,6 +7675,15 @@ module AgentCoord
     rescue ArgumentError
       raise Error,
             "attention #{field} must be an RFC 3339 timestamp of at most #{MAX_ATTENTION_TIMESTAMP_LENGTH} characters"
+    end
+
+    def valid_attention_leap_second?(value, match)
+      return true unless match[:second].to_i == 60
+
+      utc = DateTime.iso8601(value, Date::GREGORIAN).new_offset(0)
+      utc.strftime("%H:%M") == "23:59" && RFC3339_LEAP_SECOND_DATES.include?(utc.strftime("%Y-%m-%d"))
+    rescue ArgumentError
+      false
     end
 
     def validate_attention_resolution!(record)
@@ -8859,11 +8881,45 @@ module AgentCoord
   end
 
   def self.state_record_path?(path)
-    path.to_s.match?(STATE_PATH_PATTERN)
+    value = path.to_s
+    return attention_record_path?(value) if value.start_with?("attention/")
+
+    value.match?(STATE_PATH_PATTERN)
   end
 
   def self.state_directory_prefix?(path)
-    path.to_s.match?(STATE_DIRECTORY_PREFIX_PATTERN)
+    value = path.to_s
+    return attention_directory_prefix?(value) if value == "attention" || value.start_with?("attention/")
+
+    value.match?(STATE_DIRECTORY_PREFIX_PATTERN)
+  end
+
+  def self.attention_record_path?(path)
+    parts = path.split("/", -1)
+    return false unless parts.length == 5 && parts.first == "attention" && parts.last.end_with?(".json")
+
+    id = parts.last.delete_suffix(".json")
+    attention_path(parts[1], "#{parts[2]}/#{parts[3]}", id) == path
+  rescue Error
+    false
+  end
+
+  def self.attention_directory_prefix?(path)
+    parts = path.split("/", -1)
+    return true if parts == ["attention"]
+    return false unless parts.length.between?(2, 4)
+
+    if parts.length == 2
+      validate_attention_key_component!(parts[1], "workspace")
+      validate_segment!(parts[1], "attention workspace")
+    elsif parts.length == 3
+      attention_repo_prefix(parts[1], "#{parts[2]}/x")
+    else
+      return attention_repo_prefix(parts[1], "#{parts[2]}/#{parts[3]}") == path
+    end
+    true
+  rescue Error
+    false
   end
 
   # Ruby tags ARGV with the locale encoding, and everything downstream assumes

@@ -177,19 +177,42 @@ class ProvisionTokenTest < Minitest::Test
     assert_includes stdout, "writes:   [\"attention/default/shakacode/agent-coordination/decision-1.json\"]"
   end
 
-  def test_attention_scope_matches_worker_active_path_length_boundary
-    stem = "attention/a/b/c/"
-    accepted = "#{stem}#{'x' * (512 - stem.bytesize - '.json'.bytesize)}.json"
-    rejected = "#{stem}#{'x' * (513 - stem.bytesize - '.json'.bytesize)}.json"
-    assert_equal 512, accepted.bytesize
-    assert_equal 513, rejected.bytesize
+  def test_attention_scope_enforces_storage_key_component_contract
+    accepted = "attention/#{'w' * 160}/owner/repo/#{'i' * 160}.json"
+    invalid = [
+      "attention/#{'w' * 161}/owner/repo/id.json",
+      "attention/default/owner/#{'r' * 155}/id.json",
+      "attention/default/owner:team/repo/id.json",
+      "attention/default/./repo/id.json",
+      "attention/default/owner/repo/.id.json",
+      "attention/default/owner/repo/id..part.json",
+      "attention/default/owner/repo/#{'i' * 161}.json"
+    ]
 
     _, accepted_stderr, accepted_status = run_script("m5", "--local", "--read-prefix", accepted)
     assert accepted_status.success?, accepted_stderr
 
-    _, rejected_stderr, rejected_status = run_script("m5", "--local", "--read-prefix", rejected)
-    refute rejected_status.success?
-    assert_includes rejected_stderr, "invalid read prefix"
+    invalid.each do |scope|
+      _, rejected_stderr, rejected_status = run_script("m5", "--local", "--read-prefix", scope)
+      refute rejected_status.success?, scope
+      assert_includes rejected_stderr, "invalid read prefix", scope
+    end
+
+    valid_prefix = "attention/#{'w' * 160}/owner/repo"
+    invalid_prefixes = [
+      "attention/#{'w' * 161}",
+      "attention/default/owner:team",
+      "attention/default/owner/#{'r' * 155}",
+      "attention/./owner/repo",
+      "attention/default/"
+    ]
+    _, prefix_stderr, prefix_status = run_script("m5", "--local", "--read-prefix", valid_prefix)
+    assert prefix_status.success?, prefix_stderr
+    invalid_prefixes.each do |scope|
+      _, rejected_stderr, rejected_status = run_script("m5", "--local", "--read-prefix", scope)
+      refute rejected_status.success?, scope
+      assert_includes rejected_stderr, "invalid read prefix", scope
+    end
   end
 
   def test_archive_scope_matches_worker_exact_path_and_prefix_length_boundaries

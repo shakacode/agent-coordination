@@ -88,6 +88,41 @@ class HttpBackendIntegrationTest < Minitest::Test
     assert_equal 1, body.dig("data", "source_generation")
   end
 
+  def test_worker_enforces_the_attention_storage_key_contract
+    token = ENV.fetch("AGENT_COORD_API_TOKEN")
+    valid_prefix = "attention/#{'w' * 160}/owner/repo"
+    valid_path = "#{valid_prefix}/#{'i' * 160}.json"
+    invalid_prefixes = [
+      "attention/#{'w' * 161}/owner/repo",
+      "attention/default/owner:team/repo",
+      "attention/default/./repo",
+      "attention/default/owner/#{'r' * 155}"
+    ]
+    invalid_paths = invalid_prefixes.map { |prefix| "#{prefix}/id.json" } +
+                    ["attention/default/owner/repo/.id.json",
+                     "attention/default/owner/repo/#{'i' * 161}.json"]
+
+    code, body = http_json(
+      "GET", "/v1/state?#{URI.encode_www_form(prefix: valid_prefix)}", token: token
+    )
+    assert_equal 200, code, body.inspect
+    code, body = http_json("GET", state_path(valid_path), token: token)
+    assert_equal 404, code, body.inspect
+
+    invalid_prefixes.each do |prefix|
+      code, body = http_json(
+        "GET", "/v1/state?#{URI.encode_www_form(prefix: prefix)}", token: token
+      )
+      assert_equal 400, code, prefix
+      assert_equal "invalid_prefix", body.fetch("error"), prefix
+    end
+    invalid_paths.each do |path|
+      code, body = http_json("GET", state_path(path), token: token)
+      assert_equal 400, code, path
+      assert_equal "invalid_path", body.fetch("error"), path
+    end
+  end
+
   def test_full_claim_lifecycle_and_contention
     target = "100"
     code, out, err = cli("claim", "--agent-id", "w1", "--repo", REPO, "--target", target)

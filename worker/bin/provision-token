@@ -36,11 +36,15 @@ valid_prefix() {
   local prefix="$1"
   [[ "$prefix" != *..* ]] || return 1
   [[ "$prefix" != *//* ]] || return 1
+  [[ "$prefix" != */ ]] || return 1
   local segment='[A-Za-z0-9_.:-]+'
   local active="claims(/${segment}(/${segment}(/${segment}\\.json)?)?)?|heartbeats(/${segment}\\.json)?|batches(/${segment}\\.json)?|events(/${segment}(/${segment}\\.json)?)?"
-  local attention="attention(/${segment}(/${segment}(/${segment})?)?)?|attention/${segment}/${segment}/${segment}/${segment}\\.json"
-  local pattern="^(${active}|${attention}|archive(/(${active}))?)$"
-  [[ "$prefix" =~ $pattern ]] || return 1
+  local pattern="^(${active}|archive(/(${active}))?)$"
+  if [[ "$prefix" == attention || "$prefix" == attention/* ]]; then
+    valid_attention_prefix "$prefix" || return 1
+  else
+    [[ "$prefix" =~ $pattern ]] || return 1
+  fi
   local archivable_path="claims/${segment}/${segment}/${segment}\\.json|heartbeats/${segment}\\.json|batches/${segment}\\.json|events/${segment}/${segment}\\.json"
   local archive_path_pattern="^archive/(${archivable_path})$"
   if [[ "$prefix" =~ $archive_path_pattern ]]; then
@@ -49,6 +53,50 @@ valid_prefix() {
   else
     [[ "${#prefix}" -le 512 ]]
   fi
+}
+
+valid_attention_component() {
+  local value="$1"
+  [[ "${#value}" -le 160 ]] && [[ "$value" =~ ^[A-Za-z0-9_:-]+(\.[A-Za-z0-9_:-]+)*$ ]]
+}
+
+valid_attention_repo_segment() {
+  local value="$1"
+  [[ "$value" != "." ]] && [[ "$value" != *..* ]] && [[ "$value" =~ ^[A-Za-z0-9_.-]+$ ]]
+}
+
+valid_attention_repository() {
+  local owner="$1"
+  local name="$2"
+  [[ $((${#owner} + 1 + ${#name})) -le 160 ]] &&
+    valid_attention_repo_segment "$owner" && valid_attention_repo_segment "$name"
+}
+
+valid_attention_prefix() {
+  local prefix="$1"
+  local parts=()
+  IFS=/ read -r -a parts <<< "$prefix"
+  [[ "${parts[0]}" == "attention" ]] || return 1
+  case "${#parts[@]}" in
+    1) return 0 ;;
+    2) valid_attention_component "${parts[1]}" ;;
+    3)
+      valid_attention_component "${parts[1]}" &&
+        [[ "${#parts[2]}" -le 158 ]] && valid_attention_repo_segment "${parts[2]}"
+      ;;
+    4)
+      valid_attention_component "${parts[1]}" &&
+        valid_attention_repository "${parts[2]}" "${parts[3]}"
+      ;;
+    5)
+      [[ "${parts[4]}" == *.json ]] || return 1
+      local attention_id="${parts[4]%.json}"
+      valid_attention_component "${parts[1]}" &&
+        valid_attention_repository "${parts[2]}" "${parts[3]}" &&
+        valid_attention_component "$attention_id"
+      ;;
+    *) return 1 ;;
+  esac
 }
 
 while [ "$#" -gt 0 ]; do
