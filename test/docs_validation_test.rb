@@ -666,6 +666,56 @@ end
 class DocsValidationAnchorAndIntegrationTest < Minitest::Test
   include DocsValidationAssertions
 
+  def test_builds_heading_anchors_from_decoded_rendered_text
+    with_repository do |repo|
+      write(repo, "README.md", "[linked](guide.md#label) [entity](guide.md#alpha--beta)\n")
+      write(repo, "guide.md", "# [Label](details(part).md)\n\n# Alpha &amp; Beta\n")
+      write(repo, "details(part).md", "# Details\n")
+      track(repo, "README.md", "guide.md", "details(part).md")
+
+      _stdout, stderr, status = run_checker(repo)
+
+      assert status.success?, stderr
+    end
+  end
+
+  def test_does_not_validate_reference_definitions_inside_inline_comments
+    assert_document_passes("Text <!--\n[example]:missing.md\n--> visible text\n")
+  end
+
+  def test_does_not_validate_unused_reference_definitions
+    assert_document_passes("[unused]:missing.md\n\nOrdinary text.\n")
+  end
+
+  def test_preserves_raw_nested_crlf_fence_baseline_identity
+    with_repository do |repo|
+      content = "> - ```\r\n>   legacy\r\n>   ```\r\n"
+      write(repo, "README.md", content)
+      write_fence_baseline(repo, "README.md", line: 1, content: content)
+      track(repo, "README.md", ".agents/docs-lint-baseline.json")
+
+      _stdout, stderr, status = run_checker(repo)
+
+      assert status.success?, stderr
+    end
+  end
+
+  def test_bootstraps_its_bundle_outside_the_repository_without_inherited_bundler
+    with_repository do |repo|
+      write(repo, "README.md", "# Fixture\n")
+      track(repo, "README.md")
+
+      stdout, stderr, status = Open3.capture3(
+        { "BUNDLE_GEMFILE" => nil, "BUNDLE_BIN_PATH" => nil, "RUBYOPT" => nil },
+        CHECKER, "--repo-root", repo, chdir: repo
+      )
+
+      assert status.success?, stderr
+      assert_empty stdout
+      assert_empty stderr
+    end
+  end
+
   def test_preserves_repeated_heading_spaces_in_github_anchors
     with_repository do |repo|
       write(repo, "README.md", "[contract](guide.md#legacy--non-stack-cli-contract-and-exit-codes)\n")
@@ -699,14 +749,18 @@ class DocsValidationAnchorAndIntegrationTest < Minitest::Test
 
   def test_checks_reference_definitions_without_postcolon_whitespace
     with_repository do |repo|
-      write(repo, "README.md", "[guide]:missing.md\n[valid]:present.md\n[external]:https://example.com\n")
+      write(
+        repo, "README.md",
+        "[guide]:missing.md\n[valid]:present.md\n[external]:https://example.com\n\n" \
+        "Read [guide], [valid], and [external].\n"
+      )
       write(repo, "present.md", "# Present\n")
       track(repo, "README.md", "present.md")
 
       _stdout, stderr, status = run_checker(repo)
 
       refute status.success?
-      assert_equal "README.md:1: broken relative link: missing.md\n", stderr
+      assert_equal "README.md:5: broken relative link: missing.md\n", stderr
     end
   end
 
@@ -1126,7 +1180,7 @@ class DocsValidationAnchorAndIntegrationTest < Minitest::Test
     end
   end
 
-  def test_reports_a_broken_reference_link_definition
+  def test_reports_a_broken_reference_link_at_its_use_site
     with_repository do |repo|
       write(repo, "README.md", "Read [the guide][guide].\n\n[guide]: docs/missing.md\n")
       track(repo, "README.md")
@@ -1134,11 +1188,11 @@ class DocsValidationAnchorAndIntegrationTest < Minitest::Test
       _stdout, stderr, status = run_checker(repo)
 
       refute status.success?
-      assert_includes stderr, "README.md:3: broken relative link: docs/missing.md"
+      assert_includes stderr, "README.md:1: broken relative link: docs/missing.md"
     end
   end
 
-  def test_reports_a_broken_multiline_reference_link_definition
+  def test_reports_a_broken_multiline_reference_link_at_its_use_site
     with_repository do |repo|
       write(repo, "README.md", "[guide]:\n  docs/missing.md\n\nRead [the guide][guide].\n")
       track(repo, "README.md")
@@ -1146,7 +1200,7 @@ class DocsValidationAnchorAndIntegrationTest < Minitest::Test
       _stdout, stderr, status = run_checker(repo)
 
       refute status.success?
-      assert_includes stderr, "README.md:1: broken relative link: docs/missing.md"
+      assert_includes stderr, "README.md:4: broken relative link: docs/missing.md"
     end
   end
 
@@ -1175,16 +1229,16 @@ class DocsValidationAnchorAndIntegrationTest < Minitest::Test
       write(
         repo,
         "README.md",
-        "> [quoted]:\n>   missing-quoted.md\n>\n" \
-        "- [listed]:\n  <missing-listed.md> \"Title\"\n"
+        "> [quoted]:\n>   missing-quoted.md\n>\n> [quoted]\n\n" \
+        "- [listed]:\n  <missing-listed.md> \"Title\"\n\n  [listed]\n"
       )
       track(repo, "README.md")
 
       _stdout, stderr, status = run_checker(repo)
 
       refute status.success?
-      assert_includes stderr, "README.md:1: broken relative link: missing-quoted.md"
-      assert_includes stderr, "README.md:4: broken relative link: missing-listed.md"
+      assert_includes stderr, "README.md:4: broken relative link: missing-quoted.md"
+      assert_includes stderr, "README.md:9: broken relative link: missing-listed.md"
     end
   end
 

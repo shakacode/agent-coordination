@@ -1,6 +1,10 @@
 #!/usr/bin/env ruby
 # frozen_string_literal: true
 
+ENV["BUNDLE_GEMFILE"] ||= File.expand_path("../../Gemfile", __dir__)
+require "bundler/setup"
+require "commonmarker"
+require "cgi"
 require "json"
 require "digest"
 require "open3"
@@ -8,44 +12,17 @@ require "optparse"
 require "pathname"
 require "uri"
 
-def strip_underscore_emphasis(value)
-  previous = nil
-  until value == previous
-    previous = value
-    value = value.gsub(/(?<![\\\p{Alnum}_])(__|_)(?=\S)(.*?\S)(?<!\\)\1(?![\p{Alnum}_])/u) do
-      Regexp.last_match(2)
+def heading_text(node)
+  node.walk.filter_map do |child|
+    case child.type
+    when :text, :code then child.string_content
+    when :softbreak, :linebreak then " "
     end
-  end
-  value
-end
-
-def heading_text_without_markup(value)
-  text = value.gsub(/!?\[([^\]]*)\]\([^)]+\)/, "\\1")
-              .gsub(/\[([^\]]*)\]\[[^\]]*\]/, "\\1")
-              .gsub(/<[^>]*>/, "")
-  strip_underscore_emphasis(text).gsub(/[`*~]/, "")
-end
-
-def heading_text(heading)
-  text = +""
-  cursor = 0
-  while (opening = next_backtick_run(heading, cursor))
-    closing = next_backtick_run(heading, opening.end(0), length: opening[0].length, skip_escaped: false)
-    break unless closing
-
-    text << heading_text_without_markup(heading[cursor...opening.begin(0)])
-    text << heading[opening.end(0)...closing.begin(0)]
-    cursor = closing.end(0)
-  end
-  text << heading_text_without_markup(heading[cursor..])
+  end.join
 end
 
 def github_anchor(heading, used)
-  anchor = heading_text(heading.sub(/[ \t]+#+[ \t]*\z/, ""))
-           .downcase
-           .gsub(/[^\p{Alnum}\p{M}\s_-]/u, "")
-           .strip
-           .gsub(/\s/, "-")
+  anchor = heading.downcase.gsub(/[^\p{Alnum}\p{M}\s_-]/u, "").strip.gsub(/\s/, "-")
   candidate = anchor
   suffix = 0
   while used[candidate]
@@ -56,323 +33,8 @@ def github_anchor(heading, used)
   candidate
 end
 
-def markdown_punctuation?(character)
-  return false unless character&.ascii_only?
-
-  codepoint = character.ord
-  (33..47).cover?(codepoint) || (58..64).cover?(codepoint) ||
-    (91..96).cover?(codepoint) || (123..126).cover?(codepoint)
-end
-
-def unescape_markdown_punctuation(value)
-  result = +""
-  cursor = 0
-  while cursor < value.length
-    cursor += 1 if value[cursor] == "\\" && markdown_punctuation?(value[cursor + 1])
-    result << value[cursor]
-    cursor += 1
-  end
-  result
-end
-
-def link_destination(raw)
-  value = raw.strip
-  destination = if value.start_with?("<")
-                  value[/\A<([^>]*)>/, 1].to_s
-                else
-                  value.split(/\s+/, 2).first.to_s
-                end
-
-  unescape_markdown_punctuation(destination)
-end
-
-def link_whitespace?(character)
-  [" ", "\t", "\r", "\n"].include?(character)
-end
-
-def skip_link_whitespace(line, cursor)
-  line_endings = 0
-  while link_whitespace?(line[cursor])
-    line_endings += 1 if line[cursor] == "\n"
-    return [cursor, false] if line_endings > 1
-
-    cursor += 1
-  end
-  [cursor, true]
-end
-
-def delimited_content_end(line, cursor, delimiter)
-  escaped = false
-  while cursor < line.length
-    character = line[cursor]
-    if escaped
-      escaped = false
-    elsif character == "\\"
-      escaped = true
-    elsif character == delimiter
-      return cursor
-    end
-    cursor += 1
-  end
-end
-
-def unbracketed_destination_end(line, cursor)
-  depth = 0
-  escaped = false
-  while cursor < line.length
-    character = line[cursor]
-    if escaped
-      escaped = false
-    elsif character == "\\"
-      escaped = true
-    elsif character == "("
-      depth += 1
-    elsif character == ")"
-      return cursor if depth.zero?
-
-      depth -= 1
-    elsif link_whitespace?(character) && depth.zero?
-      return cursor
-    end
-    cursor += 1
-  end
-  cursor
-end
-
-def closing_parenthesis(line, cursor)
-  cursor, valid_whitespace = skip_link_whitespace(line, cursor)
-  return [nil, :invalid] unless valid_whitespace
-  return [nil, :incomplete] if cursor >= line.length
-
-  if line[cursor] == "<"
-    destination_start = cursor
-    cursor = delimited_content_end(line, cursor + 1, ">")
-    unless cursor
-      return [nil, line[destination_start..].include?("\n") ? :invalid : :incomplete]
-    end
-    return [nil, :invalid] if line[destination_start...cursor].include?("\n")
-
-    cursor += 1
-  else
-    cursor = unbracketed_destination_end(line, cursor)
-    return [cursor, :complete] if line[cursor] == ")"
-    return [nil, :incomplete] if cursor >= line.length
-  end
-
-  cursor, valid_whitespace = skip_link_whitespace(line, cursor)
-  return [nil, :invalid] unless valid_whitespace
-  return [cursor, :complete] if line[cursor] == ")"
-  return [nil, :incomplete] if cursor >= line.length
-
-  closing_title_parenthesis(line, cursor)
-end
-
-def closing_title_parenthesis(line, cursor)
-  title_start = cursor
-  opening_delimiter = line[cursor]
-  closing_delimiter = { "\"" => "\"", "'" => "'", "(" => ")" }[opening_delimiter]
-  return [nil, :invalid] unless closing_delimiter
-
-  cursor = delimited_content_end(line, cursor + 1, closing_delimiter)
-  return [nil, :incomplete] unless cursor
-  return [nil, :invalid] if line[title_start...cursor].match?(/\n[ \t]*\r?\n/)
-
-  cursor, valid_whitespace = skip_link_whitespace(line, cursor + 1)
-  return [nil, :invalid] unless valid_whitespace
-  return [cursor, :complete] if line[cursor] == ")"
-  return [nil, :incomplete] if cursor >= line.length
-
-  [nil, :invalid]
-end
-
-def closing_link_label_index(line, cursor)
-  depth = 1
-  escaped = false
-  while cursor < line.length
-    character = line[cursor]
-    if escaped
-      escaped = false
-    elsif character == "\\"
-      escaped = true
-    elsif character == "["
-      depth += 1
-    elsif character == "]"
-      depth -= 1
-      return cursor if depth.zero?
-    end
-    cursor += 1
-  end
-end
-
-def inline_link_destination_start(line, cursor)
-  while (opening = line.index("[", cursor))
-    cursor = opening + 1
-    next if escaped_at?(line, opening)
-
-    closing = closing_link_label_index(line, cursor)
-    return [opening, closing + 2] if closing && line[closing + 1] == "("
-  end
-end
-
-def inline_link_destinations(line, images_only: false)
-  destinations = []
-  cursor = 0
-  while (candidate = inline_link_destination_start(line, cursor))
-    opening, destination_start = candidate
-    closing, status = closing_parenthesis(line, destination_start)
-    unless status == :complete
-      cursor = destination_start
-      next
-    end
-
-    unless images_only
-      label_start = opening + 1
-      label_destinations, = inline_link_destinations(line[label_start...(destination_start - 2)], images_only: true)
-      label_destinations.each do |destination, label_opening|
-        destinations << [destination, label_start + label_opening]
-      end
-    end
-    if !images_only || (opening.positive? && line[opening - 1] == "!" && !escaped_at?(line, opening - 1))
-      destinations << [line[destination_start...closing], opening]
-    end
-    cursor = closing + 1
-  end
-  [destinations, nil]
-end
-
 def local_destination?(destination)
   !destination.empty? && !destination.start_with?("//") && !destination.match?(/\A[a-z][a-z0-9+.-]*:/i)
-end
-
-def escaped_at?(line, index)
-  backslashes = 0
-  index -= 1
-  while index >= 0 && line[index] == "\\"
-    backslashes += 1
-    index -= 1
-  end
-  backslashes.odd?
-end
-
-def next_backtick_run(line, cursor, length: nil, skip_escaped: true)
-  while (run = line.match(/`+/, cursor))
-    cursor = run.end(0)
-    next if skip_escaped && escaped_at?(line, run.begin(0))
-    next if length && run[0].length != length
-
-    return run
-  end
-end
-
-def without_inline_code_spans(line)
-  content = line.dup
-  cursor = 0
-  while (opening = next_backtick_run(line, cursor))
-    closing = next_backtick_run(line, opening.end(0), length: opening[0].length, skip_escaped: false)
-    unless closing
-      cursor = opening.end(0)
-      next
-    end
-
-    content[opening.begin(0)...closing.end(0)] = line[opening.begin(0)...closing.end(0)].gsub(/[^\r\n]/, " ")
-    cursor = closing.end(0)
-  end
-  content
-end
-
-def column_width(value)
-  value.each_char.reduce(0) do |column, character|
-    character == "\t" ? column + (4 - (column % 4)) : column + 1
-  end
-end
-
-def without_indentation(line, width)
-  index = 0
-  columns = 0
-  while [" ", "\t"].include?(line[index])
-    columns += line[index] == "\t" ? 4 - (columns % 4) : 1
-    index += 1
-  end
-  return unless columns >= width
-
-  (" " * (columns - width)) + line[index..]
-end
-
-def without_container_prefix(line)
-  content = line
-  operations = []
-  loop do
-    if (prefix = content.match(/\A {0,3}>[ \t]?/))
-      operations << [:blockquote]
-    elsif (prefix = content.match(/\A {0,3}(?:[-+*]|\d{1,9}[.)])[ \t]+/))
-      operations << [:indent, column_width(prefix[0])]
-    else
-      break
-    end
-    content = content[prefix[0].length..]
-  end
-  [content, operations]
-end
-
-def blockquote_content(line)
-  content = line
-  depth = 0
-  loop do
-    stripped = content.sub(/\A {0,3}>[ \t]?/, "")
-    break if stripped == content
-
-    content = stripped
-    depth += 1
-  end
-  [content, depth]
-end
-
-def apply_container_operations(line, operations)
-  operations.reduce(line) do |content, (type, width)|
-    if type == :blockquote
-      prefix = content.match(/\A {0,3}>[ \t]?/)
-      break unless prefix
-
-      content[prefix[0].length..]
-    else
-      indented_content = without_indentation(content, width)
-      break unless indented_content
-
-      indented_content
-    end
-  end
-end
-
-def blockquote_operations(depth)
-  Array.new(depth) { [:blockquote] }
-end
-
-def container_content_candidates(line, list_context)
-  content, operations = without_container_prefix(line)
-  candidates = [[content, operations]]
-  return candidates unless list_context
-
-  outer_operations = blockquote_operations(list_context.fetch(:blockquote_depth))
-  outer_operations << [:indent, list_context.fetch(:indent)]
-  outer_content = apply_container_operations(line, outer_operations)
-  return candidates unless outer_content
-
-  content, inner_operations = without_container_prefix(outer_content)
-  candidates << [content, outer_operations + inner_operations]
-  candidates
-end
-
-def container_heading(line, list_context)
-  container_content_candidates(line, list_context).filter_map do |content, _operations|
-    content.match(/\A {0,3}\#{1,6}(?:[ \t]+(.*?)[ \t]*)?\r?\n?\z/)
-  end.first
-end
-
-def fence_finding(fence)
-  {
-    "line" => fence.fetch(:line),
-    "sha256" => "sha256:#{Digest::SHA256.hexdigest(fence.fetch(:content).join)}"
-  }
 end
 
 def valid_fence_baseline?(baseline)
@@ -400,330 +62,59 @@ def tracked_directory_index(paths)
   end
 end
 
-def list_context_for_line(line, current_context)
-  content, blockquote_depth = blockquote_content(line)
-  if content.strip.empty?
-    return current_context if current_context&.fetch(:blockquote_depth) == blockquote_depth
+def raw_node_source(node, lines)
+  position = node.source_position
+  first_line = position.fetch(:start_line) - 1
+  last_line = position.fetch(:end_line) - 1
+  source = lines[first_line..last_line].join
+  return source unless node.type == :html_inline
 
-    return nil
-  end
-
-  offset = if current_context && current_context.fetch(:blockquote_depth) == blockquote_depth &&
-              content.start_with?(" " * current_context.fetch(:indent))
-             current_context.fetch(:indent)
-           else
-             0
-           end
-  marker = content[offset..].match(/\A {0,3}(?:[-+*]|\d{1,9}[.)])[ \t]+/)
-  return { indent: offset + marker[0].length, blockquote_depth: blockquote_depth } if marker
-  return current_context if current_context && offset == current_context.fetch(:indent)
-
-  nil
-end
-
-def consume_fence_line(line:, line_number:, fence:, list_context:, findings:)
-  if fence
-    fence.fetch(:content) << line
-    marker = Regexp.escape(fence.fetch(:character))
-    length = fence.fetch(:length)
-    fence_line = apply_container_operations(line, fence.fetch(:container_operations))
-    if fence_line&.match?(/\A {0,3}#{marker}{#{length},}[ \t]*\r?\n?\z/)
-      findings << fence_finding(fence) if fence.fetch(:unlabelled)
-      fence = nil
-    end
-    return [true, fence]
-  end
-
-  opening = container_content_candidates(line, list_context).find do |content, _operations|
-    match = content.match(/\A {0,3}(`{3,}|~{3,})([^\r\n]*)/)
-    match && (match[1].start_with?("~") || !match[2].include?("`"))
-  end
-  return [false, nil] unless opening
-
-  fence_line, container_operations = opening
-  match = fence_line.match(/\A {0,3}(`{3,}|~{3,})([^\r\n]*)/)
-
-  [
-    true,
-    {
-      character: match[1][0],
-      length: match[1].length,
-      container_operations: container_operations,
-      line: line_number,
-      content: [line],
-      unlabelled: match[2].strip.empty?
-    }
-  ]
-end
-
-def list_item_start?(line)
-  content, = blockquote_content(line)
-  content.match?(/\A {0,3}(?:[-+*]|\d{1,9}[.)])[ \t]+/)
-end
-
-def container_drop?(previous, current)
-  previous && current.length < previous.length && previous.take(current.length) == current
-end
-
-def reset_indented_code_at_container_boundary(line, operations, state)
-  previous = state[:container_operations]
-  changed = previous != operations
-  new_list_item = list_item_start?(line)
-
-  state[:active] = false if changed || new_list_item
-  if new_list_item || (changed && !container_drop?(previous, operations))
-    state[:paragraph_active] = false
-    state[:paragraph_lines].clear
-  end
-  state[:container_operations] = operations
-end
-
-def consume_indented_code_line(line:, list_context:, state:)
-  container_content, operations = container_content_candidates(line, list_context).last
-  reset_indented_code_at_container_boundary(line, operations, state)
-  indented_content = without_indentation(container_content, 4)
-  if state.fetch(:active)
-    return [true, container_content] if container_content.strip.empty? || indented_content
-
-    state[:active] = false
-  elsif !state.fetch(:paragraph_active) && indented_content
-    state[:active] = true
-    return [true, container_content]
-  end
-
-  [false, container_content]
-end
-
-def multiline_reference_destination(line)
-  match = line.match(
-    /\A {0,3}(<[^>\r\n]*>|\S+)(?:[ \t]+(?:"[^"]*"|'[^']*'|\([^)]*\)))?[ \t]*\r?\n?\z/
-  )
-  match&.[](1)
-end
-
-def scan_inline_links(line, line_number, context)
-  syntax = without_inline_code_spans(line)
-  syntax = syntax.gsub(/<!--.*?-->/m) { |comment| comment.gsub(/[^\r\n]/, " ") }
-  destinations, = inline_link_destinations(syntax)
-  destinations.each do |raw_destination, opening|
-    destination = link_destination(raw_destination)
-    next unless local_destination?(destination)
-
-    target_line = line_number + syntax[0...opening].count("\n")
-    context.fetch(:link_targets) << [context.fetch(:path), target_line, destination]
-  end
-end
-
-def flush_inline_paragraph(context)
-  paragraph = context.delete(:inline_paragraph)
-  return unless paragraph
-
-  scan_inline_links(paragraph.fetch(:content), paragraph.fetch(:line), context)
-end
-
-def append_inline_paragraph(content, line_number, context)
-  paragraph = context[:inline_paragraph] ||= { content: +"", line: line_number }
-  paragraph.fetch(:content) << content
-end
-
-def scan_markup_line(line, content, line_number, context)
-  path = context.fetch(:path)
-  list_context = context.fetch(:list_context)
-  anchors = context.fetch(:anchors)
-  link_targets = context.fetch(:link_targets)
-  syntax_line = without_inline_code_spans(content)
-  heading = container_heading(line, list_context)
-  anchors[path][github_anchor(heading[1].to_s, context.fetch(:anchor_counts))] = true if heading
-  syntax_line.scan(/<a\b[^>]*\s(?:id|name)\s*=\s*["']([^"']+)["'][^>]*>/i) do |match|
-    anchors[path][match.fetch(0)] = true
-  end
-
-  pending_reference = context.delete(:pending_reference)
-  if pending_reference &&
-     pending_reference.fetch(:container_operations) == context.fetch(:container_operations) &&
-     (raw_destination = multiline_reference_destination(syntax_line))
-    destination = link_destination(raw_destination)
-    link_targets << [path, pending_reference.fetch(:line), destination] if local_destination?(destination)
-    return [heading, true]
-  end
-
-  reference_line = false
-  if (reference = syntax_line.match(/\A {0,3}\[[^\]]+\]:[ \t]*(<[^>]+>|\S+)/))
-    destination = link_destination(reference[1])
-    link_targets << [path, line_number, destination] if local_destination?(destination)
-    reference_line = true
-  elsif syntax_line.match?(/\A {0,3}\[[^\]]+\]:[ \t]*\r?\n?\z/)
-    context[:pending_reference] = {
-      line: line_number,
-      container_operations: context.fetch(:container_operations)
-    }
-    reference_line = true
-  end
-
-  [heading, reference_line]
-end
-
-def paragraph_active_after?(content, heading, was_active)
-  value = content.chomp
-  return false if value.strip.empty? || heading
-  return false if value.match?(/\A {0,3}\[[^\]]+\]:/)
-  return false if value.match?(/\A {0,3}(?:(?:\*[ \t]*){3,}|(?:_[ \t]*){3,}|(?:-[ \t]*){3,})\z/)
-  return false if was_active && value.match?(/\A {0,3}(?:=+|-+)[ \t]*\z/)
-
-  true
-end
-
-def setext_heading?(content, paragraph_active)
-  paragraph_active && content.match?(/\A {0,3}(?:=+|-+)[ \t]*\r?\n?\z/)
-end
-
-def record_setext_heading(context, indented_code)
-  heading = indented_code.fetch(:paragraph_lines).join("\n")
-  anchor = github_anchor(heading, context.fetch(:anchor_counts))
-  context.fetch(:anchors)[context.fetch(:path)][anchor] = true
-end
-
-def scan_non_fence_line(line, line_number, context, indented_code)
-  indented, container_content = consume_indented_code_line(
-    line: line,
-    list_context: context.fetch(:list_context),
-    state: indented_code
-  )
-  if indented
-    context.delete(:pending_reference)
-    flush_inline_paragraph(context)
-    indented_code[:paragraph_lines].clear
-    return
-  end
-
-  was_active = indented_code.fetch(:paragraph_active)
-  setext = setext_heading?(container_content, was_active)
-  record_setext_heading(context, indented_code) if setext
-  context[:container_operations] = indented_code.fetch(:container_operations)
-  heading, reference_line = scan_markup_line(
-    line,
-    container_content,
-    line_number,
-    context
-  )
-  active = !reference_line && paragraph_active_after?(container_content, heading, was_active)
-  if heading
-    flush_inline_paragraph(context)
-    scan_inline_links(container_content, line_number, context)
-  elsif active && !setext
-    flush_inline_paragraph(context) unless was_active
-    append_inline_paragraph(container_content, line_number, context)
+  # Parser columns are byte offsets. Preserve UTF-8 and original line endings.
+  if first_line == last_line
+    lines[first_line].byteslice(
+      position.fetch(:start_column) - 1,
+      position.fetch(:end_column) - position.fetch(:start_column) + 1
+    )
   else
-    flush_inline_paragraph(context)
+    lines[first_line].byteslice((position.fetch(:start_column) - 1)..) +
+      lines[(first_line + 1)...last_line].join +
+      lines[last_line].byteslice(0, position.fetch(:end_column))
   end
-  if active
-    if was_active
-      indented_code[:paragraph_lines] << container_content.chomp
-    else
-      indented_code[:paragraph_lines] = [container_content.chomp]
-    end
-  else
-    indented_code[:paragraph_lines].clear
-  end
-  indented_code[:paragraph_active] = active
 end
 
-def reset_code_block_state(state)
-  state[:active] = false
-  state[:paragraph_active] = false
-  state[:paragraph_lines].clear
-  state[:container_operations] = nil
-end
-
-def apply_blank_container_operation(content, type, width)
-  return without_indentation(content, width) || (content if content.strip.empty?) unless type == :blockquote
-
-  prefix = content.match(/\A {0,3}>[ \t]?/)
-  content[prefix[0].length..] if prefix
-end
-
-def blank_container_content(line, operations)
-  content = operations.reduce(line) do |candidate, (type, width)|
-    candidate && apply_blank_container_operation(candidate, type, width)
+def record_html_anchors(node, lines, anchors)
+  source = raw_node_source(node, lines)
+  source = source.gsub(/<!--.*?-->/m, "")
+  source.scan(/<a\b[^>]*\s(?:id|name)\s*=\s*["']([^"']+)["'][^>]*>/i) do |match|
+    anchors[CGI.unescapeHTML(match.fetch(0))] = true
   end
-  content if content&.strip&.empty?
-end
-
-def html_comment_content(line, operations)
-  apply_container_operations(line, operations) || blank_container_content(line, operations)
-end
-
-def consume_html_comment_line?(line, list_context, state)
-  if (operations = state.fetch(:html_comment_operations))
-    content = html_comment_content(line, operations)
-    if content
-      state[:html_comment_operations] = nil if content.include?("-->")
-      return true
-    end
-
-    state[:html_comment_operations] = nil
-  end
-
-  opening = container_content_candidates(line, list_context).reverse.find do |content, _operations|
-    content.match?(/\A {0,3}<!--/)
-  end
-  return false unless opening
-
-  content, operations = opening
-  marker = content.match(/\A {0,3}<!--/)
-  reset_code_block_state(state)
-  state[:html_comment_operations] = operations unless content[marker.end(0)..].include?("-->")
-  true
 end
 
 def scan_document(repo_root:, path:, unlabelled_fences:, anchors:, link_targets:)
-  fence = nil
-  indented_code = {
-    active: false,
-    paragraph_active: false,
-    paragraph_lines: [],
-    container_operations: nil,
-    html_comment_operations: nil
-  }
-  context = {
-    path: path,
-    list_context: nil,
-    anchor_counts: {},
-    anchors: anchors,
-    link_targets: link_targets
-  }
-  anchors[path]
+  source = File.read(File.join(repo_root, path), encoding: "UTF-8")
+  lines = source.lines
+  used_anchors = {}
+  document_anchors = anchors[path]
+  document = Commonmarker.parse(source, options: { extension: { shortcodes: false } })
 
-  File.foreach(File.join(repo_root, path), encoding: "UTF-8").with_index(1) do |line, line_number|
-    if fence && html_comment_content(line, fence.fetch(:container_operations)).nil?
-      unlabelled_fences[path] << fence_finding(fence) if fence.fetch(:unlabelled)
-      fence = nil
-    end
-    context[:list_context] = list_context_for_line(line, context[:list_context]) unless fence
-    if !fence && consume_html_comment_line?(line, context.fetch(:list_context), indented_code)
-      context.delete(:pending_reference)
-      flush_inline_paragraph(context)
-      next
-    end
+  document.walk do |node|
+    case node.type
+    when :heading
+      document_anchors[github_anchor(heading_text(node), used_anchors)] = true
+    when :link, :image
+      destination = node.url
+      link_targets << [path, node.source_position.fetch(:start_line), destination] if local_destination?(destination)
+    when :html_inline, :html_block
+      record_html_anchors(node, lines, document_anchors)
+    when :code_block
+      next unless node.fenced? && node.fence_info.strip.empty?
 
-    consumed, fence = consume_fence_line(
-      line: line,
-      line_number: line_number,
-      fence: fence,
-      list_context: context.fetch(:list_context),
-      findings: unlabelled_fences[path]
-    )
-    if consumed
-      context.delete(:pending_reference)
-      flush_inline_paragraph(context)
-      reset_code_block_state(indented_code)
-      next
+      unlabelled_fences[path] << {
+        "line" => node.source_position.fetch(:start_line),
+        "sha256" => "sha256:#{Digest::SHA256.hexdigest(raw_node_source(node, lines))}"
+      }
     end
-
-    scan_non_fence_line(line, line_number, context, indented_code)
   end
-  flush_inline_paragraph(context)
-  unlabelled_fences[path] << fence_finding(fence) if fence&.fetch(:unlabelled)
 end
 
 def resolve_commit(repo_root, ref)

@@ -12,7 +12,14 @@ is absent means that capability is n/a in this repository.
 | `test` | Run tests | CI's non-integration unit and simulation test scope |
 | `lint` | Lint / format | n/a |
 | `build` | Build / type-check | n/a |
-| `docs` | Docs checks | Changed Markdown links, anchors, and unlabelled code fences; exact legacy findings stay baselined |
+| `docs` | Docs checks | Commonmarker checks rendered Markdown links, anchors, and unlabelled code fences; exact legacy findings stay baselined |
 | `ci-detect` | CI change detector | n/a |
+
+Run `bundle install` before calling `.agents/bin/docs` directly. The command
+loads the repository's bundle even from another working directory. It checks
+tracked local destinations in rendered links and images, including reference
+links at their use sites. Unused reference definitions are not checked.
+Legacy fence allowances still match the exact original source lines and bytes,
+including container prefixes and line endings.
 
 Non-command policy lives in [`../agent-workflow.yml`](../agent-workflow.yml).
