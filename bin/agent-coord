@@ -3925,9 +3925,11 @@ module AgentCoord
     def attention_upsert(options)
       require_options(options, :record_json)
       requested = load_attention_record(options.fetch(:record_json))
-      validate_attention_record!(requested, expected_status: "open")
-      path = AgentCoord.attention_path(requested.fetch("workspace"), requested.fetch("repository"),
-                                       requested.fetch("id"))
+      path = with_scrubbed_attention_identity_error do
+        validate_attention_record!(requested, expected_status: "open")
+        AgentCoord.attention_path(requested.fetch("workspace"), requested.fetch("repository"),
+                                  requested.fetch("id"))
+      end
       store = build_store(options)
       written = nil
 
@@ -3956,7 +3958,9 @@ module AgentCoord
       require_options(options, :workspace, :repo, :attention_id, :source_generation)
       generation = validate_attention_generation!(options.fetch(:source_generation), "--source-generation")
 
-      path = AgentCoord.attention_path(options.fetch(:workspace), options.fetch(:repo), options.fetch(:attention_id))
+      path = with_scrubbed_attention_identity_error do
+        AgentCoord.attention_path(options.fetch(:workspace), options.fetch(:repo), options.fetch(:attention_id))
+      end
       store = build_store(options)
       written = nil
       2.times do
@@ -3983,7 +3987,9 @@ module AgentCoord
 
     def attention_get(options)
       require_options(options, :workspace, :repo, :attention_id)
-      path = AgentCoord.attention_path(options.fetch(:workspace), options.fetch(:repo), options.fetch(:attention_id))
+      path = with_scrubbed_attention_identity_error do
+        AgentCoord.attention_path(options.fetch(:workspace), options.fetch(:repo), options.fetch(:attention_id))
+      end
       store = build_store(options)
       entry = read_attention_entry(store, path)
       raise OperationalError, "attention record not found: #{options.fetch(:attention_id)}" unless entry
@@ -4002,7 +4008,9 @@ module AgentCoord
         raise Error, "--limit must be between 1 and #{MAX_ATTENTION_LIST_LIMIT}"
       end
 
-      prefix = AgentCoord.attention_repo_prefix(options.fetch(:workspace), options.fetch(:repo))
+      prefix = with_scrubbed_attention_identity_error do
+        AgentCoord.attention_repo_prefix(options.fetch(:workspace), options.fetch(:repo))
+      end
       store = build_store(options)
       entries = store.list_json(prefix, maximum: MAX_ATTENTION_SCAN_LIMIT) do |path, error|
         raise malformed_stored_attention_error(path, error)
@@ -7524,9 +7532,9 @@ module AgentCoord
 
       JSON.parse(raw)
     rescue JSON::ParserError => e
-      raise Error, "attention record JSON invalid: #{e.message}"
+      raise Error, "attention record JSON invalid: #{log_scrub(e.message)}"
     rescue SystemCallError => e
-      raise OperationalError, "attention record unreadable: #{e.message}"
+      raise OperationalError, "attention record unreadable: #{log_scrub(e.message)}"
     end
 
     def validate_attention_record!(record, expected_status: nil)
@@ -7561,6 +7569,12 @@ module AgentCoord
       AgentCoord.validate_segment!(record.fetch("workspace"), "attention workspace")
       AgentCoord.validate_segment!(record.fetch("id"), "attention id")
       AgentCoord.validate_attention_repo!(record.fetch("repository"))
+    end
+
+    def with_scrubbed_attention_identity_error
+      yield
+    rescue Error => e
+      raise e.class.new(log_scrub(e.message), exit_code: e.exit_code)
     end
 
     def validate_attention_record_content!(record, expected_status)

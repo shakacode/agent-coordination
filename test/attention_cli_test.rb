@@ -66,12 +66,39 @@ class AttentionCliTest < Minitest::Test
     [top_level, nested_source].each do |payload|
       result = upsert(payload)
 
-      assert_equal 1, result.status.exitstatus
-      assert_includes result.stderr, "contains unknown field"
-      refute_includes result.stderr, "\e"
-      refute_includes result.stderr, "\a"
-      refute_match(AgentCoord::LOG_CONTROL_CHARACTERS, result.stderr)
+      assert_scrubbed_attention_error(result, "contains unknown field")
     end
+  end
+
+  def test_attention_commands_scrub_controls_from_invalid_identity_values
+    hostile = "bad\e]0;owned\a\nforged"
+
+    { "workspace" => hostile, "id" => hostile, "repository" => "owner/#{hostile}" }.each do |field, value|
+      result = upsert(record(field => value))
+
+      assert_scrubbed_attention_error(result, "invalid attention")
+    end
+
+    selector_commands = [
+      ["attention-get", "--workspace", hostile, "--repo", "owner/repo", "--attention-id", "decision-1"],
+      ["attention-get", "--workspace", "default", "--repo", "owner/repo", "--attention-id", hostile],
+      ["attention-resolve", "--workspace", "default", "--repo", "owner/#{hostile}",
+       "--attention-id", "decision-1", "--source-generation", "2"],
+      ["attention-list", "--workspace", hostile, "--repo", "owner/repo"],
+      ["attention-list", "--workspace", "default", "--repo", "owner/#{hostile}"]
+    ]
+    selector_commands.each do |args|
+      assert_scrubbed_attention_error(run_cli(*args, "--json"), "invalid attention")
+    end
+  end
+
+  def test_upsert_scrubs_controls_from_malformed_json_errors
+    path = File.join(@root, "malformed-record.json")
+    File.binwrite(path, "{\"hostile\":\e]0;owned\a}")
+
+    result = run_cli("attention-upsert", "--record-json", path, "--json")
+
+    assert_scrubbed_attention_error(result, "attention record JSON invalid")
   end
 
   def test_upsert_rejects_a_lower_source_generation_without_replacing_state
@@ -492,13 +519,9 @@ class AttentionCliTest < Minitest::Test
               "--attention-id", "decision-1", "--json"),
       run_cli("attention-list", "--workspace", "default", "--repo", "shakacode/agent-coordination", "--json")
     ].each do |result|
-      assert_equal 2, result.status.exitstatus
+      assert_scrubbed_attention_error(result, "unknown field", status: 2)
       assert_includes result.stderr, "invalid stored attention record"
       assert_includes result.stderr, "attention/default/shakacode/agent-coordination/decision-1.json"
-      assert_includes result.stderr, "unknown field"
-      refute_includes result.stderr, "\e"
-      refute_includes result.stderr, "\a"
-      refute_match(AgentCoord::LOG_CONTROL_CHARACTERS, result.stderr)
     end
   end
 
@@ -512,12 +535,8 @@ class AttentionCliTest < Minitest::Test
               "--attention-id", "decision-1", "--json"),
       run_cli("attention-list", "--workspace", "default", "--repo", "shakacode/agent-coordination", "--json")
     ].each do |result|
-      assert_equal 2, result.status.exitstatus
-      assert_includes result.stderr, "malformed stored JSON"
+      assert_scrubbed_attention_error(result, "malformed stored JSON", status: 2)
       assert_includes result.stderr, "attention/default/shakacode/agent-coordination/decision-1.json"
-      refute_includes result.stderr, "\e"
-      refute_includes result.stderr, "\a"
-      refute_match(AgentCoord::LOG_CONTROL_CHARACTERS, result.stderr)
     end
   end
 
@@ -772,5 +791,12 @@ class AttentionCliTest < Minitest::Test
 
   def assert_success(result)
     assert_equal 0, result.status.exitstatus, result.stderr
+  end
+
+  def assert_scrubbed_attention_error(result, message, status: 1)
+    assert_equal status, result.status.exitstatus
+    assert_includes result.stderr, message
+    assert_equal 2, result.stderr.lines.length
+    refute_match(AgentCoord::LOG_CONTROL_CHARACTERS, result.stderr)
   end
 end
