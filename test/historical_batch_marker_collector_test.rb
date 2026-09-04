@@ -1,17 +1,249 @@
 # frozen_string_literal: true
 
 require "bundler"
+require "base64"
 require "json"
 require "minitest/autorun"
 require "open3"
 require "rbconfig"
 require "tmpdir"
 
+module HistoricalBatchMarkerCollectorInputValidationTests
+  def test_live_collection_rejects_malformed_source_pull_requests_before_query_construction
+    invalid_pull_requests = [
+      nil,
+      { "repository" => 7, "number" => 7, "url" => "https://github.com/example/alpha/pull/7" },
+      { "repository" => "example/alpha", "number" => "7", "url" => "https://github.com/example/alpha/pull/7" },
+      { "repository" => "example/alpha", "number" => 7 },
+      { "repository" => "example/alpha", "number" => 7, "url" => 7 },
+      { "repository" => "example/alpha", "number" => 7, "url" => "https://github.com/example/beta/pull/7" }
+    ]
+
+    invalid_pull_requests.each do |pull_request|
+      source = { "github" => { "pull_requests" => [pull_request] } }
+      _projection, stdout, stderr, status = run_live_api(
+        graphql_stdout: JSON.generate(valid_live_graphql_response), rest_stdout: "[]", source: source
+      )
+
+      refute status.success?, stdout
+      assert_includes stderr, "live source pull requests are invalid"
+    end
+  end
+
+  def test_non_hash_graphql_connection_nodes_fail_closed
+    %w[comments reviewThreads].each do |connection|
+      response = valid_live_graphql_response
+      response.dig("data", "repository", "pr7", connection, "nodes") << nil
+      stdout, stderr, status = run_graphql_fixture(response)
+
+      refute status.success?, stdout
+      assert_includes stderr, "GraphQL response failed closed"
+    end
+  end
+
+  def test_live_collection_rejects_malformed_rest_rows_without_dereferencing_them
+    [nil, {}, { "body" => nil }, { "body" => 7 }].each do |row|
+      projection, stdout, stderr, status = run_live_api(
+        graphql_stdout: JSON.generate(valid_live_graphql_response(comments_truncated: true)),
+        rest_stdout: JSON.generate([[row]])
+      )
+
+      refute status.success?, stdout
+      assert_equal ["comments_error:https://github.com/example/alpha/pull/7"], projection.fetch("search_errors")
+      assert_includes stderr, "paginated response shape is invalid"
+      assert_includes stderr, "live collection is incomplete or malformed"
+    end
+  end
+
+  def test_live_collection_pins_github_com_for_graphql_and_rest_requests
+    projection, stdout, stderr, status, invocations = run_live_api(
+      graphql_stdout: JSON.generate(valid_live_graphql_response(comments_truncated: true)),
+      rest_stdout: JSON.generate([[{ "body" => "REST pagination" }]]),
+      gh_host: "enterprise.example"
+    )
+
+    assert status.success?, [stdout, stderr, projection].compact.join("\n")
+    assert_equal 2, invocations.length
+    invocations.each do |arguments|
+      assert_includes arguments.each_cons(2).to_a, ["--hostname", "github.com"]
+    end
+  end
+
+  def test_graphql_errors_fail_closed_unless_nil_or_empty
+    [[{ "message" => "synthetic partial response" }], [nil], [false],
+     { "message" => "error" }, "synthetic error", {}].each do |errors|
+      _stdout, stderr, status = run_graphql_fixture(valid_live_graphql_response.merge("errors" => errors))
+
+      refute status.success?
+      assert_includes stderr, "graphql_response_error:example/alpha"
+    end
+
+    [nil, []].each do |errors|
+      stdout, stderr, status = run_graphql_fixture(valid_live_graphql_response.merge("errors" => errors))
+
+      assert status.success?, stderr
+      assert_equal "GRAPHQL_RESPONSE_OK\n", stdout
+    end
+  end
+
+  def test_json_file_modes_reject_malformed_utf8_at_the_input_boundary
+    live_source = { "ignored" => "café", "github" => { "pull_requests" => [] } }
+    payloads = {
+      "fixture" => File.binread(self.class::FIXTURE).sub("Synthetic risk".b, "Synthetic r\xFFsk".b),
+      "live" => JSON.generate(live_source).b.sub("café".b, "caf\xFF".b),
+      "validate" => File.binread(self.class::SOURCE).sub(
+        "historical-batch-baseline-source".b, "historical-batch-baseline-sourc\xFF".b
+      )
+    }
+
+    payloads.each do |mode, payload|
+      stdout, stderr, status = run_json_mode_payload(mode, payload)
+
+      refute status.success?, stdout
+      assert_equal "invalid byte sequence in UTF-8\n", stderr
+    end
+  end
+
+  def test_graphql_body_values_must_be_strings
+    malformed_responses = [
+      valid_live_graphql_response.tap { |response| response.dig("data", "repository", "pr7")["body"] = nil },
+      valid_live_graphql_response.tap do |response|
+        response.dig("data", "repository", "pr7", "comments", "nodes") << {}
+      end,
+      valid_live_graphql_response.tap do |response|
+        response.dig("data", "repository", "pr7", "reviews", "nodes") << { "body" => 7 }
+      end,
+      valid_live_graphql_response.tap do |response|
+        comments = { "pageInfo" => { "hasNextPage" => false }, "nodes" => [{ "body" => nil }] }
+        response.dig("data", "repository", "pr7", "reviewThreads", "nodes") << { "comments" => comments }
+      end
+    ]
+
+    malformed_responses.each do |response|
+      stdout, stderr, status = run_graphql_fixture(response)
+
+      refute status.success?, stdout
+      assert_includes stderr, "GraphQL response failed closed"
+    end
+  end
+
+  def test_live_collection_rejects_case_insensitive_duplicate_sources
+    source = {
+      "github" => {
+        "pull_requests" => [
+          { "repository" => "example/alpha", "number" => 7, "url" => "https://github.com/example/alpha/pull/7" },
+          { "repository" => "Example/Alpha", "number" => 7, "url" => "https://github.com/Example/Alpha/pull/7" }
+        ]
+      }
+    }
+
+    _projection, stdout, stderr, status = run_live_api(
+      graphql_stdout: JSON.generate(valid_live_graphql_response), rest_stdout: "[]", source: source
+    )
+
+    refute status.success?, stdout
+    assert_includes stderr, "live source pull requests are invalid"
+  end
+
+  def test_paginated_rest_result_must_extend_the_graphql_prefix
+    response = valid_live_graphql_response(comments_truncated: true)
+    response.dig("data", "repository", "pr7", "comments", "nodes") << { "body" => "GraphQL prefix" }
+    invalid_rest_pages = [
+      [],
+      [{ "body" => "GraphQL prefix" }],
+      [{ "body" => "different" }, { "body" => "additional" }]
+    ]
+
+    invalid_rest_pages.each do |rows|
+      projection, stdout, stderr, status = run_live_api(
+        graphql_stdout: JSON.generate(response), rest_stdout: JSON.generate([rows])
+      )
+
+      refute status.success?, stdout
+      assert_equal ["comments_error:https://github.com/example/alpha/pull/7"], projection.fetch("search_errors")
+      assert_includes stderr, "paginated response does not extend GraphQL prefix"
+      assert_includes stderr, "live collection is incomplete or malformed"
+    end
+  end
+
+  def test_review_thread_rest_pagination_accepts_an_interleaved_superset
+    response = graphql_response_with_review_threads(%w[A1 A3], %w[B2])
+    rest_bodies = %w[A1 B2 A3 C4]
+
+    projection, stdout, stderr, status = run_live_api(
+      graphql_stdout: JSON.generate(response),
+      rest_stdout: JSON.generate([rest_bodies.map { |body| { "body" => body } }])
+    )
+
+    assert status.success?, [stdout, stderr].join("\n")
+    assert_equal 4,
+                 projection.dig(
+                   "collection_provenance", "per_pr_evidence", 0, "surface_row_counts", "review_thread_comments"
+                 )
+  end
+
+  def test_review_thread_rest_pagination_preserves_duplicate_occurrences
+    response = graphql_response_with_review_threads(%w[duplicate duplicate])
+
+    projection, stdout, stderr, status = run_live_api(
+      graphql_stdout: JSON.generate(response),
+      rest_stdout: JSON.generate([[{ "body" => "duplicate" }, { "body" => "other" }, { "body" => "added" }]])
+    )
+
+    refute status.success?, stdout
+    assert_equal ["review_thread_comments_error:https://github.com/example/alpha/pull/7"],
+                 projection.fetch("search_errors")
+    assert_includes stderr, "paginated response does not extend GraphQL prefix"
+  end
+
+  def test_unmatched_review_finding_fence_is_counted_after_a_valid_block
+    fixture = JSON.parse(File.read(self.class::FIXTURE))
+    body = fixture.dig("pull_requests", 0, "surfaces", "body", 0)
+    fixture.dig("pull_requests", 0, "surfaces", "body")[0] = "#{body}\n```json review-findings\n{"
+
+    projection, stderr, status = collect_fixture_result(fixture, collector: self.class::LIVE_COLLECTOR)
+
+    refute status.success?
+    assert_equal 1, projection.fetch("malformed_severity_candidates")
+    assert_includes stderr, "malformed severity candidate"
+  end
+
+  def graphql_response_with_review_threads(*thread_bodies)
+    response = valid_live_graphql_response
+    threads = response.dig("data", "repository", "pr7", "reviewThreads")
+    threads["nodes"] = thread_bodies.map.with_index do |bodies, index|
+      {
+        "comments" => {
+          "pageInfo" => { "hasNextPage" => index.zero? },
+          "nodes" => bodies.map { |body| { "body" => body } }
+        }
+      }
+    end
+    response
+  end
+
+  def run_json_mode_payload(mode, payload)
+    Dir.mktmpdir("historical-marker-json-input") do |dir|
+      input_path = File.join(dir, "input.json")
+      output_path = File.join(dir, "output.json")
+      File.binwrite(input_path, payload)
+      arguments = mode == "validate" ? [mode, input_path] : [mode, input_path, output_path]
+      Bundler.with_unbundled_env do
+        Open3.capture3(ascii_locale_environment(dir), RbConfig.ruby, self.class::LIVE_COLLECTOR, *arguments)
+      end
+    end
+  end
+end
+
 class HistoricalBatchMarkerCollectorTest < Minitest::Test
   ROOT = File.expand_path("..", __dir__)
-  COLLECTOR = File.join(
+  ARCHIVED_COLLECTOR = File.join(
     ROOT,
     "docs/archive/reports/data/2026-07-18-historical-batch-baseline-marker-collector.rb"
+  )
+  LIVE_COLLECTOR = File.join(
+    ROOT,
+    "docs/archive/reports/data/historical-batch-marker-collector-v2.rb"
   )
   REVIEW_VALIDATOR = File.join(
     ROOT,
@@ -66,7 +298,7 @@ class HistoricalBatchMarkerCollectorTest < Minitest::Test
   end
 
   def test_validate_accepts_frozen_projection
-    _stdout, stderr, status = run_collector("validate", SOURCE)
+    _stdout, stderr, status = run_archived_collector("validate", SOURCE)
 
     assert status.success?, stderr
   end
@@ -79,7 +311,7 @@ class HistoricalBatchMarkerCollectorTest < Minitest::Test
     Dir.mktmpdir("marker-projection-test") do |dir|
       path = File.join(dir, "source.json")
       File.write(path, JSON.generate(source))
-      _stdout, stderr, status = run_collector("validate", path)
+      _stdout, stderr, status = run_archived_collector("validate", path)
 
       refute status.success?
       assert_includes stderr, "marker projection failed validation"
@@ -257,6 +489,148 @@ class HistoricalBatchMarkerCollectorTest < Minitest::Test
     assert_includes stderr, "pagination is incomplete"
   end
 
+  def test_live_collection_normalizes_valid_utf8_from_graphql_and_rest_under_ascii_locale
+    graphql_response = valid_live_graphql_response(comments_truncated: true)
+    rest_response = [[{ "body" => "REST naïve" }]]
+
+    projection, stdout, stderr, status = run_live_api(
+      graphql_stdout: JSON.generate(graphql_response),
+      rest_stdout: JSON.generate(rest_response)
+    )
+
+    assert status.success?, [stdout, stderr].reject(&:empty?).join("\n")
+    assert_equal 1, projection.dig("collection_provenance", "surface_row_counts", "comments")
+    assert_equal 1, projection.dig("collection_provenance", "pagination_requests", "comments")
+    assert_equal true, projection.dig("collection_provenance", "pagination_complete")
+  end
+
+  def test_live_collection_scrubs_diagnostic_bytes_without_rewriting_payloads
+    invalid_diagnostic = "gh failed: caf\xFF".b
+
+    _projection, stdout, stderr, status = run_live_api(
+      graphql_stdout: "",
+      rest_stdout: "[]",
+      graphql_stderr: invalid_diagnostic,
+      graphql_status: 1
+    )
+
+    refute status.success?, stdout
+    assert_predicate stderr, :valid_encoding?
+    assert_includes stderr, "gh failed: caf�"
+    assert_includes stderr, "live collection is incomplete or malformed"
+  end
+
+  def test_live_collection_ignores_malformed_stdout_when_graphql_command_fails
+    projection, stdout, stderr, status = run_live_api(
+      graphql_stdout: "unused caf\xFF".b,
+      rest_stdout: "[]",
+      graphql_stderr: "graphql failed",
+      graphql_status: 1
+    )
+
+    refute status.success?, stdout
+    refute_nil projection
+    assert_equal ["graphql_error:example/alpha"], projection.fetch("search_errors")
+    assert_includes stderr, "graphql failed"
+    refute_includes stderr, "invalid byte sequence in UTF-8"
+  end
+
+  def test_live_collection_ignores_malformed_stdout_when_rest_command_fails
+    projection, stdout, _stderr, status = run_live_api(
+      graphql_stdout: JSON.generate(valid_live_graphql_response(comments_truncated: true)),
+      rest_stdout: "unused caf\xFF".b,
+      rest_status: 1
+    )
+
+    refute status.success?, stdout
+    refute_nil projection
+    assert_equal ["comments_error:https://github.com/example/alpha/pull/7"], projection.fetch("search_errors")
+  end
+
+  def test_live_collection_rejects_malformed_utf8_api_payload_without_scrubbing
+    malformed_payload = JSON.generate(valid_live_graphql_response).b.sub(
+      "GraphQL café".b,
+      "GraphQL caf\xFF".b
+    )
+
+    projection, stdout, stderr, status = run_live_api(
+      graphql_stdout: malformed_payload,
+      rest_stdout: "[]"
+    )
+
+    refute status.success?, stdout
+    assert_nil projection
+    assert_match(/invalid byte sequence in UTF-8|JSON::ParserError|Encoding::InvalidByteSequenceError/, stderr)
+  end
+
+  def test_live_collection_rejects_malformed_utf8_in_ignored_graphql_field
+    response = valid_live_graphql_response.merge("extensions" => { "ignored" => "café" })
+    malformed_payload = JSON.generate(response).b.sub("café".b, "caf\xFF".b)
+
+    projection, stdout, stderr, status = run_live_api(
+      graphql_stdout: malformed_payload,
+      rest_stdout: "[]"
+    )
+
+    refute status.success?, stdout
+    assert_nil projection
+    assert_match(/invalid byte sequence in UTF-8|JSON::ParserError|Encoding::InvalidByteSequenceError/, stderr)
+  end
+
+  def test_live_collection_rejects_malformed_json_api_payload
+    projection, stdout, stderr, status = run_live_api(
+      graphql_stdout: '{"data":',
+      rest_stdout: "[]"
+    )
+
+    refute status.success?, stdout
+    assert_equal ["graphql_response_invalid:example/alpha"], projection.fetch("search_errors")
+    assert_includes stderr, "live collection is incomplete or malformed"
+  end
+
+  def test_live_collection_rejects_malformed_utf8_rest_payload_without_scrubbing
+    malformed_payload = JSON.generate([[{ "body" => "REST naïve" }]]).b.sub(
+      "REST naïve".b,
+      "REST na\xFFve".b
+    )
+
+    projection, stdout, stderr, status = run_live_api(
+      graphql_stdout: JSON.generate(valid_live_graphql_response(comments_truncated: true)),
+      rest_stdout: malformed_payload
+    )
+
+    refute status.success?, stdout
+    assert_nil projection
+    assert_match(/invalid byte sequence in UTF-8|JSON::ParserError|Encoding::InvalidByteSequenceError/, stderr)
+  end
+
+  def test_live_collection_rejects_malformed_utf8_in_ignored_rest_field
+    malformed_payload = JSON.generate([[{ "body" => nil, "ignored" => "café" }]]).b.sub(
+      "café".b,
+      "caf\xFF".b
+    )
+
+    projection, stdout, stderr, status = run_live_api(
+      graphql_stdout: JSON.generate(valid_live_graphql_response(comments_truncated: true)),
+      rest_stdout: malformed_payload
+    )
+
+    refute status.success?, stdout
+    assert_nil projection
+    assert_match(/invalid byte sequence in UTF-8|JSON::ParserError|Encoding::InvalidByteSequenceError/, stderr)
+  end
+
+  def test_live_collection_rejects_malformed_json_rest_payload
+    projection, stdout, stderr, status = run_live_api(
+      graphql_stdout: JSON.generate(valid_live_graphql_response(comments_truncated: true)),
+      rest_stdout: '[[{"body":'
+    )
+
+    refute status.success?, stdout
+    assert_nil projection
+    assert_match(/JSON::ParserError/, stderr)
+  end
+
   def test_malformed_severity_candidate_is_rejected
     fixture = JSON.parse(File.read(FIXTURE))
     body = fixture.dig("pull_requests", 0, "surfaces", "body", 0)
@@ -278,16 +652,24 @@ class HistoricalBatchMarkerCollectorTest < Minitest::Test
     assert_includes stderr, "fixture schema is invalid"
   end
 
-  def test_graphql_errors_fail_closed_even_with_partial_data
-    response = {
-      "data" => { "repository" => {} },
-      "errors" => [{ "message" => "synthetic partial response" }]
-    }
+  def test_graphql_fixture_normalizes_valid_utf8_under_ascii_locale
+    stdout, stderr, status = run_graphql_fixture(valid_live_graphql_response, ascii_locale: true)
 
-    _stdout, stderr, status = run_graphql_fixture(response)
+    assert status.success?, stderr
+    assert_equal "GRAPHQL_RESPONSE_OK\n", stdout
+  end
 
-    refute status.success?
-    assert_includes stderr, "graphql_response_error:example/alpha"
+  def test_graphql_fixture_rejects_malformed_utf8_without_scrubbing
+    malformed_payload = JSON.generate(valid_live_graphql_response).b.sub(
+      "GraphQL café".b,
+      "GraphQL caf\xFF".b
+    )
+
+    stdout, stderr, status = run_graphql_fixture_payload(malformed_payload, ascii_locale: true)
+
+    refute status.success?, stdout
+    assert_empty stdout
+    assert_equal "invalid byte sequence in UTF-8\n", stderr
   end
 
   def test_missing_graphql_connection_shape_fails_closed
@@ -479,7 +861,7 @@ class HistoricalBatchMarkerCollectorTest < Minitest::Test
     Dir.mktmpdir("marker-projection-test") do |dir|
       path = File.join(dir, "source.json")
       File.write(path, JSON.generate(document))
-      run_collector("validate", path)
+      run_archived_collector("validate", path)
     end
   end
 
@@ -489,28 +871,139 @@ class HistoricalBatchMarkerCollectorTest < Minitest::Test
     projection
   end
 
-  def collect_fixture_result(fixture)
+  def collect_fixture_result(fixture, collector: ARCHIVED_COLLECTOR)
     Dir.mktmpdir("marker-collector-test") do |dir|
       fixture_path = File.join(dir, "fixture.json")
       output_path = File.join(dir, "projection.json")
       File.write(fixture_path, JSON.pretty_generate(fixture))
-      stdout, stderr, status = run_collector("fixture", fixture_path, output_path)
+      stdout, stderr, status = run_collector(collector, "fixture", fixture_path, output_path)
       projection = File.exist?(output_path) ? JSON.parse(File.read(output_path)) : nil
       [projection, [stdout, stderr].reject(&:empty?).join("\n"), status]
     end
   end
 
-  def run_collector(*arguments)
+  def run_archived_collector(*)
+    run_collector(ARCHIVED_COLLECTOR, *)
+  end
+
+  def run_collector(collector, *arguments)
     Bundler.with_unbundled_env do
-      Open3.capture3(RbConfig.ruby, COLLECTOR, *arguments)
+      Open3.capture3(RbConfig.ruby, collector, *arguments)
     end
   end
 
-  def run_graphql_fixture(response)
+  def run_graphql_fixture(response, ascii_locale: false)
+    run_graphql_fixture_payload(JSON.generate(response), ascii_locale: ascii_locale)
+  end
+
+  def run_graphql_fixture_payload(payload, ascii_locale: false)
     Dir.mktmpdir("graphql-marker-fixture") do |dir|
       path = File.join(dir, "response.json")
-      File.write(path, JSON.generate(response))
-      run_collector("graphql-fixture", path, "example/alpha")
+      File.binwrite(path, payload)
+      environment = ascii_locale ? ascii_locale_environment(dir) : {}
+      Bundler.with_unbundled_env do
+        Open3.capture3(environment, RbConfig.ruby, LIVE_COLLECTOR, "graphql-fixture", path, "example/alpha")
+      end
     end
   end
+
+  def run_live_api(graphql_stdout:, rest_stdout:, source: nil, graphql_stderr: "", **statuses)
+    Dir.mktmpdir("historical-marker-live-api") do |dir|
+      write_fake_gh(
+        dir,
+        graphql_stdout: graphql_stdout,
+        rest_stdout: rest_stdout,
+        graphql_stderr: graphql_stderr,
+        statuses: { graphql: statuses.fetch(:graphql_status, 0), rest: statuses.fetch(:rest_status, 0) }
+      )
+      source_path, output_path = write_live_source(dir, source: source)
+      environment = ascii_locale_environment(dir)
+      environment["GH_HOST"] = statuses.fetch(:gh_host) if statuses.key?(:gh_host)
+      stdout, stderr, status = Bundler.with_unbundled_env do
+        Open3.capture3(
+          environment,
+          RbConfig.ruby,
+          LIVE_COLLECTOR,
+          "live",
+          source_path,
+          output_path
+        )
+      end
+      projection = JSON.parse(File.read(output_path)) if File.file?(output_path)
+      invocations = read_gh_invocations(dir)
+      [projection, stdout, stderr, status, invocations]
+    end
+  end
+
+  def write_live_source(dir, source: nil)
+    source_path = File.join(dir, "source.json")
+    output_path = File.join(dir, "projection.json")
+    source ||= {
+      "github" => {
+        "pull_requests" => [
+          {
+            "repository" => "example/alpha",
+            "number" => 7,
+            "url" => "https://github.com/example/alpha/pull/7"
+          }
+        ]
+      }
+    }
+    File.write(source_path, JSON.generate(source))
+    [source_path, output_path]
+  end
+
+  def ascii_locale_environment(dir)
+    {
+      "LC_ALL" => "C",
+      "LANG" => "C",
+      "PATH" => [dir, ENV.fetch("PATH")].join(File::PATH_SEPARATOR)
+    }
+  end
+
+  def valid_live_graphql_response(comments_truncated: false)
+    {
+      "data" => {
+        "repository" => {
+          "pr7" => {
+            "url" => "https://github.com/example/alpha/pull/7",
+            "body" => "GraphQL café",
+            "comments" => { "pageInfo" => { "hasNextPage" => comments_truncated }, "nodes" => [] },
+            "reviews" => { "pageInfo" => { "hasNextPage" => false }, "nodes" => [] },
+            "reviewThreads" => { "pageInfo" => { "hasNextPage" => false }, "nodes" => [] }
+          }
+        }
+      }
+    }
+  end
+
+  def read_gh_invocations(dir)
+    path = File.join(dir, "gh-invocations.jsonl")
+    File.file?(path) ? File.readlines(path, chomp: true).map { |line| JSON.parse(line) } : []
+  end
+
+  def write_fake_gh(dir, graphql_stdout:, rest_stdout:, graphql_stderr:, statuses:)
+    encoded_graphql = Base64.strict_encode64(graphql_stdout.b)
+    encoded_rest = Base64.strict_encode64(rest_stdout.b)
+    encoded_graphql_stderr = Base64.strict_encode64(graphql_stderr.b)
+    script = <<~RUBY
+      #!/usr/bin/env ruby
+      require "base64"
+      require "json"
+      File.open(#{File.join(dir, 'gh-invocations.jsonl').dump}, "a") { |file| file.puts(JSON.generate(ARGV)) }
+      graphql = ARGV.include?("graphql")
+      stdout = graphql ? #{encoded_graphql.dump} : #{encoded_rest.dump}
+      stderr = graphql ? #{encoded_graphql_stderr.dump} : ""
+      STDOUT.binmode
+      STDERR.binmode
+      STDOUT.write(Base64.strict_decode64(stdout))
+      STDERR.write(Base64.strict_decode64(stderr)) unless stderr.empty?
+      exit(graphql ? #{statuses.fetch(:graphql)} : #{statuses.fetch(:rest)})
+    RUBY
+    path = File.join(dir, "gh")
+    File.write(path, script)
+    File.chmod(0o755, path)
+  end
 end
+
+HistoricalBatchMarkerCollectorTest.include(HistoricalBatchMarkerCollectorInputValidationTests)
