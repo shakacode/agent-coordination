@@ -6732,6 +6732,256 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     [results, errors, event, batch]
   end
 
+  def test_terminal_closeout_selects_prefixed_lane_but_requires_exact_authority_spelling
+    # Normalized selection can identify the intended lane, but terminal closeout
+    # grants authority and therefore requires the payload to use the exact raw
+    # target spelling registered by that lane.
+    {
+      "issue" => "465",
+      "pr" => "103"
+    }.each_with_index do |(type, target), index|
+      batch_id = "batch-prefixed-target-#{index}"
+      write_batch(
+        batch_id,
+        lanes: [{ "name" => "code", "owner" => "worker-a", "targets" => ["#{type}:#{target}"] }]
+      )
+      rejected = run_agent_coord(
+        "record-event", "--batch-id", batch_id, "--type", "lane_closed", "--agent-id", "worker-a",
+        "--repo", "shakacode/react_on_rails", "--target", target, "--host", "codex",
+        "--terminal", "done", "--pr-state", "merged"
+      )
+      assert_equal 1, rejected.status.exitstatus
+      assert_includes rejected.stderr, "authority requires exact target spelling #{type}:#{target}"
+
+      batch = JSON.parse(File.read(File.join(@state_root, "batches", "#{batch_id}.json")))
+      lane = batch.fetch("lanes").fetch(0)
+      refute lane.key?("terminal")
+
+      closed = run_agent_coord(
+        "record-event", "--batch-id", batch_id, "--type", "lane_closed", "--agent-id", "worker-a",
+        "--repo", "shakacode/react_on_rails", "--target", "#{type}:#{target}", "--host", "codex",
+        "--terminal", "done", "--pr-state", "merged"
+      )
+      assert_equal 0, closed.status.exitstatus, closed.stderr
+    end
+  end
+
+  def test_terminal_closeout_replays_with_the_same_exact_prefixed_spelling
+    write_batch(
+      "batch-prefixed-replay",
+      lanes: [{ "name" => "code", "owner" => "worker-a", "targets" => ["issue:465"] }]
+    )
+    args = [
+      "record-event", "--batch-id", "batch-prefixed-replay", "--type", "lane_closed",
+      "--agent-id", "worker-a", "--repo", "shakacode/react_on_rails", "--target", "issue:465",
+      "--host", "codex", "--terminal", "done", "--pr-state", "merged"
+    ]
+
+    first = run_agent_coord(*args)
+    replay = run_agent_coord(*args)
+
+    assert_equal 0, first.status.exitstatus, first.stderr
+    assert_equal 0, replay.status.exitstatus, replay.stderr
+    assert_includes replay.stdout, "lane already closed"
+  end
+
+  def test_terminal_closeout_preserves_identity_bearing_adhoc_prefixes
+    # `adhoc:319` is a separately keyed work item, not issue 319. Stripping the
+    # prefix would let a claim on one authorize closeout of the other.
+    write_batch(
+      "batch-adhoc-identity",
+      lanes: [{ "name" => "code", "owner" => "worker-a", "targets" => ["adhoc:319"] }]
+    )
+    rejected = run_agent_coord(
+      "record-event", "--batch-id", "batch-adhoc-identity", "--type", "lane_closed",
+      "--agent-id", "worker-a", "--repo", "shakacode/react_on_rails", "--target", "319",
+      "--host", "codex", "--terminal", "done", "--pr-state", "merged"
+    )
+    assert_equal 1, rejected.status.exitstatus
+    assert_includes rejected.stderr, "does not match exactly one lane"
+
+    accepted = run_agent_coord(
+      "record-event", "--batch-id", "batch-adhoc-identity", "--type", "lane_closed",
+      "--agent-id", "worker-a", "--repo", "shakacode/react_on_rails", "--target", "adhoc:319",
+      "--host", "codex", "--terminal", "done", "--pr-state", "merged"
+    )
+    assert_equal 0, accepted.status.exitstatus, accepted.stderr
+  end
+
+  def test_terminal_closeout_preserves_exact_adhoc_slug_spelling_for_authority
+    write_batch(
+      "batch-adhoc-slug",
+      lanes: [{ "name" => "code", "owner" => "worker-a", "targets" => ["adhoc:20260827-seam"] }]
+    )
+    rejected = run_agent_coord(
+      "record-event", "--batch-id", "batch-adhoc-slug", "--type", "lane_closed",
+      "--agent-id", "worker-a", "--repo", "shakacode/react_on_rails", "--target", "20260827-seam",
+      "--host", "codex", "--terminal", "done", "--pr-state", "merged"
+    )
+    assert_equal 1, rejected.status.exitstatus
+    assert_includes rejected.stderr, "authority requires exact target spelling adhoc:20260827-seam"
+
+    closed = run_agent_coord(
+      "record-event", "--batch-id", "batch-adhoc-slug", "--type", "lane_closed",
+      "--agent-id", "worker-a", "--repo", "shakacode/react_on_rails", "--target", "adhoc:20260827-seam",
+      "--host", "codex", "--terminal", "done", "--pr-state", "merged"
+    )
+    assert_equal 0, closed.status.exitstatus, closed.stderr
+  end
+
+  def test_terminal_closeout_keeps_sub_lane_targets_distinct_from_their_work_item
+    write_batch(
+      "batch-sub-lane",
+      lanes: [{ "name" => "qa", "owner" => "worker-a", "targets" => ["issue:319:qa"] }]
+    )
+    rejected = run_agent_coord(
+      "record-event", "--batch-id", "batch-sub-lane", "--type", "lane_closed",
+      "--agent-id", "worker-a", "--repo", "shakacode/react_on_rails", "--target", "319",
+      "--host", "codex", "--terminal", "done", "--pr-state", "merged"
+    )
+    assert_equal 1, rejected.status.exitstatus
+    assert_includes rejected.stderr, "does not match exactly one lane"
+  end
+
+  def test_terminal_closeout_keeps_case_distinct_lane_targets_apart
+    # `validate_segment!` permits uppercase, so these are two legitimate,
+    # separately registered targets. Case folding the identity would collide
+    # them and break a closeout that previously succeeded for either lane.
+    write_batch(
+      "batch-case-distinct",
+      lanes: [
+        { "name" => "upper", "owner" => "worker-a", "targets" => ["adhoc:Foo-Release"] },
+        { "name" => "lower", "owner" => "worker-b", "targets" => ["adhoc:foo-release"] }
+      ]
+    )
+    closed = run_agent_coord(
+      "record-event", "--batch-id", "batch-case-distinct", "--type", "lane_closed",
+      "--agent-id", "worker-a", "--repo", "shakacode/react_on_rails", "--target", "adhoc:Foo-Release",
+      "--host", "codex", "--terminal", "done", "--pr-state", "merged"
+    )
+    assert_equal 0, closed.status.exitstatus, closed.stderr
+    batch = JSON.parse(File.read(File.join(@state_root, "batches", "batch-case-distinct.json")))
+    upper = batch.fetch("lanes").find { |lane| lane.fetch("name") == "upper" }
+    lower = batch.fetch("lanes").find { |lane| lane.fetch("name") == "lower" }
+    assert_equal "done", upper.fetch("terminal")
+    refute lower.key?("terminal")
+  end
+
+  def test_terminal_closeout_selection_does_not_make_kind_prefix_case_authoritative
+    write_batch(
+      "batch-kind-case",
+      lanes: [{ "name" => "code", "owner" => "worker-a", "targets" => ["ISSUE:4500"] }]
+    )
+    rejected = run_agent_coord(
+      "record-event", "--batch-id", "batch-kind-case", "--type", "lane_closed",
+      "--agent-id", "worker-a", "--repo", "shakacode/react_on_rails", "--target", "4500",
+      "--host", "codex", "--terminal", "done", "--pr-state", "merged"
+    )
+    assert_equal 1, rejected.status.exitstatus
+    assert_includes rejected.stderr, "authority requires exact target spelling ISSUE:4500"
+
+    closed = run_agent_coord(
+      "record-event", "--batch-id", "batch-kind-case", "--type", "lane_closed",
+      "--agent-id", "worker-a", "--repo", "shakacode/react_on_rails", "--target", "ISSUE:4500",
+      "--host", "codex", "--terminal", "done", "--pr-state", "merged"
+    )
+    assert_equal 0, closed.status.exitstatus, closed.stderr
+  end
+
+  def test_terminal_closeout_does_not_fold_a_whitespace_target_into_the_empty_bucket
+    # `terminal_lane_targets` does not filter blank entries, so normalization
+    # must not turn a whitespace-only target into the empty-string bucket that a
+    # missing target also lands in.
+    write_batch(
+      "batch-blank-target",
+      lanes: [
+        { "name" => "blank", "owner" => "worker-a", "targets" => [""] },
+        { "name" => "spaced", "owner" => "worker-a", "targets" => [" "] }
+      ]
+    )
+    closed = run_agent_coord(
+      "record-event", "--batch-id", "batch-blank-target", "--type", "lane_closed",
+      "--agent-id", "worker-a", "--repo", "shakacode/react_on_rails", "--target", " ",
+      "--host", "codex", "--terminal", "done", "--pr-state", "merged"
+    )
+
+    assert_equal 0, closed.status.exitstatus, closed.stderr
+    batch = JSON.parse(File.read(File.join(@state_root, "batches", "batch-blank-target.json")))
+    spaced = batch.fetch("lanes").find { |lane| lane.fetch("name") == "spaced" }
+    blank = batch.fetch("lanes").find { |lane| lane.fetch("name") == "blank" }
+    assert_equal "done", spaced.fetch("terminal")
+    refute blank.key?("terminal")
+  end
+
+  def test_terminal_closeout_still_matches_bare_lane_target
+    write_batch(
+      "batch-bare-target",
+      lanes: [{ "name" => "code", "owner" => "worker-a", "targets" => ["4321"] }]
+    )
+    closed = run_agent_coord(
+      "record-event", "--batch-id", "batch-bare-target", "--type", "lane_closed", "--agent-id", "worker-a",
+      "--repo", "shakacode/react_on_rails", "--target", "4321", "--host", "codex",
+      "--terminal", "done", "--pr-state", "merged"
+    )
+    assert_equal 0, closed.status.exitstatus, closed.stderr
+    batch = JSON.parse(File.read(File.join(@state_root, "batches", "batch-bare-target.json")))
+    assert_equal "done", batch.fetch("lanes").fetch(0).fetch("terminal")
+  end
+
+  def test_terminal_closeout_fails_closed_when_bare_and_prefixed_lanes_are_ambiguous
+    write_batch(
+      "batch-ambiguous-target",
+      lanes: [
+        { "name" => "bare", "owner" => "worker-a", "targets" => ["4322"] },
+        { "name" => "prefixed", "owner" => "worker-b", "targets" => ["pr:4322"] }
+      ]
+    )
+    rejected = run_agent_coord(
+      "record-event", "--batch-id", "batch-ambiguous-target", "--type", "lane_closed", "--agent-id", "worker-a",
+      "--repo", "shakacode/react_on_rails", "--target", "4322", "--host", "codex",
+      "--terminal", "done", "--pr-state", "merged"
+    )
+    assert_equal 1, rejected.status.exitstatus
+    assert_includes rejected.stderr, "does not match exactly one lane"
+  end
+
+  def test_terminal_closeout_keeps_normalized_base_and_lane_boundaries_distinct
+    write_batch(
+      "batch-structured-target-identity",
+      lanes: [
+        { "name" => "issue-slug", "owner" => "worker-a", "targets" => ["issue:foo"] },
+        { "name" => "adhoc-sub-lane", "owner" => "worker-b", "targets" => ["adhoc:issue:foo"] }
+      ]
+    )
+
+    closed = run_agent_coord(
+      "record-event", "--batch-id", "batch-structured-target-identity", "--type", "lane_closed",
+      "--agent-id", "worker-a", "--repo", "shakacode/react_on_rails", "--target", "issue:foo",
+      "--host", "codex", "--terminal", "done", "--pr-state", "merged"
+    )
+
+    assert_equal 0, closed.status.exitstatus, closed.stderr
+    batch = JSON.parse(File.read(File.join(@state_root, "batches", "batch-structured-target-identity.json")))
+    issue_slug = batch.fetch("lanes").find { |lane| lane.fetch("name") == "issue-slug" }
+    adhoc_sub_lane = batch.fetch("lanes").find { |lane| lane.fetch("name") == "adhoc-sub-lane" }
+    assert_equal "done", issue_slug.fetch("terminal")
+    refute adhoc_sub_lane.key?("terminal")
+  end
+
+  def test_terminal_closeout_does_not_match_unrelated_target_sharing_a_suffix
+    write_batch(
+      "batch-suffix-target",
+      lanes: [{ "name" => "code", "owner" => "worker-a", "targets" => ["issue:14322"] }]
+    )
+    rejected = run_agent_coord(
+      "record-event", "--batch-id", "batch-suffix-target", "--type", "lane_closed", "--agent-id", "worker-a",
+      "--repo", "shakacode/react_on_rails", "--target", "4322", "--host", "codex",
+      "--terminal", "done", "--pr-state", "merged"
+    )
+    assert_equal 1, rejected.status.exitstatus
+    assert_includes rejected.stderr, "does not match exactly one lane"
+  end
+
   def test_claim_acquire_with_batch_id_records_claim_acquired_event
     write_batch("batch-lifecycle", lanes: [{ "name" => "code", "owner" => "worker-a", "targets" => ["4100"] }])
     claim = run_agent_coord(
@@ -10575,6 +10825,168 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     assert_includes result.stdout, "lane docs owner worker-b complete"
   end
 
+  def test_batch_audit_attributes_events_to_a_prefixed_lane_target
+    write_batch(
+      "batch-audit-prefixed",
+      lanes: [{ "name" => "code", "owner" => "worker-a", "targets" => ["issue:465"] }]
+    )
+    seed_event(
+      "batch-audit-prefixed", "a1",
+      "type" => "claim.acquired", "agent_id" => "worker-a", "target" => "465"
+    )
+    seed_event(
+      "batch-audit-prefixed", "a2",
+      "schema_version" => 2, "type" => "lane_closed", "agent_id" => "worker-a", "lane" => "code",
+      "repo" => "shakacode/example", "target" => "465", "terminal" => "done",
+      "workspace" => "default", "closed_by" => { "agent_id" => "worker-a", "machine" => "test" }
+    )
+
+    result = run_agent_coord("batch-audit", "--batch-id", "batch-audit-prefixed")
+
+    assert_equal 0, result.status.exitstatus, result.stderr
+    assert_includes result.stdout, "batch-audit batch-audit-prefixed complete"
+    assert_includes result.stdout, "lane code owner worker-a complete"
+  end
+
+  def test_batch_audit_attributes_prefixed_events_to_a_bare_lane_target
+    write_batch(
+      "batch-audit-bare",
+      lanes: [{ "name" => "code", "owner" => "worker-a", "targets" => ["465"] }]
+    )
+    seed_event(
+      "batch-audit-bare", "a1",
+      "type" => "claim.acquired", "agent_id" => "worker-a", "target" => "issue:465"
+    )
+    seed_event(
+      "batch-audit-bare", "a2",
+      "schema_version" => 2, "type" => "lane_closed", "agent_id" => "worker-a", "lane" => "code",
+      "repo" => "shakacode/example", "target" => "issue:465", "terminal" => "done",
+      "workspace" => "default", "closed_by" => { "agent_id" => "worker-a", "machine" => "test" }
+    )
+
+    result = run_agent_coord("batch-audit", "--batch-id", "batch-audit-bare")
+
+    assert_equal 0, result.status.exitstatus, result.stderr
+    assert_includes result.stdout, "batch-audit batch-audit-bare complete"
+    assert_includes result.stdout, "lane code owner worker-a complete"
+  end
+
+  def test_terminal_closeout_claimant_authority_requires_the_lane_target_spelling
+    # The static lane owner does not match the closing agent, so closeout falls
+    # through to the claim-based authorization path, which builds its lane
+    # context from the batch-audit target helpers.
+    write_batch(
+      "batch-prefixed-claimant",
+      lanes: [{ "name" => "code", "owner" => "worker-a", "targets" => ["pr:4400"] }]
+    )
+    claim = run_agent_coord(
+      "claim", "--agent-id", "worker-claimant", "--repo", "shakacode/react_on_rails",
+      "--target", "4400", "--batch-id", "batch-prefixed-claimant", "--host", "codex"
+    )
+    assert_equal 0, claim.status.exitstatus, claim.stderr
+
+    rejected = run_agent_coord(
+      "record-event", "--batch-id", "batch-prefixed-claimant", "--type", "lane_closed",
+      "--agent-id", "worker-claimant", "--repo", "shakacode/react_on_rails", "--target", "4400",
+      "--host", "codex", "--terminal", "done", "--pr-state", "merged"
+    )
+
+    assert_equal 1, rejected.status.exitstatus
+    assert_includes rejected.stderr, "authority requires exact target spelling pr:4400"
+
+    exact_claim = run_agent_coord(
+      "claim", "--agent-id", "worker-claimant", "--repo", "shakacode/react_on_rails",
+      "--target", "pr:4400", "--batch-id", "batch-prefixed-claimant", "--host", "codex"
+    )
+    assert_equal 0, exact_claim.status.exitstatus, exact_claim.stderr
+
+    closed = run_agent_coord(
+      "record-event", "--batch-id", "batch-prefixed-claimant", "--type", "lane_closed",
+      "--agent-id", "worker-claimant", "--repo", "shakacode/react_on_rails", "--target", "pr:4400",
+      "--host", "codex", "--terminal", "done", "--pr-state", "merged"
+    )
+    assert_equal 0, closed.status.exitstatus, closed.stderr
+    batch = JSON.parse(File.read(File.join(@state_root, "batches", "batch-prefixed-claimant.json")))
+    assert_equal "done", batch.fetch("lanes").fetch(0).fetch("terminal")
+  end
+
+  def test_terminal_claimant_authorization_does_not_reuse_normalized_audit_attribution
+    batch_id = "batch-prefixed-authority-history"
+    repo = "shakacode/react_on_rails"
+    write_batch(
+      batch_id,
+      lanes: [{ "name" => "code", "owner" => "worker-owner", "targets" => ["pr:4403"] }]
+    )
+    write_state_record(
+      AgentCoord.claim_path(repo, "pr:4403"),
+      "schema_version" => 1,
+      "repo" => repo,
+      "target" => "pr:4403",
+      "batch_id" => batch_id,
+      "agent_id" => "worker-claimant",
+      "status" => "active"
+    )
+    # Read-only batch audit may correlate this decorative alias, but the same
+    # history helper must not use it to authorize the exact `pr:4403` custody.
+    seed_event(
+      batch_id, "claim-bare",
+      "type" => "claim.acquired", "agent_id" => "worker-claimant", "repo" => repo, "target" => "4403"
+    )
+
+    rejected = run_agent_coord(
+      "record-event", "--batch-id", batch_id, "--type", "lane_closed",
+      "--agent-id", "worker-claimant", "--repo", repo, "--target", "pr:4403",
+      "--host", "codex", "--terminal", "done", "--pr-state", "merged"
+    )
+
+    assert_equal 1, rejected.status.exitstatus
+    assert_includes rejected.stderr, "agent does not match lane code"
+  end
+
+  def test_batch_audit_treats_bare_and_prefixed_lane_targets_as_the_same_identity
+    # Control: one lane owning 4402 outright is attributed by target and reports
+    # complete, so the ambiguous case below is not passing for an unrelated
+    # missing signal.
+    write_batch(
+      "batch-audit-unique",
+      lanes: [{ "name" => "solo", "owner" => "worker-a", "targets" => ["pr:4402"] }]
+    )
+    seed_batch_audit_lifecycle("batch-audit-unique", "worker-a", "4402")
+    control = run_agent_coord("batch-audit", "--batch-id", "batch-audit-unique")
+    assert_equal 0, control.status.exitstatus, control.stderr
+    assert_includes control.stdout, "lane solo owner worker-a complete"
+
+    # Same events, but a second lane declares the other spelling of the same
+    # work item. A shared owner disables owner fallback, leaving only target
+    # attribution, which must reject the normalized ambiguity.
+    write_batch(
+      "batch-audit-ambiguous",
+      lanes: [
+        { "name" => "bare", "owner" => "worker-shared", "targets" => ["4401"] },
+        { "name" => "prefixed", "owner" => "worker-shared", "targets" => ["pr:4401"] }
+      ]
+    )
+    seed_batch_audit_lifecycle("batch-audit-ambiguous", "worker-shared", "4401")
+
+    result = run_agent_coord("batch-audit", "--batch-id", "batch-audit-ambiguous")
+
+    refute_includes result.stdout, "lane bare owner worker-shared complete"
+    refute_includes result.stdout, "lane prefixed owner worker-shared complete"
+  end
+
+  def test_batch_audit_does_not_collapse_normalized_base_and_lane_boundaries
+    write_batch(
+      "batch-audit-structured-target-identity",
+      lanes: [{ "name" => "issue-slug", "owner" => "worker-a", "targets" => ["issue:foo"] }]
+    )
+    seed_batch_audit_lifecycle("batch-audit-structured-target-identity", "worker-a", "adhoc:issue:foo")
+
+    result = run_agent_coord("batch-audit", "--batch-id", "batch-audit-structured-target-identity")
+
+    assert_equal 1, result.status.exitstatus, result.stderr
+    refute_includes result.stdout, "lane issue-slug owner worker-a complete"
+  end
+
   def test_batch_audit_rejects_invalid_or_conflicting_attributed_lane_closed_facts
     families = batch_audit_terminal_false_complete_families
     invalid_outcomes = invalid_terminal_audit_outcomes(families)
@@ -13098,6 +13510,20 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
       "events/#{batch_id}/#{event_id}.json",
       { "schema_version" => 1, "event_id" => event_id, "batch_id" => batch_id, "at" => "2026-07-22T00:00:00Z" }
         .merge(overrides)
+    )
+  end
+
+  def seed_batch_audit_lifecycle(batch_id, agent_id, target)
+    seed_event(
+      batch_id, "#{agent_id}-acquired",
+      "type" => "claim.acquired", "agent_id" => agent_id, "target" => target
+    )
+    seed_event(
+      batch_id, "#{agent_id}-closed",
+      "schema_version" => 2, "type" => "lane_closed", "agent_id" => agent_id,
+      "repo" => "shakacode/example", "target" => target, "terminal" => "done",
+      "workspace" => "default",
+      "closed_by" => { "agent_id" => agent_id, "machine" => "test" }
     )
   end
 
