@@ -1,0 +1,321 @@
+#!/usr/bin/env ruby
+# frozen_string_literal: true
+
+ENV["BUNDLE_GEMFILE"] ||= File.expand_path("../../Gemfile", __dir__)
+require "bundler/setup"
+require "commonmarker"
+require "nokogiri"
+require "json"
+require "digest"
+require "open3"
+require "optparse"
+require "pathname"
+require "uri"
+
+def heading_text(node)
+  node.walk.filter_map do |child|
+    case child.type
+    when :text, :code then child.string_content
+    when :softbreak, :linebreak then " "
+    end
+  end.join
+end
+
+def github_anchor(heading, used)
+  anchor = heading.downcase.gsub(/[^\p{Alnum}\p{M}\s_-]/u, "").gsub(/\s/, "-")
+  candidate = anchor
+  suffix = 0
+  while used[candidate]
+    suffix += 1
+    candidate = "#{anchor}-#{suffix}"
+  end
+  used[candidate] = true
+  candidate
+end
+
+def local_destination?(destination)
+  !destination.empty? && !destination.start_with?("//") && !destination.match?(/\A[a-z][a-z0-9+.-]*:/i)
+end
+
+def valid_fence_baseline?(baseline)
+  baseline.all? do |path, entries|
+    next false unless path.is_a?(String) && entries.is_a?(Array)
+
+    identities = entries.filter_map do |entry|
+      next unless entry.is_a?(Hash) && entry.keys.sort == %w[line sha256]
+      next unless entry["line"].is_a?(Integer) && entry["line"].positive?
+      next unless entry["sha256"].is_a?(String) && entry["sha256"].match?(/\Asha256:[0-9a-f]{64}\z/)
+
+      [entry["line"], entry["sha256"]]
+    end
+    identities.length == entries.length && identities.uniq.length == identities.length
+  end
+end
+
+def tracked_directory_index(paths)
+  paths.each_with_object({ "." => true }) do |path, directories|
+    directory = File.dirname(path)
+    until directory == "." || directories[directory]
+      directories[directory] = true
+      directory = File.dirname(directory)
+    end
+  end
+end
+
+def tracked_path_present?(repo_root, path)
+  File.stat(File.join(repo_root, path))
+  true
+rescue Errno::ENOENT
+  false
+end
+
+def raw_node_source(node, lines)
+  position = node.source_position
+  first_line = position.fetch(:start_line) - 1
+  last_line = position.fetch(:end_line) - 1
+  if node.type == :code_block && node.fenced?
+    # Comrak can truncate the end position of an implicitly closed list fence.
+    # Its parsed content still accounts for each original body line.
+    last_line = [last_line, first_line + node.string_content.count("\n")].max
+  end
+  source = lines[first_line..last_line].join
+  return source unless node.type == :html_inline
+
+  # Parser columns are byte offsets. Preserve UTF-8 and original line endings.
+  if first_line == last_line
+    lines[first_line].byteslice(
+      position.fetch(:start_column) - 1,
+      position.fetch(:end_column) - position.fetch(:start_column) + 1
+    )
+  else
+    lines[first_line].byteslice((position.fetch(:start_column) - 1)..) +
+      lines[(first_line + 1)...last_line].join +
+      lines[last_line].byteslice(0, position.fetch(:end_column))
+  end
+end
+
+def record_html_anchors(document, anchors)
+  rendered = document.to_html(options: { render: { unsafe: true } })
+  Nokogiri::HTML5.fragment(rendered).css("a[id], a[name]").each do |anchor|
+    [anchor["id"], anchor["name"]].compact.each do |value|
+      anchors[value] = true unless value.empty?
+    end
+  end
+end
+
+def scan_document(repo_root:, path:, unlabelled_fences:, anchors:, link_targets:)
+  source = File.read(File.join(repo_root, path), encoding: "UTF-8")
+  lines = source.lines
+  used_anchors = {}
+  document_anchors = anchors[path]
+  document = Commonmarker.parse(source, options: { extension: { shortcodes: false } })
+
+  document.walk do |node|
+    case node.type
+    when :heading
+      document_anchors[github_anchor(heading_text(node), used_anchors)] = true
+    when :link, :image
+      destination = node.url
+      link_targets << [path, node.source_position.fetch(:start_line), destination] if local_destination?(destination)
+    when :code_block
+      next unless node.fenced? && node.fence_info.strip.empty?
+
+      unlabelled_fences[path] << {
+        "line" => node.source_position.fetch(:start_line),
+        "sha256" => "sha256:#{Digest::SHA256.hexdigest(raw_node_source(node, lines))}"
+      }
+    end
+  end
+  record_html_anchors(document, document_anchors)
+end
+
+def resolve_commit(repo_root, ref)
+  output, = Open3.capture3("git", "-C", repo_root, "rev-parse", "--verify", "#{ref}^{commit}")
+  commit = output.strip
+  commit if commit.match?(/\A[0-9a-f]{40}\z/)
+end
+
+def git_paths(output, command:)
+  output.force_encoding(Encoding::UTF_8)
+  abort "git #{command}: paths must be valid UTF-8" unless output.valid_encoding?
+
+  output.split("\0")
+end
+
+def paths_changed_from(repo_root, base, fallback_on_missing_merge_base: false)
+  base_output, base_error, base_status = Open3.capture3(
+    "git", "-C", repo_root, "merge-base", "HEAD", base
+  )
+  return if fallback_on_missing_merge_base && base_status.exitstatus == 1
+
+  abort base_error unless base_status.success?
+  diff_output, diff_error, diff_status = Open3.capture3(
+    "git", "-C", repo_root, "diff", "--name-only", "-z", "--diff-filter=ACMR",
+    base_output.strip, "--"
+  )
+  abort diff_error unless diff_status.success?
+  git_paths(diff_output, command: "diff")
+end
+
+def changed_paths(repo_root:, tracked_paths:, requested_base:)
+  head = resolve_commit(repo_root, "HEAD")
+  return tracked_paths unless head
+
+  base = if requested_base
+           resolve_commit(repo_root, requested_base) || abort("Cannot resolve docs base ref: #{requested_base}")
+         else
+           resolve_commit(repo_root, "origin/main")
+         end
+  return tracked_paths if !requested_base && base == head
+
+  if base
+    paths = paths_changed_from(
+      repo_root,
+      base,
+      fallback_on_missing_merge_base: !requested_base
+    )
+    return paths || tracked_paths
+  end
+
+  tracked_paths
+end
+
+options = { repo_root: File.expand_path("../..", __dir__) }
+OptionParser.new do |parser|
+  parser.on("--repo-root PATH") { |path| options[:repo_root] = File.expand_path(path) }
+  parser.on("--base REF") { |ref| options[:base] = ref }
+end.parse!
+
+repo_root = options.fetch(:repo_root)
+tracked_output, tracked_error, tracked_status = Open3.capture3(
+  "git", "-C", repo_root, "ls-files", "-z"
+)
+abort tracked_error unless tracked_status.success?
+
+tracked_paths = git_paths(tracked_output, command: "ls-files")
+present_tracked_paths = tracked_paths.select { |path| tracked_path_present?(repo_root, path) }
+tracked = present_tracked_paths.to_h { |path| [path, true] }
+tracked_directories = tracked_directory_index(present_tracked_paths)
+changed_paths = changed_paths(
+  repo_root: repo_root,
+  tracked_paths: tracked_paths,
+  requested_base: options[:base]
+)
+markdown_paths = changed_paths.select do |path|
+  tracked[path] && File.extname(path).downcase == ".md"
+end
+errors = []
+unlabelled_fences = Hash.new { |paths, path| paths[path] = [] }
+anchors = Hash.new { |documents, path| documents[path] = {} }
+link_targets = []
+
+markdown_paths.each do |path|
+  scan_document(
+    repo_root: repo_root,
+    path: path,
+    unlabelled_fences: unlabelled_fences,
+    anchors: anchors,
+    link_targets: link_targets
+  )
+end
+
+def resolved_link_path(path, location)
+  relative = URI::DEFAULT_PARSER.unescape(location.partition("?").first)
+  return unless relative.valid_encoding? && !relative.include?("\0")
+  return path if relative.empty?
+
+  target = relative.start_with?("/") ? relative.delete_prefix("/") : File.join(File.dirname(path), relative)
+  Pathname.new(target).cleanpath.to_s
+end
+
+link_targets.each do |path, line_number, destination|
+  location, separator, fragment = destination.partition("#")
+  fragment = nil if separator.empty?
+  resolved = resolved_link_path(path, location)
+  exists = tracked[resolved] || tracked_directories[resolved]
+  unless exists
+    errors << "#{path}:#{line_number}: broken relative link: #{destination}"
+    next
+  end
+
+  if fragment && tracked[resolved] && File.extname(resolved).downcase == ".md" && !anchors.key?(resolved)
+    scan_document(
+      repo_root: repo_root,
+      path: resolved,
+      unlabelled_fences: unlabelled_fences,
+      anchors: anchors,
+      link_targets: []
+    )
+  end
+  next if fragment.nil? || fragment.empty? || !anchors.key?(resolved)
+  next if anchors[resolved][URI::DEFAULT_PARSER.unescape(fragment)]
+
+  errors << "#{path}:#{line_number}: broken anchor: #{destination}"
+end
+
+baseline_path = File.join(repo_root, ".agents/docs-lint-baseline.json")
+begin
+  baseline = if File.file?(baseline_path)
+               JSON.parse(File.read(baseline_path, encoding: "UTF-8"))
+             else
+               { "version" => 1, "unlabelled_code_fences" => {} }
+             end
+rescue JSON::ParserError => e
+  warn ".agents/docs-lint-baseline.json: invalid JSON: #{e.message.lines.first.chomp}"
+  exit 2
+end
+
+unless baseline.is_a?(Hash) && baseline["version"] == 1 && baseline["unlabelled_code_fences"].is_a?(Hash)
+  warn ".agents/docs-lint-baseline.json: expected version 1 with an unlabelled_code_fences object"
+  exit 2
+end
+
+allowances = baseline.fetch("unlabelled_code_fences")
+unless valid_fence_baseline?(allowances)
+  warn ".agents/docs-lint-baseline.json: fence entries must bind a unique positive line and sha256 digest by path"
+  exit 2
+end
+
+scanned_paths = anchors.keys.to_h { |path| [path, true] }
+allowances.each_key do |path|
+  unless tracked[path] && File.extname(path).downcase == ".md"
+    errors << "#{path}: baselined document is not a tracked Markdown file"
+    next
+  end
+  next if scanned_paths[path]
+
+  scan_document(
+    repo_root: repo_root,
+    path: path,
+    unlabelled_fences: unlabelled_fences,
+    anchors: anchors,
+    link_targets: []
+  )
+end
+
+matched_findings = Hash.new { |paths, path| paths[path] = {} }
+allowances.each do |path, entries|
+  entries.each do |entry|
+    identity = [entry.fetch("line"), entry.fetch("sha256")]
+    finding = unlabelled_fences.fetch(path, []).find do |candidate|
+      [candidate.fetch("line"), candidate.fetch("sha256")] == identity
+    end
+    if finding
+      matched_findings[path][identity] = true
+    else
+      errors << "#{path}:#{entry.fetch('line')}: baselined unlabelled code fence no longer matches"
+    end
+  end
+end
+
+markdown_paths.sort.each do |path|
+  unlabelled_fences.fetch(path, []).each do |finding|
+    identity = [finding.fetch("line"), finding.fetch("sha256")]
+    next if matched_findings[path][identity]
+
+    errors << "#{path}:#{finding.fetch('line')}: unlabelled code fence"
+  end
+end
+
+warn errors.join("\n") unless errors.empty?
+exit(errors.empty? ? 0 : 1)

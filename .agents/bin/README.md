@@ -8,11 +8,27 @@ is absent means that capability is n/a in this repository.
 | Script | Purpose | This repo runs |
 | --- | --- | --- |
 | `setup` | Install dependencies | n/a |
-| `validate` | Pre-push gate | `bundle exec rubocop` |
+| `validate` | Pre-push gate | `bundle exec rubocop`, then `.agents/bin/docs` |
 | `test` | Run tests | CI's non-integration unit and simulation test scope |
 | `lint` | Lint / format | n/a |
 | `build` | Build / type-check | n/a |
-| `docs` | Docs checks | n/a |
+| `docs` | Docs checks | Commonmarker checks rendered Markdown links, anchors, and unlabelled code fences; exact legacy findings stay baselined |
 | `ci-detect` | CI change detector | n/a |
+
+Run `bundle install` before calling `.agents/bin/docs` directly. The command
+loads the repository's bundle even from another working directory. It checks
+tracked local destinations in rendered links and images, including reference
+links at their use sites. Unused reference definitions are not checked.
+Undefined reference syntax is literal text, not a rendered link.
+Nokogiri parses explicit anchors from Commonmarker's rendered HTML. The lockfile
+includes native packages for arm64 macOS and x86-64 Linux plus a generic `ruby`
+fallback, which requires compiling Nokogiri's native extension with a compatible
+C toolchain.
+An explicit `--base` limits link and new-fence checks to changed Markdown.
+Implicit `origin/main` comparison does the same when it has distinct shared
+history; when it equals `HEAD`, has no common ancestor, or is unavailable, the
+command conservatively checks all tracked Markdown.
+Legacy fence allowances still match the exact original source lines and bytes,
+including container prefixes and line endings.
 
 Non-command policy lives in [`../agent-workflow.yml`](../agent-workflow.yml).

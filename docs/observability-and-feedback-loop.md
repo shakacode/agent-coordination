@@ -273,10 +273,12 @@ Concretely, in this repo:
   gate closeout on the exit code instead of asking reviewers to eyeball lanes.
 - Ledger integrity is already mechanical — every applied migration stores its
   SHA-256, and a changed or missing applied migration refuses the next open.
-- `.agents/bin/validate` runs RuboCop and is the repo's validation seam. Note
-  what it does *not* cover: there is no docs lint and no markdown link checker
-  in `.agents/bin/` or `.github/workflows/`, so relative links in this file and
-  in the ledger are verified by hand at review time.
+- `.agents/bin/validate` runs RuboCop and then `.agents/bin/docs`, which checks
+  changed Markdown for unlabelled fences and broken tracked-file links and anchors
+  when a base is available, or all tracked Markdown otherwise.
+  Commonmarker parses rendered links and images; reference errors point to their
+  use sites. Unused definitions do not fail validation, and undefined references
+  are literal text rather than rendered links.
 
 When a retro accepts an improvement that *could* be a gate but currently is not,
 say so in the issue and prefer the gate as the implementation.
