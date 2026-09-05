@@ -24,8 +24,10 @@ Nokogiri parses explicit anchors from Commonmarker's rendered HTML. The lockfile
 includes native packages for arm64 macOS and x86-64 Linux plus a generic `ruby`
 fallback, which requires compiling Nokogiri's native extension with a compatible
 C toolchain.
-When `--base` or `origin/main` is available, link and new-fence checks cover
-changed Markdown. Without a known base, they cover all tracked Markdown.
+An explicit `--base` limits link and new-fence checks to changed Markdown.
+Implicit `origin/main` comparison does the same when it has distinct shared
+history; when it equals `HEAD`, has no common ancestor, or is unavailable, the
+command conservatively checks all tracked Markdown.
 Legacy fence allowances still match the exact original source lines and bytes,
 including container prefixes and line endings.
 

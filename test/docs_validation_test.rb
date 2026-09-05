@@ -413,6 +413,138 @@ class DocsValidationTest < Minitest::Test
     end
   end
 
+  def test_checks_all_tracked_markdown_when_implicit_base_is_head
+    with_repository do |repo|
+      write(repo, "README.md", "See [missing](missing.md).\n")
+      track(repo, "README.md")
+      commit(repo, "Add broken documentation")
+      system("git", "-C", repo, "update-ref", "refs/remotes/origin/main", "HEAD", exception: true)
+
+      _stdout, stderr, status = run_checker(repo)
+
+      refute status.success?
+      assert_includes stderr, "README.md:1: broken relative link: missing.md"
+    end
+  end
+
+  def test_reports_a_deleted_tracked_target_when_implicit_base_is_head
+    with_repository do |repo|
+      write(repo, "README.md", "See [guide](guide.md).\n")
+      write(repo, "guide.md", "# Guide\n")
+      track(repo, "README.md", "guide.md")
+      commit(repo, "Add documentation")
+      system("git", "-C", repo, "update-ref", "refs/remotes/origin/main", "HEAD", exception: true)
+      FileUtils.rm(File.join(repo, "guide.md"))
+
+      stdout, stderr, status = run_checker(repo)
+
+      refute status.success?
+      assert_empty stdout
+      assert_equal "README.md:1: broken relative link: guide.md\n", stderr
+    end
+  end
+
+  def test_fails_closed_when_a_tracked_markdown_path_cannot_be_inspected
+    with_repository do |repo|
+      write(repo, "private/README.md", "# Private\n")
+      track(repo, "private/README.md")
+      commit(repo, "Add private documentation")
+      system("git", "-C", repo, "update-ref", "refs/remotes/origin/main", "HEAD", exception: true)
+      private_directory = File.join(repo, "private")
+      FileUtils.chmod(0o000, private_directory)
+
+      _stdout, stderr, status = run_checker(repo)
+
+      refute status.success?
+      assert_includes stderr, "Errno::EACCES"
+    ensure
+      FileUtils.chmod(0o700, private_directory) if private_directory
+    end
+  end
+
+  def test_reports_a_dangling_tracked_symlink_as_a_broken_target
+    with_repository do |repo|
+      write(repo, "README.md", "See [guide](guide.md).\n")
+      File.symlink("missing.md", File.join(repo, "guide.md"))
+      track(repo, "README.md", "guide.md")
+      commit(repo, "Add dangling documentation link")
+      system("git", "-C", repo, "update-ref", "refs/remotes/origin/main", "HEAD", exception: true)
+
+      stdout, stderr, status = run_checker(repo)
+
+      refute status.success?
+      assert_empty stdout
+      assert_equal "README.md:1: broken relative link: guide.md\n", stderr
+    end
+  end
+
+  def test_checks_all_tracked_markdown_when_implicit_base_has_no_common_ancestor
+    with_repository do |repo|
+      write(repo, "README.md", "See [missing](missing.md).\n")
+      track(repo, "README.md")
+      commit(repo, "Add broken documentation")
+
+      with_repository do |origin|
+        write(origin, "upstream.md", "# Upstream\n")
+        track(origin, "upstream.md")
+        commit(origin, "Add unrelated upstream history")
+        system("git", "-C", origin, "branch", "-M", "main", exception: true)
+        system("git", "-C", repo, "remote", "add", "origin", origin, exception: true)
+        system("git", "-C", repo, "fetch", "--quiet", "--depth=1", "origin", "main", exception: true)
+      end
+
+      _stdout, stderr, status = run_checker(repo)
+
+      refute status.success?
+      assert_includes stderr, "README.md:1: broken relative link: missing.md"
+    end
+  end
+
+  def test_keeps_an_explicit_unrelated_base_strict
+    with_repository do |repo|
+      write(repo, "README.md", "See [missing](missing.md).\n")
+      track(repo, "README.md")
+      commit(repo, "Add broken documentation")
+
+      with_repository do |origin|
+        write(origin, "upstream.md", "# Upstream\n")
+        track(origin, "upstream.md")
+        commit(origin, "Add unrelated upstream history")
+        system("git", "-C", origin, "branch", "-M", "main", exception: true)
+        system("git", "-C", repo, "remote", "add", "origin", origin, exception: true)
+        system("git", "-C", repo, "fetch", "--quiet", "--depth=1", "origin", "main", exception: true)
+      end
+
+      _stdout, stderr, status = run_checker(repo, "--base", "origin/main")
+
+      refute status.success?
+      refute_includes stderr, "broken relative link"
+    end
+  end
+
+  def test_keeps_an_explicit_head_base_limited_to_worktree_changes
+    with_repository do |repo|
+      write(repo, "README.md", "See [committed](missing-committed.md).\n")
+      track(repo, "README.md")
+      commit(repo, "Add broken documentation")
+
+      stdout, stderr, status = run_checker(repo, "--base", "HEAD")
+
+      assert status.success?, stderr
+      assert_empty stdout
+      assert_empty stderr
+
+      write(repo, "README.md", "See [changed](missing-changed.md).\n")
+      %i[unstaged staged].each do |state|
+        track(repo, "README.md") if state == :staged
+        _stdout, stderr, status = run_checker(repo, "--base", "HEAD")
+
+        refute status.success?, state
+        assert_includes stderr, "README.md:1: broken relative link: missing-changed.md"
+      end
+    end
+  end
+
   def test_checks_committed_markdown_without_a_base_despite_unrelated_dirty_files
     with_repository do |repo|
       write(repo, "README.md", "See [missing](missing.md).\n")

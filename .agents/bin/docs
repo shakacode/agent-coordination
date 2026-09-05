@@ -62,6 +62,13 @@ def tracked_directory_index(paths)
   end
 end
 
+def tracked_path_present?(repo_root, path)
+  File.stat(File.join(repo_root, path))
+  true
+rescue Errno::ENOENT
+  false
+end
+
 def raw_node_source(node, lines)
   position = node.source_position
   first_line = position.fetch(:start_line) - 1
@@ -135,10 +142,12 @@ def git_paths(output, command:)
   output.split("\0")
 end
 
-def paths_changed_from(repo_root, base)
+def paths_changed_from(repo_root, base, fallback_on_missing_merge_base: false)
   base_output, base_error, base_status = Open3.capture3(
     "git", "-C", repo_root, "merge-base", "HEAD", base
   )
+  return if fallback_on_missing_merge_base && base_status.exitstatus == 1
+
   abort base_error unless base_status.success?
   diff_output, diff_error, diff_status = Open3.capture3(
     "git", "-C", repo_root, "diff", "--name-only", "-z", "--diff-filter=ACMR",
@@ -149,14 +158,24 @@ def paths_changed_from(repo_root, base)
 end
 
 def changed_paths(repo_root:, tracked_paths:, requested_base:)
-  return tracked_paths unless resolve_commit(repo_root, "HEAD")
+  head = resolve_commit(repo_root, "HEAD")
+  return tracked_paths unless head
 
   base = if requested_base
            resolve_commit(repo_root, requested_base) || abort("Cannot resolve docs base ref: #{requested_base}")
          else
            resolve_commit(repo_root, "origin/main")
          end
-  return paths_changed_from(repo_root, base) if base
+  return tracked_paths if !requested_base && base == head
+
+  if base
+    paths = paths_changed_from(
+      repo_root,
+      base,
+      fallback_on_missing_merge_base: !requested_base
+    )
+    return paths || tracked_paths
+  end
 
   tracked_paths
 end
@@ -174,8 +193,9 @@ tracked_output, tracked_error, tracked_status = Open3.capture3(
 abort tracked_error unless tracked_status.success?
 
 tracked_paths = git_paths(tracked_output, command: "ls-files")
-tracked = tracked_paths.to_h { |path| [path, true] }
-tracked_directories = tracked_directory_index(tracked_paths)
+present_tracked_paths = tracked_paths.select { |path| tracked_path_present?(repo_root, path) }
+tracked = present_tracked_paths.to_h { |path| [path, true] }
+tracked_directories = tracked_directory_index(present_tracked_paths)
 changed_paths = changed_paths(
   repo_root: repo_root,
   tracked_paths: tracked_paths,
