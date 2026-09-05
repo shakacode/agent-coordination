@@ -11,6 +11,7 @@ E="events/$EVENT_BATCH/$(date +%Y%m%dT%H%M%SZ)-smoke.json"
 E2="events/$EVENT_BATCH/$(date +%Y%m%dT%H%M%SZ)-smoke-2.json"
 OTHER_E="events/$OTHER_EVENT_BATCH/$(date +%Y%m%dT%H%M%SZ)-smoke.json"
 LONG_PATH="claims/$(python3 -c 'print("x"*600)').json"
+LONG_ATTENTION_WORKSPACE="$(python3 -c 'print("x"*161)')"
 fail() { echo "SMOKE FAIL: $1"; exit 1; }
 expect() { [ "$2" = "$3" ] || fail "$1: expected $3 got $2"; }
 
@@ -36,6 +37,12 @@ expect badcursor "$(curl -s -G -o /dev/null -w %{http_code} "$BASE/v1/state" -H 
 expect badpath  "$(curl -s -o /dev/null -w %{http_code} "$BASE/v1/state/etc/passwd" -H "$AUTH")" 400
 expect badenc   "$(curl -s -o /dev/null -w %{http_code} "$BASE/v1/state/claims/%E0%A4%A.json" -H "$AUTH")" 400
 expect longpath "$(curl -s -o /dev/null -w %{http_code} "$BASE/v1/state/$LONG_PATH" -H "$AUTH")" 400
+expect attentiondot "$(curl -s -G -o /dev/null -w %{http_code} "$BASE/v1/state" -H "$AUTH" --data-urlencode prefix=attention/default/./repo)" 400
+expect attentioncolon "$(curl -s -G -o /dev/null -w %{http_code} "$BASE/v1/state" -H "$AUTH" --data-urlencode prefix=attention/default/owner:team/repo)" 400
+expect attentionlong "$(curl -s -G -o /dev/null -w %{http_code} "$BASE/v1/state" -H "$AUTH" --data-urlencode "prefix=attention/$LONG_ATTENTION_WORKSPACE/owner/repo")" 400
+expect attentiondotid "$(curl -s -o /dev/null -w %{http_code} "$BASE/v1/state/attention/default/owner/repo/.id.json" -H "$AUTH")" 400
+expect attentioncolonpath "$(curl -s -o /dev/null -w %{http_code} "$BASE/v1/state/attention/default/owner:team/repo/id.json" -H "$AUTH")" 400
+expect attentionlongpath "$(curl -s -o /dev/null -w %{http_code} "$BASE/v1/state/attention/$LONG_ATTENTION_WORKSPACE/owner/repo/id.json" -H "$AUTH")" 400
 expect listpost "$(curl -s -o /dev/null -w %{http_code} -X POST "$BASE/v1/state" -H "$AUTH" -d '{}')" 405
 expect list     "$(curl -s "$BASE/v1/state?prefix=claims" -H "$AUTH" | python3 -c 'import json,sys; print(len(json.load(sys.stdin)["entries"]) >= 1)')" True
 expect eventcreate "$(curl -s -o /dev/null -w %{http_code} -X PUT "$BASE/v1/state/$E" -H "$AUTH" -H 'If-None-Match: *' -d '{"data":{"schema_version":1,"batch_id":"smoke","type":"phase"}}')" 201

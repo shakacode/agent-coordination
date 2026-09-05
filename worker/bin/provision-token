@@ -34,12 +34,70 @@ fi
 
 valid_prefix() {
   local prefix="$1"
+  [[ "$prefix" =~ ^[A-Za-z0-9_./:-]+$ ]] || return 1
   [[ "$prefix" != *..* ]] || return 1
   [[ "$prefix" != *//* ]] || return 1
+  [[ "$prefix" != */ ]] || return 1
   local segment='[A-Za-z0-9_.:-]+'
   local active="claims(/${segment}(/${segment}(/${segment}\\.json)?)?)?|heartbeats(/${segment}\\.json)?|batches(/${segment}\\.json)?|events(/${segment}(/${segment}\\.json)?)?"
   local pattern="^(${active}|archive(/(${active}))?)$"
-  [[ "$prefix" =~ $pattern ]]
+  if [[ "$prefix" == attention || "$prefix" == attention/* ]]; then
+    valid_attention_prefix "$prefix" || return 1
+  else
+    [[ "$prefix" =~ $pattern ]] || return 1
+  fi
+  local archivable_path="claims/${segment}/${segment}/${segment}\\.json|heartbeats/${segment}\\.json|batches/${segment}\\.json|events/${segment}/${segment}\\.json"
+  local archive_path_pattern="^archive/(${archivable_path})$"
+  if [[ "$prefix" =~ $archive_path_pattern ]]; then
+    local active_path="${prefix#archive/}"
+    [[ "${#active_path}" -le 512 ]] && [[ "${#prefix}" -le 520 ]]
+  else
+    [[ "${#prefix}" -le 512 ]]
+  fi
+}
+
+valid_attention_component() {
+  local value="$1"
+  [[ "${#value}" -le 160 ]] && [[ "$value" =~ ^[A-Za-z0-9_:-]+(\.[A-Za-z0-9_:-]+)*$ ]]
+}
+
+valid_attention_repo_segment() {
+  local value="$1"
+  [[ "$value" != "." ]] && [[ "$value" != *..* ]] && [[ "$value" =~ ^[A-Za-z0-9_.-]+$ ]]
+}
+
+valid_attention_repository() {
+  local owner="$1"
+  local name="$2"
+  [[ $((${#owner} + 1 + ${#name})) -le 160 ]] &&
+    valid_attention_repo_segment "$owner" && valid_attention_repo_segment "$name"
+}
+
+valid_attention_prefix() {
+  local prefix="$1"
+  local parts=()
+  IFS=/ read -r -a parts <<< "$prefix"
+  [[ "${parts[0]}" == "attention" ]] || return 1
+  case "${#parts[@]}" in
+    1) return 0 ;;
+    2) valid_attention_component "${parts[1]}" ;;
+    3)
+      valid_attention_component "${parts[1]}" &&
+        [[ "${#parts[2]}" -le 158 ]] && valid_attention_repo_segment "${parts[2]}"
+      ;;
+    4)
+      valid_attention_component "${parts[1]}" &&
+        valid_attention_repository "${parts[2]}" "${parts[3]}"
+      ;;
+    5)
+      [[ "${parts[4]}" == *.json ]] || return 1
+      local attention_id="${parts[4]%.json}"
+      valid_attention_component "${parts[1]}" &&
+        valid_attention_repository "${parts[2]}" "${parts[3]}" &&
+        valid_attention_component "$attention_id"
+      ;;
+    *) return 1 ;;
+  esac
 }
 
 while [ "$#" -gt 0 ]; do
@@ -68,7 +126,7 @@ while [ "$#" -gt 0 ]; do
     --read-prefix)
       [ "$#" -ge 2 ] || usage
       [ -n "$2" ] || { echo "prefix cannot be empty; pass --all-state for all-state access" >&2; exit 1; }
-      valid_prefix "$2" || { echo "invalid read prefix: $2" >&2; exit 1; }
+      valid_prefix "$2" || { echo "invalid read prefix" >&2; exit 1; }
       READ_PREFIXES_GIVEN=1
       READ_PREFIXES+=("$2")
       shift 2
@@ -76,7 +134,7 @@ while [ "$#" -gt 0 ]; do
     --write-prefix)
       [ "$#" -ge 2 ] || usage
       [ -n "$2" ] || { echo "prefix cannot be empty; pass --all-state for all-state access" >&2; exit 1; }
-      valid_prefix "$2" || { echo "invalid write prefix: $2" >&2; exit 1; }
+      valid_prefix "$2" || { echo "invalid write prefix" >&2; exit 1; }
       WRITE_PREFIXES_GIVEN=1
       WRITE_PREFIXES+=("$2")
       shift 2
@@ -111,21 +169,18 @@ elif [ "$READ_PREFIXES_GIVEN" -ne 1 ] && [ "$WRITE_PREFIXES_GIVEN" -ne 1 ]; then
 fi
 
 json_array() {
-  local out="["
-  local separator=""
-  local prefix
-  # Prefix validation disallows quotes and backslashes, so these strings are safe
-  # to embed in the JSON payload and the single-quoted SQL literal below. Keep
-  # valid_prefix in sync if the allowed character set ever changes.
-  for prefix in "$@"; do
-    out="${out}${separator}\"${prefix}\""
-    separator=","
-  done
-  printf '%s]' "$out"
+  "$NODE_BIN" -e 'process.stdout.write(JSON.stringify(process.argv.slice(1)))' -- "$@"
+}
+
+sql_literal() {
+  local value="$1"
+  value=${value//\'/\'\'}
+  printf "'%s'" "$value"
 }
 
 OPENSSL_BIN="${OPENSSL_BIN:-openssl}"
 NPX_BIN="${NPX_BIN:-npx}"
+NODE_BIN="${NODE_BIN:-node}"
 
 TOKEN=$("$OPENSSL_BIN" rand -hex 24)
 HASH=$(printf %s "$TOKEN" | "$OPENSSL_BIN" dgst -sha256 -r | cut -d' ' -f1)
@@ -139,7 +194,9 @@ if [ "${#WRITE_PREFIXES[@]}" -eq 0 ]; then
 else
   WRITE_PREFIX_JSON=$(json_array "${WRITE_PREFIXES[@]}")
 fi
-SQL="INSERT INTO machines (machine, token_hash, read_prefixes, write_prefixes, created_at) VALUES ('${MACHINE}', '${HASH}', '${READ_PREFIX_JSON}', '${WRITE_PREFIX_JSON}', strftime('%Y-%m-%dT%H:%M:%SZ','now'))"
+READ_PREFIX_SQL=$(sql_literal "$READ_PREFIX_JSON")
+WRITE_PREFIX_SQL=$(sql_literal "$WRITE_PREFIX_JSON")
+SQL="INSERT INTO machines (machine, token_hash, read_prefixes, write_prefixes, created_at) VALUES ('${MACHINE}', '${HASH}', ${READ_PREFIX_SQL}, ${WRITE_PREFIX_SQL}, strftime('%Y-%m-%dT%H:%M:%SZ','now'))"
 if [ "$ROTATE" -eq 1 ]; then
   SQL+=" ON CONFLICT(machine) DO UPDATE SET token_hash=excluded.token_hash, read_prefixes=excluded.read_prefixes, write_prefixes=excluded.write_prefixes, created_at=excluded.created_at, revoked_at=NULL"
 fi

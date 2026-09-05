@@ -345,7 +345,7 @@ class LocalStoreReadabilityStackDoctorTest < Minitest::Test
       assert_empty result.fetch(:stderr)
       resource_check = check(JSON.parse(result.fetch(:stdout)), "resources.deep")
       assert_equal [prefix], resource_check.dig("details", "prefixes")
-      assert_equal %w[heartbeats batches events archive],
+      assert_equal %w[heartbeats batches events attention archive],
                    resource_check.dig("details", "unprobed_prefixes")
     end
   end
@@ -557,11 +557,11 @@ class LocalStoreReadabilityStackDoctorTest < Minitest::Test
     assert_includes resource_check.dig("details", "error"), "claims", label
     assert_includes resource_check.dig("details", "error"), "not readable or searchable", label
     assert_kind_of String, resource_check.fetch("guidance"), label
-    expected_prefixes = label == "custom" ? ["claims"] : %w[claims heartbeats batches events archive]
+    expected_prefixes = label == "custom" ? ["claims"] : %w[claims heartbeats batches events attention archive]
     assert_equal expected_prefixes, resource_check.dig("details", "prefixes"), label
     return unless label == "custom"
 
-    assert_equal %w[heartbeats batches events archive], resource_check.dig("details", "unprobed_prefixes")
+    assert_equal %w[heartbeats batches events attention archive], resource_check.dig("details", "unprobed_prefixes")
   end
 end
 
@@ -770,7 +770,8 @@ class StackDoctorCliTest < Minitest::Test
       assert_equal "healthy", report.fetch("status")
       assert_equal "healthy", resource_check.fetch("status")
       assert_equal "deep", resource_check.dig("details", "mode")
-      assert_equal %w[archive batches claims events heartbeats], resource_check.dig("details", "prefixes").sort
+      expected_prefixes = %w[archive attention batches claims events heartbeats]
+      assert_equal expected_prefixes, resource_check.dig("details", "prefixes").sort
     end
   end
 
@@ -1193,7 +1194,7 @@ class StackDoctorCliTest < Minitest::Test
       resource_check = check(report, "resources.deep")
       assert_equal "degraded", report.fetch("status")
       assert_equal "degraded", resource_check.fetch("status")
-      assert_equal %w[claims heartbeats batches events archive], resource_check.dig("details", "prefixes")
+      assert_equal %w[claims heartbeats batches events attention archive], resource_check.dig("details", "prefixes")
       assert_equal "unsupported", resource_check.dig("details", "resource_checks", "events")
       assert_equal "unsupported", resource_check.dig("details", "resource_checks", "archive")
       assert_kind_of String, resource_check.fetch("guidance")
@@ -1215,7 +1216,7 @@ class StackDoctorCliTest < Minitest::Test
       resource_check = check(report, "resources.deep")
       assert_equal "degraded", resource_check.fetch("status")
       assert_equal ["archive"], resource_check.dig("details", "prefixes")
-      assert_equal %w[claims heartbeats batches events], resource_check.dig("details", "unprobed_prefixes")
+      assert_equal %w[claims heartbeats batches events attention], resource_check.dig("details", "unprobed_prefixes")
       assert_equal "unsupported", resource_check.dig("details", "resource_checks", "archive")
       assert_includes resource_check.dig("details", "notes", "archive"), "not supported"
     end
@@ -1245,7 +1246,7 @@ class StackDoctorCliTest < Minitest::Test
         assert_equal "healthy", report.fetch("status")
         assert_equal "healthy", resource_check.fetch("status")
         assert_equal ["claims"], resource_check.dig("details", "prefixes")
-        assert_equal %w[heartbeats batches events archive], resource_check.dig("details", "unprobed_prefixes")
+        assert_equal %w[heartbeats batches events attention archive], resource_check.dig("details", "unprobed_prefixes")
         assert_equal({ "claims" => "ok" }, resource_check.dig("details", "resource_checks"))
         assert_equal before, Dir.glob(File.join(state_root, "**", "*"), File::FNM_DOTMATCH).sort
       ensure
@@ -1276,7 +1277,7 @@ class StackDoctorCliTest < Minitest::Test
       resource_check = check(report, "resources.deep")
       assert_equal "healthy", report.fetch("status")
       assert_equal ["claims"], resource_check.dig("details", "prefixes")
-      assert_equal %w[heartbeats batches events archive], resource_check.dig("details", "unprobed_prefixes")
+      assert_equal %w[heartbeats batches events attention archive], resource_check.dig("details", "unprobed_prefixes")
       assert_equal({ "claims" => "ok" }, resource_check.dig("details", "resource_checks"))
       gh_calls = File.readlines(log_path, chomp: true)
       assert(gh_calls.any? { |call| call.include?("git/trees/state?recursive=1") })
@@ -1575,7 +1576,7 @@ class MachineIdentityStackDoctorTest < Minitest::Test
 
   def deep_http_responses(token_machine:)
     [[200, { "status" => "ok" }]] +
-      Array.new(5) { [200, { "entries" => [] }] } +
+      Array.new(6) { [200, { "entries" => [] }] } +
       [[200, { "machine" => token_machine, "read_prefixes" => ["*"], "write_prefixes" => ["*"] }]]
   end
 end

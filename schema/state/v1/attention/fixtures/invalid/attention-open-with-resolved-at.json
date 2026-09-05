@@ -1,0 +1,25 @@
+{
+  "schema_version": 1,
+  "workspace": "default",
+  "id": "decision",
+  "repository": "shakacode/example",
+  "target": "issue:1",
+  "status": "open",
+  "kind": "architecture",
+  "question": "Choose one",
+  "choices": ["A", "B"],
+  "priority_class": "product-architecture",
+  "priority_reason": "Blocks design",
+  "safe_resume": "Continue after the choice",
+  "source": {
+    "provider": "codex",
+    "host_id": "m1",
+    "task_id": "task-1",
+    "last_seen_at": "2026-09-03T09:00:00Z",
+    "capabilities": { "native_open": "unknown", "prompt_forwarding": "unknown" }
+  },
+  "source_generation": 1,
+  "created_at": "2026-09-03T09:00:00Z",
+  "refreshed_at": "2026-09-03T09:00:00Z",
+  "resolved_at": "2026-09-03T09:00:00Z"
+}

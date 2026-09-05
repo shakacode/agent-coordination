@@ -162,6 +162,94 @@ class ProvisionTokenTest < Minitest::Test
     assert_includes stdout, "writes:   [\"archive/claims/shakacode/example/42.json\"]"
   end
 
+  def test_provisions_attention_directory_and_exact_record_scopes
+    stdout, stderr, status = run_script(
+      "attention-reader",
+      "--local",
+      "--read-prefix",
+      "attention/default/shakacode/agent-coordination",
+      "--write-prefix",
+      "attention/default/shakacode/agent-coordination/decision-1.json"
+    )
+
+    assert status.success?, stderr
+    assert_includes stdout, "reads:    [\"attention/default/shakacode/agent-coordination\"]"
+    assert_includes stdout, "writes:   [\"attention/default/shakacode/agent-coordination/decision-1.json\"]"
+  end
+
+  def test_attention_scope_enforces_storage_key_component_contract
+    accepted = "attention/#{'w' * 160}/owner/repo/#{'i' * 160}.json"
+    invalid = [
+      "attention/#{'w' * 161}/owner/repo/id.json",
+      "attention/default/owner/#{'r' * 155}/id.json",
+      "attention/default/owner:team/repo/id.json",
+      "attention/default/./repo/id.json",
+      "attention/default/owner/repo/.id.json",
+      "attention/default/owner/repo/id..part.json",
+      "attention/default/owner/repo/#{'i' * 161}.json"
+    ]
+
+    _, accepted_stderr, accepted_status = run_script("m5", "--local", "--read-prefix", accepted)
+    assert accepted_status.success?, accepted_stderr
+
+    invalid.each do |scope|
+      _, rejected_stderr, rejected_status = run_script("m5", "--local", "--read-prefix", scope)
+      refute rejected_status.success?, scope
+      assert_includes rejected_stderr, "invalid read prefix", scope
+    end
+
+    valid_prefix = "attention/#{'w' * 160}/owner/repo"
+    invalid_prefixes = [
+      "attention/#{'w' * 161}",
+      "attention/default/owner:team",
+      "attention/default/owner/#{'r' * 155}",
+      "attention/./owner/repo",
+      "attention/default/"
+    ]
+    _, prefix_stderr, prefix_status = run_script("m5", "--local", "--read-prefix", valid_prefix)
+    assert prefix_status.success?, prefix_stderr
+    invalid_prefixes.each do |scope|
+      _, rejected_stderr, rejected_status = run_script("m5", "--local", "--read-prefix", scope)
+      refute rejected_status.success?, scope
+      assert_includes rejected_stderr, "invalid read prefix", scope
+    end
+  end
+
+  def test_attention_scope_rejects_multiline_and_control_suffixes_before_provisioning
+    suffixes = ["\nuntrusted", "\n'", "\n\\", "\rforged", "\tforged", "\eforged"]
+
+    %w[--read-prefix --write-prefix].product(suffixes).each do |flag, suffix|
+      _, stderr, status = run_script("m5", "--local", flag, "attention/default/owner/repo#{suffix}")
+
+      refute status.success?, "expected #{flag} suffix #{suffix.inspect} to be rejected"
+      assert_equal "invalid #{flag.delete_prefix('--').tr('-', ' ')}\n", stderr
+      refute_path_exists @npx_args_file
+    end
+  end
+
+  def test_archive_scope_matches_worker_exact_path_and_prefix_length_boundaries
+    active_stem = "claims/o/r/"
+    active512 = "#{active_stem}#{'x' * (512 - active_stem.bytesize - '.json'.bytesize)}.json"
+    active513 = "#{active_stem}#{'x' * (513 - active_stem.bytesize - '.json'.bytesize)}.json"
+    archive_path520 = "archive/#{active512}"
+    archive_path521 = "archive/#{active513}"
+    prefix_stem = "archive/claims/o/"
+    archive_prefix512 = "#{prefix_stem}#{'x' * (512 - prefix_stem.bytesize)}"
+    archive_prefix513 = "#{prefix_stem}#{'x' * (513 - prefix_stem.bytesize)}"
+    assert_equal [520, 521, 512, 513],
+                 [archive_path520, archive_path521, archive_prefix512, archive_prefix513].map(&:bytesize)
+
+    [archive_path520, archive_prefix512].each do |scope|
+      _, stderr, status = run_script("m5", "--local", "--read-prefix", scope)
+      assert status.success?, stderr
+    end
+    [archive_path521, archive_prefix513].each do |scope|
+      _, stderr, status = run_script("m5", "--local", "--read-prefix", scope)
+      refute status.success?
+      assert_includes stderr, "invalid read prefix"
+    end
+  end
+
   def test_remote_mode_uses_remote_flag
     _, stderr, status = run_script("m1", "--all-state")
 

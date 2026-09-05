@@ -330,6 +330,22 @@ class HttpStoreReadTest < HttpStoreTestCase
     end
   end
 
+  def test_list_json_applies_a_hard_maximum_to_worker_pagination
+    body = {
+      "entries" => [{ "path" => "attention/default/o/r/a.json", "data" => {}, "version" => 1 }],
+      "next_cursor" => "attention/default/o/r/a.json"
+    }
+    with_stub([[200, body]]) do |store, stub|
+      error = assert_raises(AgentCoord::OperationalError) do
+        store.list_json("attention/default/o/r", maximum: 1)
+      end
+
+      assert_includes error.message, "exceeds scan maximum 1"
+      assert_equal "/v1/state?prefix=attention%2Fdefault%2Fo%2Fr&limit=1", stub.requests.first[:path]
+      assert_equal 1, stub.requests.length
+    end
+  end
+
   def test_list_json_rejects_malformed_next_cursor
     with_stub([[200, { "entries" => [], "next_cursor" => [] }]]) do |store, _|
       error = assert_raises(AgentCoord::OperationalError) { store.list_json("heartbeats") }
@@ -1640,6 +1656,7 @@ class HttpDoctorTest < HttpEnvTestCase
       [403, { "error" => "forbidden" }],
       [403, { "error" => "forbidden" }],
       [403, { "error" => "forbidden" }],
+      [403, { "error" => "forbidden" }],
       [200, { "machine" => "scoped", "read_prefixes" => ["claims/x/y"], "write_prefixes" => [] }]
     ]
     stub = HttpStoreStub.new(responses)
@@ -1663,6 +1680,7 @@ class HttpDoctorTest < HttpEnvTestCase
       [200, { "entries" => [] }],
       [400, { "error" => "invalid_prefix" }],
       [400, { "error" => "invalid_prefix" }],
+      [400, { "error" => "invalid_prefix" }],
       [404, { "error" => "route_not_found" }]
     ]
     stub = HttpStoreStub.new(responses)
@@ -1677,6 +1695,8 @@ class HttpDoctorTest < HttpEnvTestCase
       assert_includes payload.fetch("degraded"), "event state not supported by backend"
       assert_equal "unsupported", payload.fetch("resource_checks").fetch("archive")
       assert_includes payload.fetch("degraded"), "archive state not supported by backend"
+      assert_equal "unsupported", payload.fetch("resource_checks").fetch("attention")
+      assert_includes payload.fetch("degraded"), "attention state not supported by backend"
     end
   ensure
     stub&.shutdown
@@ -1733,6 +1753,7 @@ class HttpDoctorTest < HttpEnvTestCase
   def test_doctor_deep_tolerates_worker_without_whoami_route
     responses = [
       [200, { "status" => "ok" }],
+      [200, { "entries" => [] }],
       [200, { "entries" => [] }],
       [200, { "entries" => [] }],
       [200, { "entries" => [] }],
@@ -1926,9 +1947,33 @@ class HttpDoctorTest < HttpEnvTestCase
     stub&.shutdown
   end
 
+  def test_doctor_deep_custom_attention_prefix_degrades_for_older_worker
+    stub = HttpStoreStub.new([
+                               [200, { "status" => "ok" }],
+                               [400, { "error" => "invalid_prefix" }],
+                               [404, { "error" => "route_not_found" }]
+                             ])
+    with_env("AGENT_COORD_API_URL" => stub.base_url, "AGENT_COORD_API_TOKEN" => "tok") do
+      stdout = StringIO.new
+      code = AgentCoord::Runner.new(
+        ["doctor", "--deep", "--doctor-prefix", "attention/default/shakacode/repo", "--json"],
+        stdout: stdout,
+        stderr: StringIO.new
+      ).run
+      payload = JSON.parse(stdout.string)
+
+      assert_equal 0, code
+      assert_equal "unsupported", payload.fetch("resource_checks").fetch("attention/default/shakacode/repo")
+      assert_includes payload.fetch("degraded"), "attention state not supported by backend"
+    end
+  ensure
+    stub&.shutdown
+  end
+
   def test_doctor_deep_text_labels_all_state_scopes
     responses = [
       [200, { "status" => "ok" }],
+      [200, { "entries" => [] }],
       [200, { "entries" => [] }],
       [200, { "entries" => [] }],
       [200, { "entries" => [] }],
@@ -1976,16 +2021,20 @@ class HttpDoctorTest < HttpEnvTestCase
       "heartbeats not readable by scoped token",
       "batches not readable by scoped token",
       "events not readable by scoped token",
+      "attention not readable by scoped token",
       "archive not readable by scoped token"
     ]
     expected_notes.each { |note| assert_includes payload.fetch("degraded"), note }
     assert_equal expected_notes.first, payload.fetch("section_notes").fetch("claims")
     assert_equal({
                    "claims" => "filtered", "heartbeats" => "forbidden", "batches" => "forbidden",
-                   "events" => "forbidden", "archive" => "forbidden"
+                   "events" => "forbidden", "attention" => "forbidden", "archive" => "forbidden"
                  }, payload.fetch("resource_checks"))
     assert_equal "scoped", payload.dig("identity", "machine")
-    prefixes = %w[claims heartbeats batches events archive].map { |prefix| "/v1/state?prefix=#{prefix}" }
+    prefixes = %w[claims heartbeats batches events attention archive].map do |prefix|
+      suffix = prefix == "attention" ? "&limit=1000" : ""
+      "/v1/state?prefix=#{prefix}#{suffix}"
+    end
     assert_equal(["/v1/health", *prefixes, "/v1/whoami"], stub.requests.map { |request| request[:path] })
   end
 end
