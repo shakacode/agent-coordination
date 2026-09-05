@@ -723,8 +723,17 @@ class HttpBackendSelectionTest < HttpEnvTestCase # rubocop:disable Metrics/Class
   def test_a_credential_free_url_is_reported_unchanged
     assert_equal "https://coord.example/base",
                  AgentCoord.redact_url_userinfo("https://coord.example/base")
+    assert_equal "https://coord.example/base/user@example.org",
+                 AgentCoord.redact_url_userinfo("https://coord.example/base/user@example.org")
     assert_equal "https://***@coord.example",
                  AgentCoord.redact_url_userinfo("https://svc:pw@coord.example")
+    assert_equal "https://***@host/path@p?x=a@b#c@d",
+                 AgentCoord.redact_url_userinfo("https://u:s@host/path@p?x=a@b#c@d")
+    assert_equal "//host/path@p", AgentCoord.redact_url_userinfo("//host/path@p")
+    assert_equal "//***@host/path@p", AgentCoord.redact_url_userinfo("//u:s@host/path@p")
+    assert_equal "https://***@host", AgentCoord.redact_url_userinfo("https://u@host")
+    assert_equal "https://***@host", AgentCoord.redact_url_userinfo("https://:s@host")
+    assert_equal "https://***@[::1]", AgentCoord.redact_url_userinfo("https://u:p%40ss@[::1]")
     assert_equal "***@127.0.0.1:9", AgentCoord.redact_url_userinfo("u:p@127.0.0.1:9")
     assert_equal 'bad URI: "https://***@bad host"',
                  AgentCoord.redact_userinfo_in_text('bad URI: "https://svc:pw@bad host"')
@@ -732,6 +741,26 @@ class HttpBackendSelectionTest < HttpEnvTestCase # rubocop:disable Metrics/Class
                  AgentCoord.redact_userinfo_in_text('bad URI: "https://secret-token@bad host"')
     assert_equal "contact operator@example.com",
                  AgentCoord.redact_userinfo_in_text("contact operator@example.com")
+  end
+
+  def test_url_redactor_transcodes_non_ascii_compatible_url_before_redacting
+    secret = "utf16-url-secret"
+    encoded_url = "https://fleet-user:#{secret}@coord.example/base".encode(Encoding::UTF_16LE)
+
+    refute_predicate encoded_url.encoding, :ascii_compatible?
+    redacted = AgentCoord.redact_url_userinfo(encoded_url)
+
+    assert_equal "https://***@coord.example/base", redacted
+    assert_equal Encoding::UTF_8, redacted.encoding
+    refute_includes redacted, "fleet-user"
+    refute_includes redacted, secret
+
+    # Keep the established valid-input boundary: malformed ASCII URLs still
+    # use the broad authority redaction, and an @ in a valid path is unchanged.
+    assert_equal "https://***@example.invalid",
+                 AgentCoord.redact_url_userinfo("https://operator:secret with-space@example.invalid")
+    assert_equal "https://coord.example/base/user@example.org",
+                 AgentCoord.redact_url_userinfo("https://coord.example/base/user@example.org")
   end
 
   def test_whitespace_only_process_token_falls_through_to_the_saved_token
