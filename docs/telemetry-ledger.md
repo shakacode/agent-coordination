@@ -260,8 +260,10 @@ the snapshot's long-context input/output multipliers. Unrecognized models,
 pricing in the standard profile is the five-minute write rate; another TTL
 requires a separately versioned explicit profile.
 
-SQLite exposes `outcome_scorecard`, `cost_scorecard`, and
-`review_economics_scorecard`. Emit one aggregate JSON document with:
+SQLite exposes `outcome_scorecard`, `cost_scorecard`,
+`review_economics_scorecard`, `operational_event_scorecard`,
+`lane_duration_scorecard`, and `custody_rework_scorecard`. Emit one aggregate
+JSON document with:
 
 ```bash
 agent-coord-harvest scorecard \
@@ -273,6 +275,33 @@ Review economics counts only structured finding metadata. `should_fix` is the
 actionable denominator. If any attributed review cost is unknown, or the
 actionable denominator is zero, cost per actionable finding renders as
 `UNKNOWN`.
+
+The `operational_load` object counts the typed signals retained in `events`:
+
+- `human_interventions` includes a total and the fixed `takeover`, `supersede`,
+  `manual-fix`, and `drain` breakdown.
+- `help_requests` includes a total and the fixed `blocked-user-input`,
+  `question`, and `permission` breakdown. `escalations` counts
+  `escalation_requested` events.
+- Each count also has a rate per 10 exact, same-repository merged PRs. Rates are
+  rounded to three decimal places. A batch with no such merged PR has an
+  `UNKNOWN` rate, not zero.
+- `lane_durations.by_lane_seconds.<lane_id>` measures the interval from the
+  first valid `claim.acquired` event to the first later terminal signal:
+  `claim.released` or a `lane_closed` event whose terminal value is `done`,
+  `abandoned`, or `superseded`. A lane must map to exactly one
+  target, and that target must map to
+  exactly one lane. Missing timestamps, missing endpoints, shared targets, and
+  multi-target lanes render as `UNKNOWN` and increment
+  `lane_durations.telemetry_gap_lanes`.
+- `custody_rework.reclaims` counts a `claim.acquired` event when the immediately
+  preceding custody event for that batch, repository, and target is
+  `claim.released` or a `takeover`. Consecutive acquisitions do not inflate the
+  count.
+
+The event counts include recognized events that name the batch even when their
+target key is incomplete. Duration and custody metrics require an exact target
+join because they compare a sequence for one work item.
 
 The simulation verifier can print the same aggregate rollup without reading
 source records:
