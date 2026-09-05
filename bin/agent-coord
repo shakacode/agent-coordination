@@ -376,13 +376,12 @@ module AgentCoord
   end
 
   StoredJson = Struct.new(:path, :data, :sha, keyword_init: true)
-  # Per-lane attribution context for batch-audit. `targets` is the lane's full
-  # declared target list; `unique_targets` is the subset that maps to exactly one
-  # lane in the batch. Grouping these keeps the event matcher within the argument
-  # limit while carrying both the unique-target fast path and the full target list
-  # the owner fallback needs for its in-lane membership check.
+  # Per-lane attribution context shared by batch-audit and claimant-history
+  # validation. `match_targets` carries the caller's comparison keys: reporting
+  # may normalize them, while authority checks deliberately keep them exact.
   BatchAuditLane = Struct.new(
-    :batch_id, :name, :targets, :unique_targets, :owner, :owner_unique, keyword_init: true
+    :batch_id, :name, :match_targets, :unique_targets, :owner, :owner_unique, :normalize_targets,
+    keyword_init: true
   )
   DemoClock = Struct.new(:time) do
     def now
@@ -4361,7 +4360,7 @@ module AgentCoord
       requested_lane = terminal_payload_value(payload, "lane")
       target = terminal_payload_value(payload, "target").to_s
       matches = Array(batch["lanes"]).select do |lane|
-        requested_lane ? lane_name(lane) == requested_lane : terminal_lane_targets(lane).include?(target)
+        requested_lane ? lane_name(lane) == requested_lane : terminal_lane_target?(lane, target)
       end
       raise Error, "terminal closeout does not match exactly one lane in batch #{batch_id}" unless matches.one?
 
@@ -4371,7 +4370,10 @@ module AgentCoord
     def validate_terminal_lane_identity!(store, batch, lane, payload)
       target = terminal_payload_value(payload, "target").to_s
       unless terminal_lane_targets(lane).include?(target)
-        raise Error, "terminal closeout target does not match lane #{lane_name(lane)}"
+        spellings = terminal_lane_targets(lane).join(", ")
+        raise Error,
+              "terminal closeout target does not match exact registered spelling for lane #{lane_name(lane)}; " \
+              "normalized identity selected the lane, but authority requires exact target spelling #{spellings}"
       end
 
       agent_id = terminal_payload_value(payload, "agent_id")
@@ -4415,7 +4417,8 @@ module AgentCoord
         lane,
         batch_id,
         batch_audit_owner_counts(lanes),
-        batch_audit_target_counts(lanes)
+        batch_audit_target_counts(lanes, normalize_targets: false),
+        normalize_targets: false
       )
       events = records.map(&:data).select do |event|
         batch_audit_event_for_repo?(event, batch["repo"]) && batch_audit_event_for_lane?(event, context)
@@ -4432,21 +4435,37 @@ module AgentCoord
       lineage.fetch(:authorized).include?(terminal_payload_value(payload, "agent_id"))
     end
 
-    def batch_audit_lane_context(lane, batch_id, owner_counts, target_counts)
+    def batch_audit_lane_context(lane, batch_id, owner_counts, target_counts, normalize_targets: true)
       targets = batch_audit_lane_targets(lane)
+      match_targets = targets.map do |target|
+        normalize_targets ? normalized_target_key(target) : target
+      end.uniq
       owner = lane_owner(lane)
       BatchAuditLane.new(
         batch_id: batch_id.to_s,
         name: lane_name(lane),
-        targets: targets,
-        unique_targets: targets.select { |target| target_counts.fetch(target, 0) <= 1 },
+        match_targets: match_targets,
+        unique_targets: match_targets.select { |target| target_counts.fetch(target, 0) <= 1 },
         owner: owner,
-        owner_unique: owner != "UNKNOWN" && owner_counts.fetch(owner, 0) <= 1
+        owner_unique: owner != "UNKNOWN" && owner_counts.fetch(owner, 0) <= 1,
+        normalize_targets: normalize_targets
       )
     end
 
     def terminal_lane_targets(lane)
       Array(lane["targets"] || lane["target"]).map(&:to_s)
+    end
+
+    # Reduce only decorative work-item prefixes for selection and read-only
+    # attribution. Claim keys remain raw, and callers that can grant authority
+    # use exact target spellings instead of this identity.
+    def normalized_target_key(value)
+      AgentCoord.work_item_segments(value.to_s.split(":", -1))
+    end
+
+    def terminal_lane_target?(lane, target)
+      identity = normalized_target_key(target)
+      terminal_lane_targets(lane).any? { |lane_target| normalized_target_key(lane_target) == identity }
     end
 
     def terminal_payload_value(payload, field)
@@ -5859,11 +5878,14 @@ module AgentCoord
     # Count how many lanes each target appears on. register-batch enforces unique
     # lane names but not unique targets, so a shared target is ambiguous and must
     # not attribute an event to more than one lane.
-    def batch_audit_target_counts(lanes)
+    def batch_audit_target_counts(lanes, normalize_targets: true)
       lanes.each_with_object(Hash.new(0)) do |lane, counts|
         next unless lane.is_a?(Hash)
 
-        batch_audit_lane_targets(lane).uniq.each { |target| counts[target] += 1 }
+        targets = batch_audit_lane_targets(lane).map do |target|
+          normalize_targets ? normalized_target_key(target) : target
+        end
+        targets.uniq.each { |target| counts[target] += 1 }
       end
     end
 
@@ -5966,9 +5988,13 @@ module AgentCoord
       return false unless batch_audit_valid_ordinary_payload?(event, "claim.acquired")
       return true if event["agent_id"] == lane.owner
       return false if lane.owner == "UNKNOWN"
-      return false unless lane.targets.include?(event["target"])
+      return false unless lane.match_targets.include?(normalized_target_for_lane_context(event["target"], lane))
 
-      event.key?("lane") ? event["lane"] == lane.name : lane.unique_targets.include?(event["target"])
+      if event.key?("lane")
+        event["lane"] == lane.name
+      else
+        lane.unique_targets.include?(normalized_target_for_lane_context(event["target"], lane))
+      end
     end
 
     def batch_audit_valid_ordinary_lifecycle_event?(event, lane, type, authorized)
@@ -5991,7 +6017,10 @@ module AgentCoord
       end
       return false unless event["batch_id"] == lane.batch_id
       return false if event.key?("lane") && event["lane"] != lane.name
-      return false if event.key?("target") && !lane.targets.include?(event["target"])
+      if event.key?("target") &&
+         !lane.match_targets.include?(normalized_target_for_lane_context(event["target"], lane))
+        return false
+      end
 
       gc_valid_datetime?(event["at"])
     end
@@ -6061,7 +6090,7 @@ module AgentCoord
     def batch_audit_valid_terminal_attribution?(event, lane, lineage)
       return false if event.key?("batch_id") && event["batch_id"] != lane.batch_id
       return false if event.key?("lane") && event["lane"] != lane.name
-      return false unless lane.targets.include?(event["target"])
+      return false unless lane.match_targets.include?(normalized_target_for_lane_context(event["target"], lane))
 
       closer = event.dig("closed_by", "agent_id")
       return false unless lineage.fetch(:event_authorized).fetch(event, false)
@@ -6104,7 +6133,7 @@ module AgentCoord
     def batch_audit_event_for_lane?(event, lane)
       return false unless event.is_a?(Hash)
       return true if lane.name != "UNKNOWN" && !lane.name.to_s.empty? && event["lane"].to_s == lane.name.to_s
-      return true if lane.unique_targets.include?(event["target"].to_s)
+      return true if lane.unique_targets.include?(normalized_target_for_lane_context(event["target"], lane))
 
       batch_audit_owner_attributes?(event, lane)
     end
@@ -6115,7 +6144,15 @@ module AgentCoord
       return false unless lane.owner_unique && event["agent_id"].to_s == lane.owner.to_s
 
       target = event["target"].to_s
-      target.empty? || lane.targets.include?(target)
+      target.empty? || lane.match_targets.include?(normalized_target_for_lane_context(target, lane))
+    end
+
+    # A normalized reporting context has comparison keys that can differ from
+    # its raw targets; an authority context has the same values in both arrays.
+    # This keeps the shared lineage validator exact whenever it can authorize a
+    # claimant, without duplicating the fail-closed history rules.
+    def normalized_target_for_lane_context(target, lane)
+      lane.normalize_targets ? normalized_target_key(target) : target.to_s
     end
 
     def emit_batch_audit_report(report, options)
