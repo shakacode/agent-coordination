@@ -6832,7 +6832,8 @@ module AgentCoord
              end
       return note unless qualified
 
-      target = claim.data.fetch("target", AgentCoord.target_from_path(claim.path))
+      target = claim.data["target"]
+      target = AgentCoord.target_from_path(claim.path) if target.to_s.empty?
       holder.empty? ? "#{note} for #{target}" : "#{note} for #{target} (#{holder})"
     end
 
