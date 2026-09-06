@@ -9,6 +9,12 @@ when releases begin.
 
 ### Added
 
+- Durable workspace-scoped attention records with structured source task
+  identity and capability truth. New bounded CLI reads and generation-fenced
+  upsert/resolve commands have LocalStore/HTTP parity; resolve preserves audit
+  state, and the Worker authorizes scoped list/read/write without exposing an
+  attention DELETE path (issue #292).
+
 - The telemetry ledger now retains `event_type` for every event the CLI emits,
   rather than only `lane_closed` (issue #112). `Harvester::EVENT_TYPES` had been
   fitted to the archived 2026-07-18 baseline instead of to current `bin/agent-coord`

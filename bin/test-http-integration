@@ -115,9 +115,12 @@ ARCHIVE_TOKEN=$(ruby -rsecurerandom -e 'print SecureRandom.hex(24)')
 ARCHIVE_HASH=$(ruby -rdigest -e 'print Digest::SHA256.hexdigest(ARGV.fetch(0))' "$ARCHIVE_TOKEN")
 MIRRORED_TOKEN=$(ruby -rsecurerandom -e 'print SecureRandom.hex(24)')
 MIRRORED_HASH=$(ruby -rdigest -e 'print Digest::SHA256.hexdigest(ARGV.fetch(0))' "$MIRRORED_TOKEN")
+ATTENTION_TOKEN=$(ruby -rsecurerandom -e 'print SecureRandom.hex(24)')
+ATTENTION_HASH=$(ruby -rdigest -e 'print Digest::SHA256.hexdigest(ARGV.fetch(0))' "$ATTENTION_TOKEN")
 SCOPED_CLAIM_PREFIX="claims/shakacode/api.json"
 SCOPED_SECONDARY_CLAIM_PREFIX="claims/shakacode/scoped-secondary"
 MIRRORED_CLAIM_PREFIX="claims/shakacode/mirrored-delete"
+ATTENTION_PREFIX="attention/default/shakacode"
 
 health_ready() {
   ruby -rnet/http -ruri -e '
@@ -152,6 +155,9 @@ fail_wrangler_exit() {
 (cd worker && npx wrangler d1 execute agent-coord --local --command \
   "INSERT OR REPLACE INTO machines (machine, token_hash, read_prefixes, write_prefixes, created_at) VALUES ('mirrored', '${MIRRORED_HASH}', '[\"${MIRRORED_CLAIM_PREFIX}\",\"archive/${MIRRORED_CLAIM_PREFIX}\"]', '[\"${MIRRORED_CLAIM_PREFIX}\",\"archive/${MIRRORED_CLAIM_PREFIX}\"]', '2026-07-04T00:00:00Z')" \
   --persist-to "$WRANGLER_STATE_DIR" >/dev/null)
+(cd worker && npx wrangler d1 execute agent-coord --local --command \
+  "INSERT OR REPLACE INTO machines (machine, token_hash, read_prefixes, write_prefixes, created_at) VALUES ('attention-scoped', '${ATTENTION_HASH}', '[\"${ATTENTION_PREFIX}\"]', '[\"${ATTENTION_PREFIX}\"]', '2026-07-04T00:00:00Z')" \
+  --persist-to "$WRANGLER_STATE_DIR" >/dev/null)
 (cd worker && npx wrangler dev --local --persist-to "$WRANGLER_STATE_DIR" --port "$WRANGLER_PORT" >"$WRANGLER_OUTPUT_LOG" 2>&1) &
 WRANGLER_PID=$!
 set +m 2>/dev/null || true
@@ -171,6 +177,7 @@ AGENT_COORD_API_URL="http://127.0.0.1:$HTTP_PORT" \
   SCOPED_AGENT_COORD_API_TOKEN="$SCOPED_TOKEN" \
   ARCHIVE_AGENT_COORD_API_TOKEN="$ARCHIVE_TOKEN" \
   MIRRORED_AGENT_COORD_API_TOKEN="$MIRRORED_TOKEN" \
+  ATTENTION_AGENT_COORD_API_TOKEN="$ATTENTION_TOKEN" \
   MIRRORED_CLAIM_PREFIX="$MIRRORED_CLAIM_PREFIX" \
   SCOPED_CLAIM_PREFIX="$SCOPED_CLAIM_PREFIX" \
   SCOPED_SECONDARY_CLAIM_PREFIX="$SCOPED_SECONDARY_CLAIM_PREFIX" \

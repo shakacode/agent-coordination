@@ -1,0 +1,28 @@
+{
+  "schema_version": 1,
+  "workspace": "default",
+  "id": "agent-coordination-pr284-github-api-coverage",
+  "repository": "shakacode/agent-coordination",
+  "target": "https://github.com/shakacode/agent-coordination/pull/284",
+  "status": "resolved",
+  "kind": "security",
+  "question": "May this exact head proceed despite unmappable repair authors?",
+  "choices": ["Acknowledge the exact head and risk", "Rebuild with attributable commits"],
+  "priority_class": "current-head-merge",
+  "priority_reason": "The exact head is otherwise merge-ready",
+  "safe_resume": "Refresh the exact head and continue the security gate",
+  "source": {
+    "provider": "codex",
+    "host_id": "m1",
+    "task_id": "01a06677-7565-7530-b322-d1429fc9415b",
+    "last_seen_at": "2026-09-03T09:30:00Z",
+    "capabilities": {
+      "native_open": "unknown",
+      "prompt_forwarding": "unavailable"
+    }
+  },
+  "source_generation": 6,
+  "created_at": "2026-09-03T09:00:00Z",
+  "refreshed_at": "2026-09-03T09:30:00Z",
+  "resolved_at": "2026-09-03T09:30:00Z"
+}

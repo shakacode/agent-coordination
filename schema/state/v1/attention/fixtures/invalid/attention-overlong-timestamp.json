@@ -1,0 +1,27 @@
+{
+  "schema_version": 1,
+  "workspace": "default",
+  "id": "overlong-timestamp",
+  "repository": "shakacode/agent-coordination",
+  "target": "https://github.com/shakacode/agent-coordination/issues/292",
+  "status": "open",
+  "kind": "architecture",
+  "question": "Should this timestamp be accepted?",
+  "choices": ["No"],
+  "priority_class": "current-head-merge",
+  "priority_reason": "Timestamp inputs must remain bounded",
+  "safe_resume": "Use a bounded RFC 3339 timestamp",
+  "source": {
+    "provider": "codex",
+    "host_id": "m1",
+    "task_id": "task-1",
+    "last_seen_at": "2026-09-03T09:20:00Z",
+    "capabilities": {
+      "native_open": "available",
+      "prompt_forwarding": "unknown"
+    }
+  },
+  "source_generation": 1,
+  "created_at": "2026-09-03T09:00:00.11111111111111111111111111111111111111111111111111Z",
+  "refreshed_at": "2026-09-03T09:20:00Z"
+}
