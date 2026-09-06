@@ -9458,6 +9458,29 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     assert_equal ["worker-b"], holders
   end
 
+  def test_status_target_scope_names_absent_and_blank_target_claims_from_their_paths
+    now = Time.now.utc
+    write_claim("4150", agent_id: "", updated_at: now - 60, expires_at: now + 3600)
+    write_claim("pr:4150", agent_id: "", updated_at: now - 30, expires_at: now + 3600)
+
+    bare_path = File.join(@state_root, "claims", "shakacode", "react_on_rails", "4150.json")
+    bare_claim = JSON.parse(File.read(bare_path))
+    bare_claim.delete("target")
+    File.write(bare_path, JSON.pretty_generate(bare_claim))
+
+    prefixed_path = File.join(@state_root, "claims", "shakacode", "react_on_rails", "pr:4150.json")
+    prefixed_claim = JSON.parse(File.read(prefixed_path))
+    prefixed_claim["target"] = ""
+    File.write(prefixed_path, JSON.pretty_generate(prefixed_claim))
+
+    status = run_agent_coord("status", "--repo", "shakacode/react_on_rails", "--target", "4150", "--json")
+
+    assert_equal 0, status.status.exitstatus, status.stderr
+    payload = JSON.parse(status.stdout)
+    assert_equal "claim holder not set for 4150; claim holder not set for pr:4150",
+                 payload.fetch("section_notes").fetch("heartbeats")
+  end
+
   def test_status_batch_scope_reports_missing_batch
     status = run_agent_coord("status", "--batch-id", "missing-batch", "--json")
 
