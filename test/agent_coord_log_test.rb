@@ -3591,7 +3591,7 @@ class AgentCoordLogArchiveRecencyTest < AgentCoordLogTestCase
     assert_includes included.stderr, "ambiguous archive recency"
   end
 
-  def test_visible_archive_keeps_ambiguity_with_a_hidden_synthetic_twin
+  def test_hidden_synthetic_twin_does_not_make_visible_archive_ambiguous
     { "a.json" => false, "z.json" => true }.each do |name, synthetic|
       write_recency_archive(name, "record_family" => "archived_record", "synthetic" => synthetic,
                                   "archived_at" => "2026-08-05T09:00:00Z",
@@ -3602,11 +3602,11 @@ class AgentCoordLogArchiveRecencyTest < AgentCoordLogTestCase
     result = run_log("shakacode/example#104", "--json")
 
     assert_equal 0, result.status.exitstatus, result.stderr
-    assert_equal "incomplete", JSON.parse(result.stdout).fetch("trail")
-    assert_includes result.stderr, "ambiguous archive recency"
+    assert_equal "complete", JSON.parse(result.stdout).fetch("trail")
+    refute_includes result.stderr, "ambiguous archive recency"
   end
 
-  def test_visible_archive_twin_keeps_hidden_unknown_recency_incomplete
+  def test_hidden_synthetic_twin_does_not_make_visible_archive_recency_incomplete
     write_recency_archive("dated.json", "record_family" => "archived_record",
                                         "archived_at" => "2026-08-05T09:00:00Z",
                                         "source_path" => "events/b9/dated.json", "data" => archive_event("e1"))
@@ -3617,8 +3617,25 @@ class AgentCoordLogArchiveRecencyTest < AgentCoordLogTestCase
     result = run_log("shakacode/example#104", "--json")
 
     assert_equal 0, result.status.exitstatus, result.stderr
-    assert_equal "incomplete", JSON.parse(result.stdout).fetch("trail")
-    assert_includes result.stderr, "unreadable archive recency"
+    assert_equal "complete", JSON.parse(result.stdout).fetch("trail")
+    refute_includes result.stderr, "unreadable archive recency"
+  end
+
+  def test_newer_synthetic_archive_does_not_hide_older_real_event_by_default
+    { "real.json" => ["2026-08-05T09:00:00Z", false, "real"],
+      "synthetic.json" => ["2026-08-06T09:00:00Z", true, "synthetic"] }.each do |name, values|
+      archived_at, synthetic, machine = values
+      write_recency_archive(name, "record_family" => "archived_record", "synthetic" => synthetic,
+                                  "archived_at" => archived_at, "source_path" => "events/b9/#{name}",
+                                  "data" => archive_event("e1").merge("synthetic" => synthetic,
+                                                                      "machine_id" => machine))
+    end
+
+    result = run_log("shakacode/example#104", "--json")
+    included = run_log("shakacode/example#104", "--include-synthetic", "--json")
+
+    assert_equal(["real"], JSON.parse(result.stdout).fetch("events").map { |event| event.fetch("machine") })
+    assert_equal(["synthetic"], JSON.parse(included.stdout).fetch("events").map { |event| event.fetch("machine") })
   end
 
   private

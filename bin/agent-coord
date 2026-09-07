@@ -5065,6 +5065,7 @@ module AgentCoord
             end
             next log_archive_twin(twin)
           end
+          next if data["synthetic"] && !include_synthetic
 
           row = log_row(data).merge("archived" => true, "archive_held" => true)
           seen[identity] = row
@@ -5097,7 +5098,7 @@ module AgentCoord
       twin["archived"] && prior && prior.fetch("path").to_s != current.fetch("path").to_s &&
         current.fetch("recency") != -Float::INFINITY &&
         prior.fetch("recency") == current.fetch("recency") && prior.fetch("data") != current.fetch("data") &&
-        (prior.fetch("visible") || current.fetch("visible")) &&
+        prior.fetch("visible") && current.fetch("visible") &&
         log_archive_ambiguity_scoped?(twin, current.fetch("data"), wanted)
     end
 
@@ -5216,7 +5217,8 @@ module AgentCoord
       end
 
       if (recency_defect = log_archive_recency_defect(data))
-        if log_archive_recency_relevant?(data, legible, wanted, seen, include_synthetic)
+        if log_archive_recency_visible?(data, legible, include_synthetic) &&
+           log_archive_recency_scoped?(legible, wanted, seen)
           log_archive_incomplete(entry, recency_defect)
         end
         return [legible, false]
@@ -5287,7 +5289,8 @@ module AgentCoord
 
       if (recency_defect = log_archive_recency_defect(data))
         records = [data["data"]]
-        if log_archive_recency_relevant?(data, records, wanted, seen, include_synthetic)
+        if log_archive_recency_visible?(data, records, include_synthetic) &&
+           log_archive_recency_scoped?(records, wanted, seen)
           log_archive_incomplete(entry, recency_defect)
         end
         return [records, false]
@@ -5315,16 +5318,6 @@ module AgentCoord
         twin = seen[log_event_dedup_key(record)]
         log_archive_record_scoped?(record, wanted) ||
           (twin && log_identity_match?(twin.fetch("identity"), wanted))
-      end
-    end
-
-    def log_archive_recency_relevant?(envelope, records, wanted, seen, include_synthetic)
-      return false unless log_archive_recency_scoped?(records, wanted, seen)
-      return true if log_archive_recency_visible?(envelope, records, include_synthetic)
-
-      records.any? do |record|
-        twin = seen[log_event_dedup_key(record)]
-        twin && !twin.fetch("synthetic")
       end
     end
 
