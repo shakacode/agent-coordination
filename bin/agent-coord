@@ -5033,7 +5033,7 @@ module AgentCoord
         [entry, log_archive_recency(entry)]
       end
       entries = entries.sort_by do |entry, recency|
-        [recency, entry.path.to_s]
+        [recency, log_archive_path_key(entry.path)]
       end.reverse
       archive_recencies = {}
       entries.flat_map do |entry, recency|
@@ -5095,11 +5095,19 @@ module AgentCoord
     end
 
     def log_archive_ambiguous_twin?(twin, prior, current, wanted)
-      twin["archived"] && prior && prior.fetch("path").to_s != current.fetch("path").to_s &&
+      twin["archived"] && prior &&
+        log_archive_path_key(prior.fetch("path")) != log_archive_path_key(current.fetch("path")) &&
         current.fetch("recency") != -Float::INFINITY &&
         prior.fetch("recency") == current.fetch("recency") && prior.fetch("data") != current.fetch("data") &&
         prior.fetch("visible") && current.fetch("visible") &&
         log_archive_ambiguity_scoped?(twin, current.fetch("data"), wanted)
+    end
+
+    # HTTP listing paths are untrusted JSON values. Keep their JSON type in the
+    # deterministic tie key so malformed numeric 1 and string "1" cannot be
+    # mistaken for one envelope and silently suppress divergent event payloads.
+    def log_archive_path_key(path)
+      [path.class.name, path.to_s]
     end
 
     # Recency diagnostics follow the same synthetic visibility contract as the

@@ -3556,6 +3556,33 @@ class AgentCoordLogArchiveRecencyTest < AgentCoordLogTestCase
     assert_equal 1, result.stderr.lines.grep(/ambiguous archive recency/).length
   end
 
+  def test_equal_recency_keeps_typed_archive_paths_distinct
+    entries = [1, "1"].map.with_index do |path, index|
+      AgentCoord::StoredJson.new(
+        path: path,
+        data: {
+          "schema_version" => 1, "record_family" => "archived_record",
+          "archived_at" => "2026-08-05T09:00:00Z", "delete_after" => "2026-10-04T00:00:00Z",
+          "source_path" => "events/b9/e1.json",
+          "data" => archive_event("e1").merge("machine_id" => "machine-#{index}")
+        }
+      )
+    end
+    store = Object.new
+    store.define_singleton_method(:list_json) do |prefix, &_handler|
+      prefix == "archive/events" ? entries : []
+    end
+    stderr = StringIO.new
+    runner = AgentCoord::Runner.new([], stderr: stderr)
+
+    rows = runner.send(:log_event_rows, store)
+
+    assert_equal 1, rows.length
+    assert_includes stderr.string, "ambiguous archive recency"
+    assert_equal "archive/events", runner.send(:log_incomplete_prefixes),
+                 "--sync must refuse the ambiguous trail"
+  end
+
   def test_hidden_synthetic_archive_does_not_make_default_trail_recency_incomplete
     write_recency_archive("synthetic.json", "record_family" => "compacted_events", "synthetic" => true,
                                             "source_paths" => ["events/b9/e1.json"],
