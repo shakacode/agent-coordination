@@ -4856,7 +4856,7 @@ module AgentCoord
 
     def log_rows(store, options)
       since = log_since_timestamp(options)
-      rows = log_event_rows(store)
+      rows = log_event_rows(store, log_wanted_identity(options))
       rows = rows.reject { |row| row.fetch("synthetic") } unless options[:include_synthetic]
       # The trail the query is about, before the options that narrow the view of
       # it. This is the rule log_limited states for the claim, applied to the
@@ -4991,7 +4991,7 @@ module AgentCoord
     # archived payloads are the same event records log_row already consumes, so
     # they are folded back in by default rather than behind a flag: a continuous
     # custody trail is what this command promises, and the silence was the defect.
-    def log_event_rows(store)
+    def log_event_rows(store, wanted = nil)
       seen = {}
       rows = log_event_entries(store).filter_map do |entry|
         log_validate_record_encoding!(entry)
@@ -5008,7 +5008,7 @@ module AgentCoord
         seen[log_event_dedup_key(data)] = row
         row
       end
-      rows + log_archived_event_rows(store, seen)
+      rows + log_archived_event_rows(store, seen, wanted)
     end
 
     def log_validate_record_encoding!(entry)
@@ -5028,17 +5028,21 @@ module AgentCoord
     # The live copy wins. Ordering is left to log_rows, which already sorts the
     # merged set by instant, so archived and live events for one work item
     # interleave rather than arriving in two blocks.
-    def log_archived_event_rows(store, seen)
-      entries = log_archived_event_entries(store).sort_by do |entry|
-        [log_archive_recency(entry), entry.path]
+    def log_archived_event_rows(store, seen, wanted)
+      entries = log_archived_event_entries(store).map do |entry|
+        [entry, log_archive_recency(entry)]
+      end
+      entries = entries.sort_by do |entry, recency|
+        [recency, entry.path.to_s]
       end.reverse
-      entries.flat_map do |entry|
+      archive_recencies = {}
+      entries.flat_map do |entry, recency|
         log_validate_record_encoding!(entry)
         # Records first. log_archived_event_data is what rejects a record this
         # version cannot read, and the ledger entry reaches into the same
         # envelope, so building it ahead of that check let a record that is not
         # an object end the command with a raw TypeError.
-        read = log_archived_event_data(entry)
+        read = log_archived_event_data(entry, wanted, seen)
         # nil is an entry nothing can be trusted about, not even its clock.
         # Anything else is registered even when it yielded no legible record:
         # the envelope exists and is expiring, and dropping it from the ledger
@@ -5052,25 +5056,50 @@ module AgentCoord
         records.filter_map do |data|
           identity = log_event_dedup_key(data)
           twin = seen[identity]
-          next log_archive_twin(twin) if twin
+          if twin
+            prior = archive_recencies[identity]
+            if twin["archived"] && prior && prior.fetch("path").to_s != entry.path.to_s &&
+               recency != -Float::INFINITY &&
+               prior.fetch("recency") == recency && prior.fetch("data") != data &&
+               log_archive_ambiguity_scoped?(twin, data, wanted)
+              log_archive_ambiguity(prior.fetch("path"), entry.path)
+            end
+            next log_archive_twin(twin)
+          end
 
           row = log_row(data).merge("archived" => true, "archive_held" => true)
           seen[identity] = row
+          archive_recencies[identity] = { "recency" => recency, "path" => entry.path, "data" => data }
           row
         end
       end
     end
 
     # Archive generations can repeat one immutable event identity. Prefer the
-    # newest parsed archive instant, with path as the deterministic tiebreaker.
-    # An unreadable clock cannot establish recency, so retain its rows while
-    # making the trail incomplete (and therefore unsafe to sync).
+    # newest parsed archive instant. log_at_key provides the common fail-closed
+    # ordering sentinel; the envelope validation ladder reports an unreadable
+    # recency without duplicating its one operator-facing warning.
     def log_archive_recency(entry)
       data = entry.data
-      Time.iso8601(data.is_a?(Hash) ? data["archived_at"].to_s : "").to_r
-    rescue ArgumentError, TypeError
-      log_archive_incomplete(entry, "unreadable archive recency")
-      -Float::INFINITY
+      value = data.is_a?(Hash) ? data["archived_at"] : nil
+      gc_valid_datetime?(value) ? log_at_key(value) : -Float::INFINITY
+    end
+
+    def log_archive_ambiguity(first_path, second_path)
+      paths = [first_path, second_path].map { |path| log_scrub(path) }.sort
+      message = "warning: ambiguous archive recency between #{paths.join(' and ')}; this trail may be incomplete"
+      log_note_incomplete(LOG_ARCHIVED_EVENTS_PREFIX, message)
+    end
+
+    # Collection precedes work-item filtering so deduplication sees the full
+    # store. Do not let an ambiguity elsewhere make a scoped query incomplete;
+    # either side matching is enough because the deterministic winner itself is
+    # what the ambiguity makes uncertain.
+    def log_archive_ambiguity_scoped?(twin, data, wanted)
+      return true unless wanted
+
+      candidate = log_identity(data["repo"].to_s.strip, data["target"].to_s.strip)
+      log_identity_match?(twin.fetch("identity"), wanted) || log_identity_match?(candidate, wanted)
     end
 
     # The live copy wins the row, but the event is in the archive all the same
@@ -5133,11 +5162,11 @@ module AgentCoord
     # already degrades through the listing, but valid JSON holding an array or a
     # scalar reached this far, and the http backend does not shape-check the
     # payload it hands back, so it takes the same reported-not-skipped path.
-    def log_archived_event_data(entry)
+    def log_archived_event_data(entry, wanted, seen)
       data = entry.data
       case data.is_a?(Hash) ? data["record_family"] : nil
-      when "compacted_events" then log_compacted_records(entry, data)
-      when "archived_record" then log_archived_record(entry, data)
+      when "compacted_events" then log_compacted_records(entry, data, wanted, seen)
+      when "archived_record" then log_archived_record(entry, data, wanted, seen)
       else
         log_archive_incomplete(entry, "unknown archived record family")
         nil
@@ -5157,13 +5186,18 @@ module AgentCoord
     # does not print twice. Legible records are still returned in every case --
     # a corrupt envelope header does not make the events inside it wrong, and
     # dropping them would be the silent loss this read exists to remove.
-    def log_compacted_records(entry, data)
+    def log_compacted_records(entry, data, wanted, seen)
       records = data["records"]
       legible = records.is_a?(Array) ? records.grep(Hash) : []
       defect = log_compaction_defect(records, data["source_paths"])
       if defect
         log_archive_incomplete(entry, defect)
         return [legible, true]
+      end
+
+      if (recency_defect = log_archive_recency_defect(data))
+        log_archive_incomplete(entry, recency_defect) if log_archive_recency_scoped?(legible, wanted, seen)
+        return [legible, false]
       end
 
       log_archive_report_expiry(entry, data)
@@ -5222,11 +5256,17 @@ module AgentCoord
     # note counts it, so an absent or unusable one leaves the arithmetic short
     # rather than merely uninformative. Laddered like the compacted case so a
     # doubly corrupt entry still prints one sentence.
-    def log_archived_record(entry, data)
+    def log_archived_record(entry, data, wanted, seen)
       defect = log_archived_record_defect(data)
       if defect
         log_archive_incomplete(entry, defect)
         return [[], true]
+      end
+
+      if (recency_defect = log_archive_recency_defect(data))
+        records = [data["data"]]
+        log_archive_incomplete(entry, recency_defect) if log_archive_recency_scoped?(records, wanted, seen)
+        return [records, false]
       end
 
       log_archive_report_expiry(entry, data)
@@ -5238,6 +5278,20 @@ module AgentCoord
       return "malformed archived source paths" unless log_archive_path?(data["source_path"])
 
       nil
+    end
+
+    def log_archive_recency_defect(data)
+      "unreadable archive recency" unless gc_valid_datetime?(data["archived_at"])
+    end
+
+    def log_archive_recency_scoped?(records, wanted, seen)
+      return true unless wanted
+
+      records.any? do |record|
+        twin = seen[log_event_dedup_key(record)]
+        log_archive_record_scoped?(record, wanted) ||
+          (twin && log_identity_match?(twin.fetch("identity"), wanted))
+      end
     end
 
     # A path is only a path if it is a non-empty string. nil, an empty string, a
@@ -5258,8 +5312,12 @@ module AgentCoord
     # delete_after it prints. An archive record is not a trusted source of
     # escape sequences.
     def log_archive_incomplete(entry, reason)
+      path = entry.path.to_s
+      return if (@log_archive_incomplete_paths ||= {}).key?(path)
+
+      @log_archive_incomplete_paths[path] = true
       log_note_incomplete(LOG_ARCHIVED_EVENTS_PREFIX,
-                          log_scrub("warning: #{reason} at #{entry.path}; this trail may be incomplete"))
+                          log_scrub("warning: #{reason} at #{path}; this trail may be incomplete"))
     end
 
     # Provenance for the note, not for the rendered row. It is keyed by archive
