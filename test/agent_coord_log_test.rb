@@ -35,8 +35,6 @@ class AgentCoordLogTestCase < Minitest::Test
     "CODEX_THREAD_ID" => nil,
     "XDG_CONFIG_HOME" => ISOLATED_CONFIG_HOME
   }.freeze
-  load BIN
-
   def setup
     @state_root = Dir.mktmpdir("agent-coord-log-test")
   end
