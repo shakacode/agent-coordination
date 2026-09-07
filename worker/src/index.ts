@@ -312,6 +312,10 @@ async function listState(
   }
   const scopeFilters = listScopeFilters(auth.readPrefixes, prefix);
   if (scopeFilters === null) return json(403, { error: "forbidden" });
+  const status = searchParams.get("status");
+  if (status !== null && (status !== "open" || !validAttentionPrefix(prefix))) {
+    return json(400, { error: "invalid_status" });
+  }
   const limitParam = searchParams.get("limit");
   let limit: number | null = null;
   if (limitParam !== null) {
@@ -342,6 +346,12 @@ async function listState(
     clauses.push("path > ?");
     binds.push(cursor);
   }
+  if (status !== null) {
+    clauses.push(
+      "(json_type(data, '$.status') IS NULL OR json_type(data, '$.status') != 'text'"
+      + " OR json_extract(data, '$.status') != 'resolved')",
+    );
+  }
   let sql = `SELECT path, data, version, updated_by FROM state WHERE ${clauses.join(" AND ")} ORDER BY path`;
   if (limit !== null) {
     sql += " LIMIT ?";
@@ -362,6 +372,14 @@ async function listState(
     version: r.version,
     ...(r.updated_by === null ? {} : { updated_by: r.updated_by }),
   }));
+  if (status !== null && entries.some((entry) => (
+    entry.data === null
+      || typeof entry.data !== "object"
+      || Array.isArray(entry.data)
+      || (entry.data as { status?: unknown }).status !== status
+  ))) {
+    return json(500, { error: "invalid_attention_status" });
+  }
   return json(200, {
     entries,
     ...(scopeFilters.length > 0 ? { filtered: true } : {}),

@@ -4025,7 +4025,11 @@ module AgentCoord
         AgentCoord.attention_repo_prefix(options.fetch(:workspace), options.fetch(:repo))
       end
       store = build_store(options)
-      entries = store.list_json(prefix, maximum: MAX_ATTENTION_SCAN_LIMIT) do |path, error|
+      entries = store.list_json(
+        prefix,
+        maximum: MAX_ATTENTION_SCAN_LIMIT,
+        status: options[:include_resolved] ? nil : "open"
+      ) do |path, error|
         raise malformed_stored_attention_error(path, error)
       end
       if entries.length > MAX_ATTENTION_SCAN_LIMIT
@@ -8271,11 +8275,11 @@ module AgentCoord
       end
     end
 
-    def list_json(prefix, maximum: nil)
+    def list_json(prefix, maximum: nil, status: nil)
       directory = readable_list_directory(prefix)
       return [] unless directory
 
-      list_json_files(directory, prefix, maximum:).filter_map do |file|
+      entries = list_json_files(directory, prefix, maximum:).filter_map do |file|
         path = file.delete_prefix("#{@root}/")
         begin
           StoredJson.new(path: path, data: JSON.parse(File.read(file, encoding: "UTF-8")), sha: file_sha(file))
@@ -8286,6 +8290,12 @@ module AgentCoord
           nil
         end
       end
+      # The local reader must return every parsed record so the caller validates
+      # malformed state before applying its status projection. Only HttpStore can
+      # safely push this predicate into the authoritative list query.
+      raise Error, "unsupported local list status #{status}" unless [nil, "open"].include?(status)
+
+      entries
     end
 
     def delete_json(path, message:, sha:) # rubocop:disable Lint/UnusedMethodArgument
@@ -8530,7 +8540,7 @@ module AgentCoord
       invalidate_read_cache(path)
     end
 
-    def list_json(prefix, maximum: nil)
+    def list_json(prefix, maximum: nil, status: nil)
       AgentCoord.safe_path!(prefix)
       entries = []
       matched = 0
@@ -8552,6 +8562,10 @@ module AgentCoord
           yield path, e
         end
       end
+      # GitHubStore has no server-side status-query contract. Preserve complete
+      # validation and let the attention command apply the projection locally.
+      raise Error, "unsupported GitHub list status #{status}" unless [nil, "open"].include?(status)
+
       entries
     end
 
@@ -8688,7 +8702,7 @@ module AgentCoord
                      sha: fetch_field(body, "version", "read #{path}").to_s)
     end
 
-    def list_json(prefix, maximum: nil)
+    def list_json(prefix, maximum: nil, status: nil)
       AgentCoord.safe_path!(prefix)
       entries = []
       cursor = nil
@@ -8697,7 +8711,7 @@ module AgentCoord
 
       loop do
         remaining = maximum && (maximum - entries.length)
-        response = request(Net::HTTP::Get, state_list_path(prefix, cursor, remaining))
+        response = request(Net::HTTP::Get, state_list_path(prefix, cursor, remaining, status))
         raise OperationalError, http_error("list #{prefix}", response) unless response.code == "200"
 
         body = parsed_json_object(response, "list #{prefix}")
@@ -8824,9 +8838,10 @@ module AgentCoord
       URI::DEFAULT_PARSER.escape(value.to_s, PERCENT_ENCODE_UNSAFE)
     end
 
-    def state_list_path(prefix, cursor, limit = nil)
+    def state_list_path(prefix, cursor, limit = nil, status = nil)
       query = { "prefix" => prefix }
       query["cursor"] = cursor if cursor
+      query["status"] = status if status
       query["limit"] = limit if limit
       "/v1/state?#{URI.encode_www_form(query)}"
     end

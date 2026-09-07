@@ -34,7 +34,7 @@ class HttpBackendIntegrationTest < Minitest::Test
     assert_equal "attention-scoped", body.fetch("updated_by")
     assert_equal record, body.fetch("data")
 
-    code, body = http_json("GET", "/v1/state?prefix=attention/default/shakacode", token: token)
+    code, body = http_json("GET", "/v1/state?prefix=attention/default/#{REPO}", token: token)
     assert_equal 200, code
     assert_equal([path], body.fetch("entries").map { |entry| entry.fetch("path") })
 
@@ -86,6 +86,43 @@ class HttpBackendIntegrationTest < Minitest::Test
     code, body = http_json("GET", state_path(path), token: token)
     assert_equal 200, code
     assert_equal 1, body.dig("data", "source_generation")
+  end
+
+  def test_attention_open_status_filters_before_limit_and_rejects_unsupported_values
+    token = ENV.fetch("ATTENTION_AGENT_COORD_API_TOKEN")
+    repository = "#{REPO}-status"
+    resolved = attention_record.merge("repository" => repository, "id" => "a-resolved", "status" => "resolved",
+                                      "resolved_at" => "2026-09-03T10:00:00Z")
+    open = attention_record.merge("repository" => repository, "id" => "z-open")
+
+    { resolved.fetch("id") => resolved, open.fetch("id") => open }.each do |id, payload|
+      path = "attention/default/#{repository}/#{id}.json"
+      code, body = http_json(
+        "PUT", state_path(path), token: token, headers: { "If-None-Match" => "*" }, body: { "data" => payload }
+      )
+      assert_equal 201, code, body.inspect
+    end
+
+    query = URI.encode_www_form(prefix: "attention/default/#{repository}", status: "open", limit: 1)
+    code, body = http_json("GET", "/v1/state?#{query}", token: token)
+    assert_equal 200, code, body.inspect
+    ids = body.fetch("entries").map { |entry| File.basename(entry.fetch("path"), ".json") }
+    assert_equal ["z-open"], ids
+
+    invalid_path = "attention/default/#{repository}/00-invalid.json"
+    code, body = http_json(
+      "PUT", state_path(invalid_path), token: token, headers: { "If-None-Match" => "*" },
+                                       body: { "data" => open.merge("id" => "00-invalid", "status" => "unsupported") }
+    )
+    assert_equal 201, code, body.inspect
+    code, body = http_json("GET", "/v1/state?#{query}", token: token)
+    assert_equal 500, code
+    assert_equal "invalid_attention_status", body.fetch("error")
+
+    invalid_query = URI.encode_www_form(prefix: "attention/default/#{repository}", status: "resolved")
+    code, body = http_json("GET", "/v1/state?#{invalid_query}", token: token)
+    assert_equal 400, code
+    assert_equal "invalid_status", body.fetch("error")
   end
 
   def test_worker_enforces_the_attention_storage_key_contract

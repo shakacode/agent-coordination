@@ -283,7 +283,7 @@ class AttentionCliTest < Minitest::Test
     store = Class.new do
       attr_reader :listed_prefix
 
-      def list_json(prefix, maximum: nil)
+      def list_json(prefix, maximum: nil, **)
         @listed_prefix = prefix
         @maximum = maximum
         []
@@ -544,7 +544,7 @@ class AttentionCliTest < Minitest::Test
     store = Class.new do
       attr_reader :maximum
 
-      def list_json(_prefix, maximum: nil)
+      def list_json(_prefix, maximum: nil, **)
         @maximum = maximum
         []
       end
