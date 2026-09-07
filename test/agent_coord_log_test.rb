@@ -3638,6 +3638,29 @@ class AgentCoordLogArchiveRecencyTest < AgentCoordLogTestCase
     assert_equal(["synthetic"], JSON.parse(included.stdout).fetch("events").map { |event| event.fetch("machine") })
   end
 
+  def test_real_record_in_mixed_envelope_does_not_make_synthetic_duplicate_visible
+    write_recency_archive("z-real.json", "record_family" => "archived_record",
+                                         "archived_at" => "2026-08-05T09:00:00Z",
+                                         "source_path" => "events/b9/e1-real.json",
+                                         "data" => archive_event("e1").merge("machine_id" => "real"))
+    write_recency_archive(
+      "a-mixed.json", "record_family" => "compacted_events", "synthetic" => true,
+                      "archived_at" => "2026-08-05T09:00:00Z",
+                      "source_paths" => %w[events/b9/e1-synthetic.json events/b9/e2-real.json],
+                      "records" => [archive_event("e1").merge("synthetic" => true, "machine_id" => "synthetic"),
+                                    archive_event("e2").merge("target" => "999")]
+    )
+
+    result = run_log("shakacode/example#104", "--json")
+    included = run_log("shakacode/example#104", "--include-synthetic", "--json")
+
+    assert_equal "complete", JSON.parse(result.stdout).fetch("trail")
+    assert_equal(["real"], JSON.parse(result.stdout).fetch("events").map { |event| event.fetch("machine") })
+    refute_includes result.stderr, "ambiguous archive recency"
+    assert_equal "incomplete", JSON.parse(included.stdout).fetch("trail")
+    assert_includes included.stderr, "ambiguous archive recency"
+  end
+
   private
 
   def write_recency_archive(name, payload)

@@ -5050,14 +5050,14 @@ module AgentCoord
         next [] unless read
 
         records, malformed = read
-        recency_visible = log_archive_recency_visible?(entry.data, records, include_synthetic)
         log_archive_record_envelope(entry, records, malformed)
         next [] if records.empty?
 
         records.filter_map do |data|
           identity = log_event_dedup_key(data)
           twin = seen[identity]
-          current = { "recency" => recency, "path" => entry.path, "data" => data, "visible" => recency_visible }
+          visible = include_synthetic || !data["synthetic"]
+          current = { "recency" => recency, "path" => entry.path, "data" => data, "visible" => visible }
           if twin
             prior = archive_recencies[identity]
             if log_archive_ambiguous_twin?(twin, prior, current, wanted)
@@ -5065,7 +5065,7 @@ module AgentCoord
             end
             next log_archive_twin(twin)
           end
-          next if data["synthetic"] && !include_synthetic
+          next unless visible
 
           row = log_row(data).merge("archived" => true, "archive_held" => true)
           seen[identity] = row
