@@ -5217,8 +5217,7 @@ module AgentCoord
       end
 
       if (recency_defect = log_archive_recency_defect(data))
-        if log_archive_recency_visible?(data, legible, include_synthetic) &&
-           log_archive_recency_scoped?(legible, wanted, seen)
+        if log_archive_recency_relevant?(data, legible, wanted, seen, include_synthetic)
           log_archive_incomplete(entry, recency_defect)
         end
         return [legible, false]
@@ -5289,8 +5288,7 @@ module AgentCoord
 
       if (recency_defect = log_archive_recency_defect(data))
         records = [data["data"]]
-        if log_archive_recency_visible?(data, records, include_synthetic) &&
-           log_archive_recency_scoped?(records, wanted, seen)
+        if log_archive_recency_relevant?(data, records, wanted, seen, include_synthetic)
           log_archive_incomplete(entry, recency_defect)
         end
         return [records, false]
@@ -5311,13 +5309,16 @@ module AgentCoord
       "unreadable archive recency" unless gc_valid_datetime?(data["archived_at"])
     end
 
-    def log_archive_recency_scoped?(records, wanted, seen)
-      return true unless wanted
+    def log_archive_recency_relevant?(envelope, records, wanted, seen, include_synthetic)
+      return wanted.nil? && log_archive_recency_visible?(envelope, records, include_synthetic) if records.empty?
 
       records.any? do |record|
+        next false if record["synthetic"] && !include_synthetic
+
         twin = seen[log_event_dedup_key(record)]
         log_archive_record_scoped?(record, wanted) ||
-          (twin && log_identity_match?(twin.fetch("identity"), wanted))
+          (twin && (include_synthetic || !twin.fetch("synthetic")) &&
+            log_identity_match?(twin.fetch("identity"), wanted))
       end
     end
 

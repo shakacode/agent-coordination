@@ -3661,6 +3661,23 @@ class AgentCoordLogArchiveRecencyTest < AgentCoordLogTestCase
     assert_includes included.stderr, "ambiguous archive recency"
   end
 
+  def test_mixed_envelope_recency_scope_requires_one_visible_matching_record
+    write_recency_archive(
+      "mixed.json", "record_family" => "compacted_events", "synthetic" => false,
+                    "source_paths" => %w[events/b9/e1-synthetic.json events/b9/e2-real.json],
+                    "records" => [archive_event("e1").merge("synthetic" => true),
+                                  archive_event("e2").merge("target" => "999")]
+    )
+
+    result = run_log("shakacode/example#104", "--json")
+    included = run_log("shakacode/example#104", "--include-synthetic", "--json")
+
+    assert_equal "complete", JSON.parse(result.stdout).fetch("trail")
+    refute_includes result.stderr, "unreadable archive recency"
+    assert_equal "incomplete", JSON.parse(included.stdout).fetch("trail")
+    assert_includes included.stderr, "unreadable archive recency"
+  end
+
   private
 
   def write_recency_archive(name, payload)
