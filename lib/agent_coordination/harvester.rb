@@ -1235,6 +1235,10 @@ module AgentCoord
         def parse!(argv)
           @parser.parse!(argv)
         end
+
+        def value_option_candidates(option_name)
+          @parser.candidate(option_name.tr("_", "-")) & value_options
+        end
       end
 
       def self.run(argv, stdout: $stdout, stderr: $stderr)
@@ -1292,8 +1296,14 @@ module AgentCoord
             next
           end
 
+          short_option = resolve_short_value_option(argument, registry)
+          if short_option
+            awaiting = short_value_awaiting(indexes, argument, index, short_option, registry)
+            next
+          end
+
           option_name, inline_value = argument.split("=", 2)
-          option = resolve_value_option(option_name, registry.value_options)
+          option = resolve_value_option(option_name, registry)
           next unless option
 
           if inline_value
@@ -1305,12 +1315,43 @@ module AgentCoord
         indexes
       end
 
-      def self.resolve_value_option(option_name, value_options)
+      def self.short_value_awaiting(indexes, argument, index, option, registry)
+        if option.equal?(AMBIGUOUS_VALUE_OPTION)
+          indexes << index
+          return option
+        end
+
+        if attached_short_value?(argument, option)
+          indexes << index if registry.path_options.include?(option)
+          return
+        end
+
+        option
+      end
+
+      def self.attached_short_value?(argument, option)
+        argument.bytesize > 2 && !option.equal?(AMBIGUOUS_VALUE_OPTION)
+      end
+
+      def self.resolve_value_option(option_name, registry)
         return unless option_name&.start_with?("--")
         return if option_name == "--"
-        return option_name if value_options.include?(option_name)
+        return unless option_name.ascii_only?
 
-        matches = value_options.select { |candidate| candidate.start_with?(option_name) }
+        matches = registry.value_option_candidates(option_name)
+        return matches.first if matches.one?
+
+        AMBIGUOUS_VALUE_OPTION if matches.length > 1
+      end
+
+      def self.resolve_short_value_option(argument, registry)
+        return unless argument.start_with?("-") && !argument.start_with?("--")
+
+        short_name = argument.byteslice(1, 1)
+        return if short_name.empty?
+        return unless short_name&.ascii_only?
+
+        matches = registry.value_options.select { |candidate| candidate.delete_prefix("--").start_with?(short_name) }
         return matches.first if matches.one?
 
         AMBIGUOUS_VALUE_OPTION if matches.length > 1

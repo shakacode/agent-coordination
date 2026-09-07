@@ -180,17 +180,19 @@ class TelemetryHarvesterTest < Minitest::Test # rubocop:disable Metrics/ClassLen
 
   def test_ambiguous_path_option_precedes_invalid_path_encoding
     Dir.mktmpdir("agent-coordination-ambiguous-path-argv") do |dir|
-      stdout, stderr, status = Open3.capture3(
-        { "LC_ALL" => "C", "LANG" => "C" },
-        CLI, "harvest", "--ledger", File.join(dir, "telemetry.sqlite3"),
-        "--co", "/tmp/coordination-\xE9.json".b, "--batch-id", "batch-fixture"
-      )
+      ["--co", "-co", "-co\xFF".b].each do |ambiguous_option|
+        stdout, stderr, status = Open3.capture3(
+          { "LC_ALL" => "C", "LANG" => "C" },
+          CLI, "harvest", "--ledger", File.join(dir, "telemetry.sqlite3"),
+          ambiguous_option, "/tmp/coordination-\xE9.json".b, "--batch-id", "batch-fixture"
+        )
 
-      refute status.success?
-      assert_empty stdout
-      assert_includes stderr, "agent-coord-harvest: ambiguous option: --co"
-      refute_includes stderr, "command-line argument must be valid UTF-8"
-      refute_includes stderr, "lib/agent_coordination/harvester.rb:"
+        refute status.success?
+        assert_empty stdout
+        assert_includes stderr.b, "agent-coord-harvest: ambiguous option: #{ambiguous_option}".b
+        refute_includes stderr, "command-line argument must be valid UTF-8"
+        refute_includes stderr, "lib/agent_coordination/harvester.rb:"
+      end
     end
   end
 
@@ -227,8 +229,14 @@ class TelemetryHarvesterTest < Minitest::Test # rubocop:disable Metrics/ClassLen
       "harvest separate" => ["harvest", "--ledger", typed],
       "harvest equals" => ["harvest", "--ledger=#{typed}".b.force_encoding(typed.encoding)],
       "harvest abbreviated" => ["harvest", "--led", typed],
+      "harvest case-insensitive" => ["harvest", "--LEDGER", typed],
+      "harvest segmented abbreviation" => ["harvest", "--coord-json", typed],
+      "harvest underscore alias" => ["harvest", "--coordination_j", typed],
+      "harvest single dash" => ["harvest", "-l", typed],
       "scorecard separate" => ["scorecard", "--ledger", typed],
-      "scorecard equals" => ["scorecard", "--ledger=#{typed}".b.force_encoding(typed.encoding)]
+      "scorecard equals" => ["scorecard", "--ledger=#{typed}".b.force_encoding(typed.encoding)],
+      "scorecard single dash attached" => ["scorecard", "-l#{typed}".b.force_encoding(typed.encoding)],
+      "scorecard option-like batch id" => ["scorecard", "-b", "--ledger", "--ledger", typed]
     }
 
     cases.each do |label, argv|
@@ -242,16 +250,24 @@ class TelemetryHarvesterTest < Minitest::Test # rubocop:disable Metrics/ClassLen
     normalized = AgentCoord::Telemetry::CLI.normalized_argv(["scorecard", "--batch-id", batch_id])
     assert_equal "batch-café", normalized.last
     assert_equal Encoding::UTF_8, normalized.last.encoding
+
+    invalid_text = "\xFFnot-a-path".b
+    error = assert_raises(AgentCoord::Telemetry::Error) do
+      AgentCoord::Telemetry::CLI.normalized_argv(["harvest", "-", invalid_text])
+    end
+    assert_match(/command-line argument must be valid UTF-8/, error.message)
   end
 
   def test_non_utf8_path_bytes_reach_the_filesystem_unchanged
-    Dir.mktmpdir("agent-coordination-harvester-path-argv") do |dir|
+    Dir.mktmpdir("agent-coordination-harvester-path-argv") do |dir| # rubocop:disable Metrics/BlockLength
       source_path = "#{dir}/coordination-café.json".b.force_encoding(Encoding::ISO_8859_1)
       File.binwrite(source_path, JSON.generate(coordination_fixture))
 
       {
         "separate" => ["--coordination-json", source_path],
-        "equals" => ["--coordination-json=#{source_path}".b.force_encoding(source_path.encoding)]
+        "equals" => ["--coordination-json=#{source_path}".b.force_encoding(source_path.encoding)],
+        "segmented abbreviation" => ["--coord-json", source_path],
+        "underscore alias" => ["--coordination_j", source_path]
       }.each_with_index do |(label, path_argv), index|
         ledger_path = File.join(dir, "telemetry-#{index}.sqlite3")
         stdout = StringIO.new
@@ -262,6 +278,29 @@ class TelemetryHarvesterTest < Minitest::Test # rubocop:disable Metrics/ClassLen
         )
 
         assert_equal 0, code, "#{label}: #{stderr.string}"
+        assert_equal "harvested batches=1 targets=1 usage=0\n", stdout.string, label
+        assert_empty stderr.string, label
+        assert File.file?(ledger_path), label
+      end
+
+      {
+        "case-insensitive" => ["--LEDGER"],
+        "single dash separate" => ["-l"],
+        "single dash attached" => nil
+      }.each_with_index do |(label, option_argv), index|
+        # sqlite3 normalizes database filenames to UTF-8 on Linux, so use an
+        # ASCII path here to isolate successful OptionParser resolution. Raw
+        # ledger-path bytes are asserted separately by normalized_argv above.
+        ledger_path = File.join(dir, "telemetry-#{index}.sqlite3")
+        option_argv ||= ["-l#{ledger_path}".b.force_encoding(ledger_path.encoding)]
+        option_argv = [*option_argv, ledger_path] unless option_argv.first.start_with?("-l/")
+        stdout = StringIO.new
+        stderr = StringIO.new
+        code = AgentCoord::Telemetry::CLI.run(
+          ["harvest", *option_argv, "--coordination-json", source_path, "--batch-id", "batch-fixture"],
+          stdout:, stderr:
+        )
+        assert_equal 0, code, "#{label} ledger: #{stderr.string}"
         assert_equal "harvested batches=1 targets=1 usage=0\n", stdout.string, label
         assert_empty stderr.string, label
         assert File.file?(ledger_path), label
