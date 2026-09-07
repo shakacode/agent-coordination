@@ -349,7 +349,14 @@ async function listState(
   if (status !== null) {
     clauses.push(
       "(json_type(data, '$.status') IS NULL OR json_type(data, '$.status') != 'text'"
-      + " OR json_extract(data, '$.status') != 'resolved')",
+      + " OR json_extract(data, '$.status') != 'resolved'"
+      + " OR json_type(data, '$.resolved_at') IS NOT 'text'"
+      + " OR json_extract(data, '$.schema_version') IS NOT 1"
+      + " OR json_type(data, '$.workspace') IS NOT 'text'"
+      + " OR json_type(data, '$.repository') IS NOT 'text'"
+      + " OR json_type(data, '$.id') IS NOT 'text'"
+      + " OR path IS NOT ('attention/' || json_extract(data, '$.workspace') || '/'"
+      + " || json_extract(data, '$.repository') || '/' || json_extract(data, '$.id') || '.json'))",
     );
   }
   let sql = `SELECT path, data, version, updated_by FROM state WHERE ${clauses.join(" AND ")} ORDER BY path`;

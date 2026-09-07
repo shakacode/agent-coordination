@@ -91,7 +91,8 @@ class HttpBackendIntegrationTest < Minitest::Test
   def test_attention_open_status_filters_before_limit_and_rejects_unsupported_values
     token = ENV.fetch("ATTENTION_AGENT_COORD_API_TOKEN")
     repository = "#{REPO}-status"
-    resolved = attention_record.merge("repository" => repository, "id" => "a-resolved", "status" => "resolved",
+    resolved = attention_record.merge("schema_version" => 1.0, "repository" => repository, "id" => "a-resolved",
+                                      "status" => "resolved",
                                       "resolved_at" => "2026-09-03T10:00:00Z")
     open = attention_record.merge("repository" => repository, "id" => "z-open")
 
@@ -123,6 +124,41 @@ class HttpBackendIntegrationTest < Minitest::Test
     code, body = http_json("GET", "/v1/state?#{invalid_query}", token: token)
     assert_equal 400, code
     assert_equal "invalid_status", body.fetch("error")
+  end
+
+  def test_attention_open_status_does_not_hide_resolved_records_missing_resolved_at
+    token = ENV.fetch("ATTENTION_AGENT_COORD_API_TOKEN")
+    repository = "#{REPO}-missing-resolved-at"
+    record = attention_record.merge("repository" => repository, "id" => "invalid-resolved", "status" => "resolved")
+    path = "attention/default/#{repository}/invalid-resolved.json"
+    code, body = http_json(
+      "PUT", state_path(path), token: token, headers: { "If-None-Match" => "*" }, body: { "data" => record }
+    )
+    assert_equal 201, code, body.inspect
+
+    query = URI.encode_www_form(prefix: "attention/default/#{repository}", status: "open")
+    code, body = http_json("GET", "/v1/state?#{query}", token: token)
+    assert_equal 500, code
+    assert_equal "invalid_attention_status", body.fetch("error")
+  end
+
+  def test_attention_open_status_does_not_hide_resolved_records_with_mismatched_identity
+    token = ENV.fetch("ATTENTION_AGENT_COORD_API_TOKEN")
+    repository = "#{REPO}-mismatched-identity"
+    record = attention_record.merge(
+      "repository" => repository, "id" => "payload-id", "status" => "resolved",
+      "resolved_at" => "2026-09-03T10:00:00Z"
+    )
+    path = "attention/default/#{repository}/path-id.json"
+    code, body = http_json(
+      "PUT", state_path(path), token: token, headers: { "If-None-Match" => "*" }, body: { "data" => record }
+    )
+    assert_equal 201, code, body.inspect
+
+    query = URI.encode_www_form(prefix: "attention/default/#{repository}", status: "open")
+    code, body = http_json("GET", "/v1/state?#{query}", token: token)
+    assert_equal 500, code
+    assert_equal "invalid_attention_status", body.fetch("error")
   end
 
   def test_worker_enforces_the_attention_storage_key_contract
