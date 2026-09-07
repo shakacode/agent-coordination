@@ -3539,6 +3539,88 @@ class AgentCoordLogArchiveRecencyTest < AgentCoordLogTestCase
     refute_includes result.stderr, "ambiguous archive recency"
   end
 
+  def test_log_reports_one_ambiguity_for_many_collisions_between_the_same_envelopes
+    first = [archive_event("e1"), archive_event("e2")]
+    second = first.map { |event| event.merge("machine_id" => "other") }
+    { "a.json" => first, "z.json" => second }.each do |name, records|
+      write_recency_archive(name, "record_family" => "compacted_events",
+                                  "archived_at" => "2026-08-05T09:00:00Z",
+                                  "source_paths" => %w[events/b9/e1.json events/b9/e2.json],
+                                  "records" => records)
+    end
+
+    result = run_log("shakacode/example#104", "--json")
+
+    assert_equal 0, result.status.exitstatus, result.stderr
+    assert_equal "incomplete", JSON.parse(result.stdout).fetch("trail")
+    assert_equal 1, result.stderr.lines.grep(/ambiguous archive recency/).length
+  end
+
+  def test_hidden_synthetic_archive_does_not_make_default_trail_recency_incomplete
+    write_recency_archive("synthetic.json", "record_family" => "compacted_events", "synthetic" => true,
+                                            "source_paths" => ["events/b9/e1.json"],
+                                            "records" => [archive_event("e1").merge("synthetic" => true)])
+
+    result = run_log("shakacode/example#104", "--json")
+    included = run_log("shakacode/example#104", "--include-synthetic", "--json")
+
+    assert_equal 0, result.status.exitstatus, result.stderr
+    assert_equal "complete", JSON.parse(result.stdout).fetch("trail")
+    refute_includes result.stderr, "unreadable archive recency"
+    assert_equal 0, JSON.parse(result.stdout).fetch("events").length
+    assert_equal "incomplete", JSON.parse(included.stdout).fetch("trail")
+    assert_includes included.stderr, "unreadable archive recency"
+  end
+
+  def test_hidden_synthetic_archives_do_not_make_default_trail_ambiguous
+    { "a.json" => "first", "z.json" => "second" }.each do |name, machine|
+      write_recency_archive(name, "record_family" => "archived_record", "synthetic" => true,
+                                  "archived_at" => "2026-08-05T09:00:00Z",
+                                  "source_path" => "events/b9/#{name}",
+                                  "data" => archive_event("e1").merge("synthetic" => true,
+                                                                      "machine_id" => machine))
+    end
+
+    result = run_log("shakacode/example#104", "--json")
+    included = run_log("shakacode/example#104", "--include-synthetic", "--json")
+
+    assert_equal 0, result.status.exitstatus, result.stderr
+    assert_equal "complete", JSON.parse(result.stdout).fetch("trail")
+    refute_includes result.stderr, "ambiguous archive recency"
+    assert_equal "incomplete", JSON.parse(included.stdout).fetch("trail")
+    assert_includes included.stderr, "ambiguous archive recency"
+  end
+
+  def test_visible_archive_keeps_ambiguity_with_a_hidden_synthetic_twin
+    { "a.json" => false, "z.json" => true }.each do |name, synthetic|
+      write_recency_archive(name, "record_family" => "archived_record", "synthetic" => synthetic,
+                                  "archived_at" => "2026-08-05T09:00:00Z",
+                                  "source_path" => "events/b9/#{name}",
+                                  "data" => archive_event("e1").merge("synthetic" => synthetic))
+    end
+
+    result = run_log("shakacode/example#104", "--json")
+
+    assert_equal 0, result.status.exitstatus, result.stderr
+    assert_equal "incomplete", JSON.parse(result.stdout).fetch("trail")
+    assert_includes result.stderr, "ambiguous archive recency"
+  end
+
+  def test_visible_archive_twin_keeps_hidden_unknown_recency_incomplete
+    write_recency_archive("dated.json", "record_family" => "archived_record",
+                                        "archived_at" => "2026-08-05T09:00:00Z",
+                                        "source_path" => "events/b9/dated.json", "data" => archive_event("e1"))
+    write_recency_archive("undated.json", "record_family" => "archived_record", "synthetic" => true,
+                                          "source_path" => "events/b9/undated.json",
+                                          "data" => archive_event("e1").merge("synthetic" => true))
+
+    result = run_log("shakacode/example#104", "--json")
+
+    assert_equal 0, result.status.exitstatus, result.stderr
+    assert_equal "incomplete", JSON.parse(result.stdout).fetch("trail")
+    assert_includes result.stderr, "unreadable archive recency"
+  end
+
   private
 
   def write_recency_archive(name, payload)
