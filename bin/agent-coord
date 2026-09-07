@@ -5029,7 +5029,11 @@ module AgentCoord
     # merged set by instant, so archived and live events for one work item
     # interleave rather than arriving in two blocks.
     def log_archived_event_rows(store, seen)
-      log_archived_event_entries(store).flat_map do |entry|
+      entries = log_archived_event_entries(store).sort_by do |entry|
+        data = entry.data
+        log_at_key(data.is_a?(Hash) ? data["archived_at"] : nil)
+      end.reverse
+      entries.flat_map do |entry|
         log_validate_record_encoding!(entry)
         # Records first. log_archived_event_data is what rejects a record this
         # version cannot read, and the ledger entry reaches into the same

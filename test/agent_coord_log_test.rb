@@ -3333,3 +3333,88 @@ class AgentCoordLogArchiveTest < AgentCoordLogTestCase
     result.stdout.lines.map { |line| line.split("\t").fetch(TSV_EVENT_ID_COLUMN) }
   end
 end
+
+# Terminal replays can produce divergent immutable archive generations with one
+# event identity. Exercise the real CLI lifecycle and pin both recency rules.
+class AgentCoordLogArchiveRecencyTest < AgentCoordLogTestCase
+  def test_log_prefers_newest_archive_generation_but_still_prefers_live
+    register_replay_batch
+    archive_terminal("codex")
+    archive_terminal("claude-code")
+    order_archive_paths_against_parsed_recency
+
+    assert_log_machine "claude-code"
+    close_terminal("codex-live")
+    assert_log_machine "codex-live"
+  end
+
+  private
+
+  def register_replay_batch
+    manifest_path = File.join(@state_root, "batch-archive-replay.json")
+    manifest = {
+      "batch_id" => "batch-archive-replay", "repo" => "shakacode/example",
+      "objective" => "exercise archive replay",
+      "lanes" => [{ "name" => "code", "owner" => "worker-a", "targets" => ["104"] }]
+    }
+    File.write(manifest_path, JSON.generate(manifest))
+    result = run_state_command("register-batch", "--file", manifest_path)
+
+    assert_equal 0, result.status.exitstatus, result.stderr
+  end
+
+  def archive_terminal(host)
+    close_terminal(host)
+    result = run_state_command("gc", "--execute", "--hot-days", "0", "--prefix", "events")
+
+    assert_equal 0, result.status.exitstatus, result.stderr
+    assert_empty Dir.glob(File.join(@state_root, "events", "**", "*.json"))
+  end
+
+  def close_terminal(host)
+    result = run_state_command(*close_args, "--host", host)
+    assert_equal 0, result.status.exitstatus, result.stderr
+  end
+
+  def close_args
+    [
+      "record-event", "--batch-id", "batch-archive-replay", "--type", "lane_closed",
+      "--lane", "code", "--agent-id", "worker-a", "--repo", "shakacode/example",
+      "--target", "104", "--terminal", "done", "--pr-state", "merged"
+    ]
+  end
+
+  def order_archive_paths_against_parsed_recency
+    by_machine = archive_record_paths.to_h do |path|
+      envelope = JSON.parse(File.read(path))
+      [envelope.fetch("records").fetch(0).dig("closed_by", "machine"), envelope]
+    end
+    directory = File.dirname(archive_record_paths.fetch(0))
+    archive_record_paths.each { |path| FileUtils.rm(path) }
+    write_envelope(File.join(directory, "compact-a-older.json"), by_machine.fetch("codex"),
+                   "2026-08-05T10:00:00+02:00")
+    write_envelope(File.join(directory, "compact-z-newer.json"), by_machine.fetch("claude-code"),
+                   "2026-08-05T09:00:00Z")
+  end
+
+  def write_envelope(path, envelope, archived_at)
+    envelope["archived_at"] = archived_at
+    File.write(path, "#{JSON.generate(envelope)}\n")
+  end
+
+  def assert_log_machine(expected)
+    result = run_log("shakacode/example#104", "--json")
+    event = JSON.parse(result.stdout).fetch("events").fetch(0)
+
+    assert_equal 0, result.status.exitstatus, result.stderr
+    assert_equal expected, event.fetch("machine")
+  end
+
+  def archive_record_paths
+    Dir.glob(File.join(@state_root, "archive", "events", "**", "*.json"))
+  end
+
+  def run_state_command(*)
+    run_command(COMMAND_ENV.merge("AGENT_COORD_STATE_ROOT" => @state_root), "ruby", BIN, *)
+  end
+end
