@@ -5030,8 +5030,7 @@ module AgentCoord
     # interleave rather than arriving in two blocks.
     def log_archived_event_rows(store, seen)
       entries = log_archived_event_entries(store).sort_by do |entry|
-        data = entry.data
-        log_at_key(data.is_a?(Hash) ? data["archived_at"] : nil)
+        [log_archive_recency(entry), entry.path]
       end.reverse
       entries.flat_map do |entry|
         log_validate_record_encoding!(entry)
@@ -5060,6 +5059,18 @@ module AgentCoord
           row
         end
       end
+    end
+
+    # Archive generations can repeat one immutable event identity. Prefer the
+    # newest parsed archive instant, with path as the deterministic tiebreaker.
+    # An unreadable clock cannot establish recency, so retain its rows while
+    # making the trail incomplete (and therefore unsafe to sync).
+    def log_archive_recency(entry)
+      data = entry.data
+      Time.iso8601(data.is_a?(Hash) ? data["archived_at"].to_s : "").to_r
+    rescue ArgumentError, TypeError
+      log_archive_incomplete(entry, "unreadable archive recency")
+      -Float::INFINITY
     end
 
     # The live copy wins the row, but the event is in the archive all the same

@@ -3348,6 +3348,33 @@ class AgentCoordLogArchiveRecencyTest < AgentCoordLogTestCase
     assert_log_machine "codex-live"
   end
 
+  def test_log_marks_unknown_archive_recency_incomplete
+    register_replay_batch
+    archive_terminal("codex")
+    envelope_path = archive_record_paths.fetch(0)
+    envelope = JSON.parse(File.read(envelope_path))
+    envelope.delete("archived_at")
+    File.write(envelope_path, "#{JSON.generate(envelope)}\n")
+
+    result = run_log("shakacode/example#104", "--json")
+    sync = run_log("--sync")
+
+    assert_equal 0, result.status.exitstatus, result.stderr
+    assert_equal "incomplete", JSON.parse(result.stdout).fetch("trail")
+    assert_includes result.stderr, "unreadable archive recency"
+    assert_equal 2, sync.status.exitstatus
+    assert_includes sync.stderr, "refusing to sync an incomplete trail: archive/events"
+  end
+
+  def test_log_breaks_equal_archive_recency_ties_by_path
+    register_replay_batch
+    archive_terminal("codex")
+    archive_terminal("claude-code")
+    order_archive_paths_with_equal_recency
+
+    assert_log_machine "claude-code"
+  end
+
   private
 
   def register_replay_batch
@@ -3394,6 +3421,19 @@ class AgentCoordLogArchiveRecencyTest < AgentCoordLogTestCase
     write_envelope(File.join(directory, "compact-a-older.json"), by_machine.fetch("codex"),
                    "2026-08-05T10:00:00+02:00")
     write_envelope(File.join(directory, "compact-z-newer.json"), by_machine.fetch("claude-code"),
+                   "2026-08-05T09:00:00Z")
+  end
+
+  def order_archive_paths_with_equal_recency
+    by_machine = archive_record_paths.to_h do |path|
+      envelope = JSON.parse(File.read(path))
+      [envelope.fetch("records").fetch(0).dig("closed_by", "machine"), envelope]
+    end
+    directory = File.dirname(archive_record_paths.fetch(0))
+    archive_record_paths.each { |path| FileUtils.rm(path) }
+    write_envelope(File.join(directory, "compact-a-codex.json"), by_machine.fetch("codex"),
+                   "2026-08-05T09:00:00Z")
+    write_envelope(File.join(directory, "compact-z-claude.json"), by_machine.fetch("claude-code"),
                    "2026-08-05T09:00:00Z")
   end
 
