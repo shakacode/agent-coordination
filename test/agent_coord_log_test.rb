@@ -3621,6 +3621,38 @@ class AgentCoordLogArchiveRecencyTest < AgentCoordLogTestCase
     assert_includes included.stderr, "unreadable archive recency"
   end
 
+  def test_hidden_synthetic_compaction_still_reports_an_unreadable_expiry
+    write_recency_archive("synthetic.json", "record_family" => "compacted_events", "synthetic" => false,
+                                            "delete_after" => "invalid",
+                                            "source_paths" => ["events/b9/e1.json"],
+                                            "records" => [archive_event("e1").merge("synthetic" => true)])
+
+    result = run_log("shakacode/example#104", "--json")
+    included = run_log("shakacode/example#104", "--include-synthetic", "--json")
+
+    assert_equal "incomplete", JSON.parse(result.stdout).fetch("trail")
+    assert_includes result.stderr, "unreadable archive expiry"
+    refute_includes result.stderr, "unreadable archive recency"
+    assert_includes included.stderr, "unreadable archive recency"
+    refute_includes included.stderr, "unreadable archive expiry"
+  end
+
+  def test_hidden_synthetic_archived_record_still_reports_an_unreadable_expiry
+    write_recency_archive("synthetic.json", "record_family" => "archived_record", "synthetic" => false,
+                                            "delete_after" => "invalid",
+                                            "source_path" => "events/b9/e1.json",
+                                            "data" => archive_event("e1").merge("synthetic" => true))
+
+    result = run_log("shakacode/example#104", "--json")
+    included = run_log("shakacode/example#104", "--include-synthetic", "--json")
+
+    assert_equal "incomplete", JSON.parse(result.stdout).fetch("trail")
+    assert_includes result.stderr, "unreadable archive expiry"
+    refute_includes result.stderr, "unreadable archive recency"
+    assert_includes included.stderr, "unreadable archive recency"
+    refute_includes included.stderr, "unreadable archive expiry"
+  end
+
   def test_hidden_synthetic_archives_do_not_make_default_trail_ambiguous
     { "a.json" => "first", "z.json" => "second" }.each do |name, machine|
       write_recency_archive(name, "record_family" => "archived_record", "synthetic" => true,

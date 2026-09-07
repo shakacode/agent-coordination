@@ -5227,10 +5227,9 @@ module AgentCoord
         return [legible, true]
       end
 
-      if (recency_defect = log_archive_recency_defect(data))
-        if log_archive_recency_relevant?(data, legible, wanted, seen, include_synthetic)
-          log_archive_incomplete(entry, recency_defect)
-        end
+      if (recency_defect = log_archive_recency_defect(data)) &&
+         log_archive_recency_relevant?(data, legible, wanted, seen, include_synthetic)
+        log_archive_incomplete(entry, recency_defect)
         return [legible, false]
       end
 
@@ -5297,11 +5296,10 @@ module AgentCoord
         return [[], true]
       end
 
-      if (recency_defect = log_archive_recency_defect(data))
-        records = [data["data"]]
-        if log_archive_recency_relevant?(data, records, wanted, seen, include_synthetic)
-          log_archive_incomplete(entry, recency_defect)
-        end
+      records = [data["data"]]
+      if (recency_defect = log_archive_recency_defect(data)) &&
+         log_archive_recency_relevant?(data, records, wanted, seen, include_synthetic)
+        log_archive_incomplete(entry, recency_defect)
         return [records, false]
       end
 
