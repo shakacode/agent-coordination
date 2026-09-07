@@ -3583,6 +3583,28 @@ class AgentCoordLogArchiveRecencyTest < AgentCoordLogTestCase
                  "--sync must refuse the ambiguous trail"
   end
 
+  def test_typed_archive_paths_do_not_collapse_distinct_incomplete_diagnostics
+    stderr = StringIO.new
+    runner = AgentCoord::Runner.new([], stderr: stderr)
+
+    runner.send(:log_archive_incomplete, AgentCoord::StoredJson.new(path: 1), "first defect")
+    runner.send(:log_archive_incomplete, AgentCoord::StoredJson.new(path: "1"), "second defect")
+
+    assert_includes stderr.string, "first defect"
+    assert_includes stderr.string, "second defect"
+    assert_equal 2, stderr.string.lines.grep(/this trail may be incomplete/).length
+  end
+
+  def test_typed_archive_paths_do_not_collapse_distinct_ambiguity_pairs
+    stderr = StringIO.new
+    runner = AgentCoord::Runner.new([], stderr: stderr)
+
+    runner.send(:log_archive_ambiguity, 1, "foo")
+    runner.send(:log_archive_ambiguity, "1", "foo")
+
+    assert_equal 2, stderr.string.lines.grep(/ambiguous archive recency/).length
+  end
+
   def test_hidden_synthetic_archive_does_not_make_default_trail_recency_incomplete
     write_recency_archive("synthetic.json", "record_family" => "compacted_events", "synthetic" => true,
                                             "source_paths" => ["events/b9/e1.json"],
