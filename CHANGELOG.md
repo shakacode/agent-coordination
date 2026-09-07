@@ -532,8 +532,8 @@ when releases begin.
   `repo`, `target`, and `agent_id` the record names -- so the one file two
   candidate paths reach on a case-insensitive checkout is one row even when a
   renew lands between those two reads, while two case-differing keys that are both
-  live are two files, therefore two leases, and both holders are reported where
-  `log`, which folds casing across its listing, reports one. A takeover landing
+  live are two files, therefore two leases, and both holders are reported by
+  both `status` and `log`. A takeover landing
   between the two reads of one record returns two holders and reports both, which
   is the safer reading of state that is ambiguous at the moment it is read. Each
   holder's heartbeat is read once however many of its leases answer. A lane holds
