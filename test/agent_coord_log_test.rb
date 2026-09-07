@@ -3333,3 +3333,525 @@ class AgentCoordLogArchiveTest < AgentCoordLogTestCase
     result.stdout.lines.map { |line| line.split("\t").fetch(TSV_EVENT_ID_COLUMN) }
   end
 end
+
+# Terminal replays can produce divergent immutable archive generations with one
+# event identity. Exercise the real CLI lifecycle and pin both recency rules.
+class AgentCoordLogArchiveRecencyTest < AgentCoordLogTestCase
+  def test_log_prefers_newest_archive_generation_but_still_prefers_live
+    register_replay_batch
+    archive_terminal("codex")
+    archive_terminal("claude-code")
+    order_archive_paths_against_parsed_recency
+
+    assert_log_machine "claude-code"
+    close_terminal("codex-live")
+    assert_log_machine "codex-live"
+  end
+
+  def test_log_marks_unknown_archive_recency_incomplete
+    register_replay_batch
+    archive_terminal("codex")
+    envelope_path = archive_record_paths.fetch(0)
+    envelope = JSON.parse(File.read(envelope_path))
+    envelope.delete("archived_at")
+    envelope["delete_after"] = "invalid"
+    envelope["source_paths"] += %w[events/batch-archive-replay/old-a.json events/batch-archive-replay/old-b.json]
+    File.write(envelope_path, "#{JSON.generate(envelope)}\n")
+
+    result = run_log("shakacode/example#104", "--json")
+    sync = run_log("--sync")
+
+    assert_equal 0, result.status.exitstatus, result.stderr
+    assert_equal "incomplete", JSON.parse(result.stdout).fetch("trail")
+    assert_includes result.stderr, "unreadable archive recency"
+    refute_includes result.stderr, "unreadable archive expiry"
+    assert_equal 1, result.stderr.lines.grep(/this trail may be incomplete/).length
+    assert_includes result.stderr, "2 source events were dropped by compaction"
+    refute_includes result.stderr, "compaction loss unknown"
+    assert_equal 2, sync.status.exitstatus
+    assert_includes sync.stderr, "refusing to sync an incomplete trail: archive/events"
+  end
+
+  def test_log_rejects_archive_recency_without_an_offset
+    register_replay_batch
+    archive_terminal("codex")
+    envelope_path = archive_record_paths.fetch(0)
+    envelope = JSON.parse(File.read(envelope_path))
+    envelope["archived_at"] = "2026-08-05T09:00:00"
+    File.write(envelope_path, "#{JSON.generate(envelope)}\n")
+
+    result = run_log("shakacode/example#104", "--json")
+
+    assert_equal 0, result.status.exitstatus, result.stderr
+    assert_equal "incomplete", JSON.parse(result.stdout).fetch("trail")
+    assert_includes result.stderr, "unreadable archive recency"
+  end
+
+  def test_log_keeps_readable_archived_record_with_unknown_recency
+    path = File.join(@state_root, "archive/events/b9/archived-one.json")
+    FileUtils.mkdir_p(File.dirname(path))
+    envelope = {
+      "schema_version" => 1, "record_family" => "archived_record",
+      "source_path" => "events/b9/e4.json", "delete_after" => "2026-10-04T00:00:00Z",
+      "data" => { "schema_version" => 2, "event_id" => "e4", "batch_id" => "b9",
+                  "type" => "merged", "repo" => "shakacode/example", "target" => "104",
+                  "at" => "2026-08-04T00:00:00Z" }
+    }
+    File.write(path, "#{JSON.generate(envelope)}\n")
+
+    result = run_log("shakacode/example#104", "--json")
+    payload = JSON.parse(result.stdout)
+    event_ids = payload.fetch("events").map { |event| event.fetch("event_id") }
+
+    assert_equal 0, result.status.exitstatus, result.stderr
+    assert_equal ["e4"], event_ids
+    assert_equal "incomplete", payload.fetch("trail")
+    assert_includes result.stderr, "unreadable archive recency"
+  end
+
+  def test_unknown_record_recency_preserves_compaction_loss_accounting
+    write_recency_archive("compact.json",
+                          "record_family" => "compacted_events", "archived_at" => "2026-08-05T09:00:00Z",
+                          "source_paths" => %w[events/b9/e1.json events/b9/e2.json],
+                          "records" => [archive_event("e1")])
+    write_recency_archive("record.json", "record_family" => "archived_record",
+                                         "source_path" => "events/b9/e2.json", "data" => archive_event("e2"))
+
+    result = run_log("shakacode/example#104", "--json")
+
+    assert_equal 0, result.status.exitstatus, result.stderr
+    assert_equal %w[e1 e2], JSON.parse(result.stdout).fetch("events").map { |event| event.fetch("event_id") }.sort
+    refute_includes result.stderr, "source event was dropped by compaction"
+    refute_includes result.stderr, "compaction loss unknown"
+  end
+
+  def test_log_breaks_equal_archive_recency_ties_by_path
+    register_replay_batch
+    archive_terminal("codex")
+    archive_terminal("claude-code")
+    order_archive_paths_with_equal_recency(malformed_source: true)
+
+    result = run_log("shakacode/example#104", "--json")
+    event = JSON.parse(result.stdout).fetch("events").fetch(0)
+
+    assert_equal 0, result.status.exitstatus, result.stderr
+    assert_equal "claude-code", event.fetch("machine")
+    assert_equal "incomplete", JSON.parse(result.stdout).fetch("trail")
+    assert_includes result.stderr, "ambiguous archive recency"
+    assert_includes result.stderr, "malformed archived source paths"
+    assert_equal 2, run_log("--sync").status.exitstatus
+  end
+
+  def test_log_does_not_report_archive_ambiguity_for_an_unrelated_work_item
+    register_replay_batch
+    archive_terminal("codex")
+    archive_terminal("claude-code")
+    order_archive_paths_with_equal_recency
+    archive_record_paths.each do |path|
+      envelope = JSON.parse(File.read(path))
+      envelope.fetch("records").each { |record| record["target"] = "999" }
+      File.write(path, "#{JSON.generate(envelope)}\n")
+    end
+
+    result = run_log("shakacode/example#104", "--json")
+
+    assert_equal 0, result.status.exitstatus, result.stderr
+    assert_equal "complete", JSON.parse(result.stdout).fetch("trail")
+    refute_includes result.stderr, "ambiguous archive recency"
+  end
+
+  def test_log_does_not_call_two_unreadable_archive_recencies_ambiguous
+    register_replay_batch
+    archive_terminal("codex")
+    archive_terminal("claude-code")
+    order_archive_paths_with_equal_recency
+    archive_record_paths.each do |path|
+      envelope = JSON.parse(File.read(path))
+      envelope.delete("archived_at")
+      File.write(path, "#{JSON.generate(envelope)}\n")
+    end
+
+    result = run_log("shakacode/example#104", "--json")
+
+    assert_equal 0, result.status.exitstatus, result.stderr
+    assert_equal "incomplete", JSON.parse(result.stdout).fetch("trail")
+    assert_includes result.stderr, "unreadable archive recency"
+    refute_includes result.stderr, "ambiguous archive recency"
+  end
+
+  def test_log_does_not_report_unreadable_recency_for_an_unrelated_work_item
+    write_recency_archive("unrelated.json", "record_family" => "compacted_events",
+                                            "source_paths" => ["events/b9/e1.json"],
+                                            "records" => [archive_event("e1").merge("target" => "999")])
+
+    result = run_log("shakacode/example#104", "--json")
+
+    assert_equal 0, result.status.exitstatus, result.stderr
+    assert_equal "complete", JSON.parse(result.stdout).fetch("trail")
+    refute_includes result.stderr, "unreadable archive recency"
+  end
+
+  def test_log_reports_unreadable_recency_when_a_matching_event_identity_twin_is_in_scope
+    write_recency_archive(
+      "dated.json", "record_family" => "archived_record", "archived_at" => "2026-08-05T09:00:00Z",
+                    "source_path" => "events/b9/e1.json", "data" => archive_event("e1")
+    )
+    write_recency_archive(
+      "undated.json", "record_family" => "archived_record", "source_path" => "events/b9/e1.json",
+                      "data" => archive_event("e1").merge("target" => "999")
+    )
+
+    result = run_log("shakacode/example#104", "--json")
+
+    assert_equal 0, result.status.exitstatus, result.stderr
+    assert_equal "incomplete", JSON.parse(result.stdout).fetch("trail")
+    assert_includes result.stderr, "unreadable archive recency"
+  end
+
+  def test_log_does_not_call_duplicate_records_in_one_envelope_archive_ambiguity
+    event = archive_event("e1")
+    write_recency_archive("duplicate.json", "record_family" => "compacted_events",
+                                            "archived_at" => "2026-08-05T09:00:00Z",
+                                            "source_paths" => %w[events/b9/e1.json events/b9/e2.json],
+                                            "records" => [event, event.dup])
+
+    result = run_log("shakacode/example#104", "--json")
+    event_ids = JSON.parse(result.stdout).fetch("events").map { |row| row.fetch("event_id") }
+
+    assert_equal 0, result.status.exitstatus, result.stderr
+    assert_equal "complete", JSON.parse(result.stdout).fetch("trail")
+    assert_equal ["e1"], event_ids
+    refute_includes result.stderr, "ambiguous archive recency"
+  end
+
+  def test_log_does_not_call_identical_records_in_equal_time_envelopes_ambiguous
+    event = archive_event("e1")
+    %w[a z].each do |suffix|
+      write_recency_archive("#{suffix}.json", "record_family" => "archived_record",
+                                              "archived_at" => "2026-08-05T09:00:00Z",
+                                              "source_path" => "events/b9/#{suffix}.json", "data" => event.dup)
+    end
+
+    result = run_log("shakacode/example#104", "--json")
+
+    assert_equal 0, result.status.exitstatus, result.stderr
+    assert_equal "complete", JSON.parse(result.stdout).fetch("trail")
+    refute_includes result.stderr, "ambiguous archive recency"
+  end
+
+  def test_log_reports_one_ambiguity_for_many_collisions_between_the_same_envelopes
+    first = [archive_event("e1"), archive_event("e2")]
+    second = first.map { |event| event.merge("machine_id" => "other") }
+    { "a.json" => first, "z.json" => second }.each do |name, records|
+      write_recency_archive(name, "record_family" => "compacted_events",
+                                  "archived_at" => "2026-08-05T09:00:00Z",
+                                  "source_paths" => %w[events/b9/e1.json events/b9/e2.json],
+                                  "records" => records)
+    end
+
+    result = run_log("shakacode/example#104", "--json")
+
+    assert_equal 0, result.status.exitstatus, result.stderr
+    assert_equal "incomplete", JSON.parse(result.stdout).fetch("trail")
+    assert_equal 1, result.stderr.lines.grep(/ambiguous archive recency/).length
+  end
+
+  def test_equal_recency_keeps_typed_archive_paths_distinct
+    entries = [1, "1"].map.with_index do |path, index|
+      AgentCoord::StoredJson.new(
+        path: path,
+        data: {
+          "schema_version" => 1, "record_family" => "archived_record",
+          "archived_at" => "2026-08-05T09:00:00Z", "delete_after" => "2026-10-04T00:00:00Z",
+          "source_path" => "events/b9/e1.json",
+          "data" => archive_event("e1").merge("machine_id" => "machine-#{index}")
+        }
+      )
+    end
+    store = Object.new
+    store.define_singleton_method(:list_json) do |prefix, &_handler|
+      prefix == "archive/events" ? entries : []
+    end
+    stderr = StringIO.new
+    runner = AgentCoord::Runner.new([], stderr: stderr)
+
+    rows = runner.send(:log_event_rows, store)
+
+    assert_equal 1, rows.length
+    assert_includes stderr.string, "ambiguous archive recency"
+    assert_equal "archive/events", runner.send(:log_incomplete_prefixes),
+                 "--sync must refuse the ambiguous trail"
+  end
+
+  def test_typed_archive_paths_do_not_collapse_distinct_incomplete_diagnostics
+    stderr = StringIO.new
+    runner = AgentCoord::Runner.new([], stderr: stderr)
+
+    runner.send(:log_archive_incomplete, AgentCoord::StoredJson.new(path: 1), "first defect")
+    runner.send(:log_archive_incomplete, AgentCoord::StoredJson.new(path: "1"), "second defect")
+
+    assert_includes stderr.string, "first defect"
+    assert_includes stderr.string, "second defect"
+    assert_equal 2, stderr.string.lines.grep(/this trail may be incomplete/).length
+  end
+
+  def test_typed_archive_paths_do_not_collapse_distinct_ambiguity_pairs
+    stderr = StringIO.new
+    runner = AgentCoord::Runner.new([], stderr: stderr)
+
+    runner.send(:log_archive_ambiguity, 1, "foo")
+    runner.send(:log_archive_ambiguity, "1", "foo")
+
+    assert_equal 2, stderr.string.lines.grep(/ambiguous archive recency/).length
+  end
+
+  def test_hidden_synthetic_archive_does_not_make_default_trail_recency_incomplete
+    write_recency_archive("synthetic.json", "record_family" => "compacted_events", "synthetic" => true,
+                                            "source_paths" => ["events/b9/e1.json"],
+                                            "records" => [archive_event("e1").merge("synthetic" => true)])
+
+    result = run_log("shakacode/example#104", "--json")
+    included = run_log("shakacode/example#104", "--include-synthetic", "--json")
+
+    assert_equal 0, result.status.exitstatus, result.stderr
+    assert_equal "complete", JSON.parse(result.stdout).fetch("trail")
+    refute_includes result.stderr, "unreadable archive recency"
+    assert_equal 0, JSON.parse(result.stdout).fetch("events").length
+    assert_equal "incomplete", JSON.parse(included.stdout).fetch("trail")
+    assert_includes included.stderr, "unreadable archive recency"
+  end
+
+  def test_hidden_synthetic_compaction_still_reports_an_unreadable_expiry
+    write_recency_archive("synthetic.json", "record_family" => "compacted_events", "synthetic" => false,
+                                            "delete_after" => "invalid",
+                                            "source_paths" => ["events/b9/e1.json"],
+                                            "records" => [archive_event("e1").merge("synthetic" => true)])
+
+    result = run_log("shakacode/example#104", "--json")
+    included = run_log("shakacode/example#104", "--include-synthetic", "--json")
+
+    assert_equal "incomplete", JSON.parse(result.stdout).fetch("trail")
+    assert_includes result.stderr, "unreadable archive expiry"
+    refute_includes result.stderr, "unreadable archive recency"
+    assert_includes included.stderr, "unreadable archive recency"
+    refute_includes included.stderr, "unreadable archive expiry"
+  end
+
+  def test_hidden_synthetic_archived_record_still_reports_an_unreadable_expiry
+    write_recency_archive("synthetic.json", "record_family" => "archived_record", "synthetic" => false,
+                                            "delete_after" => "invalid",
+                                            "source_path" => "events/b9/e1.json",
+                                            "data" => archive_event("e1").merge("synthetic" => true))
+
+    result = run_log("shakacode/example#104", "--json")
+    included = run_log("shakacode/example#104", "--include-synthetic", "--json")
+
+    assert_equal "incomplete", JSON.parse(result.stdout).fetch("trail")
+    assert_includes result.stderr, "unreadable archive expiry"
+    refute_includes result.stderr, "unreadable archive recency"
+    assert_includes included.stderr, "unreadable archive recency"
+    refute_includes included.stderr, "unreadable archive expiry"
+  end
+
+  def test_hidden_synthetic_archives_do_not_make_default_trail_ambiguous
+    { "a.json" => "first", "z.json" => "second" }.each do |name, machine|
+      write_recency_archive(name, "record_family" => "archived_record", "synthetic" => true,
+                                  "archived_at" => "2026-08-05T09:00:00Z",
+                                  "source_path" => "events/b9/#{name}",
+                                  "data" => archive_event("e1").merge("synthetic" => true,
+                                                                      "machine_id" => machine))
+    end
+
+    result = run_log("shakacode/example#104", "--json")
+    included = run_log("shakacode/example#104", "--include-synthetic", "--json")
+
+    assert_equal 0, result.status.exitstatus, result.stderr
+    assert_equal "complete", JSON.parse(result.stdout).fetch("trail")
+    refute_includes result.stderr, "ambiguous archive recency"
+    assert_equal "incomplete", JSON.parse(included.stdout).fetch("trail")
+    assert_includes included.stderr, "ambiguous archive recency"
+  end
+
+  def test_hidden_synthetic_twin_does_not_make_visible_archive_ambiguous
+    { "a.json" => false, "z.json" => true }.each do |name, synthetic|
+      write_recency_archive(name, "record_family" => "archived_record", "synthetic" => synthetic,
+                                  "archived_at" => "2026-08-05T09:00:00Z",
+                                  "source_path" => "events/b9/#{name}",
+                                  "data" => archive_event("e1").merge("synthetic" => synthetic))
+    end
+
+    result = run_log("shakacode/example#104", "--json")
+
+    assert_equal 0, result.status.exitstatus, result.stderr
+    assert_equal "complete", JSON.parse(result.stdout).fetch("trail")
+    refute_includes result.stderr, "ambiguous archive recency"
+  end
+
+  def test_hidden_synthetic_twin_does_not_make_visible_archive_recency_incomplete
+    write_recency_archive("dated.json", "record_family" => "archived_record",
+                                        "archived_at" => "2026-08-05T09:00:00Z",
+                                        "source_path" => "events/b9/dated.json", "data" => archive_event("e1"))
+    write_recency_archive("undated.json", "record_family" => "archived_record", "synthetic" => true,
+                                          "source_path" => "events/b9/undated.json",
+                                          "data" => archive_event("e1").merge("synthetic" => true))
+
+    result = run_log("shakacode/example#104", "--json")
+
+    assert_equal 0, result.status.exitstatus, result.stderr
+    assert_equal "complete", JSON.parse(result.stdout).fetch("trail")
+    refute_includes result.stderr, "unreadable archive recency"
+  end
+
+  def test_newer_synthetic_archive_does_not_hide_older_real_event_by_default
+    { "real.json" => ["2026-08-05T09:00:00Z", false, "real"],
+      "synthetic.json" => ["2026-08-06T09:00:00Z", true, "synthetic"] }.each do |name, values|
+      archived_at, synthetic, machine = values
+      write_recency_archive(name, "record_family" => "archived_record", "synthetic" => synthetic,
+                                  "archived_at" => archived_at, "source_path" => "events/b9/#{name}",
+                                  "data" => archive_event("e1").merge("synthetic" => synthetic,
+                                                                      "machine_id" => machine))
+    end
+
+    result = run_log("shakacode/example#104", "--json")
+    included = run_log("shakacode/example#104", "--include-synthetic", "--json")
+
+    assert_equal(["real"], JSON.parse(result.stdout).fetch("events").map { |event| event.fetch("machine") })
+    assert_equal(["synthetic"], JSON.parse(included.stdout).fetch("events").map { |event| event.fetch("machine") })
+  end
+
+  def test_real_record_in_mixed_envelope_does_not_make_synthetic_duplicate_visible
+    write_recency_archive("z-real.json", "record_family" => "archived_record",
+                                         "archived_at" => "2026-08-05T09:00:00Z",
+                                         "source_path" => "events/b9/e1-real.json",
+                                         "data" => archive_event("e1").merge("machine_id" => "real"))
+    write_recency_archive(
+      "a-mixed.json", "record_family" => "compacted_events", "synthetic" => true,
+                      "archived_at" => "2026-08-05T09:00:00Z",
+                      "source_paths" => %w[events/b9/e1-synthetic.json events/b9/e2-real.json],
+                      "records" => [archive_event("e1").merge("synthetic" => true, "machine_id" => "synthetic"),
+                                    archive_event("e2").merge("target" => "999")]
+    )
+
+    result = run_log("shakacode/example#104", "--json")
+    included = run_log("shakacode/example#104", "--include-synthetic", "--json")
+
+    assert_equal "complete", JSON.parse(result.stdout).fetch("trail")
+    assert_equal(["real"], JSON.parse(result.stdout).fetch("events").map { |event| event.fetch("machine") })
+    refute_includes result.stderr, "ambiguous archive recency"
+    assert_equal "incomplete", JSON.parse(included.stdout).fetch("trail")
+    assert_includes included.stderr, "ambiguous archive recency"
+  end
+
+  def test_mixed_envelope_recency_scope_requires_one_visible_matching_record
+    write_recency_archive(
+      "mixed.json", "record_family" => "compacted_events", "synthetic" => false,
+                    "source_paths" => %w[events/b9/e1-synthetic.json events/b9/e2-real.json],
+                    "records" => [archive_event("e1").merge("synthetic" => true),
+                                  archive_event("e2").merge("target" => "999")]
+    )
+
+    result = run_log("shakacode/example#104", "--json")
+    included = run_log("shakacode/example#104", "--include-synthetic", "--json")
+
+    assert_equal "complete", JSON.parse(result.stdout).fetch("trail")
+    refute_includes result.stderr, "unreadable archive recency"
+    assert_equal "incomplete", JSON.parse(included.stdout).fetch("trail")
+    assert_includes included.stderr, "unreadable archive recency"
+  end
+
+  private
+
+  def write_recency_archive(name, payload)
+    path = File.join(@state_root, "archive/events/b9", name)
+    FileUtils.mkdir_p(File.dirname(path))
+    envelope = { "schema_version" => 1, "delete_after" => "2026-10-04T00:00:00Z" }.merge(payload)
+    File.write(path, "#{JSON.generate(envelope)}\n")
+  end
+
+  def archive_event(event_id)
+    { "schema_version" => 2, "event_id" => event_id, "batch_id" => "b9", "type" => "merged",
+      "repo" => "shakacode/example", "target" => "104", "at" => "2026-08-04T00:00:00Z" }
+  end
+
+  def register_replay_batch
+    manifest_path = File.join(@state_root, "batch-archive-replay.json")
+    manifest = {
+      "batch_id" => "batch-archive-replay", "repo" => "shakacode/example",
+      "objective" => "exercise archive replay",
+      "lanes" => [{ "name" => "code", "owner" => "worker-a", "targets" => ["104"] }]
+    }
+    File.write(manifest_path, JSON.generate(manifest))
+    result = run_state_command("register-batch", "--file", manifest_path)
+
+    assert_equal 0, result.status.exitstatus, result.stderr
+  end
+
+  def archive_terminal(host)
+    close_terminal(host)
+    result = run_state_command("gc", "--execute", "--hot-days", "0", "--prefix", "events")
+
+    assert_equal 0, result.status.exitstatus, result.stderr
+    assert_empty Dir.glob(File.join(@state_root, "events", "**", "*.json"))
+  end
+
+  def close_terminal(host)
+    result = run_state_command(*close_args, "--host", host)
+    assert_equal 0, result.status.exitstatus, result.stderr
+  end
+
+  def close_args
+    [
+      "record-event", "--batch-id", "batch-archive-replay", "--type", "lane_closed",
+      "--lane", "code", "--agent-id", "worker-a", "--repo", "shakacode/example",
+      "--target", "104", "--terminal", "done", "--pr-state", "merged"
+    ]
+  end
+
+  def order_archive_paths_against_parsed_recency
+    by_machine = archive_record_paths.to_h do |path|
+      envelope = JSON.parse(File.read(path))
+      [envelope.fetch("records").fetch(0).dig("closed_by", "machine"), envelope]
+    end
+    directory = File.dirname(archive_record_paths.fetch(0))
+    archive_record_paths.each { |path| FileUtils.rm(path) }
+    write_envelope(File.join(directory, "compact-a-older.json"), by_machine.fetch("codex"),
+                   "2026-08-05T10:00:00+02:00")
+    write_envelope(File.join(directory, "compact-z-newer.json"), by_machine.fetch("claude-code"),
+                   "2026-08-05T09:00:00Z")
+  end
+
+  def order_archive_paths_with_equal_recency(malformed_source: false)
+    by_machine = archive_record_paths.to_h do |path|
+      envelope = JSON.parse(File.read(path))
+      [envelope.fetch("records").fetch(0).dig("closed_by", "machine"), envelope]
+    end
+    directory = File.dirname(archive_record_paths.fetch(0))
+    archive_record_paths.each { |path| FileUtils.rm(path) }
+    by_machine.fetch("codex")["source_paths"] = [nil] if malformed_source
+    write_envelope(File.join(directory, "compact-a-codex.json"), by_machine.fetch("codex"),
+                   "2026-08-05T09:00:00Z")
+    write_envelope(File.join(directory, "compact-z-claude.json"), by_machine.fetch("claude-code"),
+                   "2026-08-05T09:00:00Z")
+  end
+
+  def write_envelope(path, envelope, archived_at)
+    envelope["archived_at"] = archived_at
+    File.write(path, "#{JSON.generate(envelope)}\n")
+  end
+
+  def assert_log_machine(expected)
+    result = run_log("shakacode/example#104", "--json")
+    event = JSON.parse(result.stdout).fetch("events").fetch(0)
+
+    assert_equal 0, result.status.exitstatus, result.stderr
+    assert_equal expected, event.fetch("machine")
+  end
+
+  def archive_record_paths
+    Dir.glob(File.join(@state_root, "archive", "events", "**", "*.json"))
+  end
+
+  def run_state_command(*)
+    run_command(COMMAND_ENV.merge("AGENT_COORD_STATE_ROOT" => @state_root), "ruby", BIN, *)
+  end
+end
