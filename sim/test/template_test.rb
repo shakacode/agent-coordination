@@ -447,6 +447,11 @@ class SimulationTemplateTest < Minitest::Test
     assert_equal "Simulation test runner must remain executable.\n", err
   end
 
+  def test_fixture_subprocess_environment_allows_explicit_github_base_ref
+    assert_nil fixture_subprocess_env({})["GITHUB_BASE_REF"]
+    assert_equal "release", fixture_subprocess_env("GITHUB_BASE_REF" => "release")["GITHUB_BASE_REF"]
+  end
+
   def test_validate_does_not_honor_inherited_syntax_only_environment
     FileUtils.rm(File.join(@repo, ".agents/bin/test"))
     git("add", "-A")
@@ -727,7 +732,7 @@ class SimulationTemplateTest < Minitest::Test
 
   def run_ci_gate(base_ref = "HEAD", env = {})
     Open3.capture3(
-      env.merge("AGENT_SIM_BASE_REF" => base_ref),
+      fixture_subprocess_env(env).merge("AGENT_SIM_BASE_REF" => base_ref),
       File.join(@repo, ".agents/bin/ci"),
       chdir: @repo
     )
@@ -736,7 +741,7 @@ class SimulationTemplateTest < Minitest::Test
   def validate(base_ref = "HEAD", env = {})
     validator = File.join(@repo, ".agents/bin/validate")
     Open3.capture3(
-      env.merge("AGENT_SIM_BASE_REF" => base_ref),
+      fixture_subprocess_env(env).merge("AGENT_SIM_BASE_REF" => base_ref),
       [validator, validator],
       chdir: @repo
     )
@@ -744,7 +749,7 @@ class SimulationTemplateTest < Minitest::Test
 
   def config_check(base_ref = "HEAD", env = {})
     Open3.capture3(
-      env,
+      fixture_subprocess_env(env),
       File.join(@repo, ".agents/bin/config-check"),
       base_ref,
       chdir: @repo
@@ -753,12 +758,16 @@ class SimulationTemplateTest < Minitest::Test
 
   def seam_guard(base_ref, head_ref, env = {})
     Open3.capture3(
-      env,
+      fixture_subprocess_env(env),
       File.join(TEMPLATE, ".agents/bin/seam-guard"),
       @repo,
       base_ref,
       head_ref,
       chdir: @repo
     )
+  end
+
+  def fixture_subprocess_env(env)
+    { "GITHUB_BASE_REF" => nil }.merge(env)
   end
 end
