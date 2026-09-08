@@ -54,6 +54,16 @@ class HttpStoreStub
   def shutdown = @server.shutdown && @thread.join
 end
 
+class StoreStatusValidationTest < Minitest::Test
+  def test_local_and_github_stores_reject_unsupported_status_before_scanning
+    Dir.mktmpdir do |root|
+      stores = [AgentCoord::LocalStore.new(File.join(root, "missing")), AgentCoord::GitHubStore.allocate]
+      stores.last.define_singleton_method(:tree_nodes) { raise "storage scan should not run" }
+      stores.each { |store| assert_raises(AgentCoord::Error) { store.list_json("attention", status: "resolved") } }
+    end
+  end
+end
+
 class HttpStoreTestCase < Minitest::Test
   def with_stub(responses)
     stub = HttpStoreStub.new(responses)
@@ -265,6 +275,47 @@ class HttpStoreReadTest < HttpStoreTestCase
       refute store.filtered_list?("heartbeats")
       assert_equal "/v1/state?prefix=heartbeats", stub.requests.first[:path]
     end
+  end
+
+  def test_list_json_sends_open_status_before_the_worker_limit
+    body = {
+      "entries" => [
+        { "path" => "attention/default/o/r/open.json", "data" => { "status" => "open" }, "version" => 1 }
+      ]
+    }
+    with_stub([[200, body]]) do |store, stub|
+      entries = store.list_json("attention/default/o/r", maximum: 1, status: "open")
+
+      assert_equal(["open"], entries.map { |entry| entry.data.fetch("status") })
+      assert_equal "/v1/state?prefix=attention%2Fdefault%2Fo%2Fr&status=open&limit=1",
+                   stub.requests.first[:path]
+    end
+  end
+
+  def test_attention_list_pushes_default_open_filter_but_include_resolved_does_not
+    store = Class.new do
+      attr_reader :statuses
+
+      def initialize = @statuses = []
+
+      def list_json(_prefix, maximum: nil, status: nil)
+        raise "missing maximum" unless maximum
+
+        @statuses << status
+        []
+      end
+
+      def filtered_list?(_prefix) = false
+      def close; end
+    end.new
+    runner = AgentCoord::Runner.new([], stdout: StringIO.new, stderr: StringIO.new)
+    runner.define_singleton_method(:build_store) { |_options| store }
+    base = { workspace: "default", repo: "shakacode/agent-coordination", limit: 100, json: true }
+
+    runner.send(:attention_list, base)
+    runner.send(:attention_list, base.merge(include_resolved: true))
+
+    assert_equal ["open", nil], store.statuses
   end
 
   def test_list_json_tracks_filtered_responses_per_prefix
