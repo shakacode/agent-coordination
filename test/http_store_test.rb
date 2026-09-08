@@ -54,6 +54,16 @@ class HttpStoreStub
   def shutdown = @server.shutdown && @thread.join
 end
 
+class StoreStatusValidationTest < Minitest::Test
+  def test_local_and_github_stores_reject_unsupported_status_before_scanning
+    Dir.mktmpdir do |root|
+      stores = [AgentCoord::LocalStore.new(File.join(root, "missing")), AgentCoord::GitHubStore.allocate]
+      stores.last.define_singleton_method(:tree_nodes) { raise "storage scan should not run" }
+      stores.each { |store| assert_raises(AgentCoord::Error) { store.list_json("attention", status: "resolved") } }
+    end
+  end
+end
+
 class HttpStoreTestCase < Minitest::Test
   def with_stub(responses)
     stub = HttpStoreStub.new(responses)

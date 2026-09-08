@@ -187,11 +187,8 @@ class HttpBackendIntegrationTest < Minitest::Test
   end
 
   def test_attention_open_status_accepts_cli_valid_absolute_uris
-    valid_uris = [
-      "http:", "http:#a", "x://host:99999", "x://[v1.foo]",
-      "x:?%", "x:?%G0", "x:?%a_", "x:?%\t\r\n-", "x:a?%!!", "x:a?%&_"
-    ]
-    valid_uris.each_with_index do |open_uri, index|
+    valid_uris = %w[http: http:#a x://host:99999 x://[v1.foo] x:?% x:?%G0 x:?%a_ x:a?%!! x:a?%&_]
+    valid_uris.push("x:?%\t\r\n-").each_with_index do |open_uri, index|
       assert_attention_uri_validation(open_uri, index:, valid: true)
     end
   end

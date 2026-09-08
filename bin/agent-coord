@@ -8276,10 +8276,15 @@ module AgentCoord
     end
 
     def list_json(prefix, maximum: nil, status: nil)
+      raise Error, "unsupported local list status #{status}" unless [nil, "open"].include?(status)
+
       directory = readable_list_directory(prefix)
       return [] unless directory
 
-      entries = list_json_files(directory, prefix, maximum:).filter_map do |file|
+      # The local reader must return every parsed record so the caller validates
+      # malformed state before applying its status projection. Only HttpStore can
+      # safely push this predicate into the authoritative list query.
+      list_json_files(directory, prefix, maximum:).filter_map do |file|
         path = file.delete_prefix("#{@root}/")
         begin
           StoredJson.new(path: path, data: JSON.parse(File.read(file, encoding: "UTF-8")), sha: file_sha(file))
@@ -8290,12 +8295,6 @@ module AgentCoord
           nil
         end
       end
-      # The local reader must return every parsed record so the caller validates
-      # malformed state before applying its status projection. Only HttpStore can
-      # safely push this predicate into the authoritative list query.
-      raise Error, "unsupported local list status #{status}" unless [nil, "open"].include?(status)
-
-      entries
     end
 
     def delete_json(path, message:, sha:) # rubocop:disable Lint/UnusedMethodArgument
@@ -8542,6 +8541,8 @@ module AgentCoord
 
     def list_json(prefix, maximum: nil, status: nil)
       AgentCoord.safe_path!(prefix)
+      raise Error, "unsupported GitHub list status #{status}" unless [nil, "open"].include?(status)
+
       entries = []
       matched = 0
       tree_nodes.each do |node|
@@ -8564,8 +8565,6 @@ module AgentCoord
       end
       # GitHubStore has no server-side status-query contract. Preserve complete
       # validation and let the attention command apply the projection locally.
-      raise Error, "unsupported GitHub list status #{status}" unless [nil, "open"].include?(status)
-
       entries
     end
 
