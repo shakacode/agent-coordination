@@ -141,23 +141,123 @@ function compareRfc3339(left: Rfc3339Instant, right: Rfc3339Instant): number {
   return left.fraction.padEnd(width, "0").localeCompare(right.fraction.padEnd(width, "0"));
 }
 
+const URI_PCHAR = new Set("!$&'()*+,-./0123456789:;=@ABCDEFGHIJKLMNOPQRSTUVWXYZ_abcdefghijklmnopqrstuvwxyz~");
+const URI_REG_NAME_CHAR = new Set("!$&'()*+,-.0123456789;=ABCDEFGHIJKLMNOPQRSTUVWXYZ_abcdefghijklmnopqrstuvwxyz~");
+const URI_USERINFO_CHAR = new Set([...URI_REG_NAME_CHAR, ":"]);
+const URI_QUERY_OR_FRAGMENT_CHAR = new Set([...URI_PCHAR, "?"]);
+
+function validUriChars(value: string, allowed: Set<string>): boolean {
+  for (let index = 0; index < value.length; index += 1) {
+    const character = value[index];
+    if (character === "%") {
+      if (!/^[0-9A-Fa-f]{2}$/.test(value.slice(index + 1, index + 3))) return false;
+      index += 2;
+    } else if (!allowed.has(character)) {
+      return false;
+    }
+  }
+  return true;
+}
+
+function validUriQuery(value: string): boolean {
+  value = value.replace(/[\t\r\n]/g, "");
+  for (let index = 0; index + 2 < value.length; index += 1) {
+    if (value[index] === "%" && !/[0-9A-Fa-f]/.test(value[index + 1]) && !/[0-9A-Fa-f]/.test(value[index + 2])) {
+      return false;
+    }
+  }
+  return true;
+}
+
+function validIpv4(value: string): boolean {
+  const octets = value.split(".");
+  return octets.length === 4 && octets.every(
+    (octet) => /^(?:0|[1-9][0-9]{0,2})$/.test(octet) && Number(octet) <= 255,
+  );
+}
+
+function validIpv6(value: string): boolean {
+  if ((value.match(/::/g) ?? []).length > 1) return false;
+  const compressed = value.includes("::");
+  const [leftText, rightText = ""] = value.split("::");
+  const left = leftText === "" ? [] : leftText.split(":");
+  const right = rightText === "" ? [] : rightText.split(":");
+  if ([...left, ...right].some((part) => part === "")) return false;
+
+  const parts = [...left, ...right];
+  let groups = 0;
+  for (let index = 0; index < parts.length; index += 1) {
+    const part = parts[index];
+    if (part.includes(".")) {
+      if (index !== parts.length - 1 || !validIpv4(part)) return false;
+      groups += 2;
+    } else {
+      if (!/^[0-9A-Fa-f]{1,4}$/.test(part)) return false;
+      groups += 1;
+    }
+  }
+  return compressed ? groups < 8 : groups === 8;
+}
+
+function validIpLiteral(value: string): boolean {
+  if (/^v[0-9A-Fa-f]+\.[!$&'()*+,\-.0-9:;=A-Z_a-z~]+$/.test(value)) return true;
+  return validIpv6(value);
+}
+
+function validUriAuthority(value: string): boolean {
+  const at = value.indexOf("@");
+  if (at >= 0) {
+    if (value.indexOf("@", at + 1) >= 0 || !validUriChars(value.slice(0, at), URI_USERINFO_CHAR)) return false;
+    value = value.slice(at + 1);
+  }
+
+  if (value.startsWith("[")) {
+    const close = value.indexOf("]");
+    if (close < 0 || !validIpLiteral(value.slice(1, close))) return false;
+    const port = value.slice(close + 1);
+    return port === "" || /^:[0-9]*$/.test(port);
+  }
+  if (value.includes("[") || value.includes("]")) return false;
+  const colon = value.lastIndexOf(":");
+  if (colon >= 0) {
+    if (!/^[0-9]*$/.test(value.slice(colon + 1)) || value.slice(0, colon).includes(":")) return false;
+    value = value.slice(0, colon);
+  }
+  return validUriChars(value, URI_REG_NAME_CHAR);
+}
+
 function validAbsoluteUri(value: unknown): boolean {
   if (!boundedText(value, 2000)) return false;
-  const match = value.match(/^([A-Za-z][A-Za-z0-9+.-]*):(.*)$/);
+  const match = value.match(/^([A-Za-z][A-Za-z0-9+.-]*):([\s\S]*)$/);
   if (!match) return false;
-  const rest = match[2];
-  if (!/^[\x21-\x7E]*$/.test(rest) || /%(?![0-9A-Fa-f]{2})/.test(rest)) return false;
-  if (/[^A-Za-z0-9\-._~!$&'()*+,;=:/?@%#[\]]/.test(rest)) return false;
-  if (!URL.canParse(value) || (rest.match(/#/g) ?? []).length > 1) return false;
-  const queryStart = rest.indexOf("?");
+  let rest = match[2];
+  if ([...rest].some((character) => character.charCodeAt(0) > 0x7f)) return false;
+
   const fragmentStart = rest.indexOf("#");
-  const bracketBoundary = queryStart >= 0 && (fragmentStart < 0 || queryStart < fragmentStart) ? queryStart : rest.length;
-  const beforeQuery = rest.slice(0, bracketBoundary);
-  if (beforeQuery.includes("[") || beforeQuery.includes("]")) {
-    const authority = beforeQuery.match(/^\/\/\[([0-9A-Fa-f:.]+)\](?::[0-9]*)?(?:\/.*)?$/);
-    if (!authority) return false;
+  if (fragmentStart >= 0) {
+    if (rest.indexOf("#", fragmentStart + 1) >= 0) return false;
+    if (!validUriChars(rest.slice(fragmentStart + 1), URI_QUERY_OR_FRAGMENT_CHAR)) return false;
+    rest = rest.slice(0, fragmentStart);
   }
-  return fragmentStart < 0 || !rest.slice(fragmentStart).includes("[") && !rest.slice(fragmentStart).includes("]");
+
+  const queryStart = rest.indexOf("?");
+  const hierarchy = queryStart >= 0 ? rest.slice(0, queryStart) : rest;
+  if (hierarchy !== "" && !hierarchy.startsWith("/")) {
+    // Ruby treats a rootless component and everything through its query marker as one opaque value.
+    return validUriChars(hierarchy, URI_PCHAR);
+  }
+  const validQuery = queryStart < 0 || validUriQuery(rest.slice(queryStart + 1));
+  if (hierarchy.startsWith("//")) {
+    const pathStart = hierarchy.indexOf("/", 2);
+    const authority = pathStart >= 0 ? hierarchy.slice(2, pathStart) : hierarchy.slice(2);
+    const path = pathStart >= 0 ? hierarchy.slice(pathStart) : "";
+    return validQuery && validUriAuthority(authority) && validUriChars(path, URI_PCHAR);
+  }
+  if (hierarchy === "") return validQuery;
+  if (hierarchy.startsWith("/")) {
+    return validQuery && !hierarchy.startsWith("//") && validUriChars(hierarchy, URI_PCHAR);
+  }
+  return false;
 }
 
 function validAttentionSource(value: unknown): boolean {
