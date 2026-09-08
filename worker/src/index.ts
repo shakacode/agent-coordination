@@ -73,6 +73,143 @@ function validAttentionPrefix(prefix: string): boolean {
   return parts.length === 3 || validAttentionRepository(parts[2], parts[3]);
 }
 
+const ATTENTION_REQUIRED_FIELDS = [
+  "schema_version", "workspace", "id", "repository", "target", "status", "kind", "question",
+  "choices", "priority_class", "priority_reason", "safe_resume", "source", "source_generation",
+  "created_at", "refreshed_at",
+] as const;
+const ATTENTION_ALLOWED_FIELDS = new Set([...ATTENTION_REQUIRED_FIELDS, "resolved_at"]);
+const ATTENTION_PRIORITIES = new Set([
+  "urgent-risk", "unblocks-work", "current-head-merge", "product-architecture",
+]);
+const ATTENTION_CAPABILITY_STATES = new Set(["available", "unavailable", "unknown"]);
+const RFC3339_PATTERN = /^([0-9]{4})-([0-9]{2})-([0-9]{2})[Tt]([0-9]{2}):([0-9]{2}):([0-5][0-9])(?:[.]([0-9]+))?(?:[Zz]|([+-])([0-9]{2}):([0-9]{2}))$/;
+
+function plainObject(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+function boundedText(value: unknown, maximum: number): value is string {
+  return typeof value === "string" && value.length > 0 && Array.from(value).length <= maximum;
+}
+
+interface Rfc3339Instant {
+  seconds: number;
+  fraction: string;
+}
+
+function leapYear(year: number): boolean {
+  return year % 4 === 0 && (year % 100 !== 0 || year % 400 === 0);
+}
+
+function daysBeforeYear(year: number): number {
+  return 365 * year + Math.floor((year + 3) / 4) - Math.floor((year + 99) / 100)
+    + Math.floor((year + 399) / 400);
+}
+
+function rfc3339Time(value: unknown): Rfc3339Instant | null {
+  if (typeof value !== "string" || value.length > 64) return null;
+  const match = value.match(RFC3339_PATTERN);
+  if (!match) return null;
+  const [, yearText, monthText, dayText, hourText, minuteText, secondText, fraction = "",
+    offsetSign, offsetHourText = "0", offsetMinuteText = "0"] = match;
+  const year = Number(yearText);
+  const month = Number(monthText);
+  const day = Number(dayText);
+  const hour = Number(hourText);
+  const minute = Number(minuteText);
+  const second = Number(secondText);
+  const offsetHour = Number(offsetHourText);
+  const offsetMinute = Number(offsetMinuteText);
+  if (month < 1 || month > 12 || hour > 23 || minute > 59 || offsetHour > 23 || offsetMinute > 59) return null;
+  const monthLengths = [31, leapYear(year) ? 29 : 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+  const daysInMonth = monthLengths[month - 1];
+  if (day < 1 || day > daysInMonth) return null;
+  const daysBeforeMonth = monthLengths.slice(0, month - 1).reduce((sum, length) => sum + length, 0);
+  const localSeconds = (daysBeforeYear(year) - daysBeforeYear(1970) + daysBeforeMonth + day - 1) * 86_400
+    + hour * 3_600 + minute * 60 + second;
+  const offsetMinutes = offsetHour * 60 + offsetMinute;
+  return {
+    seconds: localSeconds + (offsetSign === "+" ? -offsetMinutes : offsetMinutes) * 60,
+    fraction: fraction.replace(/0+$/, ""),
+  };
+}
+
+function compareRfc3339(left: Rfc3339Instant, right: Rfc3339Instant): number {
+  if (left.seconds !== right.seconds) return left.seconds - right.seconds;
+  const width = Math.max(left.fraction.length, right.fraction.length);
+  return left.fraction.padEnd(width, "0").localeCompare(right.fraction.padEnd(width, "0"));
+}
+
+function validAbsoluteUri(value: unknown): boolean {
+  if (!boundedText(value, 2000)) return false;
+  const match = value.match(/^([A-Za-z][A-Za-z0-9+.-]*):(.*)$/);
+  if (!match) return false;
+  const rest = match[2];
+  if (!/^[\x21-\x7E]*$/.test(rest) || /%(?![0-9A-Fa-f]{2})/.test(rest)) return false;
+  if (/[^A-Za-z0-9\-._~!$&'()*+,;=:/?@%#[\]]/.test(rest)) return false;
+  if (!URL.canParse(value) || (rest.match(/#/g) ?? []).length > 1) return false;
+  const queryStart = rest.indexOf("?");
+  const fragmentStart = rest.indexOf("#");
+  const bracketBoundary = queryStart >= 0 && (fragmentStart < 0 || queryStart < fragmentStart) ? queryStart : rest.length;
+  const beforeQuery = rest.slice(0, bracketBoundary);
+  if (beforeQuery.includes("[") || beforeQuery.includes("]")) {
+    const authority = beforeQuery.match(/^\/\/\[([0-9A-Fa-f:.]+)\](?::[0-9]*)?(?:\/.*)?$/);
+    if (!authority) return false;
+  }
+  return fragmentStart < 0 || !rest.slice(fragmentStart).includes("[") && !rest.slice(fragmentStart).includes("]");
+}
+
+function validAttentionSource(value: unknown): boolean {
+  if (!plainObject(value)) return false;
+  const required = ["provider", "host_id", "task_id", "last_seen_at", "capabilities"];
+  const allowed = new Set([...required, "open_uri"]);
+  if (!required.every((field) => Object.hasOwn(value, field))) return false;
+  if (Object.keys(value).some((field) => !allowed.has(field))) return false;
+  if (!boundedText(value.provider, 100) || !boundedText(value.host_id, 255) || !boundedText(value.task_id, 255)) {
+    return false;
+  }
+  if (rfc3339Time(value.last_seen_at) === null) return false;
+  if (Object.hasOwn(value, "open_uri") && !validAbsoluteUri(value.open_uri)) {
+    return false;
+  }
+  if (!plainObject(value.capabilities)) return false;
+  if (Object.keys(value.capabilities).sort().join(",") !== "native_open,prompt_forwarding") return false;
+  return Object.values(value.capabilities).every(
+    (capability) => typeof capability === "string" && ATTENTION_CAPABILITY_STATES.has(capability),
+  );
+}
+
+function validAttentionRecord(path: string, value: unknown): value is Record<string, unknown> {
+  if (!plainObject(value)) return false;
+  if (!ATTENTION_REQUIRED_FIELDS.every((field) => Object.hasOwn(value, field))) return false;
+  if (Object.keys(value).some((field) => !ATTENTION_ALLOWED_FIELDS.has(field))) return false;
+  if (value.schema_version !== 1 || typeof value.workspace !== "string" || typeof value.id !== "string"
+      || typeof value.repository !== "string") return false;
+  const repositoryParts = value.repository.split("/");
+  if (!validAttentionComponent(value.workspace) || !validAttentionComponent(value.id)
+      || repositoryParts.length !== 2 || !validAttentionRepository(repositoryParts[0], repositoryParts[1])) return false;
+  if (path !== `attention/${value.workspace}/${value.repository}/${value.id}.json`) return false;
+  if (!boundedText(value.target, 2000) || !boundedText(value.kind, 100)
+      || !boundedText(value.question, 4000) || !boundedText(value.priority_reason, 4000)
+      || !boundedText(value.safe_resume, 4000)) return false;
+  if (!Array.isArray(value.choices) || value.choices.length < 1 || value.choices.length > 10
+      || !value.choices.every((choice) => boundedText(choice, 2000))) return false;
+  if (typeof value.priority_class !== "string" || !ATTENTION_PRIORITIES.has(value.priority_class)) return false;
+  if (value.status !== "open" && value.status !== "resolved") return false;
+  if (typeof value.source_generation !== "number" || !Number.isSafeInteger(value.source_generation)
+      || value.source_generation < 0) return false;
+  if (!validAttentionSource(value.source)) return false;
+  const createdAt = rfc3339Time(value.created_at);
+  const refreshedAt = rfc3339Time(value.refreshed_at);
+  if (createdAt === null || refreshedAt === null || compareRfc3339(refreshedAt, createdAt) < 0) return false;
+  if (value.status === "resolved") {
+    const resolvedAt = rfc3339Time(value.resolved_at);
+    return resolvedAt !== null && compareRfc3339(resolvedAt, createdAt) >= 0;
+  }
+  return !Object.hasOwn(value, "resolved_at");
+}
+
 function validPath(path: string): boolean {
   const encoder = new TextEncoder();
   const archive = path.startsWith("archive/");
@@ -342,50 +479,65 @@ async function listState(
     });
     clauses.push(`(${scopeClauses.join(" OR ")})`);
   }
-  if (cursor !== null) {
-    clauses.push("path > ?");
-    binds.push(cursor);
-  }
-  if (status !== null) {
-    clauses.push(
-      "(json_type(data, '$.status') IS NULL OR json_type(data, '$.status') != 'text'"
-      + " OR json_extract(data, '$.status') != 'resolved'"
-      + " OR json_type(data, '$.resolved_at') IS NOT 'text'"
-      + " OR json_extract(data, '$.schema_version') IS NOT 1"
-      + " OR json_type(data, '$.workspace') IS NOT 'text'"
-      + " OR json_type(data, '$.repository') IS NOT 'text'"
-      + " OR json_type(data, '$.id') IS NOT 'text'"
-      + " OR path IS NOT ('attention/' || json_extract(data, '$.workspace') || '/'"
-      + " || json_extract(data, '$.repository') || '/' || json_extract(data, '$.id') || '.json'))",
-    );
-  }
-  let sql = `SELECT path, data, version, updated_by FROM state WHERE ${clauses.join(" AND ")} ORDER BY path`;
-  if (limit !== null) {
-    sql += " LIMIT ?";
-    binds.push(limit + 1);
-  }
-  const rows = await env.DB.prepare(
-    sql,
-  ).bind(...binds).all<{ path: string; data: string; version: number; updated_by: string | null }>();
-  let results = rows.results ?? [];
   let nextCursor: string | undefined;
-  if (limit !== null && results.length > limit) {
-    results = results.slice(0, limit);
-    nextCursor = results[results.length - 1]?.path;
-  }
-  const entries = results.map((r) => ({
-    path: r.path,
-    data: JSON.parse(r.data),
-    version: r.version,
-    ...(r.updated_by === null ? {} : { updated_by: r.updated_by }),
-  }));
-  if (status !== null && entries.some((entry) => (
-    entry.data === null
-      || typeof entry.data !== "object"
-      || Array.isArray(entry.data)
-      || (entry.data as { status?: unknown }).status !== status
-  ))) {
-    return json(500, { error: "invalid_attention_status" });
+  let entries: Array<{ path: string; data: Record<string, unknown>; version: number; updated_by?: string }> = [];
+  if (status !== null) {
+    let scanCursor = cursor;
+    while (true) {
+      const pageClauses = [...clauses];
+      const pageBinds = [...binds];
+      if (scanCursor !== null) {
+        pageClauses.push("path > ?");
+        pageBinds.push(scanCursor);
+      }
+      const sql = `SELECT path, data, version, updated_by FROM state WHERE ${pageClauses.join(" AND ")}`
+        + " ORDER BY path LIMIT ?";
+      pageBinds.push(MAX_LIST_LIMIT);
+      const page = await env.DB.prepare(sql).bind(...pageBinds)
+        .all<{ path: string; data: string; version: number; updated_by: string | null }>();
+      const pageRows = page.results ?? [];
+      for (const row of pageRows) {
+        const data: unknown = JSON.parse(row.data);
+        if (!validAttentionRecord(row.path, data)) return json(500, { error: "invalid_attention_status" });
+        if (data.status === status && (limit === null || entries.length <= limit)) {
+          entries.push({
+            path: row.path,
+            data,
+            version: row.version,
+            ...(row.updated_by === null ? {} : { updated_by: row.updated_by }),
+          });
+        }
+      }
+      if (pageRows.length < MAX_LIST_LIMIT) break;
+      scanCursor = pageRows[pageRows.length - 1]?.path ?? null;
+    }
+    if (limit !== null && entries.length > limit) {
+      entries = entries.slice(0, limit);
+      nextCursor = entries[entries.length - 1]?.path;
+    }
+  } else {
+    if (cursor !== null) {
+      clauses.push("path > ?");
+      binds.push(cursor);
+    }
+    let sql = `SELECT path, data, version, updated_by FROM state WHERE ${clauses.join(" AND ")} ORDER BY path`;
+    if (limit !== null) {
+      sql += " LIMIT ?";
+      binds.push(limit + 1);
+    }
+    const rows = await env.DB.prepare(sql).bind(...binds)
+      .all<{ path: string; data: string; version: number; updated_by: string | null }>();
+    const results = rows.results ?? [];
+    entries = results.map((row) => ({
+      path: row.path,
+      data: JSON.parse(row.data) as Record<string, unknown>,
+      version: row.version,
+      ...(row.updated_by === null ? {} : { updated_by: row.updated_by }),
+    }));
+    if (limit !== null && entries.length > limit) {
+      entries = entries.slice(0, limit);
+      nextCursor = entries[entries.length - 1]?.path;
+    }
   }
   return json(200, {
     entries,

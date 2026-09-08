@@ -161,6 +161,121 @@ class HttpBackendIntegrationTest < Minitest::Test
     assert_equal "invalid_attention_status", body.fetch("error")
   end
 
+  def test_attention_open_status_does_not_hide_resolved_records_with_invalid_content
+    token = ENV.fetch("ATTENTION_AGENT_COORD_API_TOKEN")
+    repository = "#{REPO}-invalid-content"
+    record = attention_record.merge(
+      "repository" => repository, "id" => "invalid-content", "status" => "resolved",
+      "resolved_at" => "2026-09-03T10:00:00Z", "priority_class" => "not-a-priority"
+    )
+    path = "attention/default/#{repository}/invalid-content.json"
+    code, body = http_json(
+      "PUT", state_path(path), token: token, headers: { "If-None-Match" => "*" }, body: { "data" => record }
+    )
+    assert_equal 201, code, body.inspect
+
+    query = URI.encode_www_form(prefix: "attention/default/#{repository}", status: "open")
+    code, body = http_json("GET", "/v1/state?#{query}", token: token)
+    assert_equal 500, code
+    assert_equal "invalid_attention_status", body.fetch("error")
+  end
+
+  def test_attention_open_status_uses_cli_uri_validation
+    token = ENV.fetch("ATTENTION_AGENT_COORD_API_TOKEN")
+    ["x:%", "x:a#b#c", "x://host:abc", "x://[::::]"].each_with_index do |open_uri, index|
+      repository = "#{REPO}-invalid-uri-#{index}"
+      id = "invalid-uri-#{index}"
+      record = attention_record.merge(
+        "repository" => repository, "id" => id, "status" => "resolved",
+        "resolved_at" => "2026-09-03T10:00:00Z",
+        "source" => attention_record.fetch("source").merge("open_uri" => open_uri)
+      )
+      path = "attention/default/#{repository}/#{id}.json"
+      code, body = http_json(
+        "PUT", state_path(path), token: token, headers: { "If-None-Match" => "*" }, body: { "data" => record }
+      )
+      assert_equal 201, code, body.inspect
+
+      query = URI.encode_www_form(prefix: "attention/default/#{repository}", status: "open")
+      code, body = http_json("GET", "/v1/state?#{query}", token: token)
+      assert_equal 500, code, open_uri
+      assert_equal "invalid_attention_status", body.fetch("error")
+    end
+  end
+
+  def test_attention_open_status_uses_cli_subsecond_timestamp_ordering
+    token = ENV.fetch("ATTENTION_AGENT_COORD_API_TOKEN")
+    repository = "#{REPO}-invalid-subsecond-order"
+    record = attention_record.merge(
+      "repository" => repository, "id" => "invalid-subsecond-order", "status" => "resolved",
+      "created_at" => "2026-09-03T09:00:00.0009Z",
+      "refreshed_at" => "2026-09-03T09:00:00.0001Z",
+      "resolved_at" => "2026-09-03T10:00:00Z"
+    )
+    path = "attention/default/#{repository}/invalid-subsecond-order.json"
+    code, body = http_json(
+      "PUT", state_path(path), token: token, headers: { "If-None-Match" => "*" }, body: { "data" => record }
+    )
+    assert_equal 201, code, body.inspect
+
+    query = URI.encode_www_form(prefix: "attention/default/#{repository}", status: "open")
+    code, body = http_json("GET", "/v1/state?#{query}", token: token)
+    assert_equal 500, code
+    assert_equal "invalid_attention_status", body.fetch("error")
+  end
+
+  def test_attention_open_status_accepts_cli_valid_unicode_and_year_zero_records
+    token = ENV.fetch("ATTENTION_AGENT_COORD_API_TOKEN")
+    repository = "#{REPO}-unicode-year-zero"
+    timestamp = "0000-02-29T09:00:00.0001Z"
+    record = attention_record.merge(
+      "repository" => repository, "id" => "unicode-year-zero", "status" => "resolved",
+      "created_at" => timestamp, "refreshed_at" => timestamp, "resolved_at" => timestamp,
+      "source" => attention_record.fetch("source").merge("provider" => "😀" * 100, "last_seen_at" => timestamp)
+    )
+    path = "attention/default/#{repository}/unicode-year-zero.json"
+    code, body = http_json(
+      "PUT", state_path(path), token: token, headers: { "If-None-Match" => "*" }, body: { "data" => record }
+    )
+    assert_equal 201, code, body.inspect
+
+    query = URI.encode_www_form(prefix: "attention/default/#{repository}", status: "open")
+    code, body = http_json("GET", "/v1/state?#{query}", token: token)
+    assert_equal 200, code, body.inspect
+    assert_empty body.fetch("entries")
+  end
+
+  def test_attention_open_status_validates_later_pages_before_applying_limit
+    token = ENV.fetch("ATTENTION_AGENT_COORD_API_TOKEN")
+    repository = "#{REPO}-validation-pages"
+    1000.times do |index|
+      id = format("%<index>04d-%<status>s", index:, status: index < 2 ? "open" : "resolved")
+      record = attention_record.merge("repository" => repository, "id" => id)
+      record = record.merge("status" => "resolved", "resolved_at" => "2026-09-03T10:00:00Z") if index >= 2
+      path = "attention/default/#{repository}/#{id}.json"
+      code, body = http_json(
+        "PUT", state_path(path), token: token, headers: { "If-None-Match" => "*" }, body: { "data" => record }
+      )
+      assert_equal 201, code, body.inspect
+    end
+
+    invalid_id = "1000-invalid"
+    invalid = attention_record.merge(
+      "repository" => repository, "id" => invalid_id, "status" => "resolved",
+      "resolved_at" => "2026-09-03T10:00:00Z", "priority_class" => "not-a-priority"
+    )
+    code, body = http_json(
+      "PUT", state_path("attention/default/#{repository}/#{invalid_id}.json"),
+      token: token, headers: { "If-None-Match" => "*" }, body: { "data" => invalid }
+    )
+    assert_equal 201, code, body.inspect
+
+    query = URI.encode_www_form(prefix: "attention/default/#{repository}", status: "open", limit: 1)
+    code, body = http_json("GET", "/v1/state?#{query}", token: token)
+    assert_equal 500, code
+    assert_equal "invalid_attention_status", body.fetch("error")
+  end
+
   def test_worker_enforces_the_attention_storage_key_contract
     token = ENV.fetch("AGENT_COORD_API_TOKEN")
     valid_prefix = "attention/#{'w' * 160}/owner/repo"
