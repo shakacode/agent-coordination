@@ -196,13 +196,14 @@ pass through the CLI's write-time validation at all.
 
 **Upgrade note.** A ledger populated before this change may already hold a batch
 whose id is now rejected — only from one of those non-CLI sources, since
-`validate_segment!` cannot produce such an id. Both a named `harvest --batch-id`
-for that raw id and a date-range harvest covering it reconcile the stale row:
-they remove the stored batch subtree rather than refresh it, because current
-validation still rejects the id and it therefore cannot be re-ingested.
-Neighboring batch rows remain intact. This is an upgrade hazard rather than new
-exposure: the row was already in the ledger and reachable before the validation
-change.
+`validate_segment!` cannot produce such an id. A named `harvest --batch-id` looks
+up that exact batch id across the ledger. Date-range cleanup is source-relative:
+it only considers stale rows whose `source_artifact_id` matches the selected
+source artifact. In either case, a matched stale row is removed with its stored
+batch subtree rather than refreshed, because current validation still rejects
+the id and it therefore cannot be re-ingested. Neighboring batch rows remain
+intact. This is an upgrade hazard rather than new exposure: the row was already
+in the ledger and reachable before the validation change.
 
 Note the `0004` migration's own comment still describes the promotion as an open
 gap. Applied migrations are hash-pinned historical records and are not edited;
