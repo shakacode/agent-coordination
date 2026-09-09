@@ -1831,6 +1831,28 @@ class TelemetryHarvesterTest < Minitest::Test # rubocop:disable Metrics/ClassLen
     )
   end
 
+  def test_operational_scorecard_excludes_orphan_targets_from_custody_rework
+    source = coordination_fixture
+    source.fetch("events").replace(
+      [
+        ["known-release", "78", "claim.released", "2026-07-18T01:00:00Z"],
+        ["known-acquire", "78", "claim.acquired", "2026-07-18T01:10:00Z"],
+        ["orphan-release", "999", "claim.released", "2026-07-18T01:00:00Z"],
+        ["orphan-acquire", "999", "claim.acquired", "2026-07-18T01:10:00Z"]
+      ].map do |id, target, type, at|
+        {
+          "id" => id, "batch_id" => "batch-fixture",
+          "repo" => "shakacode/agent-coordination", "target" => target,
+          "type" => type, "at" => at
+        }
+      end
+    )
+
+    rework = harvested_scorecard(source).dig("operational_load", "custody_rework")
+
+    assert_equal 1, rework.fetch("reclaims")
+  end
+
   def test_operational_scorecard_marks_ambiguous_lane_membership_as_duration_gaps
     source = coordination_fixture
     source.fetch("batches").first.fetch("lanes").replace(

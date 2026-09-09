@@ -293,9 +293,9 @@ The `operational_load` object counts the typed signals retained in `events`:
   render as `UNKNOWN` and increment
   `lane_durations.telemetry_gap_lanes`.
 - `custody_rework.reclaims` counts a `claim.acquired` event when the immediately
-  preceding custody event for that batch, repository, and target is
-  `claim.released` or a `takeover`. Consecutive acquisitions do not inflate the
-  count.
+  preceding custody event for that batch, repository, and registered target is
+  `claim.released` or a `takeover`. Events for orphan targets are excluded.
+  Consecutive acquisitions do not inflate the count.
 
 The event counts include recognized events that name the batch even when their
 target key is incomplete. Duration and custody metrics require an exact target

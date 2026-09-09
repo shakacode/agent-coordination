@@ -133,8 +133,9 @@ LEFT JOIN terminal_events
  AND terminal_events.lane_id = lanes.lane_id;
 
 -- A reclaim is a claim acquisition immediately after a release or explicit
--- takeover in the same batch/repository/target custody sequence. Consecutive
--- claim acquisitions are renewals or generation changes, not repeated rework.
+-- takeover in the same registered batch/repository/target custody sequence.
+-- Orphan targets are excluded before sequencing. Consecutive claim
+-- acquisitions are renewals or generation changes, not repeated rework.
 CREATE VIEW custody_rework_scorecard AS
 WITH custody_events AS (
   SELECT
@@ -148,6 +149,10 @@ WITH custody_events AS (
       ELSE events.event_type
     END AS custody_type
   FROM events
+  JOIN target_units
+    ON target_units.batch_id = events.batch_id
+   AND target_units.repo = events.repo
+   AND target_units.target = events.target
   WHERE events.join_status = 'exact'
     AND unixepoch(events.observed_at) IS NOT NULL
     AND (

@@ -169,7 +169,7 @@ measurable and must not be accepted as a hypothesis target.
 | `operational_load.lane_durations.telemetry_gap_lanes` | lanes whose duration is `UNKNOWN` because any source target observation is non-joinable or membership, endpoints, or timestamps are incomplete |
 | `operational_load.lane_durations.by_lane_seconds.<lane_id>` | seconds from first exact `claim.acquired` to first later `claim.released` or `lane_closed` with terminal value `done`, `abandoned`, or `superseded`; otherwise `UNKNOWN` |
 | `operational_load.lane_durations.seconds.<summary>` | minimum, median, or maximum of computable lane durations; `UNKNOWN` when none are computable |
-| `operational_load.custody_rework.reclaims` | acquisitions immediately following a release or takeover for the same target within the batch |
+| `operational_load.custody_rework.reclaims` | acquisitions immediately following a release or takeover for the same registered target within the batch; orphan targets are excluded |
 | `operational_load.custody_rework.per_10_merged_prs` | custody reclaims per 10 merged PRs; `UNKNOWN` when the denominator is zero |
 | `unknowns.non_joinable_target_observations` | target observations for this batch whose `join_status != 'exact'` |
 | `unknowns.unlinked_host_sessions_ledger_wide` | host sessions with `link_status != 'exact'` — **ledger-wide, not per-batch** |
