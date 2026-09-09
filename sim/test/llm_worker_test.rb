@@ -43,6 +43,28 @@ class LlmWorkerTest < Minitest::Test
     end
   end
 
+  def test_non_ascii_manifest_title_is_read_under_ascii_and_utf8_locales
+    issue_title = "positive_sum must exclude negative numbers"
+    extra_issues = [{ "key" => "task_cafe", "title" => "land the fix — café" }]
+
+    with_fake_tools(issue_title: issue_title) do |env, prompt_path|
+      with_llm_worker_fixture(issue_title: issue_title, extra_issues: extra_issues) do |llm_worker|
+        %w[C C.UTF-8].each do |locale|
+          stdout, stderr, status = Open3.capture3(
+            env.merge("LC_ALL" => locale, "LANG" => locale),
+            llm_worker, "codex", "shakacode/agent-coord-sim-alpha", "7", "batch-42"
+          )
+          assert_equal 0, status.exitstatus, "#{locale}: #{stderr}"
+
+          prompt = File.read(prompt_path)
+          assert_includes prompt, "Issue key: task_one", locale
+          assert_includes stdout, "LLM_WORKER_EXIT host=codex issue=7 issue_key=task_one", locale
+          cleanup_workdir(stdout)
+        end
+      end
+    end
+  end
+
   def test_non_ascii_selected_title_matches_under_ascii_and_utf8_locales
     issue_title = "land the fix — café"
 
