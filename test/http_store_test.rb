@@ -852,6 +852,14 @@ class HttpBackendSelectionTest < HttpEnvTestCase # rubocop:disable Metrics/Class
     assert_equal "file:/path@p", AgentCoord.redact_url_userinfo("file:/path@p")
   end
 
+  # URI parses this malformed HTTP shape with an empty host and moves the
+  # credential-looking authority into the path. Diagnostics must still use the
+  # broad fail-closed fallback rather than returning the original secret.
+  def test_url_redactor_redacts_http_credentials_after_empty_authority
+    assert_equal "https://***@example.invalid",
+                 AgentCoord.redact_url_userinfo("https:////operator:secret@example.invalid")
+  end
+
   # Opaque URI forms also lack //, but credential-like content must continue
   # through the broad fail-closed fallback instead of returning verbatim.
   def test_url_redactor_redacts_opaque_credentials_without_authority
