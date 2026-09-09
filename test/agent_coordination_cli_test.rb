@@ -4853,6 +4853,22 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     end
   end
 
+  def test_stack_doctor_contains_invalid_mailto_component_error
+    stdout = StringIO.new
+    stderr = StringIO.new
+    runner = AgentCoord::Runner.new([], stdout:, stderr:)
+    options = { api_url: "mailto:", backend: nil, state_root: nil, deep: nil }
+
+    assert_equal 2, runner.send(:emit_failed_stack_configuration_report, options, "broken configuration")
+    assert_empty stderr.string
+    report = JSON.parse(stdout.string)
+    backend_check = report.fetch("checks").find { |check| check.fetch("id") == "backend.readability" }
+    assert_equal "failed", report.fetch("status")
+    assert_equal "mailto:", backend_check.dig("details", "backend_url")
+    refute_includes stdout.string, "InvalidComponentError"
+    refute_includes stdout.string, "bin/agent-coord:"
+  end
+
   # Ruby 3.2 Shellwords returned this NUL-bearing value and ENV#[]= then raised a
   # bare ArgumentError; newer Shellwords rejected it during parsing. Pin the
   # structured failure at the config boundary on every supported Ruby.

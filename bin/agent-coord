@@ -9250,7 +9250,7 @@ module AgentCoord
         userinfo_end += authority_start
         return "#{text[0...authority_start]}***@#{text[(userinfo_end + 1)..]}"
       end
-    rescue URI::InvalidURIError
+    rescue URI::Error
       # A parse-invalid configured URL can still contain credentials. Fall
       # through to the broad whole-value patterns so diagnostics fail closed.
     end

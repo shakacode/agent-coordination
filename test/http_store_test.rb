@@ -830,6 +830,14 @@ class HttpBackendSelectionTest < HttpEnvTestCase # rubocop:disable Metrics/Class
                  AgentCoord.redact_url_userinfo("https://coord.example/base/user@example.org")
   end
 
+  # A scheme-specific URI parser may reject a syntactically incomplete value
+  # with URI::InvalidComponentError rather than URI::InvalidURIError. The
+  # diagnostic redactor must still fall back instead of becoming the failure.
+  def test_url_redactor_contains_invalid_mailto_component_errors
+    assert_equal "mailto:", AgentCoord.redact_url_userinfo("mailto:")
+    assert_equal "mailto:/", AgentCoord.redact_url_userinfo("mailto:/")
+  end
+
   def test_whitespace_only_process_token_falls_through_to_the_saved_token
     # read_token_from_stdin already refuses a wholly blank token, so treating an
     # exported blank one as a real credential both contradicts that and sends
