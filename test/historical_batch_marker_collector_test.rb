@@ -235,7 +235,7 @@ module HistoricalBatchMarkerCollectorInputValidationTests
   end
 end
 
-class HistoricalBatchMarkerCollectorTest < Minitest::Test
+class HistoricalBatchMarkerCollectorTest < Minitest::Test # rubocop:disable Metrics/ClassLength
   ROOT = File.expand_path("..", __dir__)
   ARCHIVED_COLLECTOR = File.join(
     ROOT,
@@ -640,6 +640,23 @@ class HistoricalBatchMarkerCollectorTest < Minitest::Test
 
     refute status.success?
     assert_includes stderr, "malformed severity candidate"
+  end
+
+  def test_live_collector_rejects_non_string_target_repos_and_continues
+    [123, []].each do |repo|
+      fixture = JSON.parse(File.read(FIXTURE))
+      malformed_document = fixture_review_document(fixture)
+      malformed_document.dig("review_findings", 0, "target")["repo"] = repo
+      malformed_block = ["```json review-findings", JSON.generate(malformed_document), "```"].join("\n")
+      fixture.dig("pull_requests", 0, "surfaces", "body").unshift(malformed_block)
+
+      projection, stderr, status = collect_fixture_result(fixture, collector: LIVE_COLLECTOR)
+
+      refute status.success?
+      assert_includes stderr, "malformed severity candidate"
+      assert_equal 1, projection.fetch("malformed_severity_candidates")
+      assert_equal(["P1"], projection.fetch("severity_findings").map { |row| row.fetch("severity") })
+    end
   end
 
   def test_unexpected_raw_surface_is_rejected
