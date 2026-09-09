@@ -790,8 +790,17 @@ class HttpBackendSelectionTest < HttpEnvTestCase # rubocop:disable Metrics/Class
   def test_a_credential_free_url_is_reported_unchanged
     assert_equal "https://coord.example/base",
                  AgentCoord.redact_url_userinfo("https://coord.example/base")
+    assert_equal "https://coord.example/base/user@example.org",
+                 AgentCoord.redact_url_userinfo("https://coord.example/base/user@example.org")
     assert_equal "https://***@coord.example",
                  AgentCoord.redact_url_userinfo("https://svc:pw@coord.example")
+    assert_equal "https://***@host/path@p?x=a@b#c@d",
+                 AgentCoord.redact_url_userinfo("https://u:s@host/path@p?x=a@b#c@d")
+    assert_equal "//host/path@p", AgentCoord.redact_url_userinfo("//host/path@p")
+    assert_equal "//***@host/path@p", AgentCoord.redact_url_userinfo("//u:s@host/path@p")
+    assert_equal "https://***@host", AgentCoord.redact_url_userinfo("https://u@host")
+    assert_equal "https://***@host", AgentCoord.redact_url_userinfo("https://:s@host")
+    assert_equal "https://***@[::1]", AgentCoord.redact_url_userinfo("https://u:p%40ss@[::1]")
     assert_equal "***@127.0.0.1:9", AgentCoord.redact_url_userinfo("u:p@127.0.0.1:9")
     assert_equal 'bad URI: "https://***@bad host"',
                  AgentCoord.redact_userinfo_in_text('bad URI: "https://svc:pw@bad host"')
@@ -799,6 +808,65 @@ class HttpBackendSelectionTest < HttpEnvTestCase # rubocop:disable Metrics/Class
                  AgentCoord.redact_userinfo_in_text('bad URI: "https://secret-token@bad host"')
     assert_equal "contact operator@example.com",
                  AgentCoord.redact_userinfo_in_text("contact operator@example.com")
+  end
+
+  def test_url_redactor_transcodes_non_ascii_compatible_url_before_redacting
+    secret = "utf16-url-secret"
+    encoded_url = "https://fleet-user:#{secret}@coord.example/base".encode(Encoding::UTF_16LE)
+
+    refute_predicate encoded_url.encoding, :ascii_compatible?
+    redacted = AgentCoord.redact_url_userinfo(encoded_url)
+
+    assert_equal "https://***@coord.example/base", redacted
+    assert_equal Encoding::UTF_8, redacted.encoding
+    refute_includes redacted, "fleet-user"
+    refute_includes redacted, secret
+
+    # Keep the established valid-input boundary: malformed ASCII URLs still
+    # use the broad authority redaction, and an @ in a valid path is unchanged.
+    assert_equal "https://***@example.invalid",
+                 AgentCoord.redact_url_userinfo("https://operator:secret with-space@example.invalid")
+    assert_equal "https://coord.example/base/user@example.org",
+                 AgentCoord.redact_url_userinfo("https://coord.example/base/user@example.org")
+  end
+
+  # A scheme-specific URI parser may reject a syntactically incomplete value
+  # with URI::InvalidComponentError rather than URI::InvalidURIError. The
+  # diagnostic redactor must still fall back instead of becoming the failure.
+  def test_url_redactor_contains_invalid_mailto_component_errors
+    assert_equal "mailto:", AgentCoord.redact_url_userinfo("mailto:")
+    assert_equal "mailto:/", AgentCoord.redact_url_userinfo("mailto:/")
+  end
+
+  # A scheme-specific URI class can expose a host while discarding userinfo.
+  # The diagnostic must still redact credentials from the original authority.
+  def test_url_redactor_redacts_authority_when_uri_parser_discards_userinfo
+    assert_equal "file://***@example.invalid/path",
+                 AgentCoord.redact_url_userinfo("file://operator:secret@example.invalid/path")
+  end
+
+  # Some URI classes expose an empty host without a // authority delimiter.
+  # Credential redaction must leave that credential-free shape unchanged.
+  def test_url_redactor_handles_scheme_without_authority
+    assert_equal "file:/tmp", AgentCoord.redact_url_userinfo("file:/tmp")
+    assert_equal "file:/path@p", AgentCoord.redact_url_userinfo("file:/path@p")
+  end
+
+  # URI parses this malformed HTTP shape with an empty host and moves the
+  # credential-looking authority into the path. Diagnostics must still use the
+  # broad fail-closed fallback rather than returning the original secret.
+  def test_url_redactor_redacts_http_credentials_after_empty_authority
+    assert_equal "https://***@example.invalid",
+                 AgentCoord.redact_url_userinfo("https:////operator:secret@example.invalid")
+    assert_equal "file://***@example.invalid",
+                 AgentCoord.redact_url_userinfo("file:////operator:secret@example.invalid")
+  end
+
+  # Opaque URI forms also lack //, but credential-like content must continue
+  # through the broad fail-closed fallback instead of returning verbatim.
+  def test_url_redactor_redacts_opaque_credentials_without_authority
+    assert_equal "***@example.invalid/path",
+                 AgentCoord.redact_url_userinfo("file:user:secret@example.invalid/path")
   end
 
   def test_whitespace_only_process_token_falls_through_to_the_saved_token
