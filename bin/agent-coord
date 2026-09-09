@@ -9256,10 +9256,10 @@ module AgentCoord
 
   def self.redact_parsed_url_userinfo(text)
     uri = URI.parse(text)
-    # URI accepts malformed HTTP(S) values with an empty authority and moves
+    # URI accepts malformed values with an empty authority and moves
     # the following credential-looking bytes into the path. Let the broad
     # fail-closed patterns inspect that original shape instead of returning it.
-    return if %w[http https].include?(uri.scheme) && uri.host.to_s.empty?
+    return if uri.host.to_s.empty? && text.include?("://")
     return unless uri.host
 
     authority_start =

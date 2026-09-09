@@ -858,6 +858,8 @@ class HttpBackendSelectionTest < HttpEnvTestCase # rubocop:disable Metrics/Class
   def test_url_redactor_redacts_http_credentials_after_empty_authority
     assert_equal "https://***@example.invalid",
                  AgentCoord.redact_url_userinfo("https:////operator:secret@example.invalid")
+    assert_equal "file://***@example.invalid",
+                 AgentCoord.redact_url_userinfo("file:////operator:secret@example.invalid")
   end
 
   # Opaque URI forms also lack //, but credential-like content must continue

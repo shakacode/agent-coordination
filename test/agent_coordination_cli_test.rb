@@ -4853,25 +4853,22 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     end
   end
 
-  def test_stack_doctor_redacts_http_credentials_after_empty_authority
+  def test_stack_doctor_redacts_credentials_after_empty_authority
     secret = "diagnostic-password"
-    result = run_command(
-      { "AGENT_COORD_POLICY" => "bogus" },
-      RbConfig.ruby,
-      BIN,
-      "doctor",
-      "--stack-json",
-      "--api-url",
-      "https:////operator:#{secret}@example.invalid"
-    )
+    %w[https file].each do |scheme|
+      result = run_command(
+        { "AGENT_COORD_POLICY" => "bogus" }, RbConfig.ruby, BIN, "doctor", "--stack-json", "--api-url",
+        "#{scheme}:////operator:#{secret}@example.invalid"
+      )
 
-    assert_equal 2, result.status.exitstatus
-    assert_empty result.stderr
-    report = JSON.parse(result.stdout)
-    backend_check = report.fetch("checks").find { |check| check.fetch("id") == "backend.readability" }
-    assert_equal "https://***@example.invalid", backend_check.dig("details", "backend_url")
-    refute_includes result.stdout, secret
-    refute_includes result.stdout, "operator:"
+      assert_equal 2, result.status.exitstatus, scheme
+      assert_empty result.stderr, scheme
+      report = JSON.parse(result.stdout)
+      backend_check = report.fetch("checks").find { |check| check.fetch("id") == "backend.readability" }
+      assert_equal "#{scheme}://***@example.invalid", backend_check.dig("details", "backend_url"), scheme
+      refute_includes result.stdout, secret, scheme
+      refute_includes result.stdout, "operator:", scheme
+    end
   end
 
   def test_stack_doctor_contains_invalid_mailto_component_error
