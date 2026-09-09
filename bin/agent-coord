@@ -9242,16 +9242,8 @@ module AgentCoord
     text = utf8_diagnostic(text) unless text.encoding.ascii_compatible?
 
     begin
-      uri = URI.parse(text)
-      if uri.host
-        authority_start = uri.scheme ? text.index("://") + 3 : 2
-        authority_end = text.index(%r{[/?#]}, authority_start) || text.length
-        userinfo_end = text[authority_start...authority_end].rindex("@")
-        return text unless userinfo_end
-
-        userinfo_end += authority_start
-        return "#{text[0...authority_start]}***@#{text[(userinfo_end + 1)..]}"
-      end
+      parsed_redaction = redact_parsed_url_userinfo(text)
+      return parsed_redaction unless parsed_redaction.nil?
     rescue URI::Error
       # A parse-invalid configured URL can still contain credentials. Fall
       # through to the broad whole-value patterns so diagnostics fail closed.
@@ -9260,6 +9252,28 @@ module AgentCoord
     return text if text.sub!(INVALID_URL_AUTHORITY_USERINFO_PREFIX) { "#{Regexp.last_match(1)}***@" }
 
     text.sub(INVALID_URL_USERINFO_PREFIX, "***@")
+  end
+
+  def self.redact_parsed_url_userinfo(text)
+    uri = URI.parse(text)
+    return unless uri.host
+
+    authority_start =
+      if uri.scheme
+        delimiter = text.index("://")
+        return text if delimiter.nil? && uri.opaque.nil?
+        return if delimiter.nil?
+
+        delimiter + 3
+      else
+        2
+      end
+    authority_end = text.index(%r{[/?#]}, authority_start) || text.length
+    userinfo_end = text[authority_start...authority_end].rindex("@")
+    return text unless userinfo_end
+
+    userinfo_end += authority_start
+    "#{text[0...authority_start]}***@#{text[(userinfo_end + 1)..]}"
   end
 
   # Prose form: redact every credential-bearing URL embedded in a message.

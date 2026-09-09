@@ -845,6 +845,20 @@ class HttpBackendSelectionTest < HttpEnvTestCase # rubocop:disable Metrics/Class
                  AgentCoord.redact_url_userinfo("file://operator:secret@example.invalid/path")
   end
 
+  # Some URI classes expose an empty host without a // authority delimiter.
+  # Credential redaction must leave that credential-free shape unchanged.
+  def test_url_redactor_handles_scheme_without_authority
+    assert_equal "file:/tmp", AgentCoord.redact_url_userinfo("file:/tmp")
+    assert_equal "file:/path@p", AgentCoord.redact_url_userinfo("file:/path@p")
+  end
+
+  # Opaque URI forms also lack //, but credential-like content must continue
+  # through the broad fail-closed fallback instead of returning verbatim.
+  def test_url_redactor_redacts_opaque_credentials_without_authority
+    assert_equal "***@example.invalid/path",
+                 AgentCoord.redact_url_userinfo("file:user:secret@example.invalid/path")
+  end
+
   def test_whitespace_only_process_token_falls_through_to_the_saved_token
     # read_token_from_stdin already refuses a wholly blank token, so treating an
     # exported blank one as a real credential both contradicts that and sends
