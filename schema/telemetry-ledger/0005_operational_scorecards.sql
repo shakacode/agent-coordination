@@ -40,9 +40,10 @@ FROM batches
 LEFT JOIN events ON events.batch_id = batches.batch_id
 GROUP BY batches.batch_id;
 
--- A target supplies a lane duration only when the lane names exactly one
--- target and that target belongs to exactly one lane. Shared or targetless
--- membership is not silently duplicated; it remains a telemetry gap.
+-- A target supplies a lane duration only when every source target observation
+-- joins exactly, the lane names exactly one target, and that target belongs to
+-- exactly one lane. Shared, targetless, or partially joinable membership is
+-- not silently duplicated; it remains a telemetry gap.
 CREATE VIEW lane_duration_scorecard AS
 WITH lane_targets AS (
   SELECT
@@ -72,6 +73,13 @@ eligible_lane_targets AS (
     ON target_units.id = lane_targets.target_unit_id
   WHERE lane_targets.target_count = 1
     AND target_lane_counts.lane_count = 1
+    AND NOT EXISTS (
+      SELECT 1
+      FROM target_observations
+      WHERE target_observations.batch_id = lane_targets.batch_id
+        AND target_observations.lane_id = lane_targets.lane_id
+        AND target_observations.join_status != 'exact'
+    )
 ),
 claim_starts AS (
   SELECT

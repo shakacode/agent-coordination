@@ -289,7 +289,8 @@ The `operational_load` object counts the typed signals retained in `events`:
   `abandoned`, or `superseded`. A lane must map to exactly one
   target, and that target must map to
   exactly one lane. Missing timestamps, missing endpoints, shared targets, and
-  multi-target lanes render as `UNKNOWN` and increment
+  multi-target lanes, and lanes with any non-joinable source target observation
+  render as `UNKNOWN` and increment
   `lane_durations.telemetry_gap_lanes`.
 - `custody_rework.reclaims` counts a `claim.acquired` event when the immediately
   preceding custody event for that batch, repository, and target is

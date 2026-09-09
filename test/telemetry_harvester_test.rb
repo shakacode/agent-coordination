@@ -1851,6 +1851,24 @@ class TelemetryHarvesterTest < Minitest::Test # rubocop:disable Metrics/ClassLen
     )
   end
 
+  def test_operational_scorecard_rejects_lane_with_any_non_joinable_target_observation
+    source = coordination_fixture
+    source.fetch("batches").first.fetch("lanes").replace(
+      [{ "name" => "partially-joinable", "targets" => ["78", nil], "status" => "done" }]
+    )
+    source.fetch("events").replace(complete_duration_events_for(["78"]))
+    durations = harvested_scorecard(source).dig("operational_load", "lane_durations")
+
+    assert_equal 1, durations.fetch("lanes")
+    assert_equal 0, durations.fetch("computable_lanes")
+    assert_equal 1, durations.fetch("telemetry_gap_lanes")
+    assert_equal({ "partially-joinable" => "UNKNOWN" }, durations.fetch("by_lane_seconds"))
+    assert_equal(
+      { "minimum" => "UNKNOWN", "median" => "UNKNOWN", "maximum" => "UNKNOWN" },
+      durations.fetch("seconds")
+    )
+  end
+
   def test_operational_scorecard_marks_normalized_load_unknown_without_merged_prs
     load = harvested_scorecard(coordination_fixture).fetch("operational_load")
 
