@@ -3116,16 +3116,10 @@ module AgentCoord
       [nil, SESSION_SOURCE_UNSET]
     end
 
-    # Use the canonical configuration-presence rule, then retain the original
-    # bytes for machine comparison. Only the emitted diagnostic value is
-    # scrubbed.
+    # Use the canonical environment-identity boundary so deep doctor reporting
+    # preserves the same fail-closed malformed-text contract as state writes.
     def diagnostic_environment_identity_value(name)
-      value = ENV.fetch(name, nil)
-      return nil unless AgentCoord.config_value_set?(value)
-
-      value = value.to_s
-      value = value.b unless value.valid_encoding?
-      value.strip
+      AgentCoord.environment_identity_value(name)
     end
 
     # Environment identity is state payload data in claim/heartbeat paths, but
