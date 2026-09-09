@@ -838,6 +838,13 @@ class HttpBackendSelectionTest < HttpEnvTestCase # rubocop:disable Metrics/Class
     assert_equal "mailto:/", AgentCoord.redact_url_userinfo("mailto:/")
   end
 
+  # A scheme-specific URI class can expose a host while discarding userinfo.
+  # The diagnostic must still redact credentials from the original authority.
+  def test_url_redactor_redacts_authority_when_uri_parser_discards_userinfo
+    assert_equal "file://***@example.invalid/path",
+                 AgentCoord.redact_url_userinfo("file://operator:secret@example.invalid/path")
+  end
+
   def test_whitespace_only_process_token_falls_through_to_the_saved_token
     # read_token_from_stdin already refuses a wholly blank token, so treating an
     # exported blank one as a real credential both contradicts that and sends

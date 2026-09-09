@@ -5371,7 +5371,7 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     }
     http_options = {
       backend: "",
-      api_url: "https://user:secret@example.invalid/\xFF".b,
+      api_url: "https://user:secret@example.invalid/\xFF".dup.force_encoding(Encoding::UTF_8),
       state_root: nil
     }
 
@@ -5379,9 +5379,25 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     http_details = runner.send(:stack_backend_details, http_options, "http")
 
     assert_equal "owner/repo-�", github_details.fetch("backend_repo")
-    assert_equal "https://***@example.invalid/�", http_details.fetch("backend_url")
+    assert_equal AgentCoord::INVALID_URL_DIAGNOSTIC, http_details.fetch("backend_url")
     JSON.generate(github_details)
     JSON.generate(http_details)
+  end
+
+  # Binary environment strings report every byte sequence as encoding-valid.
+  # Invalid UTF-8 bytes must still collapse to the fixed diagnostic before JSON.
+  def test_stack_backend_details_reject_invalid_binary_url_bytes
+    runner = AgentCoord::Runner.new([])
+    options = {
+      backend: "",
+      api_url: "https://user:secret@example.invalid/\xFF".b,
+      state_root: nil
+    }
+
+    details = runner.send(:stack_backend_details, options, "http")
+
+    assert_equal AgentCoord::INVALID_URL_DIAGNOSTIC, details.fetch("backend_url")
+    JSON.generate(details)
   end
 
   def test_stack_backend_details_transcode_declared_state_root_encoding

@@ -3312,7 +3312,7 @@ module AgentCoord
     def diagnostic_stack_backend_url(options, backend_kind)
       return unless backend_kind == "http" && options[:api_url]
 
-      redact_url_userinfo(AgentCoord.utf8_diagnostic(options[:api_url]))
+      redact_url_userinfo(options[:api_url])
     end
 
     def diagnostic_stack_state_root(options, backend_kind)
@@ -9227,6 +9227,10 @@ module AgentCoord
     return value if value.nil?
 
     text = value.to_s.dup
+    # Process environments commonly surface raw bytes as ASCII-8BIT. Interpret
+    # them as the CLI's UTF-8 contract before deciding whether any bytes are
+    # safe to preserve in diagnostics.
+    text.force_encoding(Encoding::UTF_8) if text.encoding == Encoding::ASCII_8BIT
     # An invalid byte sequence cannot be inspected reliably for the authority
     # delimiter. Do not return any part of it because that could expose
     # credential bytes from a malformed configured URL.
@@ -9240,8 +9244,6 @@ module AgentCoord
     begin
       uri = URI.parse(text)
       if uri.host
-        return text if uri.userinfo.nil?
-
         authority_start = uri.scheme ? text.index("://") + 3 : 2
         authority_end = text.index(%r{[/?#]}, authority_start) || text.length
         userinfo_end = text[authority_start...authority_end].rindex("@")
