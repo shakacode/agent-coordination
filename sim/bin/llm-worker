@@ -25,7 +25,8 @@ ISSUE_KEY="$(
     manifest_json = File.read(ARGV.fetch(0), encoding: "UTF-8")
     abort "simulation issue manifest is not valid UTF-8" unless manifest_json.valid_encoding?
     manifest = JSON.parse(manifest_json).fetch("issues")
-    title = ARGV.fetch(1)
+    title = ARGV.fetch(1).dup.force_encoding(Encoding::UTF_8)
+    abort "issue title is not valid UTF-8" unless title.valid_encoding?
     issue = manifest.find { |candidate| candidate.fetch("title") == title }
     abort "no sim issue key for issue title: #{title}" unless issue
     puts issue.fetch("key")
