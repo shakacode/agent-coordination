@@ -2138,7 +2138,8 @@ module AgentCoord
         outcome = execute_gc_candidate(store, candidate, now, archive_days)
         action = candidate.fetch(:action)
         skipped = %i[
-          claim_changed_at_apply holder_present_at_apply holder_liveness_unknown_at_apply
+          claim_changed_at_apply claim_identity_mismatch_at_apply
+          holder_present_at_apply holder_liveness_unknown_at_apply
           invalid_claim_path_at_apply invalid_expired_event_destination_at_apply
         ]
         if skipped.include?(outcome)
@@ -2648,13 +2649,20 @@ module AgentCoord
     # the gc write instead, and the archive pass reads the hot window from it.
     def gc_reap_claim(store, candidate, now)
       entry = candidate.fetch(:entry)
-      return :invalid_claim_path_at_apply unless gc_canonical_claim_path?(entry.path)
+      path_identity = gc_canonical_claim_identity(entry.path)
+      return :invalid_claim_path_at_apply unless path_identity
 
       read_method = store.respond_to?(:read_json_fresh) ? :read_json_fresh : :read_json
       current_entry = store.public_send(read_method, entry.path)
       return :claim_changed_at_apply unless current_entry&.sha == entry.sha
 
       entry = current_entry
+      path_repo, path_target = path_identity
+      identity_mismatch = { "repo" => path_repo, "target" => path_target }.any? do |field, path_value|
+        !entry.data[field].to_s.empty? && entry.data[field].to_s != path_value
+      end
+      return :claim_identity_mismatch_at_apply if identity_mismatch
+
       holder = gc_claim_holder_disposition(store, entry.data, now, {}, fresh: true)
       return :holder_present_at_apply if holder == :present
       return :holder_liveness_unknown_at_apply if holder == :unknown
@@ -2668,8 +2676,8 @@ module AgentCoord
       # written before repo/target were duplicated into the payload. Preserve
       # that identity in immutable expiry history rather than emitting an
       # unjoinable event.
-      payload["repo"] = AgentCoord.repo_from_claim_path(entry.path) if payload["repo"].to_s.empty?
-      payload["target"] = AgentCoord.target_from_path(entry.path) if payload["target"].to_s.empty?
+      payload["repo"] = path_repo
+      payload["target"] = path_target
       expired_event_batch_id = if payload["batch_id"].to_s.empty?
                                  INTERNAL_UNBATCHED_CLAIM_EXPIRY_BATCH_ID
                                else
@@ -2703,12 +2711,12 @@ module AgentCoord
       "claim-expired-#{Digest::SHA256.hexdigest(gc_canonical_json(identity))[0, 16]}"
     end
 
-    def gc_canonical_claim_path?(path)
+    def gc_canonical_claim_identity(path)
       repo = AgentCoord.repo_from_claim_path(path)
       target = AgentCoord.target_from_path(path)
-      AgentCoord.claim_path(repo, target) == path
+      [repo, target] if AgentCoord.claim_path(repo, target) == path
     rescue Error, ArgumentError
-      false
+      nil
     end
 
     def gc_expired_event_destination_valid?(claim)

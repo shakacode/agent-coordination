@@ -547,6 +547,27 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     assert_equal "expired", JSON.parse(File.read(File.join(@state_root, valid_path))).fetch("status")
   end
 
+  def test_gc_reap_skips_claim_identity_that_disagrees_with_its_path_and_continues
+    now = Time.utc(2026, 7, 12, 12, 0, 0)
+    mismatched_path = write_abandoned_claim(
+      "mismatched-identity", now - (3 * 86_400),
+      "repo" => "shakacode/other", "target" => "different-target", "agent_id" => "gone-holder"
+    )
+    valid_path = write_abandoned_claim("valid-after-mismatch", now - (3 * 86_400), "agent_id" => "gone-holder")
+    stdout = StringIO.new
+    runner = AgentCoord::Runner.new([], stdout: stdout, clock: FixedClock.new(now))
+
+    assert_equal 0, runner.send(:gc, state_root: @state_root, dry_run: false, execute: true, json: true)
+
+    action = JSON.parse(stdout.string).fetch("actions").find do |candidate|
+      candidate.fetch("source_path") == mismatched_path
+    end
+    assert_equal "skipped", action.fetch("outcome")
+    assert_equal "claim_identity_mismatch_at_apply", action.fetch("skip_reason")
+    assert_equal "active", JSON.parse(File.read(File.join(@state_root, mismatched_path))).fetch("status")
+    assert_equal "expired", JSON.parse(File.read(File.join(@state_root, valid_path))).fetch("status")
+  end
+
   def test_gc_archives_a_reaped_claim_on_a_hot_window_that_starts_at_the_reap # rubocop:disable Metrics/AbcSize
     now = Time.utc(2026, 7, 12, 12, 0, 0)
     claim_path = write_abandoned_claim("aged-out", now - (30 * 86_400))
