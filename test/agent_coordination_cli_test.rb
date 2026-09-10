@@ -522,7 +522,7 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     # marker as its source claim and is compacted independently, never erased.
     compact_actions = early_actions.select { |action| action.fetch("action") == "compact" }
     assert_equal 1, compact_actions.length
-    assert_equal "synthetic_orphan_events", compact_actions.first.fetch("reason")
+    assert_equal "unbatched_claim_expirations", compact_actions.first.fetch("reason")
 
     late = StringIO.new
     late_runner = AgentCoord::Runner.new([], stdout: late, clock: FixedClock.new(now + (8 * 86_400)))
@@ -531,7 +531,7 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     late_archives = late_actions.select { |action| action.fetch("action") == "archive" }
     assert_equal([claim_path, synthetic_path].sort, late_archives.map { |action| action.fetch("source_path") }.sort)
     assert_equal(["terminal_claim"], late_archives.map { |action| action.fetch("reason") }.uniq)
-    assert_equal(1, late_actions.count { |action| action.fetch("action") == "compact" })
+    assert_equal(2, late_actions.count { |action| action.fetch("action") == "compact" })
   end
 
   def test_gc_never_reaps_a_claim_whose_lease_is_absent_and_fails_closed_on_an_unparseable_one
@@ -899,7 +899,10 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     assert_equal "expired", immutable_event.fetch("status")
     assert_equal "unbatched-reuse", immutable_event.fetch("target")
     refute_empty immutable_event.fetch("batch_id")
-    assert_raises(AgentCoord::Error) { AgentCoord.batch_path(immutable_event.fetch("batch_id")) }
+    assert_equal(
+      "batches/#{immutable_event.fetch('batch_id')}.json",
+      AgentCoord.batch_path(immutable_event.fetch("batch_id"))
+    )
 
     replacement = run_agent_coord(
       "claim", "--agent-id", "new-holder", "--repo", "shakacode/example", "--target", "unbatched-reuse"
@@ -933,6 +936,22 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     assert_empty Dir.glob(File.join(@state_root, "heartbeats", "*.json"))
   end
 
+  def test_preexisting_reserved_name_batch_remains_readable_but_cannot_be_created_again
+    batch_id = AgentCoord::UNBATCHED_CLAIM_EXPIRY_BATCH_ID
+    write_batch(batch_id, lanes: [{ "name" => "legacy", "owner" => "worker-a", "targets" => ["99"] }])
+
+    status = run_agent_coord("status", "--batch-id", batch_id, "--json")
+
+    assert_equal 0, status.status.exitstatus, status.stderr
+    assert_equal batch_id, JSON.parse(status.stdout).fetch("batches").fetch(0).fetch("batch_id")
+
+    manifest = File.join(@state_root, "reserved-batch.json")
+    File.write(manifest, JSON.generate("batch_id" => batch_id, "lanes" => []))
+    create = run_agent_coord("register-batch", "--file", manifest)
+    assert_equal 1, create.status.exitstatus
+    assert_includes create.stderr, "reserved for unbatched claim expiry history"
+  end
+
   def test_gc_execute_reports_a_still_pending_expired_event
     now = Time.utc(2026, 7, 12, 12, 0, 0)
     claim_path = write_abandoned_claim(
@@ -963,6 +982,26 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
            prefixes: %w[claims events]
     )
     assert_includes text_runner.captured_stdout.string, "[pending: expired_event_pending]"
+  end
+
+  def test_gc_claims_only_scope_warns_when_pending_expiry_history_needs_events
+    now = Time.utc(2026, 7, 12, 12, 0, 0)
+    write_abandoned_claim(
+      "pending-prefix", now - (3 * 86_400),
+      "status" => "expired", "reaped_at" => now.iso8601,
+      "expired_event_id" => "claim-expired-pending-prefix",
+      "expired_event_batch_id" => AgentCoord::UNBATCHED_CLAIM_EXPIRY_BATCH_ID,
+      "expired_event_at" => now.iso8601, "expired_event_pending" => true
+    )
+    stderr = StringIO.new
+    runner = AgentCoord::Runner.new([], stdout: StringIO.new, stderr: stderr, clock: FixedClock.new(now))
+
+    assert_equal 0, runner.send(
+      :gc, state_root: @state_root, dry_run: true, execute: false, json: true, prefixes: ["claims"]
+    )
+
+    assert_includes stderr.string, "1 pending claim.expired event(s) unreconciled"
+    assert_includes stderr.string, "needs --prefix events alongside --prefix claims"
   end
 
   def test_gc_reconcile_warns_when_the_pending_event_identity_moves
@@ -1786,6 +1825,35 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     envelope = JSON.parse(File.read(File.join(@state_root, action.fetch("archive_path"))))
     assert_equal(%w[first transition last], envelope.fetch("records").map { |record| record.fetch("event_id") })
     assert_path_exists File.join(@state_root, "events/orphan-normal/old.json")
+  end
+
+  def test_gc_compacts_unbatched_claim_expiry_history_after_the_normal_hot_window
+    now = Time.utc(2026, 7, 12, 12, 0, 0)
+    batch_id = AgentCoord::UNBATCHED_CLAIM_EXPIRY_BATCH_ID
+    event_path = "events/#{batch_id}/claim-expired-retained.json"
+    write_state_record(
+      event_path,
+      "schema_version" => 1, "event_id" => "claim-expired-retained", "batch_id" => batch_id,
+      "type" => "claim.expired", "status" => "expired", "agent_id" => "gone-holder",
+      "repo" => "shakacode/example", "target" => "retained", "at" => (now - (6 * 86_400)).iso8601
+    )
+    early = StringIO.new
+    early_runner = AgentCoord::Runner.new([], stdout: early, clock: FixedClock.new(now))
+    assert_equal 0, early_runner.send(:gc, state_root: @state_root, dry_run: true, execute: false, json: true)
+    assert_empty JSON.parse(early.string).fetch("actions")
+
+    stdout = StringIO.new
+    runner = AgentCoord::Runner.new([], stdout: stdout, clock: FixedClock.new(now + (2 * 86_400)))
+
+    assert_equal 0, runner.send(:gc, state_root: @state_root, dry_run: false, execute: true, json: true)
+
+    action = JSON.parse(stdout.string).fetch("actions").find { |row| row["action"] == "compact" }
+    refute_nil action
+    assert_equal "unbatched_claim_expirations", action.fetch("reason")
+    assert_equal [event_path], action.fetch("source_paths")
+    refute_path_exists File.join(@state_root, event_path)
+    archive = JSON.parse(File.read(File.join(@state_root, action.fetch("archive_path"))))
+    assert_equal(["claim-expired-retained"], archive.fetch("records").map { |record| record.fetch("event_id") })
   end
 
   def test_gc_defers_synthetic_orphan_group_until_every_event_ages

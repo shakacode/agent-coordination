@@ -1222,6 +1222,9 @@ eligibility: active claims, live heartbeats, and incomplete batches remain hot.
 This protects scripted workers that claim once and refresh only their heartbeat.
 Synthetic events without a valid terminal marker compact as an orphan
 generation only after every event independently passes the synthetic window;
+GC-generated unbatched `claim.expired` events compact after the normal hot
+window into the same immutable archive-envelope lifecycle as other event
+generations.
 missing repository or target metadata uses the batch/lane/available-provenance
 identity rather than blocking cleanup. Metadata-less legacy events remain in
 their own absent-lane group, and non-synthetic orphan events remain untouched.
