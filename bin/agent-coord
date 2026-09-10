@@ -2662,6 +2662,12 @@ module AgentCoord
         "status" => CLAIM_EXPIRED_STATUS,
         "reaped_at" => event_at
       )
+      # Claim paths remain the authoritative identity for supported records
+      # written before repo/target were duplicated into the payload. Preserve
+      # that identity in immutable expiry history rather than emitting an
+      # unjoinable event.
+      payload["repo"] = AgentCoord.repo_from_claim_path(entry.path) if payload["repo"].to_s.empty?
+      payload["target"] = AgentCoord.target_from_path(entry.path) if payload["target"].to_s.empty?
       expired_event_batch_id = if payload["batch_id"].to_s.empty?
                                  INTERNAL_UNBATCHED_CLAIM_EXPIRY_BATCH_ID
                                else

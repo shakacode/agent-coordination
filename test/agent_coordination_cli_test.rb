@@ -503,6 +503,21 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     assert_empty JSON.parse(replay.string).fetch("actions")
   end
 
+  def test_gc_reap_preserves_path_only_claim_identity_in_the_expiry_event
+    now = Time.utc(2026, 7, 12, 12, 0, 0)
+    claim_path = write_abandoned_claim("path-only", now - (3 * 86_400))
+    path = File.join(@state_root, claim_path)
+    path_only = JSON.parse(File.read(path)).except("repo", "target")
+    File.write(path, JSON.generate(path_only))
+    runner = AgentCoord::Runner.new([], stdout: StringIO.new, clock: FixedClock.new(now))
+
+    assert_equal 0, runner.send(:gc, state_root: @state_root, dry_run: false, execute: true, json: true)
+
+    event = event_records(AgentCoord::INTERNAL_UNBATCHED_CLAIM_EXPIRY_BATCH_ID).fetch(0)
+    assert_equal "shakacode/example", event.fetch("repo")
+    assert_equal "path-only", event.fetch("target")
+  end
+
   def test_gc_archives_a_reaped_claim_on_a_hot_window_that_starts_at_the_reap # rubocop:disable Metrics/AbcSize
     now = Time.utc(2026, 7, 12, 12, 0, 0)
     claim_path = write_abandoned_claim("aged-out", now - (30 * 86_400))
