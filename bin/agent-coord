@@ -2137,7 +2137,7 @@ module AgentCoord
       candidates.each do |candidate|
         outcome = execute_gc_candidate(store, candidate, now, archive_days)
         action = candidate.fetch(:action)
-        if %i[holder_present_at_apply holder_liveness_unknown_at_apply].include?(outcome)
+        if %i[claim_changed_at_apply holder_present_at_apply holder_liveness_unknown_at_apply].include?(outcome)
           action.merge!("outcome" => "skipped", "skip_reason" => outcome.to_s)
         elsif outcome == :expired_event_pending || (action["action"] == "reconcile_expired_event" && !outcome)
           action.merge!("outcome" => "pending", "skip_reason" => "expired_event_pending")
@@ -2644,11 +2644,16 @@ module AgentCoord
     # the gc write instead, and the archive pass reads the hot window from it.
     def gc_reap_claim(store, candidate, now)
       entry = candidate.fetch(:entry)
+      read_method = store.respond_to?(:read_json_fresh) ? :read_json_fresh : :read_json
+      current_entry = store.public_send(read_method, entry.path)
+      return :claim_changed_at_apply unless current_entry&.sha == entry.sha
+
+      entry = current_entry
       holder = gc_claim_holder_disposition(store, entry.data, now, {}, fresh: true)
       return :holder_present_at_apply if holder == :present
       return :holder_liveness_unknown_at_apply if holder == :unknown
 
-      event_at = timestamp(now)
+      event_at = precise_timestamp(now)
       payload = entry.data.except(*CLAIM_CLOSEOUT_FIELDS).merge(
         "status" => CLAIM_EXPIRED_STATUS,
         "reaped_at" => event_at
@@ -2675,8 +2680,8 @@ module AgentCoord
                      false
                    end
       reconciled ? :applied : :expired_event_pending
-    rescue Conflict => e
-      raise OperationalError, "gc source changed at #{entry.path}; #{e.message}"
+    rescue Conflict
+      :claim_changed_at_apply
     end
 
     def gc_claim_expired_event_id(path, claim)
@@ -4709,7 +4714,7 @@ module AgentCoord
                           existing.fetch("created_at")].compact.max_by { |value| parse_time(value) }
       now = now_utc
       refreshed_at = if now > parse_time(latest_stored_at)
-                       attention_timestamp(now)
+                       precise_timestamp(now)
                      else
                        latest_stored_at
                      end
@@ -5015,7 +5020,7 @@ module AgentCoord
         "evidence_url" => options[:evidence_url],
         "workspace" => terminal_event?(options) ? options.fetch(:workspace, DEFAULT_WORKSPACE) : options[:workspace],
         "closed_by" => terminal_event?(options) ? closed_by_payload(options) : nil,
-        "at" => timestamp(now)
+        "at" => precise_timestamp(now)
       }
       payload["status"] = options[:status] if options[:status_given]
       payload["status_raw"] = options[:status_raw] if options[:status_given] && options[:status_raw]
@@ -8654,7 +8659,7 @@ module AgentCoord
       time.utc.iso8601
     end
 
-    def attention_timestamp(time)
+    def precise_timestamp(time)
       utc = time.utc
       return utc.iso8601 if utc.nsec.zero?
 

@@ -747,7 +747,7 @@ module AgentCoord
           # "unknown" -- which the CLI writes for a type-less record -- is a real
           # observation to keep, not an absent value. Contrast `category` below.
           "event_type_raw" => bounded_signal(event["type"], unknown_is_value: true),
-          "observed_at" => timestamp(event["at"] || event["timestamp"]),
+          "observed_at" => precise_timestamp(event["at"] || event["timestamp"]),
           "terminal" => enum(event["terminal"], STRUCTURED_STATUSES),
           "join_status" => join_status(batch_id, event_repo, target),
           "source_artifact_id" => source_artifact_id,
@@ -995,18 +995,24 @@ module AgentCoord
         # immutable lifecycle remains: a later acquire/release supersedes an old
         # expiry without deleting it from the ledger.
         current_claim_is_nonexpired = claims.any? { |row| row["status"] != "expired" }
-        lifecycle_types = %w[claim.acquired claim.expired claim.released]
-        lifecycle_rows = event_rows.select { |row| lifecycle_types.include?(row["event_type"]) }
-        lifecycle_order_known = lifecycle_rows.all? { |row| row["observed_at"] }
-        latest_lifecycle = if lifecycle_order_known
-                             lifecycle_rows.max_by { |row| [row.fetch("observed_at"), row.fetch("id")] }
-                           end
+        latest_lifecycle = latest_ordered_lifecycle(event_rows)
         event_statuses = if !current_claim_is_nonexpired && latest_lifecycle&.fetch("event_type") == "claim.expired"
                            ["expired"]
                          else
                            []
                          end
         [claim_statuses + terminal_statuses + event_statuses, terminal_statuses]
+      end
+
+      def latest_ordered_lifecycle(event_rows)
+        lifecycle_types = %w[claim.acquired claim.expired claim.released]
+        lifecycle_rows = event_rows.select { |row| lifecycle_types.include?(row["event_type"]) }
+        return unless lifecycle_rows.all? { |row| row["observed_at"] }
+
+        timed_rows = lifecycle_rows.map { |row| [row, Time.iso8601(row.fetch("observed_at"))] }
+        latest_at = timed_rows.map(&:last).max
+        latest_rows = timed_rows.select { |_row, at| at == latest_at }
+        latest_rows.one? ? latest_rows.first.first : nil
       end
 
       def outcome_for(statuses, pr_states, terminal_statuses)
@@ -1263,6 +1269,15 @@ module AgentCoord
 
       def timestamp(value)
         Time.iso8601(value.to_s).utc.iso8601
+      rescue ArgumentError
+        nil
+      end
+
+      def precise_timestamp(value)
+        parsed = Time.iso8601(value.to_s).utc
+        return parsed.iso8601 if parsed.nsec.zero?
+
+        parsed.iso8601(9).sub(/0+Z\z/, "Z")
       rescue ArgumentError
         nil
       end

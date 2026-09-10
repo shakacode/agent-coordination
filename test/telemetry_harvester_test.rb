@@ -892,6 +892,133 @@ class TelemetryHarvesterTest < Minitest::Test # rubocop:disable Metrics/ClassLen
     end
   end
 
+  def test_same_second_lifecycle_events_do_not_manufacture_current_expiry_from_ingestion_order
+    Dir.mktmpdir("agent-coordination-ledger-same-second-history") do |dir| # rubocop:disable Metrics/BlockLength
+      source_path = File.join(dir, "coordination.json")
+      ledger_path = File.join(dir, "telemetry.sqlite3")
+      coordination = coordination_fixture
+      coordination["claims"] = []
+      coordination["events"] = [
+        {
+          "id" => "acquired", "batch_id" => "batch-fixture", "type" => "claim.acquired",
+          "repo" => "shakacode/agent-coordination", "target" => "78", "at" => "2026-07-18T03:00:00Z"
+        },
+        {
+          "id" => "released", "batch_id" => "batch-fixture", "type" => "claim.released",
+          "repo" => "shakacode/agent-coordination", "target" => "78", "at" => "2026-07-18T03:00:00Z"
+        },
+        {
+          "id" => "expired-ingested-last", "batch_id" => "batch-fixture", "type" => "claim.expired",
+          "status" => "expired", "repo" => "shakacode/agent-coordination", "target" => "78",
+          "at" => "2026-07-18T03:00:00Z"
+        }
+      ]
+      File.write(source_path, JSON.generate(coordination))
+
+      _stdout, stderr, status = Open3.capture3(
+        CLI, "harvest", "--ledger", ledger_path,
+        "--coordination-json", source_path, "--batch-id", "batch-fixture"
+      )
+
+      assert status.success?, stderr
+      assert_equal ["done"], sqlite_query(ledger_path, "SELECT outcome FROM target_units WHERE target = '78'")
+    end
+  end
+
+  def test_subsecond_lifecycle_order_survives_harvest
+    Dir.mktmpdir("agent-coordination-ledger-subsecond-history") do |dir|
+      source_path = File.join(dir, "coordination.json")
+      ledger_path = File.join(dir, "telemetry.sqlite3")
+      coordination = coordination_fixture
+      coordination["claims"] = []
+      coordination["events"] = [
+        {
+          "id" => "acquired-first", "batch_id" => "batch-fixture", "type" => "claim.acquired",
+          "repo" => "shakacode/agent-coordination", "target" => "78",
+          "at" => "2026-07-18T03:00:00.100000001Z"
+        },
+        {
+          "id" => "expired-later", "batch_id" => "batch-fixture", "type" => "claim.expired",
+          "status" => "expired", "repo" => "shakacode/agent-coordination", "target" => "78",
+          "at" => "2026-07-18T03:00:00.200000002Z"
+        }
+      ]
+      File.write(source_path, JSON.generate(coordination))
+
+      _stdout, stderr, status = Open3.capture3(
+        CLI, "harvest", "--ledger", ledger_path,
+        "--coordination-json", source_path, "--batch-id", "batch-fixture"
+      )
+
+      assert status.success?, stderr
+      assert_equal ["expired"], sqlite_query(ledger_path, "SELECT outcome FROM target_units WHERE target = '78'")
+      assert_equal ["2026-07-18T03:00:00.100000001Z", "2026-07-18T03:00:00.200000002Z"],
+                   sqlite_query(ledger_path, "SELECT observed_at FROM events ORDER BY observed_at")
+    end
+  end
+
+  def test_whole_second_event_orders_before_a_later_fractional_event
+    Dir.mktmpdir("agent-coordination-ledger-mixed-precision") do |dir|
+      source_path = File.join(dir, "coordination.json")
+      ledger_path = File.join(dir, "telemetry.sqlite3")
+      coordination = coordination_fixture
+      coordination["claims"] = []
+      coordination["events"] = [
+        {
+          "id" => "acquired-whole", "batch_id" => "batch-fixture", "type" => "claim.acquired",
+          "repo" => "shakacode/agent-coordination", "target" => "78", "at" => "2026-07-18T03:00:00Z"
+        },
+        {
+          "id" => "expired-fraction", "batch_id" => "batch-fixture", "type" => "claim.expired",
+          "status" => "expired", "repo" => "shakacode/agent-coordination", "target" => "78",
+          "at" => "2026-07-18T03:00:00.200000002Z"
+        }
+      ]
+      File.write(source_path, JSON.generate(coordination))
+
+      _stdout, stderr, status = Open3.capture3(
+        CLI, "harvest", "--ledger", ledger_path,
+        "--coordination-json", source_path, "--batch-id", "batch-fixture"
+      )
+
+      assert status.success?, stderr
+      assert_equal ["expired"], sqlite_query(ledger_path, "SELECT outcome FROM target_units WHERE target = '78'")
+    end
+  end
+
+  def test_old_lifecycle_tie_does_not_hide_a_unique_later_expiry
+    Dir.mktmpdir("agent-coordination-ledger-old-tie") do |dir| # rubocop:disable Metrics/BlockLength
+      source_path = File.join(dir, "coordination.json")
+      ledger_path = File.join(dir, "telemetry.sqlite3")
+      coordination = coordination_fixture
+      coordination["claims"] = []
+      coordination["events"] = [
+        {
+          "id" => "acquired-tied", "batch_id" => "batch-fixture", "type" => "claim.acquired",
+          "repo" => "shakacode/agent-coordination", "target" => "78", "at" => "2026-07-18T03:00:00Z"
+        },
+        {
+          "id" => "released-tied", "batch_id" => "batch-fixture", "type" => "claim.released",
+          "repo" => "shakacode/agent-coordination", "target" => "78", "at" => "2026-07-18T03:00:00Z"
+        },
+        {
+          "id" => "expired-unique-later", "batch_id" => "batch-fixture", "type" => "claim.expired",
+          "status" => "expired", "repo" => "shakacode/agent-coordination", "target" => "78",
+          "at" => "2026-07-18T03:00:01Z"
+        }
+      ]
+      File.write(source_path, JSON.generate(coordination))
+
+      _stdout, stderr, status = Open3.capture3(
+        CLI, "harvest", "--ledger", ledger_path,
+        "--coordination-json", source_path, "--batch-id", "batch-fixture"
+      )
+
+      assert status.success?, stderr
+      assert_equal ["expired"], sqlite_query(ledger_path, "SELECT outcome FROM target_units WHERE target = '78'")
+    end
+  end
+
   def test_internal_unbatched_expiry_event_does_not_join_a_preexisting_reserved_batch
     Dir.mktmpdir("agent-coordination-ledger-disjoint-expiry") do |dir|
       source_path = File.join(dir, "coordination.json")

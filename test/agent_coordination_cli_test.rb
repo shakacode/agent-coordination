@@ -711,6 +711,41 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     assert_equal 2, store.reads.count("heartbeats/resumed-holder.json")
   end
 
+  def test_gc_skips_a_claim_renewed_between_plan_and_apply_without_aborting
+    now = Time.utc(2026, 7, 12, 12, 0, 0)
+    claim_path = write_abandoned_claim(
+      "renewed-at-apply", now - (3 * 86_400), "agent_id" => "gone-holder"
+    )
+    other_path = write_abandoned_claim(
+      "still-expired", now - (3 * 86_400), "agent_id" => "another-gone-holder"
+    )
+    store = AgentCoord::LocalStore.new(@state_root)
+    runner = AgentCoord::Runner.new([], stdout: StringIO.new, clock: FixedClock.new(now))
+    candidates = runner.send(:gc_reap_candidates, store, now, 1, %w[claims heartbeats events batches])
+    candidate = candidates.find { |item| item.dig(:action, "source_path") == claim_path }
+    renewed = JSON.parse(File.read(File.join(@state_root, claim_path))).merge(
+      "updated_at" => now.iso8601, "expires_at" => (now + 3600).iso8601
+    )
+    File.write(File.join(@state_root, claim_path), JSON.pretty_generate(renewed))
+
+    runner.send(:execute_gc_candidates, store, candidates, now, 30)
+
+    assert_equal "active", JSON.parse(File.read(File.join(@state_root, claim_path))).fetch("status")
+    assert_equal "expired", JSON.parse(File.read(File.join(@state_root, other_path))).fetch("status")
+    assert_equal "skipped", candidate.dig(:action, "outcome")
+    assert_equal "claim_changed_at_apply", candidate.dig(:action, "skip_reason")
+  end
+
+  def test_event_payload_preserves_subsecond_lifecycle_order
+    now = Time.utc(2026, 7, 12, 12, 0, 0) + Rational(123_456_789, 1_000_000_000)
+    runner = AgentCoord::Runner.new([], stdout: StringIO.new, clock: FixedClock.new(now))
+    options = { batch_id: "precision", type: "claim.acquired" }
+
+    payload = runner.send(:event_payload, options, "event-precision", now)
+
+    assert_equal "2026-07-12T12:00:00.123456789Z", payload.fetch("at")
+  end
+
   def test_gc_apply_bypasses_a_cached_planning_heartbeat
     now = Time.utc(2026, 7, 12, 12, 0, 0)
     claim_path = write_abandoned_claim(
