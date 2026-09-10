@@ -738,6 +738,38 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     assert_equal 2, store.reads.count("heartbeats/cached-resume-holder.json")
   end
 
+  def test_gc_fails_closed_when_heartbeat_payload_agent_id_does_not_match_claim_holder
+    now = Time.utc(2026, 7, 12, 12, 0, 0)
+    claim_path = write_abandoned_claim(
+      "mismatched-heartbeat", now - (3 * 86_400), "agent_id" => "expected-holder"
+    )
+    heartbeat_path = "heartbeats/expected-holder.json"
+    write_state_record(
+      heartbeat_path,
+      "schema_version" => 1, "agent_id" => "different-holder", "status" => "dead",
+      "updated_at" => (now - (3 * 86_400)).iso8601, "expires_at" => (now - (2 * 86_400)).iso8601
+    )
+    stderr = StringIO.new
+    runner = AgentCoord::Runner.new([], stdout: StringIO.new, stderr: stderr, clock: FixedClock.new(now))
+    store = CountingLocalStore.new(@state_root)
+
+    assert_empty runner.send(:gc_reap_candidates, store, now, 1, %w[claims heartbeats events batches])
+    assert_includes stderr.string, "cannot establish liveness for claim holder \"expected-holder\""
+
+    FileUtils.rm(File.join(@state_root, heartbeat_path))
+    candidate = runner.send(
+      :gc_reap_candidates, store, now, 1, %w[claims heartbeats events batches]
+    ).fetch(0)
+    write_state_record(
+      heartbeat_path,
+      "schema_version" => 1, "agent_id" => "different-holder", "status" => "dead",
+      "updated_at" => (now - (3 * 86_400)).iso8601, "expires_at" => (now - (2 * 86_400)).iso8601
+    )
+
+    assert_equal :holder_liveness_unknown_at_apply, runner.send(:gc_reap_claim, store, candidate, now)
+    assert_equal "active", JSON.parse(File.read(File.join(@state_root, claim_path))).fetch("status")
+  end
+
   def test_gc_execute_reports_a_reap_rejected_by_apply_time_liveness_as_skipped
     now = Time.utc(2026, 7, 12, 12, 0, 0)
     claim_path = write_abandoned_claim(
@@ -1066,6 +1098,33 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     assert_includes text_runner.captured_stdout.string, "[pending: expired_event_pending]"
   end
 
+  def test_gc_reconcile_treats_an_already_settled_expiry_event_as_success
+    now = Time.utc(2026, 7, 12, 12, 0, 0)
+    claim_path = write_abandoned_claim(
+      "already-settled", now - (3 * 86_400),
+      "batch_id" => "already-settled-batch", "status" => "expired", "reaped_at" => now.iso8601,
+      "expired_event_id" => "claim-expired-already-settled",
+      "expired_event_batch_id" => "already-settled-batch", "expired_event_at" => now.iso8601
+    )
+    store = AgentCoord::LocalStore.new(@state_root)
+    runner = AgentCoord::Runner.new([], stdout: StringIO.new, clock: FixedClock.new(now))
+    entry = store.read_json(claim_path)
+    event = runner.send(:gc_claim_expired_event_payload, entry.data)
+    store.write_json(
+      AgentCoord.event_path(event.fetch("batch_id"), event.fetch("event_id")), event,
+      message: "seed settled history", create: true
+    )
+    candidate = {
+      entry: entry,
+      action: { "action" => "reconcile_expired_event", "source_path" => claim_path }
+    }
+
+    runner.send(:execute_gc_candidates, store, [candidate], now, 30)
+
+    refute candidate.fetch(:action).key?("outcome")
+    refute candidate.fetch(:action).key?("skip_reason")
+  end
+
   def test_gc_claims_only_scope_warns_when_pending_expiry_history_needs_events
     now = Time.utc(2026, 7, 12, 12, 0, 0)
     write_abandoned_claim(
@@ -1244,13 +1303,14 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     assert_empty Dir.glob(File.join(@state_root, "archive", "**", "*.json"))
 
     # The reap is not a dead end: the ordinary terminal-claim path collects the
-    # record once its hot window elapses from the reap.
+    # mutable record and the immutable expiry generation compacts independently
+    # once their hot windows elapse from the reap.
     later = StringIO.new
     later_runner = AgentCoord::Runner.new([], stdout: later, clock: FixedClock.new(now + (8 * 86_400)))
 
     assert_equal 0, later_runner.send(:gc, state_root: @state_root, dry_run: true, execute: false, json: true)
     assert_equal(
-      [["archive", claim_path, "terminal_claim"]],
+      [["archive", claim_path, "terminal_claim"], ["compact", nil, "claim_expirations"]],
       JSON.parse(later.string).fetch("actions").map { |action| action.values_at("action", "source_path", "reason") }
     )
   end
@@ -1961,6 +2021,42 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     assert_equal 1, compact.length
     assert_equal [old_path], compact.fetch(0).fetch("source_paths")
     assert_path_exists File.join(@state_root, new_path)
+  end
+
+  def test_gc_compacts_a_batched_expiry_generation_after_its_terminal_generation_was_compacted
+    now = Time.utc(2026, 7, 12, 12, 0, 0)
+    batch_id = "terminal-then-expired"
+    target = "reaped-after-terminal-plan"
+    terminal_path = "events/#{batch_id}/lane-closed.json"
+    write_state_record(
+      terminal_path,
+      valid_gc_lane_closed(
+        event_id: "lane-closed", batch_id: batch_id, target: target, at: (now - (8 * 86_400)).iso8601
+      )
+    )
+    write_abandoned_claim(
+      target, now - (3 * 86_400), "batch_id" => batch_id, "agent_id" => "gone-holder"
+    )
+    first_stdout = StringIO.new
+    first = AgentCoord::Runner.new([], stdout: first_stdout, clock: FixedClock.new(now))
+
+    assert_equal 0, first.send(:gc, state_root: @state_root, dry_run: false, execute: true, json: true)
+    first_actions = JSON.parse(first_stdout.string).fetch("actions")
+    terminal_compacted = first_actions.any? do |action|
+      action["action"] == "compact" && action["source_paths"] == [terminal_path]
+    end
+    claim_reaped = first_actions.any? { |action| action["action"] == "reap" }
+    assert terminal_compacted
+    assert claim_reaped
+
+    later_stdout = StringIO.new
+    later = AgentCoord::Runner.new([], stdout: later_stdout, clock: FixedClock.new(now + (8 * 86_400)))
+    assert_equal 0, later.send(:gc, state_root: @state_root, dry_run: true, execute: false, json: true)
+    expiry_compaction = JSON.parse(later_stdout.string).fetch("actions").find do |action|
+      action["action"] == "compact" && action["reason"] == "claim_expirations"
+    end
+    refute_nil expiry_compaction
+    assert_equal 1, expiry_compaction.fetch("source_paths").length
   end
 
   def test_gc_defers_synthetic_orphan_group_until_every_event_ages

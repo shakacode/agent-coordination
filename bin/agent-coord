@@ -2371,7 +2371,7 @@ module AgentCoord
       lane = data["lane"]
       lanes = terminal_lanes[provenance]
       lane = lanes.first if lane.to_s.empty? && lanes&.one?
-      lane = "unbatched-claim-expiration:#{data.fetch('event_id')}" if gc_unbatched_claim_expiration_event?(entry)
+      lane = "claim-expiration:#{data.fetch('event_id')}" if gc_generated_claim_expiration_event?(entry)
       [*provenance, lane]
     end
 
@@ -2441,6 +2441,8 @@ module AgentCoord
         ["terminal_target_events", gc_record_time(terminal.data, nil, terminal.path)]
       elsif entries.all? { |entry| gc_unbatched_claim_expiration_event?(entry) }
         ["unbatched_claim_expirations", entries.map { |entry| gc_record_time(entry.data, nil, entry.path) }.max]
+      elsif entries.all? { |entry| gc_generated_claim_expiration_event?(entry) }
+        ["claim_expirations", entries.map { |entry| gc_record_time(entry.data, nil, entry.path) }.max]
       elsif entries.all? { |entry| entry.data["synthetic"] == true }
         ["synthetic_orphan_events", entries.map { |entry| gc_record_time(entry.data, nil, entry.path) }.max]
       end
@@ -2450,7 +2452,12 @@ module AgentCoord
       data = entry.data
       entry.path.start_with?("#{INTERNAL_UNBATCHED_CLAIM_EXPIRY_EVENT_PREFIX}/") &&
         data["batch_id"] == INTERNAL_UNBATCHED_CLAIM_EXPIRY_BATCH_ID &&
-        data["type"] == "claim.expired" && data["status"] == CLAIM_EXPIRED_STATUS &&
+        gc_generated_claim_expiration_event?(entry)
+    end
+
+    def gc_generated_claim_expiration_event?(entry)
+      data = entry.data
+      data["type"] == "claim.expired" && data["status"] == CLAIM_EXPIRED_STATUS &&
         data["event_id"].to_s.start_with?("claim-expired-")
     end
 
@@ -2687,7 +2694,9 @@ module AgentCoord
     def gc_reconcile_expired_event(store, candidate)
       entry = candidate.fetch(:entry)
       claim = entry.data
-      return unless claim["status"] == CLAIM_EXPIRED_STATUS && claim["expired_event_pending"] == true
+      unless claim["status"] == CLAIM_EXPIRED_STATUS && claim["expired_event_pending"] == true
+        return gc_expired_event_already_settled?(store, entry)
+      end
 
       event = gc_claim_expired_event_payload(claim)
       gc_assert_internal_expiry_namespace_available!(store, event)
@@ -2714,6 +2723,20 @@ module AgentCoord
       true
     rescue Error, KeyError, TypeError, SystemCallError => e
       @stderr.puts "warning: claim.expired event pending for #{entry.path}: #{e.message}"
+      false
+    end
+
+    def gc_expired_event_already_settled?(store, entry)
+      claim = entry.data
+      return false unless claim["status"] == CLAIM_EXPIRED_STATUS && claim["expired_event_pending"].nil?
+
+      event = gc_claim_expired_event_payload(claim)
+      gc_assert_internal_expiry_namespace_available!(store, event)
+      event_path = AgentCoord.event_path(event.fetch("batch_id"), event.fetch("event_id"))
+      current = store.read_json(entry.path)
+      immutable = store.read_json(event_path)
+      current&.data == claim && immutable&.data == event
+    rescue Error, KeyError, TypeError, SystemCallError
       false
     end
 
@@ -8248,6 +8271,7 @@ module AgentCoord
       holder = claim["agent_id"].to_s
       heartbeat = holder.empty? ? nil : holder_heartbeat(store, holder, holder_heartbeats, fresh:)
       return fallback_holder_state(claim, now, "invalid") if heartbeat == :invalid
+      return fallback_holder_state(claim, now, "unknown") if heartbeat && heartbeat.data["agent_id"] != holder
 
       liveness = heartbeat && heartbeat_liveness(heartbeat.data, now)
 
