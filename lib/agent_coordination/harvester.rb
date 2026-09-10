@@ -986,18 +986,25 @@ module AgentCoord
         terminal_statuses = claims.filter_map { |row| STATUS_OUTCOMES[row["terminal"]] }
         claim_statuses = claims.filter_map { |row| STATUS_OUTCOMES[row["status"]] }
         event_rows = @ledger.rows(
-          "SELECT event_type, terminal FROM events WHERE batch_id = ? AND repo = ? AND target = ?", target_key
+          "SELECT id, event_type, observed_at, terminal FROM events " \
+          "WHERE batch_id = ? AND repo = ? AND target = ?", target_key
         )
         terminal_statuses.concat(event_rows.filter_map { |row| STATUS_OUTCOMES[row["terminal"]] })
         # A current non-expired mutable claim necessarily follows the reap that
-        # emitted claim.expired. Preserve that immutable event in the ledger,
-        # but do not present historical abandonment as the target's current
-        # outcome after a legitimate reclaim.
+        # emitted claim.expired. Once that mutable row is archived, the ordered
+        # immutable lifecycle remains: a later acquire/release supersedes an old
+        # expiry without deleting it from the ledger.
         current_claim_is_nonexpired = claims.any? { |row| row["status"] != "expired" }
-        event_statuses = if current_claim_is_nonexpired
-                           []
+        lifecycle_types = %w[claim.acquired claim.expired claim.released]
+        lifecycle_rows = event_rows.select { |row| lifecycle_types.include?(row["event_type"]) }
+        lifecycle_order_known = lifecycle_rows.all? { |row| row["observed_at"] }
+        latest_lifecycle = if lifecycle_order_known
+                             lifecycle_rows.max_by { |row| [row.fetch("observed_at"), row.fetch("id")] }
+                           end
+        event_statuses = if !current_claim_is_nonexpired && latest_lifecycle&.fetch("event_type") == "claim.expired"
+                           ["expired"]
                          else
-                           event_rows.filter_map { |row| "expired" if row["event_type"] == "claim.expired" }
+                           []
                          end
         [claim_statuses + terminal_statuses + event_statuses, terminal_statuses]
       end

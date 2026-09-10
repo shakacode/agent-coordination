@@ -8269,6 +8269,8 @@ module AgentCoord
 
     def claim_holder_state(store, claim, now, holder_heartbeats = nil, fresh: false)
       holder = claim["agent_id"].to_s
+      return fallback_holder_state(claim, now, "unknown") unless valid_claim_holder_identity?(holder)
+
       heartbeat = holder.empty? ? nil : holder_heartbeat(store, holder, holder_heartbeats, fresh:)
       return fallback_holder_state(claim, now, "invalid") if heartbeat == :invalid
       return fallback_holder_state(claim, now, "unknown") if heartbeat && heartbeat.data["agent_id"] != holder
@@ -8278,6 +8280,15 @@ module AgentCoord
       return { liveness: liveness } if %w[live stale dead].include?(liveness)
 
       fallback_holder_state(claim, now, heartbeat ? "unknown" : "missing")
+    end
+
+    def valid_claim_holder_identity?(holder)
+      return false if holder.empty?
+
+      AgentCoord.validate_segment!(holder, "agent-id")
+      true
+    rescue Error
+      false
     end
 
     def fallback_holder_state(claim, now, liveness)

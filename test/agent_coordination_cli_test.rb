@@ -770,6 +770,24 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     assert_equal "active", JSON.parse(File.read(File.join(@state_root, claim_path))).fetch("status")
   end
 
+  def test_gc_fails_closed_when_claim_holder_identity_is_missing_or_path_invalid
+    now = Time.utc(2026, 7, 12, 12, 0, 0)
+    missing_path = write_abandoned_claim("missing-holder", now - (3 * 86_400), "agent_id" => nil)
+    invalid_path = write_abandoned_claim("invalid-holder", now - (3 * 86_400), "agent_id" => "bad/holder")
+    stderr = StringIO.new
+    runner = AgentCoord::Runner.new([], stdout: StringIO.new, stderr: stderr, clock: FixedClock.new(now))
+    store = CountingLocalStore.new(@state_root)
+
+    candidates = runner.send(:gc_reap_candidates, store, now, 1, %w[claims heartbeats events batches])
+
+    assert_empty candidates
+    assert_includes stderr.string, "claim holder \"\""
+    assert_includes stderr.string, "claim holder \"bad/holder\""
+    [missing_path, invalid_path].each do |path|
+      assert_equal "active", JSON.parse(File.read(File.join(@state_root, path))).fetch("status")
+    end
+  end
+
   def test_gc_execute_reports_a_reap_rejected_by_apply_time_liveness_as_skipped
     now = Time.utc(2026, 7, 12, 12, 0, 0)
     claim_path = write_abandoned_claim(
