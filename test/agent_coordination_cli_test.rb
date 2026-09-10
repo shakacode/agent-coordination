@@ -678,6 +678,33 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     assert_equal 2, store.reads.count("heartbeats/resumed-holder.json")
   end
 
+  def test_gc_apply_bypasses_a_cached_planning_heartbeat
+    now = Time.utc(2026, 7, 12, 12, 0, 0)
+    claim_path = write_abandoned_claim(
+      "cached-resume", now - (3 * 86_400), "agent_id" => "cached-resume-holder"
+    )
+    runner = AgentCoord::Runner.new([], stdout: StringIO.new, clock: FixedClock.new(now))
+    store = CachingLocalStore.new(@state_root)
+    candidate = runner.send(:gc_reap_candidates, store, now, 1, %w[claims heartbeats events]).fetch(0)
+
+    write_state_record(
+      "heartbeats/cached-resume-holder.json",
+      {
+        "schema_version" => 1,
+        "agent_id" => "cached-resume-holder",
+        "status" => "in_progress",
+        "updated_at" => (now - 60).iso8601,
+        "expires_at" => (now + 600).iso8601
+      }
+    )
+
+    runner.send(:gc_reap_claim, store, candidate, now)
+
+    claim = JSON.parse(File.read(File.join(@state_root, claim_path)))
+    assert_equal "active", claim.fetch("status")
+    assert_equal 2, store.reads.count("heartbeats/cached-resume-holder.json")
+  end
+
   def test_gc_execute_reports_a_reap_rejected_by_apply_time_liveness_as_skipped
     now = Time.utc(2026, 7, 12, 12, 0, 0)
     claim_path = write_abandoned_claim(
@@ -707,7 +734,8 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     heartbeat_path = File.join(@state_root, "heartbeats", "malformed-holder.json")
     FileUtils.mkdir_p(File.dirname(heartbeat_path))
     File.write(heartbeat_path, "{not-json")
-    runner = AgentCoord::Runner.new([], stdout: StringIO.new, clock: FixedClock.new(now))
+    stderr = StringIO.new
+    runner = AgentCoord::Runner.new([], stdout: StringIO.new, stderr: stderr, clock: FixedClock.new(now))
     store = CountingLocalStore.new(@state_root)
     entry = store.read_json(claim_path)
     candidate = {
@@ -715,9 +743,12 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
       action: { "action" => "reap", "source_path" => claim_path, "reason" => "expired_lease" }
     }
 
-    runner.send(:gc_reap_claim, store, candidate, now)
+    runner.send(:execute_gc_candidates, store, [candidate], now, 30)
 
     assert_equal "active", JSON.parse(File.read(File.join(@state_root, claim_path))).fetch("status")
+    assert_equal "skipped", candidate.dig(:action, "outcome")
+    assert_equal "holder_liveness_unknown_at_apply", candidate.dig(:action, "skip_reason")
+    assert_includes stderr.string, "cannot establish liveness for claim holder"
   end
 
   def test_gc_apply_fails_closed_on_unreadable_and_unknown_holder_heartbeats
@@ -732,7 +763,8 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
       "heartbeats/unknown-apply.json",
       { "schema_version" => 1, "agent_id" => "unknown-apply", "status" => "in_progress" }
     )
-    runner = AgentCoord::Runner.new([], stdout: StringIO.new, stderr: StringIO.new, clock: FixedClock.new(now))
+    stderr = StringIO.new
+    runner = AgentCoord::Runner.new([], stdout: StringIO.new, stderr: stderr, clock: FixedClock.new(now))
     unreadable_store = ForbiddenHeartbeatStore.new(@state_root, "heartbeats/unreadable-apply.json")
     unknown_store = CountingLocalStore.new(@state_root)
 
@@ -741,9 +773,12 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
         entry: store.read_json(path),
         action: { "action" => "reap", "source_path" => path, "reason" => "expired_lease" }
       }
-      runner.send(:gc_reap_claim, store, candidate, now)
+      runner.send(:execute_gc_candidates, store, [candidate], now, 30)
       assert_equal "active", JSON.parse(File.read(File.join(@state_root, path))).fetch("status")
+      assert_equal "holder_liveness_unknown_at_apply", candidate.dig(:action, "skip_reason")
     end
+    assert_includes stderr.string, "cannot establish liveness for claim holder \"unknown-apply\""
+    assert_includes stderr.string, "cannot read the heartbeat for claim holder \"unreadable-apply\""
   end
 
   def test_gc_reconciles_a_transient_expired_event_failure_exactly_once
@@ -779,6 +814,49 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     assert_equal 1, events.length
     assert_equal "claim.expired", events.fetch(0).fetch("type")
     assert_equal 1, store.expired_event_write_attempts
+  end
+
+  def test_gc_execute_reports_a_still_pending_expired_event
+    now = Time.utc(2026, 7, 12, 12, 0, 0)
+    claim_path = write_abandoned_claim(
+      "pending-output", now - (3 * 86_400),
+      "batch_id" => "pending-output-batch", "agent_id" => "gone-holder",
+      "status" => "expired", "reaped_at" => now.iso8601,
+      "expired_event_id" => "claim-expired-pending-output",
+      "expired_event_at" => now.iso8601, "expired_event_pending" => true
+    )
+    store = FailExpiredEventStore.new(@state_root)
+    runner = StoreInjectedRunner.new([], store: store, clock: FixedClock.new(now))
+
+    assert_equal 0, runner.send(
+      :gc, state_root: @state_root, dry_run: false, execute: true, json: true,
+           prefixes: %w[claims events]
+    )
+
+    action = JSON.parse(runner.captured_stdout.string).fetch("actions").fetch(0)
+    assert_equal "reconcile_expired_event", action.fetch("action")
+    assert_equal "pending", action.fetch("outcome")
+    assert_equal "expired_event_pending", action.fetch("skip_reason")
+    assert_equal true, store.read_json(claim_path).data.fetch("expired_event_pending")
+  end
+
+  def test_gc_reconcile_warns_when_the_pending_event_identity_moves
+    now = Time.utc(2026, 7, 12, 12, 0, 0)
+    claim_path = write_abandoned_claim(
+      "moved-event", now - (3 * 86_400),
+      "batch_id" => "moved-event-batch", "agent_id" => "gone-holder",
+      "status" => "expired", "reaped_at" => now.iso8601,
+      "expired_event_id" => "claim-expired-original",
+      "expired_event_at" => now.iso8601, "expired_event_pending" => true
+    )
+    stderr = StringIO.new
+    runner = AgentCoord::Runner.new([], stdout: StringIO.new, stderr: stderr, clock: FixedClock.new(now))
+    store = ExpiredEventIdentityMovesStore.new(@state_root, claim_path)
+
+    result = runner.send(:gc_reconcile_expired_event, store, { entry: store.read_json(claim_path) })
+
+    assert_equal false, result
+    assert_includes stderr.string, "claim.expired event identity changed"
   end
 
   def test_pending_expiry_history_blocks_release_and_archive_before_reacquisition
@@ -817,6 +895,47 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     assert_equal "claim.expired", event.fetch("type")
     assert_equal true, event.fetch("synthetic")
     assert_equal "smoke", event.fetch("synthetic_kind")
+  end
+
+  def test_malformed_pending_expiry_history_fails_through_the_controlled_cli_surface
+    now = Time.utc(2026, 7, 12, 12, 0, 0)
+    write_abandoned_claim(
+      "malformed-pending", now - (3 * 86_400),
+      "agent_id" => "expired-holder", "status" => "expired",
+      "reaped_at" => now.iso8601, "expired_event_pending" => true
+    )
+
+    claim = run_agent_coord(
+      "claim", "--agent-id", "new-holder", "--repo", "shakacode/example",
+      "--target", "malformed-pending", "--batch-id", "replacement-batch"
+    )
+
+    assert_equal 2, claim.status.exitstatus
+    assert_includes claim.stderr, "claim.expired event pending"
+    refute_includes claim.stderr, "KeyError"
+    refute_includes claim.stderr, "bin/agent-coord:"
+  end
+
+  def test_gc_reports_malformed_pending_expiry_history_without_a_backtrace
+    now = Time.utc(2026, 7, 12, 12, 0, 0)
+    claim_path = write_abandoned_claim(
+      "malformed-pending-gc", now - (3 * 86_400),
+      "agent_id" => "expired-holder", "status" => "expired",
+      "reaped_at" => now.iso8601, "expired_event_pending" => true
+    )
+    store = CountingLocalStore.new(@state_root)
+    runner = StoreInjectedRunner.new([], store: store, clock: FixedClock.new(now))
+
+    assert_equal 0, runner.send(
+      :gc, state_root: @state_root, dry_run: false, execute: true, json: true,
+           prefixes: %w[claims events]
+    )
+
+    action = JSON.parse(runner.captured_stdout.string).fetch("actions").fetch(0)
+    assert_equal claim_path, action.fetch("source_path")
+    assert_equal "pending", action.fetch("outcome")
+    assert_includes runner.captured_stderr.string, "claim.expired event pending"
+    refute_includes runner.captured_stderr.string, "KeyError"
   end
 
   def test_gc_plans_one_action_per_record_and_reaping_outranks_archiving
@@ -14462,6 +14581,32 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     end
   end
 
+  # Mirrors GitHubStore's per-path read cache so the apply-time liveness test
+  # proves the recheck explicitly invalidates a planning-time heartbeat read.
+  class CachingLocalStore < CountingLocalStore
+    def initialize(root)
+      super
+      @cache = {}
+    end
+
+    def read_json(path)
+      return @cache[path] if @cache.key?(path)
+
+      @cache[path] = super
+    end
+
+    def invalidate_read_cache(path)
+      @cache.delete(path)
+    end
+
+    def read_json_fresh(path)
+      invalidate_read_cache(path)
+      read_json(path)
+    end
+
+    private :invalidate_read_cache
+  end
+
   class FailOnceExpiredEventStore < CountingLocalStore
     attr_reader :expired_event_write_attempts
 
@@ -14476,6 +14621,38 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
         raise AgentCoord::OperationalError, "transient event outage" if @expired_event_write_attempts == 1
       end
       super
+    end
+  end
+
+  class FailExpiredEventStore < CountingLocalStore
+    def write_json(path, data, **options)
+      if path.start_with?("events/") && data["type"] == "claim.expired"
+        raise AgentCoord::OperationalError, "event store unavailable"
+      end
+
+      super
+    end
+  end
+
+  class ExpiredEventIdentityMovesStore < CountingLocalStore
+    def initialize(root, claim_path)
+      super(root)
+      @claim_path = claim_path
+      @event_written = false
+    end
+
+    def read_json(path)
+      entry = super
+      return entry unless @event_written && path == @claim_path && entry
+
+      AgentCoord::StoredJson.new(
+        path: entry.path, data: entry.data.merge("expired_event_id" => "claim-expired-replacement"), sha: entry.sha
+      )
+    end
+
+    def write_json(path, data, **options)
+      super
+      @event_written = true if path.start_with?("events/") && data["type"] == "claim.expired"
     end
   end
 
@@ -14800,12 +14977,13 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
   end
 
   class StoreInjectedRunner < AgentCoord::Runner
-    attr_reader :captured_stdout
+    attr_reader :captured_stdout, :captured_stderr
 
     def initialize(argv, store:, clock: Time)
       @injected_store = store
       @captured_stdout = StringIO.new
-      super(argv, stdout: @captured_stdout, stderr: StringIO.new, clock: clock)
+      @captured_stderr = StringIO.new
+      super(argv, stdout: @captured_stdout, stderr: @captured_stderr, clock: clock)
     end
 
     private

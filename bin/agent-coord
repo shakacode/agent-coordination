@@ -2112,11 +2112,12 @@ module AgentCoord
     def execute_gc_candidates(store, candidates, now, archive_days)
       candidates.each do |candidate|
         outcome = execute_gc_candidate(store, candidate, now, archive_days)
-        next unless outcome == :holder_present_at_apply
-
-        candidate.fetch(:action).merge!(
-          "outcome" => "skipped", "skip_reason" => "holder_present_at_apply"
-        )
+        action = candidate.fetch(:action)
+        if %i[holder_present_at_apply holder_liveness_unknown_at_apply].include?(outcome)
+          action.merge!("outcome" => "skipped", "skip_reason" => outcome.to_s)
+        elsif action["action"] == "reconcile_expired_event" && !outcome
+          action.merge!("outcome" => "pending", "skip_reason" => "expired_event_pending")
+        end
       end
     end
 
@@ -2223,19 +2224,26 @@ module AgentCoord
     # claim alone: the holder is treated as present, the run keeps planning
     # every other family, and the memo remembers the refusal so one unreadable
     # holder costs one round trip and one warning.
-    def gc_claim_holder_gone?(store, claim, now, holder_heartbeats)
+    def gc_claim_holder_gone?(store, claim, now, holder_heartbeats, fresh: false)
+      gc_claim_holder_disposition(store, claim, now, holder_heartbeats, fresh:) == :gone
+    end
+
+    def gc_claim_holder_disposition(store, claim, now, holder_heartbeats, fresh: false)
       holder = claim["agent_id"].to_s
-      return false if holder_heartbeats[holder] == :unreadable
+      return :unknown if holder_heartbeats[holder] == :unreadable
 
-      holder_state = claim_holder_state(store, claim, now, holder_heartbeats)
-      return false if %w[invalid unknown].include?(holder_state.fetch(:liveness))
+      holder_state = claim_holder_state(store, claim, now, holder_heartbeats, fresh:)
+      if %w[invalid unknown].include?(holder_state.fetch(:liveness))
+        @stderr.puts "warning: gc cannot establish liveness for claim holder #{holder.inspect}; not reaping its claims"
+        return :unknown
+      end
 
-      takeover_allowed?(holder_state)
+      takeover_allowed?(holder_state) ? :gone : :present
     rescue OperationalError => e
       holder_heartbeats[holder] = :unreadable
       @stderr.puts "warning: gc cannot read the heartbeat for claim holder #{holder.inspect}; " \
                    "not reaping its claims: #{e.message}"
-      false
+      :unknown
     end
 
     def gc_expired_event_candidates(store, prefixes)
@@ -2250,7 +2258,7 @@ module AgentCoord
             "action" => "reconcile_expired_event",
             "source_path" => entry.path,
             "reason" => "missing_claim_expired_event",
-            "eligible_at" => entry.data.fetch("expired_event_at")
+            "eligible_at" => entry.data["expired_event_at"]
           }
         }
       end
@@ -2558,7 +2566,9 @@ module AgentCoord
     # the gc write instead, and the archive pass reads the hot window from it.
     def gc_reap_claim(store, candidate, now)
       entry = candidate.fetch(:entry)
-      return :holder_present_at_apply unless gc_claim_holder_gone?(store, entry.data, now, {})
+      holder = gc_claim_holder_disposition(store, entry.data, now, {}, fresh: true)
+      return :holder_present_at_apply if holder == :present
+      return :holder_liveness_unknown_at_apply if holder == :unknown
 
       event_at = timestamp(now)
       payload = entry.data.except(*CLAIM_CLOSEOUT_FIELDS).merge(
@@ -2606,12 +2616,15 @@ module AgentCoord
         raise OperationalError, "claim.expired event conflict at #{path}" unless existing && existing.data == event
       end
       current = store.read_json(entry.path)
-      return unless current && current.data["expired_event_id"] == event.fetch("event_id")
+      unless current && current.data["expired_event_id"] == event.fetch("event_id")
+        @stderr.puts "warning: claim.expired event identity changed for #{entry.path}; history remains pending"
+        return false
+      end
 
       settled = current.data.except("expired_event_pending")
       store.write_json(entry.path, settled, message: "Confirm expired claim event #{entry.path}", sha: current.sha)
       true
-    rescue Error, SystemCallError => e
+    rescue Error, KeyError, TypeError, SystemCallError => e
       @stderr.puts "warning: claim.expired event pending for #{entry.path}: #{e.message}"
       false
     end
@@ -8113,9 +8126,9 @@ module AgentCoord
       claim["status"] == "active"
     end
 
-    def claim_holder_state(store, claim, now, holder_heartbeats = nil)
+    def claim_holder_state(store, claim, now, holder_heartbeats = nil, fresh: false)
       holder = claim["agent_id"].to_s
-      heartbeat = holder.empty? ? nil : holder_heartbeat(store, holder, holder_heartbeats)
+      heartbeat = holder.empty? ? nil : holder_heartbeat(store, holder, holder_heartbeats, fresh:)
       return fallback_holder_state(claim, now, "invalid") if heartbeat == :invalid
 
       liveness = heartbeat && heartbeat_liveness(heartbeat.data, now)
@@ -8137,14 +8150,15 @@ module AgentCoord
     # a handful of holders, so a caller may hand in a memo to keep one gc run
     # from issuing one heartbeat round trip per claim. The memo belongs to the
     # caller and dies with the run; nothing here is global.
-    def holder_heartbeat(store, holder, memo = nil)
-      return read_holder_heartbeat(store, holder) unless memo
+    def holder_heartbeat(store, holder, memo = nil, fresh: false)
+      return read_holder_heartbeat(store, holder, fresh:) unless memo
 
-      memo.fetch(holder) { memo[holder] = read_holder_heartbeat(store, holder) }
+      memo.fetch(holder) { memo[holder] = read_holder_heartbeat(store, holder, fresh:) }
     end
 
-    def read_holder_heartbeat(store, holder)
-      store.read_json(AgentCoord.heartbeat_path(holder))
+    def read_holder_heartbeat(store, holder, fresh: false)
+      method = fresh && store.respond_to?(:read_json_fresh) ? :read_json_fresh : :read_json
+      store.public_send(method, AgentCoord.heartbeat_path(holder))
     rescue OperationalError
       raise
     rescue JSON::ParserError
@@ -9116,6 +9130,14 @@ module AgentCoord
 
         raise OperationalError, "state layout invalid: #{prefix} is not a directory"
       end
+    end
+
+    # GC's apply boundary must not reuse the planning read. This explicit public
+    # seam keeps cache management inside GitHubStore while preserving ordinary
+    # cached reads everywhere else.
+    def read_json_fresh(path)
+      invalidate_read_cache(path)
+      read_json(path)
     end
 
     private

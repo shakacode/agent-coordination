@@ -790,13 +790,15 @@ class TelemetryHarvesterTest < Minitest::Test # rubocop:disable Metrics/ClassLen
     end
   end
 
-  def test_expired_claim_remains_a_distinct_outcome_and_event
+  def test_expired_event_preserves_the_distinct_outcome_after_claim_reuse
     Dir.mktmpdir("agent-coordination-ledger-expired") do |dir| # rubocop:disable Metrics/BlockLength
       source_path = File.join(dir, "coordination.json")
       ledger_path = File.join(dir, "telemetry.sqlite3")
       coordination = JSON.parse(File.read(File.join(FIXTURES, "coordination.json")))
       claim = coordination.fetch("claims").find { |row| row["target"] == "78" }
-      claim["status"] = "expired"
+      # The target was reclaimed before harvest, so the mutable claim row no
+      # longer carries the expired outcome. The immutable event is authoritative.
+      claim["status"] = "active"
       claim.delete("terminal")
       coordination.fetch("events") << {
         "schema_version" => 1,

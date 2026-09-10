@@ -979,12 +979,12 @@ module AgentCoord
         )
         terminal_statuses = claims.filter_map { |row| STATUS_OUTCOMES[row["terminal"]] }
         claim_statuses = claims.filter_map { |row| STATUS_OUTCOMES[row["status"]] }
-        terminal_statuses.concat(
-          @ledger.rows(
-            "SELECT terminal FROM events WHERE batch_id = ? AND repo = ? AND target = ?", target_key
-          ).filter_map { |row| STATUS_OUTCOMES[row["terminal"]] }
+        event_rows = @ledger.rows(
+          "SELECT event_type, terminal FROM events WHERE batch_id = ? AND repo = ? AND target = ?", target_key
         )
-        [claim_statuses + terminal_statuses, terminal_statuses]
+        terminal_statuses.concat(event_rows.filter_map { |row| STATUS_OUTCOMES[row["terminal"]] })
+        event_statuses = event_rows.filter_map { |row| "expired" if row["event_type"] == "claim.expired" }
+        [claim_statuses + terminal_statuses + event_statuses, terminal_statuses]
       end
 
       def outcome_for(statuses, pr_states, terminal_statuses)
