@@ -731,12 +731,18 @@ module AgentCoord
         batch_id = known(event["batch_id"])
         event_repo = repo(event["repo"])
         target = known(event["target"])
+        event_type = enum(event["type"], EVENT_TYPES)
+        # claim.expired is an outcome-bearing lifecycle fact, not merely a
+        # caller-selected label. Keep malformed/manual rows visible to drift
+        # reporting through event_type_raw, but do not let the label alone
+        # manufacture an expired target outcome.
+        event_type = nil if event_type == "claim.expired" && event["status"] != "expired"
         {
           "event_ref" => opaque_value(event["id"]) || "record-#{index}",
           "batch_id" => batch_id,
           "repo" => event_repo,
           "target" => target,
-          "event_type" => enum(event["type"], EVENT_TYPES),
+          "event_type" => event_type,
           # unknown_is_value: this column is the raw type string, so a literal
           # "unknown" -- which the CLI writes for a type-less record -- is a real
           # observation to keep, not an absent value. Contrast `category` below.

@@ -503,7 +503,7 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     assert_empty JSON.parse(replay.string).fetch("actions")
   end
 
-  def test_gc_archives_a_reaped_claim_on_a_hot_window_that_starts_at_the_reap
+  def test_gc_archives_a_reaped_claim_on_a_hot_window_that_starts_at_the_reap # rubocop:disable Metrics/AbcSize
     now = Time.utc(2026, 7, 12, 12, 0, 0)
     claim_path = write_abandoned_claim("aged-out", now - (30 * 86_400))
     synthetic_path = write_abandoned_claim("aged-out-synthetic", now - (30 * 86_400), "synthetic" => true)
@@ -514,17 +514,24 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     early_runner = AgentCoord::Runner.new([], stdout: early, clock: FixedClock.new(now + (2 * 86_400)))
     assert_equal 0, early_runner.send(:gc, state_root: @state_root, dry_run: true, execute: false, json: true)
     early_actions = JSON.parse(early.string).fetch("actions")
-    assert_equal([synthetic_path], early_actions.map { |action| action.fetch("source_path") })
-    assert_equal "archive", early_actions.first.fetch("action")
-    assert_equal "terminal_claim", early_actions.first.fetch("reason")
-    assert_equal now.iso8601, early_actions.first.fetch("eligible_at")
+    archive_actions = early_actions.select { |action| action.fetch("action") == "archive" }
+    assert_equal([synthetic_path], archive_actions.map { |action| action.fetch("source_path") })
+    assert_equal "terminal_claim", archive_actions.first.fetch("reason")
+    assert_equal now.iso8601, archive_actions.first.fetch("eligible_at")
+    # The new immutable expiry history follows the same synthetic retention
+    # marker as its source claim and is compacted independently, never erased.
+    compact_actions = early_actions.select { |action| action.fetch("action") == "compact" }
+    assert_equal 1, compact_actions.length
+    assert_equal "synthetic_orphan_events", compact_actions.first.fetch("reason")
 
     late = StringIO.new
     late_runner = AgentCoord::Runner.new([], stdout: late, clock: FixedClock.new(now + (8 * 86_400)))
     assert_equal 0, late_runner.send(:gc, state_root: @state_root, dry_run: true, execute: false, json: true)
     late_actions = JSON.parse(late.string).fetch("actions")
-    assert_equal([claim_path, synthetic_path].sort, late_actions.map { |action| action.fetch("source_path") }.sort)
-    assert_equal(["terminal_claim"], late_actions.map { |action| action.fetch("reason") }.uniq)
+    late_archives = late_actions.select { |action| action.fetch("action") == "archive" }
+    assert_equal([claim_path, synthetic_path].sort, late_archives.map { |action| action.fetch("source_path") }.sort)
+    assert_equal(["terminal_claim"], late_archives.map { |action| action.fetch("reason") }.uniq)
+    assert_equal(1, late_actions.count { |action| action.fetch("action") == "compact" })
   end
 
   def test_gc_never_reaps_a_claim_whose_lease_is_absent_and_fails_closed_on_an_unparseable_one
@@ -814,6 +821,35 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     assert_equal 1, events.length
     assert_equal "claim.expired", events.fetch(0).fetch("type")
     assert_equal 1, store.expired_event_write_attempts
+  end
+
+  def test_gc_retains_an_unbatched_expiry_event_after_the_claim_is_reused
+    now = Time.utc(2026, 7, 12, 12, 0, 0)
+    claim_path = write_abandoned_claim("unbatched-reuse", now - (3 * 86_400), "agent_id" => "gone-holder")
+    runner = AgentCoord::Runner.new([], stdout: StringIO.new, clock: FixedClock.new(now))
+
+    assert_equal 0, runner.send(:gc, state_root: @state_root, dry_run: false, execute: true, json: true)
+
+    expired = JSON.parse(File.read(File.join(@state_root, claim_path)))
+    assert_equal "expired", expired.fetch("status")
+    event_paths = Dir.glob(File.join(@state_root, "events", "**", "*.json"))
+    assert_equal 1, event_paths.length
+    immutable_event = JSON.parse(File.read(event_paths.fetch(0)))
+    assert_equal "claim.expired", immutable_event.fetch("type")
+    assert_equal "expired", immutable_event.fetch("status")
+    assert_equal "unbatched-reuse", immutable_event.fetch("target")
+    refute_empty immutable_event.fetch("batch_id")
+
+    replacement = run_agent_coord(
+      "claim", "--agent-id", "new-holder", "--repo", "shakacode/example", "--target", "unbatched-reuse"
+    )
+
+    assert_equal 0, replacement.status.exitstatus, replacement.stderr
+    reused = JSON.parse(File.read(File.join(@state_root, claim_path)))
+    assert_equal "active", reused.fetch("status")
+    refute reused.key?("reaped_at")
+    assert_equal immutable_event, JSON.parse(File.read(event_paths.fetch(0)))
+    assert_equal 1, Dir.glob(File.join(@state_root, "events", "**", "*.json")).length
   end
 
   def test_gc_execute_reports_a_still_pending_expired_event
@@ -11746,6 +11782,45 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     assert_equal "phase", status_event.fetch("type")
     assert_equal "validating", status_event.fetch("phase")
     assert_equal "running tests", status_event.fetch("message")
+  end
+
+  def test_record_event_requires_expired_status_for_claim_expired
+    write_batch("batch-expired-event", lanes: [{ "name" => "code", "owner" => "worker-a", "targets" => ["3991"] }])
+
+    missing = run_agent_coord(
+      "record-event", "--batch-id", "batch-expired-event", "--type", "claim.expired",
+      "--agent-id", "worker-a", "--repo", "shakacode/example", "--target", "3991"
+    )
+    wrong = run_agent_coord(
+      "record-event", "--batch-id", "batch-expired-event", "--type", "claim.expired",
+      "--agent-id", "worker-a", "--repo", "shakacode/example", "--target", "3991", "--status", "active"
+    )
+
+    assert_equal 1, missing.status.exitstatus
+    assert_includes missing.stderr, "claim.expired requires --status expired"
+    assert_equal 1, wrong.status.exitstatus
+    assert_includes wrong.stderr, "claim.expired requires --status expired"
+    assert_empty event_records("batch-expired-event")
+
+    valid = run_agent_coord(
+      "record-event", "--batch-id", "batch-expired-event", "--type", "claim.expired",
+      "--agent-id", "worker-a", "--repo", "shakacode/example", "--target", "3991", "--status", "expired"
+    )
+    assert_equal 0, valid.status.exitstatus, valid.stderr
+    assert_empty valid.stderr
+    exact = event_of_type("batch-expired-event", "claim.expired")
+    assert_equal "expired", exact.fetch("status")
+    refute exact.key?("status_raw")
+
+    folded = run_agent_coord(
+      "record-event", "--batch-id", "batch-expired-event", "--type", "claim.expired",
+      "--agent-id", "worker-a", "--repo", "shakacode/example", "--target", "3991", "--status", "EXPIRED"
+    )
+    assert_equal 0, folded.status.exitstatus, folded.stderr
+    assert_empty folded.stderr
+    folded_event = events_of_type("batch-expired-event", "claim.expired").last
+    assert_equal "expired", folded_event.fetch("status")
+    assert_equal "EXPIRED", folded_event.fetch("status_raw")
   end
 
   def test_record_event_coerces_alias_status_and_projects_status_raw

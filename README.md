@@ -770,8 +770,11 @@ appended. Rather than reporting a bare "no events" and hiding live custody, `log
 reports the claim record, labelled as one, whenever it is the latest thing known
 about the work item. That covers an empty trail and also a trail whose events are
 all older than the claim — `claim` permits omitting `--batch-id`, and no
-lifecycle event is emitted without a batch, so stale events and a live claim can
-coexist. The claim is never reported when a filter emptied the trail, since it is
+acquisition lifecycle event is emitted without a batch, so stale events and a
+live claim can coexist. GC is the exception: reaping an unbatched claim writes
+its immutable `claim.expired` event under the reserved
+`unbatched-claim-expirations` namespace before that claim can be reused. The
+claim is never reported when a filter emptied the trail, since it is
 not evaluated against `--since`, `--machine`, `--host`, or `--type`:
 
 ```text

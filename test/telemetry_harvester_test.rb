@@ -827,6 +827,42 @@ class TelemetryHarvesterTest < Minitest::Test # rubocop:disable Metrics/ClassLen
     end
   end
 
+  def test_claim_expired_event_without_expired_status_cannot_derive_expired_outcome
+    Dir.mktmpdir("agent-coordination-ledger-unqualified-expired") do |dir| # rubocop:disable Metrics/BlockLength
+      source_path = File.join(dir, "coordination.json")
+      ledger_path = File.join(dir, "telemetry.sqlite3")
+      coordination = JSON.parse(File.read(File.join(FIXTURES, "coordination.json")))
+      claim = coordination.fetch("claims").find { |row| row["target"] == "78" }
+      claim["status"] = "active"
+      claim.delete("terminal")
+      coordination.fetch("events") << {
+        "schema_version" => 1,
+        "id" => "unqualified-expired-78",
+        "batch_id" => "batch-fixture",
+        "type" => "claim.expired",
+        "agent_id" => "maker",
+        "repo" => "shakacode/agent-coordination",
+        "target" => "78",
+        "at" => "2026-07-18T04:00:00Z"
+      }
+      File.write(source_path, JSON.pretty_generate(coordination))
+
+      _stdout, stderr, status = Open3.capture3(
+        CLI, "harvest", "--ledger", ledger_path,
+        "--coordination-json", source_path, "--batch-id", "batch-fixture"
+      )
+
+      assert status.success?, stderr
+      refute_equal ["expired"], sqlite_query(
+        ledger_path, "SELECT outcome FROM target_units WHERE target = '78'"
+      )
+      assert_equal ["|claim.expired"], sqlite_query(
+        ledger_path,
+        "SELECT COALESCE(event_type, ''), event_type_raw FROM events WHERE event_type_raw = 'claim.expired'"
+      )
+    end
+  end
+
   def test_named_batch_harvest_recomputes_outcomes_for_all_refreshed_github_rows # rubocop:disable Metrics/MethodLength
     Dir.mktmpdir("agent-coordination-ledger-github-refresh") do |dir| # rubocop:disable Metrics/BlockLength
       source_path = File.join(dir, "coordination.json")

@@ -50,6 +50,7 @@ module AgentCoord
   # it. Deliberately distinct from "released" so an abandoned lane stays
   # countable instead of being laundered into a clean handoff.
   CLAIM_EXPIRED_STATUS = "expired"
+  UNBATCHED_CLAIM_EXPIRY_BATCH_ID = "unbatched-claim-expirations"
   CLAIM_CLOSEOUT_FIELDS = %w[
     terminal pr_state evidence_url closed_by released_at release_mode handoff_to handoff_note
   ].freeze
@@ -2575,13 +2576,17 @@ module AgentCoord
         "status" => CLAIM_EXPIRED_STATUS,
         "reaped_at" => event_at
       )
-      unless payload["batch_id"].to_s.empty?
-        payload.merge!(
-          "expired_event_id" => gc_claim_expired_event_id(entry.path, entry.data),
-          "expired_event_at" => event_at,
-          "expired_event_pending" => true
-        )
-      end
+      expired_event_batch_id = if payload["batch_id"].to_s.empty?
+                                 UNBATCHED_CLAIM_EXPIRY_BATCH_ID
+                               else
+                                 payload.fetch("batch_id")
+                               end
+      payload.merge!(
+        "expired_event_id" => gc_claim_expired_event_id(entry.path, entry.data),
+        "expired_event_batch_id" => expired_event_batch_id,
+        "expired_event_at" => event_at,
+        "expired_event_pending" => true
+      )
       store.write_json(entry.path, payload, message: "Reap expired claim #{entry.path}", sha: entry.sha)
       current = store.read_json(entry.path)
       gc_reconcile_expired_event(store, { entry: current }) if current
@@ -2608,7 +2613,7 @@ module AgentCoord
       return unless claim["status"] == CLAIM_EXPIRED_STATUS && claim["expired_event_pending"] == true
 
       event = gc_claim_expired_event_payload(claim)
-      path = AgentCoord.event_path(claim.fetch("batch_id"), event.fetch("event_id"))
+      path = AgentCoord.event_path(event.fetch("batch_id"), event.fetch("event_id"))
       begin
         store.write_json(path, event, message: "Record expired claim #{entry.path}", create: true)
       rescue Conflict
@@ -2633,7 +2638,7 @@ module AgentCoord
       payload = {
         "schema_version" => SCHEMA_VERSION,
         "event_id" => claim.fetch("expired_event_id"),
-        "batch_id" => claim.fetch("batch_id").to_s,
+        "batch_id" => claim.fetch("expired_event_batch_id", claim.fetch("batch_id", nil)).to_s,
         "type" => "claim.expired",
         "agent_id" => claim["agent_id"],
         "repo" => claim["repo"],
@@ -4189,6 +4194,20 @@ module AgentCoord
       options[:status] = canonical
     end
 
+    # claim.expired is a closed lifecycle fact rather than a heartbeat status.
+    # Give it the same case/hyphen folding and raw-spelling attribution as the
+    # shared vocabulary without warning that its one valid status is unknown.
+    def normalize_claim_expired_status_option!(options)
+      raw = options[:status]
+      return if raw.nil?
+
+      canonical = raw.downcase.tr("-", "_")
+      return unless canonical == CLAIM_EXPIRED_STATUS
+
+      options[:status] = canonical
+      options[:status_raw] = canonical == raw ? nil : raw
+    end
+
     def warn_unknown_status(raw)
       @stderr.puts "warning: status #{raw.inspect} is not in the canonical status vocabulary; " \
                    "preserving it verbatim with a status_raw copy. " \
@@ -4407,6 +4426,7 @@ module AgentCoord
 
     def record_event(options)
       require_options(options, :batch_id, :type)
+      normalize_claim_expired_status_option!(options) if options[:type] == "claim.expired" && options[:status_given]
       validate_record_event_options!(options)
 
       store = build_store(options)
@@ -4415,7 +4435,7 @@ module AgentCoord
         close_terminal_event(store, options, now, output: true)
         return 0
       end
-      normalize_status_option!(options) if options[:status_given]
+      normalize_status_option!(options) if options[:status_given] && options[:type] != "claim.expired"
       write_event_record(store, options, now, output: true)
       0
     ensure
@@ -4801,6 +4821,10 @@ module AgentCoord
     def validate_record_event_options!(options)
       AgentCoord.batch_path(options.fetch(:batch_id))
       AgentCoord.validate_segment!(options.fetch(:type), "event type")
+      if options[:type] == "claim.expired" && (!options[:status_given] || options[:status] != CLAIM_EXPIRED_STATUS)
+        raise Error, "claim.expired requires --status expired"
+      end
+
       validate_terminal_options!(options, event: true) if options[:type] == "lane_closed"
       validate_typed_event_options!(options)
       return unless options.key?(:lane)
