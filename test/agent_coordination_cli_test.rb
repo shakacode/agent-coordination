@@ -994,6 +994,48 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     assert_equal 1, event_records("initial-settled-race-batch").length
   end
 
+  def test_gc_initial_reap_accepts_exact_history_settled_then_immediately_reacquired
+    now = Time.utc(2026, 7, 12, 12, 0, 0)
+    claim_path = write_abandoned_claim(
+      "initial-settled-reacquired-race", now - (3 * 86_400),
+      "batch_id" => "initial-settled-reacquired-batch", "agent_id" => "gone-holder"
+    )
+    store = SettleExpiredEventAndReacquireBeforeReadStore.new(@state_root, claim_path, now)
+    runner = StoreInjectedRunner.new([], store: store, clock: FixedClock.new(now))
+
+    assert_equal 0, runner.send(
+      :gc, state_root: @state_root, dry_run: false, execute: true, json: true,
+           prefixes: %w[claims heartbeats events]
+    )
+
+    action = JSON.parse(runner.captured_stdout.string).fetch("actions").fetch(0)
+    refute action.key?("outcome")
+    claim = store.read_json(claim_path).data
+    assert_equal "active", claim.fetch("status")
+    assert_equal "new-holder", claim.fetch("agent_id")
+    assert_equal 1, event_records("initial-settled-reacquired-batch").length
+  end
+
+  def test_gc_initial_reap_finishes_a_pending_claim_after_another_reconciler_writes_the_event
+    now = Time.utc(2026, 7, 12, 12, 0, 0)
+    claim_path = write_abandoned_claim(
+      "initial-event-written-race", now - (3 * 86_400),
+      "batch_id" => "initial-event-written-batch", "agent_id" => "gone-holder"
+    )
+    store = ExpiredEventWrittenBeforeReadStore.new(@state_root, claim_path)
+    runner = StoreInjectedRunner.new([], store: store, clock: FixedClock.new(now))
+
+    assert_equal 0, runner.send(
+      :gc, state_root: @state_root, dry_run: false, execute: true, json: true,
+           prefixes: %w[claims heartbeats events]
+    )
+
+    action = JSON.parse(runner.captured_stdout.string).fetch("actions").fetch(0)
+    refute action.key?("outcome")
+    refute store.read_json(claim_path).data.key?("expired_event_pending")
+    assert_equal 1, event_records("initial-event-written-batch").length
+  end
+
   def test_gc_retains_an_unbatched_expiry_event_after_the_claim_is_reused
     now = Time.utc(2026, 7, 12, 12, 0, 0)
     claim_path = write_abandoned_claim("unbatched-reuse", now - (3 * 86_400), "agent_id" => "gone-holder")
@@ -15222,6 +15264,76 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
                    message: "Confirm event elsewhere", sha: pending.sha)
       end
       super
+    end
+  end
+
+  class SettleExpiredEventAndReacquireBeforeReadStore < CountingLocalStore
+    EXPIRY_FIELDS = %w[
+      reaped_at expired_event_id expired_event_batch_id expired_event_at expired_event_pending
+    ].freeze
+
+    def initialize(root, claim_path, now)
+      super(root)
+      @claim_path = claim_path
+      @now = now
+      @settle_on_read = false
+    end
+
+    def write_json(path, data, **options)
+      @settle_on_read = true if path == @claim_path && data["expired_event_pending"] == true
+      super
+    end
+
+    def read_json(path)
+      settle_and_reacquire if path == @claim_path && @settle_on_read
+      super
+    end
+
+    private
+
+    def settle_and_reacquire
+      @settle_on_read = false
+      pending = read_json(@claim_path)
+      event = AgentCoord::Runner.new([]).send(:gc_claim_expired_event_payload, pending.data)
+      write_json(AgentCoord.event_path(event.fetch("batch_id"), event.fetch("event_id")), event,
+                 message: "Settle event elsewhere", create: true)
+      write_json(@claim_path, pending.data.except("expired_event_pending"),
+                 message: "Confirm event elsewhere", sha: pending.sha)
+      settled = read_json(@claim_path)
+      active = settled.data.except(*EXPIRY_FIELDS).merge(
+        "status" => "active", "agent_id" => "new-holder", "generation" => 2,
+        "instance_id" => "new-instance", "claimed_at" => @now.iso8601,
+        "updated_at" => @now.iso8601, "expires_at" => (@now + 3600).iso8601
+      )
+      write_json(@claim_path, active, message: "Reacquire immediately", sha: settled.sha)
+    end
+  end
+
+  class ExpiredEventWrittenBeforeReadStore < CountingLocalStore
+    def initialize(root, claim_path)
+      super(root)
+      @claim_path = claim_path
+      @write_event_on_read = false
+    end
+
+    def write_json(path, data, **options)
+      @write_event_on_read = true if path == @claim_path && data["expired_event_pending"] == true
+      super
+    end
+
+    def read_json(path)
+      write_expired_event if path == @claim_path && @write_event_on_read
+      super
+    end
+
+    private
+
+    def write_expired_event
+      @write_event_on_read = false
+      pending = read_json(@claim_path)
+      event = AgentCoord::Runner.new([]).send(:gc_claim_expired_event_payload, pending.data)
+      write_json(AgentCoord.event_path(event.fetch("batch_id"), event.fetch("event_id")), event,
+                 message: "Write event elsewhere", create: true)
     end
   end
 

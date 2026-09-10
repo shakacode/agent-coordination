@@ -2671,14 +2671,7 @@ module AgentCoord
       )
       store.write_json(entry.path, payload, message: "Reap expired claim #{entry.path}", sha: entry.sha)
       current = store.read_json(entry.path)
-      settled = payload.except("expired_event_pending")
-      reconciled = if current&.data == settled
-                     true
-                   elsif current
-                     gc_reconcile_expired_event(store, { entry: current })
-                   else
-                     false
-                   end
+      reconciled = gc_finish_reap_reconciliation(store, current, payload)
       reconciled ? :applied : :expired_event_pending
     rescue Conflict
       :claim_changed_at_apply
@@ -2694,6 +2687,18 @@ module AgentCoord
         "expires_at" => claim["expires_at"]
       }
       "claim-expired-#{Digest::SHA256.hexdigest(gc_canonical_json(identity))[0, 16]}"
+    end
+
+    def gc_finish_reap_reconciliation(store, current, payload)
+      return true if current&.data == payload.except("expired_event_pending")
+      if current&.data&.fetch("expired_event_pending", false) == true
+        return gc_reconcile_expired_event(store, { entry: current })
+      end
+
+      event_recorded = gc_expired_event_recorded?(store, payload)
+      return event_recorded unless current
+
+      event_recorded || gc_reconcile_expired_event(store, { entry: current })
     end
 
     def gc_reconcile_expired_event(store, candidate)
@@ -2735,12 +2740,18 @@ module AgentCoord
       claim = entry.data
       return false unless claim["status"] == CLAIM_EXPIRED_STATUS && claim["expired_event_pending"].nil?
 
+      current = store.read_json(entry.path)
+      current&.data == claim && gc_expired_event_recorded?(store, claim)
+    rescue Error, KeyError, TypeError, SystemCallError
+      false
+    end
+
+    def gc_expired_event_recorded?(store, claim)
       event = gc_claim_expired_event_payload(claim)
       gc_assert_internal_expiry_namespace_available!(store, event)
       event_path = AgentCoord.event_path(event.fetch("batch_id"), event.fetch("event_id"))
-      current = store.read_json(entry.path)
       immutable = store.read_json(event_path)
-      current&.data == claim && immutable&.data == event
+      immutable&.data == event
     rescue Error, KeyError, TypeError, SystemCallError
       false
     end
