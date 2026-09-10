@@ -1407,7 +1407,7 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     store = AgentCoord::LocalStore.new(@state_root)
     runner = AgentCoord::Runner.new([], stdout: StringIO.new, clock: FixedClock.new(now))
     entry = store.read_json(claim_path)
-    event = runner.send(:gc_claim_expired_event_payload, entry.data)
+    event = runner.send(:gc_claim_expired_event_payload, entry.data, entry.path)
     store.write_json(
       AgentCoord.event_path(event.fetch("batch_id"), event.fetch("event_id")), event,
       message: "seed settled history", create: true
@@ -1429,7 +1429,7 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
       "pending-prefix", now - (3 * 86_400),
       "status" => "expired", "reaped_at" => now.iso8601,
       "expired_event_id" => "claim-expired-pending-prefix",
-      "expired_event_batch_id" => AgentCoord::UNBATCHED_CLAIM_EXPIRY_BATCH_ID,
+      "expired_event_batch_id" => AgentCoord::INTERNAL_UNBATCHED_CLAIM_EXPIRY_BATCH_ID,
       "expired_event_at" => now.iso8601, "expired_event_pending" => true
     )
     stderr = StringIO.new
@@ -1441,6 +1441,164 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
 
     assert_includes stderr.string, "1 pending claim.expired event(s) unreconciled"
     assert_includes stderr.string, "needs --prefix events alongside --prefix claims"
+  end
+
+  def test_claims_only_reacquisition_preserves_pending_expiry_for_privileged_gc # rubocop:disable Metrics/AbcSize
+    now = Time.utc(2026, 7, 12, 12, 0, 0)
+    claim_path = write_abandoned_claim(
+      "claims-only-reacquire", now - (3 * 86_400),
+      "agent_id" => "expired-holder", "status" => "expired", "reaped_at" => now.iso8601,
+      "expired_event_id" => "claim-expired-claims-only",
+      "expired_event_batch_id" => AgentCoord::INTERNAL_UNBATCHED_CLAIM_EXPIRY_BATCH_ID,
+      "expired_event_at" => now.iso8601, "expired_event_pending" => true
+    )
+    claims_store = ClaimsOnlyStore.new(@state_root)
+    claim_runner = StoreInjectedRunner.new([], store: claims_store, clock: FixedClock.new(now + 60))
+
+    assert_equal 0, claim_runner.send(
+      :claim, agent_id: "new-holder", repo: "shakacode/example", target: "claims-only-reacquire", ttl: 3600
+    )
+
+    active = claims_store.read_json(claim_path).data
+    assert_equal "active", active.fetch("status")
+    assert_equal "new-holder", active.fetch("agent_id")
+    assert_equal true, active.fetch("expired_event_pending")
+    assert_equal "expired-holder", active.fetch("expired_event_replay").fetch("agent_id")
+    assert_empty claims_store.non_claim_accesses
+
+    store = AgentCoord::LocalStore.new(@state_root)
+    gc_runner = AgentCoord::Runner.new([], stdout: StringIO.new, clock: FixedClock.new(now + (3 * 86_400)))
+    assert_empty gc_runner.send(
+      :gc_reap_candidates, store, now + (3 * 86_400), 1, %w[claims heartbeats events batches]
+    )
+
+    release_runner = StoreInjectedRunner.new([], store: claims_store, clock: FixedClock.new(now + 90))
+    assert_equal 0, release_runner.send(
+      :release, agent_id: "new-holder", repo: "shakacode/example", target: "claims-only-reacquire"
+    )
+    released = claims_store.read_json(claim_path).data
+    assert_equal "released", released.fetch("status")
+    assert_equal true, released.fetch("expired_event_pending")
+    assert_equal "expired-holder", released.fetch("expired_event_replay").fetch("agent_id")
+    assert_empty claims_store.non_claim_accesses
+
+    gc_runner = AgentCoord::Runner.new([], stdout: StringIO.new, clock: FixedClock.new(now + 120))
+    candidates = gc_runner.send(:gc_expired_event_candidates, store, %w[claims events batches])
+    gc_runner.send(:execute_gc_candidates, store, candidates, now + 120, 30)
+
+    reconciled = store.read_json(claim_path).data
+    assert_equal "released", reconciled.fetch("status")
+    assert_equal "new-holder", reconciled.fetch("agent_id")
+    refute reconciled.key?("expired_event_pending")
+    refute reconciled.key?("expired_event_replay")
+    event = event_records(AgentCoord::INTERNAL_UNBATCHED_CLAIM_EXPIRY_BATCH_ID).fetch(0)
+    assert_equal "expired-holder", event.fetch("agent_id")
+  end
+
+  def test_claim_and_gc_reject_legacy_pending_expiry_destination_without_mutation
+    now = Time.utc(2026, 7, 12, 12, 0, 0)
+    claim_path = write_abandoned_claim(
+      "legacy-pending-expiry", now - (3 * 86_400),
+      "agent_id" => "expired-holder", "status" => "expired", "reaped_at" => now.iso8601,
+      "expired_event_id" => "claim-expired-legacy-pending",
+      "expired_event_batch_id" => AgentCoord::UNBATCHED_CLAIM_EXPIRY_BATCH_ID,
+      "expired_event_at" => now.iso8601, "expired_event_pending" => true
+    )
+    original = File.binread(File.join(@state_root, claim_path))
+    claim_runner = AgentCoord::Runner.new([], stdout: StringIO.new, clock: FixedClock.new(now + 60))
+
+    error = assert_raises(AgentCoord::Error) do
+      claim_runner.send(
+        :claim, state_root: @state_root, agent_id: "new-holder", repo: "shakacode/example",
+                target: "legacy-pending-expiry", ttl: 3600
+      )
+    end
+    assert_includes error.message, "legacy unbatched claim expiry destination is unsupported"
+    assert_equal original, File.binread(File.join(@state_root, claim_path))
+
+    stdout = StringIO.new
+    gc_runner = AgentCoord::Runner.new([], stdout: stdout, clock: FixedClock.new(now + 120))
+    assert_equal 0, gc_runner.send(
+      :gc, state_root: @state_root, dry_run: false, execute: true, json: true,
+           prefixes: %w[claims events]
+    )
+    action = JSON.parse(stdout.string).fetch("actions").fetch(0)
+    assert_equal "pending", action.fetch("outcome")
+    assert_equal original, File.binread(File.join(@state_root, claim_path))
+    assert_empty event_records(AgentCoord::UNBATCHED_CLAIM_EXPIRY_BATCH_ID)
+  end
+
+  def test_claim_and_gc_reject_malformed_nested_expiry_replays_without_mutation
+    now = Time.utc(2026, 7, 12, 12, 0, 0)
+    mutations = {
+      "missing-schema" => ->(event) { event.delete("schema_version") },
+      "missing-holder" => ->(event) { event.delete("agent_id") },
+      "blank-repo" => ->(event) { event["repo"] = "" },
+      "wrong-repo" => ->(event) { event["repo"] = "shakacode/other" },
+      "missing-target" => ->(event) { event.delete("target") },
+      "wrong-target" => ->(event) { event["target"] = "another-target" },
+      "invalid-time" => ->(event) { event["at"] = "not-a-timestamp" }
+    }
+
+    mutations.each do |label, mutate| # rubocop:disable Metrics/BlockLength
+      target = "malformed-replay-#{label}"
+      event_id = "claim-expired-#{label}"
+      replay = {
+        "schema_version" => AgentCoord::SCHEMA_VERSION,
+        "event_id" => event_id, "batch_id" => "malformed-replay-batch",
+        "type" => "claim.expired", "agent_id" => "expired-holder",
+        "repo" => "shakacode/example", "target" => target,
+        "status" => "expired", "at" => now.iso8601
+      }
+      mutate.call(replay)
+      event_at = replay.fetch("at")
+      claim_path = write_abandoned_claim(
+        target, now - (3 * 86_400),
+        "agent_id" => "expired-holder", "status" => "expired", "reaped_at" => now.iso8601,
+        "expired_event_id" => event_id, "expired_event_batch_id" => "malformed-replay-batch",
+        "expired_event_at" => event_at, "expired_event_pending" => true,
+        "expired_event_replay" => replay
+      )
+      original = File.binread(File.join(@state_root, claim_path))
+      runner = AgentCoord::Runner.new([], stdout: StringIO.new, stderr: StringIO.new, clock: FixedClock.new(now + 60))
+
+      error = assert_raises(AgentCoord::OperationalError, label) do
+        runner.send(
+          :claim, state_root: @state_root, agent_id: "new-holder", repo: "shakacode/example",
+                  target: target, ttl: 3600
+        )
+      end
+      assert_includes error.message, "claim.expired event pending replay", label
+      assert_equal false, runner.send(
+        :gc_reconcile_expired_event, AgentCoord::LocalStore.new(@state_root),
+        { entry: AgentCoord::LocalStore.new(@state_root).read_json(claim_path) }
+      ), label
+      assert_equal original, File.binread(File.join(@state_root, claim_path)), label
+      assert_empty event_records("malformed-replay-batch"), label
+    end # rubocop:enable Metrics/BlockLength
+  end
+
+  def test_pending_expiry_replay_rejects_invalid_optional_metadata_encoding
+    claim_path = "claims/shakacode/example/invalid-replay-encoding.json"
+    event = {
+      "schema_version" => AgentCoord::SCHEMA_VERSION,
+      "event_id" => "claim-expired-invalid-encoding", "batch_id" => "invalid-encoding-batch",
+      "type" => "claim.expired", "agent_id" => "expired-holder",
+      "repo" => "shakacode/example", "target" => "invalid-replay-encoding",
+      "status" => "expired", "at" => "2026-07-12T12:00:00Z",
+      "host" => "bad\xFF".b.force_encoding(Encoding::UTF_8)
+    }
+    claim = {
+      "expired_event_id" => event.fetch("event_id"),
+      "expired_event_batch_id" => event.fetch("batch_id"),
+      "expired_event_at" => event.fetch("at")
+    }
+    runner = AgentCoord::Runner.new([])
+
+    error = assert_raises(AgentCoord::OperationalError) do
+      runner.send(:gc_validate_expired_event_replay!, claim, event, claim_path)
+    end
+    assert_includes error.message, "invalid generated event shape"
   end
 
   def test_gc_reconcile_warns_when_the_pending_event_identity_moves
@@ -1566,7 +1724,14 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
       "--target", "pending-lifecycle", "--batch-id", "pending-lifecycle-batch"
     )
     assert_equal 0, claim.status.exitstatus, claim.stderr
-    assert_equal "active", store.read_json(claim_path).data.fetch("status")
+    pending = store.read_json(claim_path).data
+    assert_equal "active", pending.fetch("status")
+    assert_equal true, pending.fetch("expired_event_pending")
+    assert_equal "expired-holder", pending.fetch("expired_event_replay").fetch("agent_id")
+    runner.send(
+      :execute_gc_candidates, store,
+      runner.send(:gc_expired_event_candidates, store, %w[claims events]), now, 30
+    )
     event = event_records("pending-lifecycle-batch").find { |record| record["type"] == "claim.expired" }
     refute_nil event
     assert_equal "claim.expired", event.fetch("type")
@@ -1587,7 +1752,7 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
       "--target", "malformed-pending", "--batch-id", "replacement-batch"
     )
 
-    assert_equal 2, claim.status.exitstatus
+    assert_equal 2, claim.status.exitstatus, claim.stderr
     assert_includes claim.stderr, "claim.expired event pending"
     refute_includes claim.stderr, "KeyError"
     refute_includes claim.stderr, "bin/agent-coord:"
@@ -15403,6 +15568,34 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     end
   end
 
+  class ClaimsOnlyStore < CountingLocalStore
+    attr_reader :non_claim_accesses
+
+    def initialize(root)
+      super
+      @non_claim_accesses = []
+    end
+
+    def read_json(path)
+      reject_non_claim(path)
+      super
+    end
+
+    def write_json(path, data, **options)
+      reject_non_claim(path)
+      super
+    end
+
+    private
+
+    def reject_non_claim(path)
+      return if path.start_with?("claims/")
+
+      @non_claim_accesses << path
+      raise AgentCoord::OperationalError, "claims-only store forbids #{path}"
+    end
+  end
+
   # Mirrors GitHubStore's per-path read cache so the apply-time liveness test
   # proves the recheck explicitly invalidates a planning-time heartbeat read.
   class CachingLocalStore < CountingLocalStore
@@ -15512,7 +15705,7 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
       if path == @claim_path && @settle_on_read
         @settle_on_read = false
         pending = super
-        event = AgentCoord::Runner.new([]).send(:gc_claim_expired_event_payload, pending.data)
+        event = AgentCoord::Runner.new([]).send(:gc_claim_expired_event_payload, pending.data, @claim_path)
         write_json(AgentCoord.event_path(event.fetch("batch_id"), event.fetch("event_id")), event,
                    message: "Settle event elsewhere", create: true)
         write_json(path, pending.data.except("expired_event_pending"),
@@ -15549,7 +15742,7 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     def settle_and_reacquire
       @settle_on_read = false
       pending = read_json(@claim_path)
-      event = AgentCoord::Runner.new([]).send(:gc_claim_expired_event_payload, pending.data)
+      event = AgentCoord::Runner.new([]).send(:gc_claim_expired_event_payload, pending.data, @claim_path)
       write_json(AgentCoord.event_path(event.fetch("batch_id"), event.fetch("event_id")), event,
                  message: "Settle event elsewhere", create: true)
       write_json(@claim_path, pending.data.except("expired_event_pending"),
@@ -15586,7 +15779,7 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     def write_expired_event
       @write_event_on_read = false
       pending = read_json(@claim_path)
-      event = AgentCoord::Runner.new([]).send(:gc_claim_expired_event_payload, pending.data)
+      event = AgentCoord::Runner.new([]).send(:gc_claim_expired_event_payload, pending.data, @claim_path)
       write_json(AgentCoord.event_path(event.fetch("batch_id"), event.fetch("event_id")), event,
                  message: "Write event elsewhere", create: true)
     end

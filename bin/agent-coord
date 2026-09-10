@@ -61,6 +61,9 @@ module AgentCoord
   CLAIM_CLOSEOUT_FIELDS = %w[
     terminal pr_state evidence_url closed_by released_by released_at release_mode handoff_to handoff_note
   ].freeze
+  EXPIRED_EVENT_PENDING_FIELDS = %w[
+    expired_event_pending expired_event_id expired_event_batch_id expired_event_at expired_event_replay
+  ].freeze
   # gc plans each disposition in an independent pass, so nothing structural
   # stops two passes from selecting the same record: a claim that is still
   # active while carrying a terminal marker is both archive-eligible and
@@ -260,6 +263,10 @@ module AgentCoord
     thread_handle chat_handle host pr_url dashboard_url operator phase generation instance_id
     synthetic synthetic_kind
   ].freeze
+  CLAIM_EXPIRED_EVENT_REQUIRED_FIELDS = %w[event_id batch_id agent_id repo target at].freeze
+  CLAIM_EXPIRED_EVENT_FIELDS = (
+    %w[schema_version event_id batch_id type agent_id repo target branch status at] + METADATA_OPTION_FIELDS
+  ).freeze
   HANDOFF_STATE_FIELDS = %w[
     release_mode handoff_to handoff_note
   ].freeze
@@ -2214,6 +2221,7 @@ module AgentCoord
       return [] unless prefixes.include?("claims")
 
       expired = store.list_json("claims").filter_map do |entry|
+        next if entry.data["expired_event_pending"] == true
         next unless active_claim_record?(entry.data)
 
         lease_ended_at = gc_claim_lease_expiry(entry.data, entry.path)
@@ -2303,9 +2311,7 @@ module AgentCoord
     def gc_expired_event_candidates(store, prefixes)
       return [] unless prefixes.include?("claims")
 
-      pending = store.list_json("claims").select do |entry|
-        entry.data["status"] == CLAIM_EXPIRED_STATUS && entry.data["expired_event_pending"] == true
-      end
+      pending = store.list_json("claims").select { |entry| entry.data["expired_event_pending"] == true }
       unless prefixes.include?("events")
         unless pending.empty?
           @stderr.puts "warning: gc left #{pending.length} pending claim.expired event(s) unreconciled: " \
@@ -2697,11 +2703,13 @@ module AgentCoord
         "expired_event_at" => event_at,
         "expired_event_pending" => true
       )
-      return :invalid_expired_event_destination_at_apply unless gc_expired_event_destination_valid?(store, payload)
+      unless gc_expired_event_destination_valid?(store, payload, entry.path)
+        return :invalid_expired_event_destination_at_apply
+      end
 
       store.write_json(entry.path, payload, message: "Reap expired claim #{entry.path}", sha: entry.sha)
       current = store.read_json(entry.path)
-      reconciled = gc_finish_reap_reconciliation(store, current, payload)
+      reconciled = gc_finish_reap_reconciliation(store, current, payload, entry.path)
       reconciled ? :applied : :expired_event_pending
     rescue Conflict
       :claim_changed_at_apply
@@ -2727,8 +2735,8 @@ module AgentCoord
       nil
     end
 
-    def gc_expired_event_destination_valid?(store, claim)
-      event = gc_claim_expired_event_payload(claim)
+    def gc_expired_event_destination_valid?(store, claim, claim_path)
+      event = gc_claim_expired_event_payload(claim, claim_path)
       AgentCoord.event_path(event.fetch("batch_id"), event.fetch("event_id"))
       gc_assert_internal_expiry_namespace_available!(store, event)
       true
@@ -2737,13 +2745,13 @@ module AgentCoord
       false
     end
 
-    def gc_finish_reap_reconciliation(store, current, payload)
+    def gc_finish_reap_reconciliation(store, current, payload, claim_path)
       return true if current&.data == payload.except("expired_event_pending")
       if current&.data&.fetch("expired_event_pending", false) == true
         return gc_reconcile_expired_event(store, { entry: current })
       end
 
-      event_recorded = gc_expired_event_recorded?(store, payload)
+      event_recorded = gc_expired_event_recorded?(store, payload, claim_path)
       return event_recorded unless current
 
       event_recorded || gc_reconcile_expired_event(store, { entry: current })
@@ -2752,11 +2760,9 @@ module AgentCoord
     def gc_reconcile_expired_event(store, candidate)
       entry = candidate.fetch(:entry)
       claim = entry.data
-      unless claim["status"] == CLAIM_EXPIRED_STATUS && claim["expired_event_pending"] == true
-        return gc_expired_event_already_settled?(store, entry)
-      end
+      return gc_expired_event_already_settled?(store, entry) unless claim["expired_event_pending"] == true
 
-      event = gc_claim_expired_event_payload(claim)
+      event = gc_claim_expired_event_payload(claim, entry.path)
       gc_assert_internal_expiry_namespace_available!(store, event)
       path = AgentCoord.event_path(event.fetch("batch_id"), event.fetch("event_id"))
       begin
@@ -2766,20 +2772,22 @@ module AgentCoord
         raise OperationalError, "claim.expired event conflict at #{path}" unless existing && existing.data == event
       end
       current = store.read_json(entry.path)
-      unless current && current.data["expired_event_id"] == event.fetch("event_id")
-        return true if gc_expired_event_settled_after_claim_advanced?(store, current, claim)
+      current_matches = current && current.data["expired_event_id"] == event.fetch("event_id") &&
+                        gc_claim_expired_event_payload(current.data, entry.path) == event
+      unless current_matches
+        return true if gc_expired_event_settled_after_claim_advanced?(store, current, claim, entry.path)
 
         @stderr.puts "warning: claim.expired event identity changed for #{entry.path}; history remains pending"
         return false
       end
 
-      settled = current.data.except("expired_event_pending")
+      settled = gc_clear_expired_event_pending(current.data)
       begin
         store.write_json(entry.path, settled, message: "Confirm expired claim event #{entry.path}", sha: current.sha)
       rescue Conflict
         latest = store.read_json(entry.path)
         exact_settled = latest&.data == settled
-        raise unless exact_settled || gc_expired_event_settled_after_claim_advanced?(store, latest, claim)
+        raise unless exact_settled || gc_expired_event_settled_after_claim_advanced?(store, latest, claim, entry.path)
       end
       true
     rescue Error, KeyError, TypeError, SystemCallError => e
@@ -2787,8 +2795,18 @@ module AgentCoord
       false
     end
 
-    def gc_expired_event_settled_after_claim_advanced?(store, current, claim)
-      current&.data&.fetch("expired_event_pending", false) != true && gc_expired_event_recorded?(store, claim)
+    def gc_expired_event_settled_after_claim_advanced?(store, current, claim, claim_path)
+      current&.data&.fetch("expired_event_pending", false) != true &&
+        gc_expired_event_recorded?(store, claim, claim_path)
+    end
+
+    def gc_clear_expired_event_pending(claim)
+      fields = if claim["status"] == CLAIM_EXPIRED_STATUS
+                 %w[expired_event_pending expired_event_replay]
+               else
+                 EXPIRED_EVENT_PENDING_FIELDS
+               end
+      claim.except(*fields)
     end
 
     def gc_expired_event_already_settled?(store, entry)
@@ -2796,13 +2814,13 @@ module AgentCoord
       return false unless claim["status"] == CLAIM_EXPIRED_STATUS && claim["expired_event_pending"].nil?
 
       current = store.read_json(entry.path)
-      current&.data == claim && gc_expired_event_recorded?(store, claim)
+      current&.data == claim && gc_expired_event_recorded?(store, claim, entry.path)
     rescue Error, KeyError, TypeError, SystemCallError
       false
     end
 
-    def gc_expired_event_recorded?(store, claim)
-      event = gc_claim_expired_event_payload(claim)
+    def gc_expired_event_recorded?(store, claim, claim_path)
+      event = gc_claim_expired_event_payload(claim, claim_path)
       gc_assert_internal_expiry_namespace_available!(store, event)
       event_path = AgentCoord.event_path(event.fetch("batch_id"), event.fetch("event_id"))
       immutable = store.read_json(event_path)
@@ -2822,8 +2840,8 @@ module AgentCoord
       raise OperationalError, "internal claim expiry namespace collides with existing batch #{batch_id}"
     end
 
-    def gc_claim_expired_event_payload(claim)
-      payload = {
+    def gc_claim_expired_event_payload(claim, claim_path)
+      payload = claim["expired_event_replay"] || {
         "schema_version" => SCHEMA_VERSION,
         "event_id" => claim.fetch("expired_event_id"),
         "batch_id" => claim.fetch("expired_event_batch_id", claim.fetch("batch_id", nil)).to_s,
@@ -2835,10 +2853,64 @@ module AgentCoord
         "status" => CLAIM_EXPIRED_STATUS,
         "at" => claim.fetch("expired_event_at")
       }
-      METADATA_OPTION_FIELDS.each do |field|
-        payload[field] = claim[field] if claim.key?(field) && !claim[field].nil?
+      unless claim["expired_event_replay"]
+        METADATA_OPTION_FIELDS.each do |field|
+          payload[field] = claim[field] if claim.key?(field) && !claim[field].nil?
+        end
       end
-      payload.compact
+      payload = payload.compact if payload.is_a?(Hash)
+      gc_validate_expired_event_replay!(claim, payload, claim_path)
+    rescue KeyError, TypeError => e
+      raise OperationalError, "claim.expired event pending replay is malformed: #{e.message}"
+    end
+
+    def gc_validate_expired_event_replay!(claim, event, claim_path)
+      raise OperationalError, "claim.expired event pending replay must be an object" unless event.is_a?(Hash)
+
+      if event["batch_id"] == UNBATCHED_CLAIM_EXPIRY_BATCH_ID
+        raise OperationalError, "legacy unbatched claim expiry destination is unsupported"
+      end
+
+      unless gc_valid_expired_event_shape?(event) && gc_expired_event_matches_claim_path?(event, claim_path)
+        raise OperationalError, "claim.expired event pending replay has an invalid generated event shape"
+      end
+
+      expected = {
+        "event_id" => claim.fetch("expired_event_id"),
+        "batch_id" => claim.fetch("expired_event_batch_id", claim.fetch("batch_id", nil)).to_s,
+        "at" => claim.fetch("expired_event_at")
+      }
+      valid = event["type"] == "claim.expired" && event["status"] == CLAIM_EXPIRED_STATUS &&
+              expected.all? { |field, value| event[field] == value }
+      raise OperationalError, "claim.expired event pending replay does not match its marker" unless valid
+
+      AgentCoord.event_path(event.fetch("batch_id"), event.fetch("event_id"))
+      event
+    rescue KeyError, TypeError => e
+      raise OperationalError, "claim.expired event pending replay is malformed: #{e.message}"
+    end
+
+    def gc_valid_expired_event_shape?(event)
+      return false unless valid_stored_json_encoding?(event)
+      return false unless event["schema_version"] == SCHEMA_VERSION
+      return false unless (event.keys - CLAIM_EXPIRED_EVENT_FIELDS).empty?
+      return false unless CLAIM_EXPIRED_EVENT_REQUIRED_FIELDS.all? do |field|
+        gc_valid_expired_event_string?(event[field])
+      end
+      return false unless gc_valid_datetime?(event["at"])
+
+      !event.key?("branch") || gc_valid_expired_event_string?(event["branch"])
+    end
+
+    def gc_valid_expired_event_string?(value)
+      value.is_a?(String) && value.valid_encoding? && !value.strip.empty?
+    end
+
+    def gc_expired_event_matches_claim_path?(event, claim_path)
+      repo, target = gc_canonical_claim_identity(claim_path)
+      event["repo"] == repo && event["target"] == target
+    rescue TypeError
+      false
     end
 
     def gc_archive_record(store, candidate, now, archive_days)
@@ -3068,7 +3140,7 @@ module AgentCoord
       path = AgentCoord.claim_path(options.fetch(:repo), options.fetch(:target))
       store = build_store(options)
       existing = store.read_json(path)
-      existing = reconcile_pending_expired_claim!(store, existing)
+      pending_expired_event = claim_pending_expired_event(existing)
 
       if existing && active_claim_record?(existing.data) && existing.data["agent_id"] != options[:agent_id]
         holder_state = claim_holder_state(store, existing.data, now)
@@ -3077,23 +3149,7 @@ module AgentCoord
         end
       end
 
-      claim_updates = {
-        "schema_version" => SCHEMA_VERSION,
-        "repo" => options.fetch(:repo),
-        "target" => options.fetch(:target).to_s,
-        "agent_id" => options.fetch(:agent_id),
-        "batch_id" => options[:batch_id],
-        "branch" => options[:branch],
-        "status" => "active",
-        "claimed_at" => claim_timestamp(existing, options, now),
-        "updated_at" => timestamp(now),
-        "expires_at" => timestamp(expires_at)
-      }.compact
-      payload = preserved_payload(existing, claim_preserved_fields(existing, options))
-                .merge(claim_updates)
-                .merge(metadata_payload(options))
-                .merge(environment_identity_payload(existing&.data))
-                .compact
+      payload = claim_payload(existing, options, now, expires_at, pending_expired_event)
 
       begin
         write_with_cas(store, path, payload, existing, "Claim #{options[:repo]}##{options[:target]}")
@@ -3106,6 +3162,34 @@ module AgentCoord
       0
     ensure
       close_store(store)
+    end
+
+    def claim_pending_expired_event(existing)
+      return unless existing&.data&.fetch("expired_event_pending", false) == true
+
+      gc_claim_expired_event_payload(existing.data, existing.path)
+    end
+
+    def claim_payload(existing, options, now, expires_at, pending_expired_event)
+      updates = {
+        "schema_version" => SCHEMA_VERSION, "repo" => options.fetch(:repo),
+        "target" => options.fetch(:target).to_s, "agent_id" => options.fetch(:agent_id),
+        "batch_id" => options[:batch_id], "branch" => options[:branch], "status" => "active",
+        "claimed_at" => claim_timestamp(existing, options, now), "updated_at" => timestamp(now),
+        "expires_at" => timestamp(expires_at)
+      }.compact
+      payload = preserved_payload(existing, claim_preserved_fields(existing, options))
+                .merge(updates).merge(metadata_payload(options))
+                .merge(environment_identity_payload(existing&.data)).compact
+      return payload unless pending_expired_event
+
+      payload.merge(
+        "expired_event_pending" => true,
+        "expired_event_id" => pending_expired_event.fetch("event_id"),
+        "expired_event_batch_id" => pending_expired_event.fetch("batch_id"),
+        "expired_event_at" => pending_expired_event.fetch("at"),
+        "expired_event_replay" => pending_expired_event
+      )
     end
 
     def release(options)
@@ -4468,21 +4552,6 @@ module AgentCoord
       return [] unless renewed_claim?(existing, options)
 
       CLAIM_PRESERVED_FIELDS
-    end
-
-    def reconcile_pending_expired_claim!(store, existing)
-      return existing unless existing&.data&.fetch("expired_event_pending", false) == true
-
-      unless gc_reconcile_expired_event(store, { entry: existing })
-        raise OperationalError, "expired claim history is still pending; retry after event storage recovers"
-      end
-
-      refreshed = store.read_json(existing.path)
-      if refreshed.nil? || refreshed.data["expired_event_pending"] == true
-        raise OperationalError, "expired claim history could not be confirmed"
-      end
-
-      refreshed
     end
 
     def renewed_claim?(existing, options)
