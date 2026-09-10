@@ -1410,6 +1410,7 @@ module AgentCoord
       validate_register_batch_option_usage!(command, options)
       validate_config_set_backend_option_usage!(command, options)
       validate_user_config_bypass_option_usage!(command, options)
+      validate_write_batch_id!(command, options)
 
       if backend_command?(command)
         resolve_backend_env(options)
@@ -1419,6 +1420,12 @@ module AgentCoord
       end
       emit_user_config_bypass_notice(options)
       options
+    end
+
+    def validate_write_batch_id!(command, options)
+      return unless split_brain_write_command?(command) && options[:batch_id]
+
+      AgentCoord.batch_path(options.fetch(:batch_id))
     end
 
     def validate_user_config_bypass_option_usage!(command, options)
@@ -2117,7 +2124,7 @@ module AgentCoord
         action = candidate.fetch(:action)
         if %i[holder_present_at_apply holder_liveness_unknown_at_apply].include?(outcome)
           action.merge!("outcome" => "skipped", "skip_reason" => outcome.to_s)
-        elsif action["action"] == "reconcile_expired_event" && !outcome
+        elsif outcome == :expired_event_pending || (action["action"] == "reconcile_expired_event" && !outcome)
           action.merge!("outcome" => "pending", "skip_reason" => "expired_event_pending")
         end
       end
@@ -2594,8 +2601,15 @@ module AgentCoord
       )
       store.write_json(entry.path, payload, message: "Reap expired claim #{entry.path}", sha: entry.sha)
       current = store.read_json(entry.path)
-      gc_reconcile_expired_event(store, { entry: current }) if current
-      :applied
+      settled = payload.except("expired_event_pending")
+      reconciled = if current&.data == settled
+                     true
+                   elsif current
+                     gc_reconcile_expired_event(store, { entry: current })
+                   else
+                     false
+                   end
+      reconciled ? :applied : :expired_event_pending
     rescue Conflict => e
       raise OperationalError, "gc source changed at #{entry.path}; #{e.message}"
     end
@@ -3003,7 +3017,8 @@ module AgentCoord
         @stdout.puts "retention_policy: " \
                      "hot=#{payload.dig('retention_policy', 'hot_days')}d," \
                      "archive=#{payload.dig('retention_policy', 'archive_days')}d," \
-                     "synthetic_hot=#{payload.dig('retention_policy', 'synthetic_hot_days')}d"
+                     "synthetic_hot=#{payload.dig('retention_policy', 'synthetic_hot_days')}d," \
+                     "lease_grace=#{payload.dig('retention_policy', 'lease_grace_days')}d"
         @stdout.puts "dependency_terminal_statuses: #{payload.fetch('dependency_terminal_statuses').join(',')}"
         @stdout.puts "heartbeat_working_statuses: #{payload.dig('heartbeat_status_vocabulary', 'working').join(',')}"
         @stdout.puts "heartbeat_terminal_statuses: #{payload.dig('heartbeat_status_vocabulary', 'terminal').join(',')}"
@@ -8560,7 +8575,8 @@ module AgentCoord
         "retention_policy" => {
           "hot_days" => DEFAULT_HOT_DAYS,
           "archive_days" => DEFAULT_ARCHIVE_DAYS,
-          "synthetic_hot_days" => DEFAULT_SYNTHETIC_HOT_DAYS
+          "synthetic_hot_days" => DEFAULT_SYNTHETIC_HOT_DAYS,
+          "lease_grace_days" => DEFAULT_LEASE_GRACE_DAYS
         },
         "dependency_terminal_statuses" => DEPENDENCY_DONE_STATUSES,
         "heartbeat_status_vocabulary" => {

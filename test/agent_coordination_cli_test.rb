@@ -841,6 +841,48 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     assert_equal 1, store.expired_event_write_attempts
   end
 
+  def test_gc_initial_reap_reports_pending_when_expired_event_write_fails
+    now = Time.utc(2026, 7, 12, 12, 0, 0)
+    claim_path = write_abandoned_claim(
+      "initial-pending", now - (3 * 86_400),
+      "batch_id" => "initial-pending-batch", "agent_id" => "gone-holder"
+    )
+    store = FailExpiredEventStore.new(@state_root)
+    runner = StoreInjectedRunner.new([], store: store, clock: FixedClock.new(now))
+
+    assert_equal 0, runner.send(
+      :gc, state_root: @state_root, dry_run: false, execute: true, json: true,
+           prefixes: %w[claims heartbeats events]
+    )
+
+    action = JSON.parse(runner.captured_stdout.string).fetch("actions").fetch(0)
+    assert_equal "reap", action.fetch("action")
+    assert_equal "pending", action.fetch("outcome")
+    assert_equal "expired_event_pending", action.fetch("skip_reason")
+    assert_equal true, store.read_json(claim_path).data.fetch("expired_event_pending")
+  end
+
+  def test_gc_initial_reap_accepts_exact_history_settled_before_its_reread
+    now = Time.utc(2026, 7, 12, 12, 0, 0)
+    claim_path = write_abandoned_claim(
+      "initial-settled-race", now - (3 * 86_400),
+      "batch_id" => "initial-settled-race-batch", "agent_id" => "gone-holder"
+    )
+    store = SettleExpiredEventBeforeReadStore.new(@state_root, claim_path)
+    runner = StoreInjectedRunner.new([], store: store, clock: FixedClock.new(now))
+
+    assert_equal 0, runner.send(
+      :gc, state_root: @state_root, dry_run: false, execute: true, json: true,
+           prefixes: %w[claims heartbeats events]
+    )
+
+    action = JSON.parse(runner.captured_stdout.string).fetch("actions").fetch(0)
+    assert_equal "reap", action.fetch("action")
+    refute action.key?("outcome")
+    refute store.read_json(claim_path).data.key?("expired_event_pending")
+    assert_equal 1, event_records("initial-settled-race-batch").length
+  end
+
   def test_gc_retains_an_unbatched_expiry_event_after_the_claim_is_reused
     now = Time.utc(2026, 7, 12, 12, 0, 0)
     claim_path = write_abandoned_claim("unbatched-reuse", now - (3 * 86_400), "agent_id" => "gone-holder")
@@ -869,6 +911,26 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     refute reused.key?("reaped_at")
     assert_equal immutable_event, JSON.parse(File.read(event_paths.fetch(0)))
     assert_equal 1, Dir.glob(File.join(@state_root, "events", "**", "*.json")).length
+  end
+
+  def test_claim_and_heartbeat_reject_the_reserved_unbatched_expiry_namespace
+    batch_id = AgentCoord::UNBATCHED_CLAIM_EXPIRY_BATCH_ID
+
+    claim = run_agent_coord(
+      "claim", "--agent-id", "worker-a", "--repo", "shakacode/example", "--target", "reserved-claim",
+      "--batch-id", batch_id
+    )
+    heartbeat = run_agent_coord(
+      "heartbeat", "--agent-id", "worker-a", "--repo", "shakacode/example", "--target", "reserved-heartbeat",
+      "--batch-id", batch_id
+    )
+
+    [claim, heartbeat].each do |result|
+      assert_equal 1, result.status.exitstatus
+      assert_includes result.stderr, "reserved for unbatched claim expiry history"
+    end
+    assert_empty Dir.glob(File.join(@state_root, "claims", "**", "*.json"))
+    assert_empty Dir.glob(File.join(@state_root, "heartbeats", "*.json"))
   end
 
   def test_gc_execute_reports_a_still_pending_expired_event
@@ -2202,7 +2264,7 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     assert_equal 15 * 60, payload.fetch("default_heartbeat_ttl_seconds")
     assert_equal 4, payload.fetch("heartbeat_dead_after_ttl_multiplier")
     assert_equal(
-      { "hot_days" => 7, "archive_days" => 30, "synthetic_hot_days" => 1 },
+      { "hot_days" => 7, "archive_days" => 30, "synthetic_hot_days" => 1, "lease_grace_days" => 1 },
       payload.fetch("retention_policy")
     )
     assert_includes payload.fetch("dependency_terminal_statuses"), "done"
@@ -14795,6 +14857,32 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
         raise AgentCoord::Conflict, "another reconciler settled the same claim"
       end
 
+      super
+    end
+  end
+
+  class SettleExpiredEventBeforeReadStore < CountingLocalStore
+    def initialize(root, claim_path)
+      super(root)
+      @claim_path = claim_path
+      @settle_on_read = false
+    end
+
+    def write_json(path, data, **options)
+      @settle_on_read = true if path == @claim_path && data["expired_event_pending"] == true
+      super
+    end
+
+    def read_json(path)
+      if path == @claim_path && @settle_on_read
+        @settle_on_read = false
+        pending = super
+        event = AgentCoord::Runner.new([]).send(:gc_claim_expired_event_payload, pending.data)
+        write_json(AgentCoord.event_path(event.fetch("batch_id"), event.fetch("event_id")), event,
+                   message: "Settle event elsewhere", create: true)
+        write_json(path, pending.data.except("expired_event_pending"),
+                   message: "Confirm event elsewhere", sha: pending.sha)
+      end
       super
     end
   end

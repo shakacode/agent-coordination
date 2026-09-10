@@ -1246,7 +1246,8 @@ old holder's record. For planned ownership moves, include `--handoff-to` and
 `--handoff-note` on the original release, then have the next worker claim the
 same repo/target and continue on the recorded branch/PR.
 `version` prints the CLI contract version. `config show --json` prints runtime
-defaults, machine-readable exit codes, and a `coordination` object containing
+defaults, including `retention_policy.lease_grace_days`, machine-readable exit
+codes, and a `coordination` object containing
 the effective `policy`, selected `backend`, `configured` state, source
 provenance, and `available: null`. Configuration inspection never performs a
 network probe, so consumers must run `doctor` before treating the backend as
