@@ -2689,7 +2689,7 @@ module AgentCoord
         "expired_event_at" => event_at,
         "expired_event_pending" => true
       )
-      return :invalid_expired_event_destination_at_apply unless gc_expired_event_destination_valid?(payload)
+      return :invalid_expired_event_destination_at_apply unless gc_expired_event_destination_valid?(store, payload)
 
       store.write_json(entry.path, payload, message: "Reap expired claim #{entry.path}", sha: entry.sha)
       current = store.read_json(entry.path)
@@ -2719,9 +2719,10 @@ module AgentCoord
       nil
     end
 
-    def gc_expired_event_destination_valid?(claim)
+    def gc_expired_event_destination_valid?(store, claim)
       event = gc_claim_expired_event_payload(claim)
       AgentCoord.event_path(event.fetch("batch_id"), event.fetch("event_id"))
+      gc_assert_internal_expiry_namespace_available!(store, event)
       true
     rescue Error, KeyError, TypeError => e
       @stderr.puts "warning: invalid claim.expired event destination; claim not reaped: #{log_scrub(e.message)}"

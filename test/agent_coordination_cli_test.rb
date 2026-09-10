@@ -1265,18 +1265,26 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     claim_path = write_abandoned_claim(
       "unbatched-internal-collision", now - (3 * 86_400), "agent_id" => "gone-holder"
     )
+    valid_path = write_abandoned_claim(
+      "batched-after-internal-collision", now - (3 * 86_400),
+      "agent_id" => "gone-holder", "batch_id" => "valid-collision-peer-batch"
+    )
     stdout = StringIO.new
     stderr = StringIO.new
     runner = AgentCoord::Runner.new([], stdout: stdout, stderr: stderr, clock: FixedClock.new(now))
 
     assert_equal 0, runner.send(:gc, state_root: @state_root, dry_run: false, execute: true, json: true)
 
-    action = JSON.parse(stdout.string).fetch("actions").find { |row| row["action"] == "reap" }
-    assert_equal "pending", action.fetch("outcome")
-    assert_equal "expired_event_pending", action.fetch("skip_reason")
+    action = JSON.parse(stdout.string).fetch("actions").find do |row|
+      row["source_path"] == claim_path
+    end
+    assert_equal "skipped", action.fetch("outcome")
+    assert_equal "invalid_expired_event_destination_at_apply", action.fetch("skip_reason")
     assert_includes stderr.string, "internal claim expiry namespace collides with existing batch"
     claim = JSON.parse(File.read(File.join(@state_root, claim_path)))
-    assert_equal true, claim.fetch("expired_event_pending")
+    assert_equal "active", claim.fetch("status")
+    refute claim.key?("expired_event_pending")
+    assert_equal "expired", JSON.parse(File.read(File.join(@state_root, valid_path))).fetch("status")
     assert_empty Dir.glob(File.join(@state_root, AgentCoord::INTERNAL_UNBATCHED_CLAIM_EXPIRY_EVENT_PREFIX, "*.json"))
   end
 
