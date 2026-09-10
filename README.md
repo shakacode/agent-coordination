@@ -1190,7 +1190,9 @@ reaper, and the reap wins: archiving a claim nobody released would file it away
 still reading `active` and lose the abandonment the reap exists to record. The
 reaped record reaches the archive on a later run through the ordinary
 `terminal_claim` path, so nothing is stranded and `--dry-run` still describes
-exactly what `--execute` applies.
+exactly what `--execute` attempts. If a holder becomes live before apply, the
+execute response keeps the planned reap but marks it `outcome: skipped` with
+`skip_reason: holder_present_at_apply`; the claim remains active.
 
 | Record state | Hot retention | Archive retention | Result |
 | --- | ---: | ---: | --- |

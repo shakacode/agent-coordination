@@ -2028,7 +2028,7 @@ module AgentCoord
       candidates.concat(gc_expired_event_candidates(store, prefixes))
       candidates = gc_one_action_per_source(candidates)
       validate_gc_archive_sizes!(candidates, now, archive_days)
-      candidates.each { |candidate| execute_gc_candidate(store, candidate, now, archive_days) } if options[:execute]
+      execute_gc_candidates(store, candidates, now, archive_days) if options[:execute]
       candidates.sort_by! do |candidate|
         action = candidate.fetch(:action)
         action["source_path"] || Array(action["source_paths"]).first || action.fetch("archive_path", "")
@@ -2106,6 +2106,17 @@ module AgentCoord
       when "delete" then gc_delete_archive(store, candidate)
       when "reap" then gc_reap_claim(store, candidate, now)
       when "reconcile_expired_event" then gc_reconcile_expired_event(store, candidate)
+      end
+    end
+
+    def execute_gc_candidates(store, candidates, now, archive_days)
+      candidates.each do |candidate|
+        outcome = execute_gc_candidate(store, candidate, now, archive_days)
+        next unless outcome == :holder_present_at_apply
+
+        candidate.fetch(:action).merge!(
+          "outcome" => "skipped", "skip_reason" => "holder_present_at_apply"
+        )
       end
     end
 
@@ -2547,7 +2558,7 @@ module AgentCoord
     # the gc write instead, and the archive pass reads the hot window from it.
     def gc_reap_claim(store, candidate, now)
       entry = candidate.fetch(:entry)
-      return unless gc_claim_holder_gone?(store, entry.data, now, {})
+      return :holder_present_at_apply unless gc_claim_holder_gone?(store, entry.data, now, {})
 
       event_at = timestamp(now)
       payload = entry.data.except(*CLAIM_CLOSEOUT_FIELDS).merge(
@@ -2564,6 +2575,7 @@ module AgentCoord
       store.write_json(entry.path, payload, message: "Reap expired claim #{entry.path}", sha: entry.sha)
       current = store.read_json(entry.path)
       gc_reconcile_expired_event(store, { entry: current }) if current
+      :applied
     rescue Conflict => e
       raise OperationalError, "gc source changed at #{entry.path}; #{e.message}"
     end
@@ -2754,7 +2766,12 @@ module AgentCoord
     def gc_action_text(action)
       source = action["source_path"] || Array(action["source_paths"]).join(",")
       destination = action["archive_path"] ? " -> #{action['archive_path']}" : ""
-      "#{action.fetch('action')} #{source}#{destination} (#{action.fetch('reason')})"
+      outcome = if action["outcome"] == "skipped"
+                  " [skipped: #{action.fetch('skip_reason')}]"
+                else
+                  ""
+                end
+      "#{action.fetch('action')} #{source}#{destination} (#{action.fetch('reason')})#{outcome}"
     end
 
     def deep_option_token?(argv, command:)

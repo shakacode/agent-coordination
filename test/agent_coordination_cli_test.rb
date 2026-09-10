@@ -678,6 +678,27 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     assert_equal 2, store.reads.count("heartbeats/resumed-holder.json")
   end
 
+  def test_gc_execute_reports_a_reap_rejected_by_apply_time_liveness_as_skipped
+    now = Time.utc(2026, 7, 12, 12, 0, 0)
+    claim_path = write_abandoned_claim(
+      "resumed-output", now - (3 * 86_400), "agent_id" => "resumed-output-holder"
+    )
+    store = HolderResumesAtReapStore.new(@state_root, "resumed-output-holder", now)
+    runner = StoreInjectedRunner.new([], store: store, clock: FixedClock.new(now))
+
+    assert_equal 0, runner.send(
+      :gc, state_root: @state_root, dry_run: false, execute: true, json: true,
+           prefixes: %w[claims heartbeats events]
+    )
+
+    action = JSON.parse(runner.captured_stdout.string).fetch("actions").fetch(0)
+    assert_equal "reap", action.fetch("action")
+    assert_equal "skipped", action.fetch("outcome")
+    assert_equal "holder_present_at_apply", action.fetch("skip_reason")
+    assert_equal "active", JSON.parse(File.read(File.join(@state_root, claim_path))).fetch("status")
+    assert_equal 2, store.reads.count("heartbeats/resumed-output-holder.json")
+  end
+
   def test_gc_apply_fails_closed_on_a_malformed_holder_heartbeat
     now = Time.utc(2026, 7, 12, 12, 0, 0)
     claim_path = write_abandoned_claim(
@@ -14458,6 +14479,29 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     end
   end
 
+  class HolderResumesAtReapStore < CountingLocalStore
+    def initialize(root, holder, now)
+      super(root)
+      @heartbeat_path = AgentCoord.heartbeat_path(holder)
+      @holder = holder
+      @now = now
+    end
+
+    def read_json(path)
+      if path == @heartbeat_path && reads.count(path) == 1
+        write_json(
+          path,
+          {
+            "schema_version" => 1, "agent_id" => @holder, "status" => "in_progress",
+            "updated_at" => (@now - 60).iso8601, "expires_at" => (@now + 600).iso8601
+          },
+          message: "Resume holder", create: true
+        )
+      end
+      super
+    end
+  end
+
   class NoBroadScanStore
     attr_reader :reads
 
@@ -14756,9 +14800,12 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
   end
 
   class StoreInjectedRunner < AgentCoord::Runner
-    def initialize(argv, store:)
+    attr_reader :captured_stdout
+
+    def initialize(argv, store:, clock: Time)
       @injected_store = store
-      super(argv, stdout: StringIO.new, stderr: StringIO.new)
+      @captured_stdout = StringIO.new
+      super(argv, stdout: @captured_stdout, stderr: StringIO.new, clock: clock)
     end
 
     private
