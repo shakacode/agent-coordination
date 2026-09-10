@@ -1209,6 +1209,44 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     assert_empty Dir.glob(File.join(@state_root, "heartbeats", "*.json"))
   end
 
+  def test_lifecycle_writes_reject_reserved_batch_ids_preserved_from_existing_records
+    batch_id = AgentCoord::INTERNAL_UNBATCHED_CLAIM_EXPIRY_BATCH_ID
+    claim_path = AgentCoord.claim_path("shakacode/example", "reserved-release")
+    heartbeat_path = AgentCoord.heartbeat_path("worker-a")
+    write_state_record(
+      claim_path,
+      "schema_version" => 1, "repo" => "shakacode/example", "target" => "reserved-release",
+      "agent_id" => "worker-a", "batch_id" => batch_id, "status" => "active",
+      "claimed_at" => "2026-07-12T10:00:00Z", "updated_at" => "2026-07-12T10:00:00Z",
+      "expires_at" => "2026-07-12T14:00:00Z"
+    )
+    write_state_record(
+      heartbeat_path,
+      "schema_version" => 1, "agent_id" => "worker-a", "repo" => "shakacode/example",
+      "target" => "reserved-release", "batch_id" => batch_id, "status" => "in_progress",
+      "phase" => "implementing", "updated_at" => "2026-07-12T10:00:00Z",
+      "expires_at" => "2026-07-12T14:00:00Z"
+    )
+    original_claim = File.binread(File.join(@state_root, claim_path))
+    original_heartbeat = File.binread(File.join(@state_root, heartbeat_path))
+
+    release = run_agent_coord(
+      "release", "--agent-id", "worker-a", "--repo", "shakacode/example", "--target", "reserved-release"
+    )
+    heartbeat = run_agent_coord(
+      "heartbeat", "--agent-id", "worker-a", "--repo", "shakacode/example", "--target", "reserved-release",
+      "--status", "in_progress", "--phase", "validating"
+    )
+
+    [release, heartbeat].each do |result|
+      assert_equal 1, result.status.exitstatus
+      assert_includes result.stderr, "reserved for unbatched claim expiry history"
+    end
+    assert_equal original_claim, File.binread(File.join(@state_root, claim_path))
+    assert_equal original_heartbeat, File.binread(File.join(@state_root, heartbeat_path))
+    assert_empty event_records(batch_id)
+  end
+
   def test_preexisting_reserved_name_batch_remains_readable_but_cannot_be_created_again
     batch_id = AgentCoord::UNBATCHED_CLAIM_EXPIRY_BATCH_ID
     write_batch(batch_id, lanes: [{ "name" => "legacy", "owner" => "worker-a", "targets" => ["99"] }])
