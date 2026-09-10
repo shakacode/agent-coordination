@@ -606,7 +606,7 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     store = CountingLocalStore.new(@state_root)
     runner = AgentCoord::Runner.new([], stdout: StringIO.new, clock: FixedClock.new(now))
 
-    candidates = runner.send(:gc_reap_candidates, store, now, 1, %w[claims heartbeats events])
+    candidates = runner.send(:gc_reap_candidates, store, now, 1, %w[claims heartbeats events batches])
 
     assert_equal 3, candidates.length
     assert_equal 1, store.reads.count("heartbeats/shared-holder.json")
@@ -636,6 +636,32 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     assert_empty store.reads.grep(%r{\Aheartbeats/})
   end
 
+  def test_gc_withholds_unbatched_reap_and_reconciliation_when_batches_are_outside_selected_prefixes
+    now = Time.utc(2026, 7, 12, 12, 0, 0)
+    write_abandoned_claim("unbatched-no-batches", now - (3 * 86_400), "agent_id" => "gone-holder")
+    pending_path = write_abandoned_claim(
+      "unbatched-pending-no-batches", now - (3 * 86_400),
+      "status" => "expired", "reaped_at" => now.iso8601,
+      "expired_event_id" => "claim-expired-no-batches",
+      "expired_event_batch_id" => AgentCoord::INTERNAL_UNBATCHED_CLAIM_EXPIRY_BATCH_ID,
+      "expired_event_at" => now.iso8601, "expired_event_pending" => true
+    )
+    internal_batch_path = AgentCoord.batch_path(AgentCoord::INTERNAL_UNBATCHED_CLAIM_EXPIRY_BATCH_ID)
+    store = ForbiddenBatchStore.new(@state_root, internal_batch_path)
+    stderr = StringIO.new
+    runner = AgentCoord::Runner.new([], stdout: StringIO.new, stderr: stderr, clock: FixedClock.new(now))
+
+    reaps = runner.send(:gc_reap_candidates, store, now, 1, %w[claims heartbeats events])
+    reconciliations = runner.send(:gc_expired_event_candidates, store, %w[claims events])
+
+    assert_empty reaps
+    assert_empty reconciliations
+    assert_empty store.reads.grep(%r{\Abatches/})
+    assert_includes stderr.string, "need --prefix batches alongside --prefix claims"
+    assert_includes stderr.string, "alongside --prefix claims and --prefix events"
+    assert_path_exists File.join(@state_root, pending_path)
+  end
+
   def test_gc_does_not_reap_a_claim_whose_holder_heartbeat_is_unreadable
     now = Time.utc(2026, 7, 12, 12, 0, 0)
     2.times { |index| write_abandoned_claim("forbidden-#{index}", now - (3 * 86_400), "agent_id" => "forbidden") }
@@ -644,7 +670,7 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     runner = AgentCoord::Runner.new([], stdout: StringIO.new, stderr: stderr, clock: FixedClock.new(now))
     store = ForbiddenHeartbeatStore.new(@state_root, "heartbeats/forbidden.json")
 
-    candidates = runner.send(:gc_reap_candidates, store, now, 1, %w[claims heartbeats events])
+    candidates = runner.send(:gc_reap_candidates, store, now, 1, %w[claims heartbeats events batches])
 
     # An unreadable heartbeat is not evidence the holder is gone, so its claims
     # are left alone; a backend that answered 404 instead of 403 would otherwise
@@ -661,7 +687,7 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     )
     runner = AgentCoord::Runner.new([], stdout: StringIO.new, clock: FixedClock.new(now))
     store = CountingLocalStore.new(@state_root)
-    candidate = runner.send(:gc_reap_candidates, store, now, 1, %w[claims heartbeats events]).fetch(0)
+    candidate = runner.send(:gc_reap_candidates, store, now, 1, %w[claims heartbeats events batches]).fetch(0)
 
     # A holder can resume after planning without changing the claim. The claim
     # CAS would still succeed, so apply must re-read liveness rather than reap
@@ -692,7 +718,7 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     )
     runner = AgentCoord::Runner.new([], stdout: StringIO.new, clock: FixedClock.new(now))
     store = CachingLocalStore.new(@state_root)
-    candidate = runner.send(:gc_reap_candidates, store, now, 1, %w[claims heartbeats events]).fetch(0)
+    candidate = runner.send(:gc_reap_candidates, store, now, 1, %w[claims heartbeats events batches]).fetch(0)
 
     write_state_record(
       "heartbeats/cached-resume-holder.json",
@@ -722,7 +748,7 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
 
     assert_equal 0, runner.send(
       :gc, state_root: @state_root, dry_run: false, execute: true, json: true,
-           prefixes: %w[claims heartbeats events]
+           prefixes: %w[claims heartbeats events batches]
     )
 
     action = JSON.parse(runner.captured_stdout.string).fetch("actions").fetch(0)
@@ -898,11 +924,8 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     assert_equal "claim.expired", immutable_event.fetch("type")
     assert_equal "expired", immutable_event.fetch("status")
     assert_equal "unbatched-reuse", immutable_event.fetch("target")
-    refute_empty immutable_event.fetch("batch_id")
-    assert_equal(
-      "batches/#{immutable_event.fetch('batch_id')}.json",
-      AgentCoord.batch_path(immutable_event.fetch("batch_id"))
-    )
+    assert_equal AgentCoord::INTERNAL_UNBATCHED_CLAIM_EXPIRY_BATCH_ID, immutable_event.fetch("batch_id")
+    assert event_paths.fetch(0).include?(AgentCoord::INTERNAL_UNBATCHED_CLAIM_EXPIRY_EVENT_PREFIX)
 
     replacement = run_agent_coord(
       "claim", "--agent-id", "new-holder", "--repo", "shakacode/example", "--target", "unbatched-reuse"
@@ -917,20 +940,24 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
   end
 
   def test_claim_and_heartbeat_reject_the_reserved_unbatched_expiry_namespace
-    batch_id = AgentCoord::UNBATCHED_CLAIM_EXPIRY_BATCH_ID
+    reserved_batch_ids = [
+      AgentCoord::UNBATCHED_CLAIM_EXPIRY_BATCH_ID,
+      AgentCoord::INTERNAL_UNBATCHED_CLAIM_EXPIRY_BATCH_ID
+    ]
+    reserved_batch_ids.each do |batch_id|
+      claim = run_agent_coord(
+        "claim", "--agent-id", "worker-a", "--repo", "shakacode/example", "--target", "reserved-claim",
+        "--batch-id", batch_id
+      )
+      heartbeat = run_agent_coord(
+        "heartbeat", "--agent-id", "worker-a", "--repo", "shakacode/example", "--target", "reserved-heartbeat",
+        "--batch-id", batch_id
+      )
 
-    claim = run_agent_coord(
-      "claim", "--agent-id", "worker-a", "--repo", "shakacode/example", "--target", "reserved-claim",
-      "--batch-id", batch_id
-    )
-    heartbeat = run_agent_coord(
-      "heartbeat", "--agent-id", "worker-a", "--repo", "shakacode/example", "--target", "reserved-heartbeat",
-      "--batch-id", batch_id
-    )
-
-    [claim, heartbeat].each do |result|
-      assert_equal 1, result.status.exitstatus
-      assert_includes result.stderr, "reserved for unbatched claim expiry history"
+      [claim, heartbeat].each do |result|
+        assert_equal 1, result.status.exitstatus
+        assert_includes result.stderr, "reserved for unbatched claim expiry history"
+      end
     end
     assert_empty Dir.glob(File.join(@state_root, "claims", "**", "*.json"))
     assert_empty Dir.glob(File.join(@state_root, "heartbeats", "*.json"))
@@ -950,6 +977,61 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     create = run_agent_coord("register-batch", "--file", manifest)
     assert_equal 1, create.status.exitstatus
     assert_includes create.stderr, "reserved for unbatched claim expiry history"
+  end
+
+  def test_unbatched_expiry_history_cannot_enter_a_preexisting_reserved_batch_event_lineage
+    now = Time.utc(2026, 7, 12, 12, 0, 0)
+    batch_id = AgentCoord::UNBATCHED_CLAIM_EXPIRY_BATCH_ID
+    legacy_event_path = "events/#{batch_id}/legacy-event.json"
+    write_batch(batch_id, lanes: [{ "name" => "legacy", "owner" => "worker-a", "targets" => ["99"] }])
+    write_state_record(
+      legacy_event_path,
+      "schema_version" => 1, "event_id" => "legacy-event", "batch_id" => batch_id,
+      "type" => "phase", "repo" => "shakacode/example", "target" => "99",
+      "phase" => "implementing", "at" => (now - 3600).iso8601
+    )
+    write_abandoned_claim("unbatched-disjoint", now - (3 * 86_400), "agent_id" => "gone-holder")
+    runner = AgentCoord::Runner.new([], stdout: StringIO.new, clock: FixedClock.new(now))
+
+    assert_equal 0, runner.send(:gc, state_root: @state_root, dry_run: false, execute: true, json: true)
+
+    generated = Dir.glob(File.join(@state_root, "events", "**", "claim-expired-*.json"))
+    assert_equal 1, generated.length
+    refute generated.fetch(0).start_with?(File.join(@state_root, "events", batch_id, ""))
+    internal_path = AgentCoord.event_path(
+      AgentCoord::INTERNAL_UNBATCHED_CLAIM_EXPIRY_BATCH_ID,
+      File.basename(generated.fetch(0), ".json")
+    )
+    assert_match AgentCoord::STATE_PATH_PATTERN, internal_path
+    assert_match AgentCoord::STATE_PATH_PATTERN, "archive/#{internal_path}"
+    assert_path_exists File.join(@state_root, legacy_event_path)
+    assert_equal batch_id, JSON.parse(File.read(File.join(@state_root, legacy_event_path))).fetch("batch_id")
+    status = run_agent_coord("status", "--batch-id", batch_id, "--json")
+    assert_equal 0, status.status.exitstatus, status.stderr
+    status_event_paths = JSON.parse(status.stdout).fetch("events").map { |event| event.fetch("path") }
+    assert_equal [legacy_event_path], status_event_paths
+  end
+
+  def test_unbatched_expiry_history_fails_closed_if_internal_namespace_has_a_preexisting_batch
+    now = Time.utc(2026, 7, 12, 12, 0, 0)
+    internal_batch_id = AgentCoord::INTERNAL_UNBATCHED_CLAIM_EXPIRY_BATCH_ID
+    write_batch(internal_batch_id, lanes: [])
+    claim_path = write_abandoned_claim(
+      "unbatched-internal-collision", now - (3 * 86_400), "agent_id" => "gone-holder"
+    )
+    stdout = StringIO.new
+    stderr = StringIO.new
+    runner = AgentCoord::Runner.new([], stdout: stdout, stderr: stderr, clock: FixedClock.new(now))
+
+    assert_equal 0, runner.send(:gc, state_root: @state_root, dry_run: false, execute: true, json: true)
+
+    action = JSON.parse(stdout.string).fetch("actions").find { |row| row["action"] == "reap" }
+    assert_equal "pending", action.fetch("outcome")
+    assert_equal "expired_event_pending", action.fetch("skip_reason")
+    assert_includes stderr.string, "internal claim expiry namespace collides with existing batch"
+    claim = JSON.parse(File.read(File.join(@state_root, claim_path)))
+    assert_equal true, claim.fetch("expired_event_pending")
+    assert_empty Dir.glob(File.join(@state_root, AgentCoord::INTERNAL_UNBATCHED_CLAIM_EXPIRY_EVENT_PREFIX, "*.json"))
   end
 
   def test_gc_execute_reports_a_still_pending_expired_event
@@ -1829,8 +1911,8 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
 
   def test_gc_compacts_unbatched_claim_expiry_history_after_the_normal_hot_window
     now = Time.utc(2026, 7, 12, 12, 0, 0)
-    batch_id = AgentCoord::UNBATCHED_CLAIM_EXPIRY_BATCH_ID
-    event_path = "events/#{batch_id}/claim-expired-retained.json"
+    batch_id = AgentCoord::INTERNAL_UNBATCHED_CLAIM_EXPIRY_BATCH_ID
+    event_path = "#{AgentCoord::INTERNAL_UNBATCHED_CLAIM_EXPIRY_EVENT_PREFIX}/claim-expired-retained.json"
     write_state_record(
       event_path,
       "schema_version" => 1, "event_id" => "claim-expired-retained", "batch_id" => batch_id,
@@ -14823,6 +14905,20 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
   # Stands in for a least-privileged HTTP token: one heartbeat path answers the
   # way a forbidden read does, while every other record reads normally.
   class ForbiddenHeartbeatStore < CountingLocalStore
+    def initialize(root, forbidden_path)
+      super(root)
+      @forbidden_path = forbidden_path
+    end
+
+    def read_json(path)
+      return super unless path == @forbidden_path
+
+      @reads << path
+      raise AgentCoord::OperationalError, "state read forbidden at #{path}"
+    end
+  end
+
+  class ForbiddenBatchStore < CountingLocalStore
     def initialize(root, forbidden_path)
       super(root)
       @forbidden_path = forbidden_path

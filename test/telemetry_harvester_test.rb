@@ -831,6 +831,38 @@ class TelemetryHarvesterTest < Minitest::Test # rubocop:disable Metrics/ClassLen
     end
   end
 
+  def test_internal_unbatched_expiry_event_does_not_join_a_preexisting_reserved_batch
+    Dir.mktmpdir("agent-coordination-ledger-disjoint-expiry") do |dir|
+      source_path = File.join(dir, "coordination.json")
+      ledger_path = File.join(dir, "telemetry.sqlite3")
+      coordination = coordination_fixture
+      reserved = "unbatched-claim-expirations"
+      coordination.fetch("batches").first["batch_id"] = reserved
+      coordination.fetch("events") << {
+        "id" => "legacy-event", "batch_id" => reserved, "type" => "phase",
+        "repo" => "shakacode/agent-coordination", "target" => "78",
+        "at" => "2026-07-18T03:00:00Z"
+      }
+      coordination.fetch("events") << {
+        "id" => "claim-expired-disjoint",
+        "batch_id" => "agent-coord-internal-unbatched-expiry-v1-7e4c9a2d",
+        "type" => "claim.expired", "status" => "expired",
+        "repo" => "shakacode/agent-coordination", "target" => "78",
+        "at" => "2026-07-18T04:00:00Z"
+      }
+      File.write(source_path, JSON.generate(coordination))
+
+      _stdout, stderr, status = Open3.capture3(
+        CLI, "harvest", "--ledger", ledger_path,
+        "--coordination-json", source_path, "--batch-id", reserved
+      )
+
+      assert status.success?, stderr
+      assert_equal ["phase"], sqlite_query(ledger_path, "SELECT event_type_raw FROM events")
+      assert_empty sqlite_query(ledger_path, "SELECT event_type FROM events WHERE event_type = 'claim.expired'")
+    end
+  end
+
   def test_claim_expired_event_without_expired_status_cannot_derive_expired_outcome
     Dir.mktmpdir("agent-coordination-ledger-unqualified-expired") do |dir| # rubocop:disable Metrics/BlockLength
       source_path = File.join(dir, "coordination.json")

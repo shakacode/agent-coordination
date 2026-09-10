@@ -51,6 +51,13 @@ module AgentCoord
   # countable instead of being laundered into a clean handoff.
   CLAIM_EXPIRED_STATUS = "expired"
   UNBATCHED_CLAIM_EXPIRY_BATCH_ID = "unbatched-claim-expirations"
+  # Generated unbatched expiry history must not share lineage with any normal
+  # batch, including a pre-existing batch that used the later-reserved name.
+  # This fresh, collision-resistant batch-shaped identity is storage-valid for
+  # both local and HTTP backends but reserved below from every public producer.
+  INTERNAL_UNBATCHED_CLAIM_EXPIRY_BATCH_ID = "agent-coord-internal-unbatched-expiry-v1-7e4c9a2d"
+  INTERNAL_UNBATCHED_CLAIM_EXPIRY_EVENT_PREFIX =
+    "events/#{INTERNAL_UNBATCHED_CLAIM_EXPIRY_BATCH_ID}".freeze
   CLAIM_CLOSEOUT_FIELDS = %w[
     terminal pr_state evidence_url closed_by released_by released_at release_mode handoff_to handoff_note
   ].freeze
@@ -1430,7 +1437,8 @@ module AgentCoord
 
     def validate_producer_batch_id!(batch_id)
       AgentCoord.validate_segment!(batch_id, "batch-id")
-      return unless batch_id == UNBATCHED_CLAIM_EXPIRY_BATCH_ID
+      reserved = [UNBATCHED_CLAIM_EXPIRY_BATCH_ID, INTERNAL_UNBATCHED_CLAIM_EXPIRY_BATCH_ID]
+      return unless reserved.include?(batch_id)
 
       raise Error, "batch-id #{batch_id.inspect} is reserved for unbatched claim expiry history"
     end
@@ -2203,6 +2211,8 @@ module AgentCoord
       missing_prefixes = %w[heartbeats events].reject { |prefix| prefixes.include?(prefix) }
       return gc_report_unreapable_without_supporting_prefixes(expired, missing_prefixes) unless missing_prefixes.empty?
 
+      expired = gc_withhold_unbatched_reaps_without_batches(expired, prefixes)
+
       holder_heartbeats = {}
       expired.filter_map do |entry, lease_ended_at|
         next unless gc_claim_holder_gone?(store, entry.data, now, holder_heartbeats)
@@ -2230,6 +2240,17 @@ module AgentCoord
                      "heartbeats and records immutable events, so it needs #{switches} alongside --prefix claims"
       end
       []
+    end
+
+    def gc_withhold_unbatched_reaps_without_batches(expired, prefixes)
+      return expired if prefixes.include?("batches")
+
+      unbatched, supported = expired.partition { |entry, _lease_ended_at| entry.data["batch_id"].to_s.empty? }
+      unless unbatched.empty?
+        @stderr.puts "warning: gc left #{unbatched.length} unbatched expired-lease claim(s) unreaped: " \
+                     "immutable history collision checks need --prefix batches alongside --prefix claims"
+      end
+      supported
     end
 
     # The reaper borrows the takeover rule instead of restating it. A holder
@@ -2278,6 +2299,16 @@ module AgentCoord
                        "reconciliation needs --prefix events alongside --prefix claims"
         end
         return []
+      end
+
+      unless prefixes.include?("batches")
+        internal, pending = pending.partition do |entry|
+          entry.data["expired_event_batch_id"] == INTERNAL_UNBATCHED_CLAIM_EXPIRY_BATCH_ID
+        end
+        unless internal.empty?
+          @stderr.puts "warning: gc left #{internal.length} pending unbatched claim.expired event(s) unreconciled: " \
+                       "collision checks need --prefix batches alongside --prefix claims and --prefix events"
+        end
       end
 
       pending.map do |entry|
@@ -2417,8 +2448,8 @@ module AgentCoord
 
     def gc_unbatched_claim_expiration_event?(entry)
       data = entry.data
-      entry.path.start_with?("events/#{UNBATCHED_CLAIM_EXPIRY_BATCH_ID}/") &&
-        data["batch_id"] == UNBATCHED_CLAIM_EXPIRY_BATCH_ID &&
+      entry.path.start_with?("#{INTERNAL_UNBATCHED_CLAIM_EXPIRY_EVENT_PREFIX}/") &&
+        data["batch_id"] == INTERNAL_UNBATCHED_CLAIM_EXPIRY_BATCH_ID &&
         data["type"] == "claim.expired" && data["status"] == CLAIM_EXPIRED_STATUS &&
         data["event_id"].to_s.start_with?("claim-expired-")
     end
@@ -2616,7 +2647,7 @@ module AgentCoord
         "reaped_at" => event_at
       )
       expired_event_batch_id = if payload["batch_id"].to_s.empty?
-                                 UNBATCHED_CLAIM_EXPIRY_BATCH_ID
+                                 INTERNAL_UNBATCHED_CLAIM_EXPIRY_BATCH_ID
                                else
                                  payload.fetch("batch_id")
                                end
@@ -2659,6 +2690,7 @@ module AgentCoord
       return unless claim["status"] == CLAIM_EXPIRED_STATUS && claim["expired_event_pending"] == true
 
       event = gc_claim_expired_event_payload(claim)
+      gc_assert_internal_expiry_namespace_available!(store, event)
       path = AgentCoord.event_path(event.fetch("batch_id"), event.fetch("event_id"))
       begin
         store.write_json(path, event, message: "Record expired claim #{entry.path}", create: true)
@@ -2683,6 +2715,14 @@ module AgentCoord
     rescue Error, KeyError, TypeError, SystemCallError => e
       @stderr.puts "warning: claim.expired event pending for #{entry.path}: #{e.message}"
       false
+    end
+
+    def gc_assert_internal_expiry_namespace_available!(store, event)
+      batch_id = event.fetch("batch_id")
+      return unless batch_id == INTERNAL_UNBATCHED_CLAIM_EXPIRY_BATCH_ID
+      return unless store.read_json(AgentCoord.batch_path(batch_id))
+
+      raise OperationalError, "internal claim expiry namespace collides with existing batch #{batch_id}"
     end
 
     def gc_claim_expired_event_payload(claim)
