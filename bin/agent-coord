@@ -2920,6 +2920,10 @@ module AgentCoord
           ["dead_heartbeat", gc_heartbeat_dead_at(data, path)]
         end
       when "batches"
+        # A pre-existing manifest at the reserved internal ID is a permanent
+        # collision sentinel. Archiving it would let a later GC run reuse its
+        # event namespace while the older lineage still exists.
+        return if path == AgentCoord.batch_path(INTERNAL_UNBATCHED_CLAIM_EXPIRY_BATCH_ID)
         return unless data["status"] == "completed"
 
         ["completed_batch", gc_record_time(data, "completed_at", path)]

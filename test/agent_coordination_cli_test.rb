@@ -1288,7 +1288,7 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     assert_empty Dir.glob(File.join(@state_root, AgentCoord::INTERNAL_UNBATCHED_CLAIM_EXPIRY_EVENT_PREFIX, "*.json"))
   end
 
-  def test_gc_checks_internal_namespace_collision_before_archiving_its_manifest
+  def test_gc_checks_internal_namespace_collision_before_archiving_its_manifest # rubocop:disable Metrics/AbcSize
     now = Time.utc(2026, 7, 12, 12, 0, 0)
     internal_batch_id = AgentCoord::INTERNAL_UNBATCHED_CLAIM_EXPIRY_BATCH_ID
     write_batch(internal_batch_id, lanes: [])
@@ -1316,7 +1316,19 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     assert_equal "invalid_expired_event_destination_at_apply", reap.fetch("skip_reason")
     assert_equal "active", JSON.parse(File.read(File.join(@state_root, claim_path))).fetch("status")
     assert_equal "expired", JSON.parse(File.read(File.join(@state_root, valid_path))).fetch("status")
-    assert_path_exists File.join(@state_root, "archive", AgentCoord.batch_path(internal_batch_id))
+    assert_path_exists batch_path
+    refute_path_exists File.join(@state_root, "archive", AgentCoord.batch_path(internal_batch_id))
+    assert_empty Dir.glob(File.join(@state_root, AgentCoord::INTERNAL_UNBATCHED_CLAIM_EXPIRY_EVENT_PREFIX, "*.json"))
+
+    replay_stdout = StringIO.new
+    replay = AgentCoord::Runner.new([], stdout: replay_stdout, clock: FixedClock.new(now + 60))
+    assert_equal 0, replay.send(:gc, state_root: @state_root, dry_run: false, execute: true, json: true)
+    replay_action = JSON.parse(replay_stdout.string).fetch("actions").find do |row|
+      row["source_path"] == claim_path
+    end
+    assert_equal "skipped", replay_action.fetch("outcome")
+    assert_equal "invalid_expired_event_destination_at_apply", replay_action.fetch("skip_reason")
+    assert_equal "active", JSON.parse(File.read(File.join(@state_root, claim_path))).fetch("status")
     assert_empty Dir.glob(File.join(@state_root, AgentCoord::INTERNAL_UNBATCHED_CLAIM_EXPIRY_EVENT_PREFIX, "*.json"))
   end
 
