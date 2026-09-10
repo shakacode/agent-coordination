@@ -35,7 +35,7 @@ module AgentCoord
       # constrains the character set but applies no allowlist and no length
       # bound, so an arbitrary -- and arbitrarily long -- type can reach ingest.
       # That is why `event_type_raw` has to sanitize rather than reject.
-      CLI_LIFECYCLE_EVENT_TYPES = %w[claim.acquired claim.released phase.changed].freeze
+      CLI_LIFECYCLE_EVENT_TYPES = %w[claim.acquired claim.expired claim.released phase.changed].freeze
       CLI_TERMINAL_EVENT_TYPES = %w[lane_closed].freeze
       CLI_TYPED_EVENT_TYPES = %w[help_requested escalation_requested error human_intervention].freeze
       CLI_EVENT_TYPES = (CLI_LIFECYCLE_EVENT_TYPES + CLI_TERMINAL_EVENT_TYPES + CLI_TYPED_EVENT_TYPES).freeze
@@ -175,13 +175,14 @@ module AgentCoord
       ].freeze
       EFFORTS = %w[low medium high xhigh max ultra].freeze
       PRICING_PROFILES = %w[standard].freeze
-      EXCEPTIONAL_OUTCOMES = %w[blocked-user-input no-pr-evidence failed abandoned superseded].freeze
+      EXCEPTIONAL_OUTCOMES = %w[blocked-user-input no-pr-evidence failed expired abandoned superseded].freeze
       STATUS_OUTCOMES = {
         "blocked" => "blocked",
         "blocked-user-input" => "blocked-user-input",
         "completed" => "done",
         "done" => "done",
         "failed" => "failed",
+        "expired" => "expired",
         "abandoned" => "abandoned",
         "superseded" => "superseded",
         "in_progress" => "in-progress",

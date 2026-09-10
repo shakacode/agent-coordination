@@ -599,7 +599,7 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     store = CountingLocalStore.new(@state_root)
     runner = AgentCoord::Runner.new([], stdout: StringIO.new, clock: FixedClock.new(now))
 
-    candidates = runner.send(:gc_reap_candidates, store, now, 1, %w[claims heartbeats])
+    candidates = runner.send(:gc_reap_candidates, store, now, 1, %w[claims heartbeats events])
 
     assert_equal 3, candidates.length
     assert_equal 1, store.reads.count("heartbeats/shared-holder.json")
@@ -620,7 +620,7 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     # mirror and nothing else, so the reaper must withdraw rather than widen the
     # run into heartbeats. It says why, so an empty plan is not a mystery.
     assert_empty reap_sources(JSON.parse(stdout.string))
-    assert_includes stderr.string, "--prefix heartbeats alongside --prefix claims"
+    assert_includes stderr.string, "--prefix heartbeats and --prefix events alongside --prefix claims"
     assert_path_exists File.join(@state_root, claim_path)
 
     store = CountingLocalStore.new(@state_root)
@@ -637,7 +637,7 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     runner = AgentCoord::Runner.new([], stdout: StringIO.new, stderr: stderr, clock: FixedClock.new(now))
     store = ForbiddenHeartbeatStore.new(@state_root, "heartbeats/forbidden.json")
 
-    candidates = runner.send(:gc_reap_candidates, store, now, 1, %w[claims heartbeats])
+    candidates = runner.send(:gc_reap_candidates, store, now, 1, %w[claims heartbeats events])
 
     # An unreadable heartbeat is not evidence the holder is gone, so its claims
     # are left alone; a backend that answered 404 instead of 403 would otherwise
@@ -647,11 +647,170 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     assert_equal 1, store.reads.count("heartbeats/forbidden.json")
   end
 
+  def test_gc_rechecks_holder_liveness_immediately_before_applying_a_reap
+    now = Time.utc(2026, 7, 12, 12, 0, 0)
+    claim_path = write_abandoned_claim(
+      "resumed", now - (3 * 86_400), "agent_id" => "resumed-holder"
+    )
+    runner = AgentCoord::Runner.new([], stdout: StringIO.new, clock: FixedClock.new(now))
+    store = CountingLocalStore.new(@state_root)
+    candidate = runner.send(:gc_reap_candidates, store, now, 1, %w[claims heartbeats events]).fetch(0)
+
+    # A holder can resume after planning without changing the claim. The claim
+    # CAS would still succeed, so apply must re-read liveness rather than reap
+    # work that is demonstrably live at the mutation boundary.
+    write_state_record(
+      "heartbeats/resumed-holder.json",
+      {
+        "schema_version" => 1,
+        "agent_id" => "resumed-holder",
+        "status" => "in_progress",
+        "updated_at" => (now - 60).iso8601,
+        "expires_at" => (now + 600).iso8601
+      }
+    )
+
+    runner.send(:gc_reap_claim, store, candidate, now)
+
+    claim = JSON.parse(File.read(File.join(@state_root, claim_path)))
+    assert_equal "active", claim.fetch("status")
+    refute claim.key?("reaped_at")
+    assert_equal 2, store.reads.count("heartbeats/resumed-holder.json")
+  end
+
+  def test_gc_apply_fails_closed_on_a_malformed_holder_heartbeat
+    now = Time.utc(2026, 7, 12, 12, 0, 0)
+    claim_path = write_abandoned_claim(
+      "malformed-holder", now - (3 * 86_400), "agent_id" => "malformed-holder"
+    )
+    heartbeat_path = File.join(@state_root, "heartbeats", "malformed-holder.json")
+    FileUtils.mkdir_p(File.dirname(heartbeat_path))
+    File.write(heartbeat_path, "{not-json")
+    runner = AgentCoord::Runner.new([], stdout: StringIO.new, clock: FixedClock.new(now))
+    store = CountingLocalStore.new(@state_root)
+    entry = store.read_json(claim_path)
+    candidate = {
+      entry: entry,
+      action: { "action" => "reap", "source_path" => claim_path, "reason" => "expired_lease" }
+    }
+
+    runner.send(:gc_reap_claim, store, candidate, now)
+
+    assert_equal "active", JSON.parse(File.read(File.join(@state_root, claim_path))).fetch("status")
+  end
+
+  def test_gc_apply_fails_closed_on_unreadable_and_unknown_holder_heartbeats
+    now = Time.utc(2026, 7, 12, 12, 0, 0)
+    unreadable_path = write_abandoned_claim(
+      "unreadable-apply", now - (3 * 86_400), "agent_id" => "unreadable-apply"
+    )
+    unknown_path = write_abandoned_claim(
+      "unknown-apply", now - (3 * 86_400), "agent_id" => "unknown-apply"
+    )
+    write_state_record(
+      "heartbeats/unknown-apply.json",
+      { "schema_version" => 1, "agent_id" => "unknown-apply", "status" => "in_progress" }
+    )
+    runner = AgentCoord::Runner.new([], stdout: StringIO.new, stderr: StringIO.new, clock: FixedClock.new(now))
+    unreadable_store = ForbiddenHeartbeatStore.new(@state_root, "heartbeats/unreadable-apply.json")
+    unknown_store = CountingLocalStore.new(@state_root)
+
+    [[unreadable_store, unreadable_path], [unknown_store, unknown_path]].each do |store, path|
+      candidate = {
+        entry: store.read_json(path),
+        action: { "action" => "reap", "source_path" => path, "reason" => "expired_lease" }
+      }
+      runner.send(:gc_reap_claim, store, candidate, now)
+      assert_equal "active", JSON.parse(File.read(File.join(@state_root, path))).fetch("status")
+    end
+  end
+
+  def test_gc_reconciles_a_transient_expired_event_failure_exactly_once
+    now = Time.utc(2026, 7, 12, 12, 0, 0)
+    claim_path = write_abandoned_claim(
+      "retry-event", now - (3 * 86_400),
+      "batch_id" => "retry-expired-batch", "agent_id" => "gone-holder"
+    )
+    stderr = StringIO.new
+    runner = AgentCoord::Runner.new([], stdout: StringIO.new, stderr: stderr, clock: FixedClock.new(now))
+    store = FailOnceExpiredEventStore.new(@state_root)
+    candidate = runner.send(:gc_reap_candidates, store, now, 1, %w[claims heartbeats events]).fetch(0)
+
+    runner.send(:gc_reap_claim, store, candidate, now)
+
+    pending = store.read_json(claim_path)
+    assert_equal "expired", pending.data.fetch("status")
+    assert_equal true, pending.data.fetch("expired_event_pending")
+    assert_empty event_records("retry-expired-batch")
+    assert_includes stderr.string, "claim.expired event pending"
+
+    2.times do
+      runner.send(
+        :gc, state_root: @state_root, dry_run: false, execute: true, json: true,
+             prefixes: %w[claims events]
+      )
+    end
+
+    settled = store.read_json(claim_path)
+    refute settled.data.key?("expired_event_pending")
+    assert_empty runner.send(:gc_expired_event_candidates, store, %w[claims events])
+    events = event_records("retry-expired-batch")
+    assert_equal 1, events.length
+    assert_equal "claim.expired", events.fetch(0).fetch("type")
+    assert_equal 1, store.expired_event_write_attempts
+  end
+
+  def test_pending_expiry_history_blocks_release_and_archive_before_reacquisition
+    now = Time.utc(2026, 7, 12, 12, 0, 0)
+    claim_path = write_abandoned_claim(
+      "pending-lifecycle", now - (3 * 86_400),
+      "batch_id" => "pending-lifecycle-batch",
+      "agent_id" => "expired-holder",
+      "status" => "expired",
+      "reaped_at" => now.iso8601,
+      "expired_event_id" => "claim-expired-pending-lifecycle",
+      "expired_event_at" => now.iso8601,
+      "expired_event_pending" => true,
+      "synthetic" => true,
+      "synthetic_kind" => "smoke"
+    )
+    runner = AgentCoord::Runner.new([], stdout: StringIO.new, clock: FixedClock.new(now))
+    store = CountingLocalStore.new(@state_root)
+
+    assert_nil runner.send(:gc_archive_eligibility, store.read_json(claim_path), "claims", now + (8 * 86_400))
+    release = run_agent_coord(
+      "release", "--agent-id", "expired-holder", "--repo", "shakacode/example",
+      "--target", "pending-lifecycle"
+    )
+    assert_equal 1, release.status.exitstatus
+    assert_includes release.stderr, "expired claim must be reacquired"
+
+    claim = run_agent_coord(
+      "claim", "--agent-id", "new-holder", "--repo", "shakacode/example",
+      "--target", "pending-lifecycle", "--batch-id", "pending-lifecycle-batch"
+    )
+    assert_equal 0, claim.status.exitstatus, claim.stderr
+    assert_equal "active", store.read_json(claim_path).data.fetch("status")
+    event = event_records("pending-lifecycle-batch").find { |record| record["type"] == "claim.expired" }
+    refute_nil event
+    assert_equal "claim.expired", event.fetch("type")
+    assert_equal true, event.fetch("synthetic")
+    assert_equal "smoke", event.fetch("synthetic_kind")
+  end
+
   def test_gc_plans_one_action_per_record_and_reaping_outranks_archiving
     now = Time.utc(2026, 7, 12, 12, 0, 0)
     # Active but already carrying a terminal marker: eligible for the archive
     # pass and the reaper at once.
-    claim_path = write_abandoned_claim("dual", now - (4 * 86_400), "terminal" => "done")
+    claim_path = write_abandoned_claim(
+      "dual", now - (4 * 86_400),
+      "batch_id" => "expired-batch",
+      "agent_id" => "expired-holder",
+      "terminal" => "done",
+      "pr_state" => "merged",
+      "evidence_url" => "https://example.test/stale-closeout",
+      "closed_by" => { "agent_id" => "expired-holder", "machine" => "old-host" }
+    )
     dry = StringIO.new
     AgentCoord::Runner.new([], stdout: dry, clock: FixedClock.new(now))
                       .send(:gc, state_root: @state_root, dry_run: true, execute: false, json: true)
@@ -668,6 +827,11 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     reaped = JSON.parse(File.read(File.join(@state_root, claim_path)))
 
     assert_equal "expired", reaped.fetch("status")
+    %w[terminal pr_state evidence_url closed_by].each { |field| refute reaped.key?(field) }
+    expired_event = event_records("expired-batch").fetch(0)
+    assert_equal "claim.expired", expired_event.fetch("type")
+    assert_equal "expired", expired_event.fetch("status")
+    assert_equal "dual", expired_event.fetch("target")
     assert_empty Dir.glob(File.join(@state_root, "archive", "**", "*.json"))
 
     # The reap is not a dead end: the ordinary terminal-claim path collects the
@@ -12220,6 +12384,28 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     assert_includes result.stdout, "lane docs owner worker-b complete"
   end
 
+  def test_batch_audit_treats_claim_expired_as_lifecycle_but_not_completion
+    write_batch(
+      "batch-audit-expired",
+      lanes: [{ "name" => "code", "owner" => "worker-a", "targets" => ["101"] }]
+    )
+    seed_event(
+      "batch-audit-expired", "acquired",
+      "type" => "claim.acquired", "agent_id" => "worker-a", "target" => "101"
+    )
+    seed_event(
+      "batch-audit-expired", "expired",
+      "type" => "claim.expired", "agent_id" => "worker-a", "target" => "101", "status" => "expired"
+    )
+
+    result = run_agent_coord("batch-audit", "--batch-id", "batch-audit-expired", "--json")
+
+    assert_equal 1, result.status.exitstatus, result.stderr
+    lane = JSON.parse(result.stdout).fetch("lanes").fetch(0)
+    assert_equal false, lane.fetch("complete")
+    assert_equal ["terminal"], lane.fetch("missing")
+  end
+
   def test_batch_audit_attributes_events_to_a_prefixed_lane_target
     write_batch(
       "batch-audit-prefixed",
@@ -14252,6 +14438,23 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
 
       @reads << path
       raise AgentCoord::OperationalError, "state read forbidden at #{path}"
+    end
+  end
+
+  class FailOnceExpiredEventStore < CountingLocalStore
+    attr_reader :expired_event_write_attempts
+
+    def initialize(root)
+      super
+      @expired_event_write_attempts = 0
+    end
+
+    def write_json(path, data, **options)
+      if path.start_with?("events/") && data["type"] == "claim.expired"
+        @expired_event_write_attempts += 1
+        raise AgentCoord::OperationalError, "transient event outage" if @expired_event_write_attempts == 1
+      end
+      super
     end
   end
 

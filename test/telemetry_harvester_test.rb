@@ -790,6 +790,41 @@ class TelemetryHarvesterTest < Minitest::Test # rubocop:disable Metrics/ClassLen
     end
   end
 
+  def test_expired_claim_remains_a_distinct_outcome_and_event
+    Dir.mktmpdir("agent-coordination-ledger-expired") do |dir| # rubocop:disable Metrics/BlockLength
+      source_path = File.join(dir, "coordination.json")
+      ledger_path = File.join(dir, "telemetry.sqlite3")
+      coordination = JSON.parse(File.read(File.join(FIXTURES, "coordination.json")))
+      claim = coordination.fetch("claims").find { |row| row["target"] == "78" }
+      claim["status"] = "expired"
+      claim.delete("terminal")
+      coordination.fetch("events") << {
+        "schema_version" => 1,
+        "id" => "expired-78",
+        "batch_id" => "batch-fixture",
+        "type" => "claim.expired",
+        "agent_id" => "maker",
+        "repo" => "shakacode/agent-coordination",
+        "target" => "78",
+        "status" => "expired",
+        "at" => "2026-07-18T04:00:00Z"
+      }
+      File.write(source_path, JSON.pretty_generate(coordination))
+
+      _stdout, stderr, status = Open3.capture3(
+        CLI, "harvest", "--ledger", ledger_path,
+        "--coordination-json", source_path, "--batch-id", "batch-fixture"
+      )
+      assert status.success?, stderr
+      assert_equal ["expired"], sqlite_query(
+        ledger_path, "SELECT outcome FROM target_units WHERE target = '78'"
+      )
+      assert_equal ["claim.expired"], sqlite_query(
+        ledger_path, "SELECT event_type FROM events WHERE event_type = 'claim.expired'"
+      )
+    end
+  end
+
   def test_named_batch_harvest_recomputes_outcomes_for_all_refreshed_github_rows # rubocop:disable Metrics/MethodLength
     Dir.mktmpdir("agent-coordination-ledger-github-refresh") do |dir| # rubocop:disable Metrics/BlockLength
       source_path = File.join(dir, "coordination.json")
@@ -2869,11 +2904,30 @@ class TelemetryHarvesterTest < Minitest::Test # rubocop:disable Metrics/ClassLen
                          ))
     run_coord(env, "register-batch", "--state-root", state, "--file", manifest)
     corpus_commands(state).each { |args| run_coord(env, *args) }
+    seed_expired_corpus_claim(state)
+    run_coord(env, "gc", "--state-root", state, "--execute", "--json", "--lease-grace-days", "0")
 
     source_path = File.join(dir, "coordination.json")
     status_json = run_coord(env, "status", "--state-root", state, "--json")
     File.write(source_path, status_json)
     [JSON.parse(status_json).fetch("events").map { |event| event.fetch("type") }.sort, source_path]
+  end
+
+  def seed_expired_corpus_claim(state)
+    load_agent_coord_cli
+    path = File.join(state, AgentCoord.claim_path(CORPUS_REPO, CORPUS_TARGET))
+    FileUtils.mkdir_p(File.dirname(path))
+    File.write(path, JSON.generate(
+                       "schema_version" => 1,
+                       "batch_id" => CORPUS_BATCH,
+                       "repo" => CORPUS_REPO,
+                       "target" => CORPUS_TARGET,
+                       "agent_id" => "expired-corpus-worker",
+                       "status" => "active",
+                       "claimed_at" => "2026-01-01T00:00:00Z",
+                       "updated_at" => "2026-01-01T00:00:00Z",
+                       "expires_at" => "2026-01-01T00:01:00Z"
+                     ))
   end
 
   def corpus_commands(state)
