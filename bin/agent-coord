@@ -2137,7 +2137,11 @@ module AgentCoord
       candidates.each do |candidate|
         outcome = execute_gc_candidate(store, candidate, now, archive_days)
         action = candidate.fetch(:action)
-        if %i[claim_changed_at_apply holder_present_at_apply holder_liveness_unknown_at_apply].include?(outcome)
+        skipped = %i[
+          claim_changed_at_apply holder_present_at_apply holder_liveness_unknown_at_apply
+          invalid_expired_event_destination_at_apply
+        ]
+        if skipped.include?(outcome)
           action.merge!("outcome" => "skipped", "skip_reason" => outcome.to_s)
         elsif outcome == :expired_event_pending || (action["action"] == "reconcile_expired_event" && !outcome)
           action.merge!("outcome" => "pending", "skip_reason" => "expired_event_pending")
@@ -2669,6 +2673,8 @@ module AgentCoord
         "expired_event_at" => event_at,
         "expired_event_pending" => true
       )
+      return :invalid_expired_event_destination_at_apply unless gc_expired_event_destination_valid?(payload)
+
       store.write_json(entry.path, payload, message: "Reap expired claim #{entry.path}", sha: entry.sha)
       current = store.read_json(entry.path)
       reconciled = gc_finish_reap_reconciliation(store, current, payload)
@@ -2687,6 +2693,15 @@ module AgentCoord
         "expires_at" => claim["expires_at"]
       }
       "claim-expired-#{Digest::SHA256.hexdigest(gc_canonical_json(identity))[0, 16]}"
+    end
+
+    def gc_expired_event_destination_valid?(claim)
+      event = gc_claim_expired_event_payload(claim)
+      AgentCoord.event_path(event.fetch("batch_id"), event.fetch("event_id"))
+      true
+    rescue Error, KeyError, TypeError => e
+      @stderr.puts "warning: invalid claim.expired event destination; claim not reaped: #{log_scrub(e.message)}"
+      false
     end
 
     def gc_finish_reap_reconciliation(store, current, payload)
@@ -2719,6 +2734,8 @@ module AgentCoord
       end
       current = store.read_json(entry.path)
       unless current && current.data["expired_event_id"] == event.fetch("event_id")
+        return true if gc_expired_event_settled_after_claim_advanced?(store, current, claim)
+
         @stderr.puts "warning: claim.expired event identity changed for #{entry.path}; history remains pending"
         return false
       end
@@ -2728,12 +2745,17 @@ module AgentCoord
         store.write_json(entry.path, settled, message: "Confirm expired claim event #{entry.path}", sha: current.sha)
       rescue Conflict
         latest = store.read_json(entry.path)
-        raise unless latest && latest.data == settled
+        exact_settled = latest&.data == settled
+        raise unless exact_settled || gc_expired_event_settled_after_claim_advanced?(store, latest, claim)
       end
       true
     rescue Error, KeyError, TypeError, SystemCallError => e
       @stderr.puts "warning: claim.expired event pending for #{entry.path}: #{e.message}"
       false
+    end
+
+    def gc_expired_event_settled_after_claim_advanced?(store, current, claim)
+      current&.data&.fetch("expired_event_pending", false) != true && gc_expired_event_recorded?(store, claim)
     end
 
     def gc_expired_event_already_settled?(store, entry)

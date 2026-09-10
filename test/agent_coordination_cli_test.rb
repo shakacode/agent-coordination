@@ -736,6 +736,31 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     assert_equal "claim_changed_at_apply", candidate.dig(:action, "skip_reason")
   end
 
+  def test_gc_skips_a_legacy_claim_with_an_invalid_event_destination_before_mutation
+    now = Time.utc(2026, 7, 12, 12, 0, 0)
+    invalid_path = write_abandoned_claim(
+      "invalid-event-destination", now - (3 * 86_400),
+      "agent_id" => "gone-holder", "batch_id" => "invalid/batch"
+    )
+    valid_path = write_abandoned_claim(
+      "valid-after-invalid", now - (3 * 86_400),
+      "agent_id" => "another-gone-holder", "batch_id" => "valid-batch"
+    )
+    stderr = StringIO.new
+    store = AgentCoord::LocalStore.new(@state_root)
+    runner = AgentCoord::Runner.new([], stdout: StringIO.new, stderr: stderr, clock: FixedClock.new(now))
+    candidates = runner.send(:gc_reap_candidates, store, now, 1, %w[claims heartbeats events batches])
+
+    runner.send(:execute_gc_candidates, store, candidates, now, 30)
+
+    invalid = candidates.find { |item| item.dig(:action, "source_path") == invalid_path }
+    assert_equal "active", store.read_json(invalid_path).data.fetch("status")
+    assert_equal "skipped", invalid.dig(:action, "outcome")
+    assert_equal "invalid_expired_event_destination_at_apply", invalid.dig(:action, "skip_reason")
+    assert_equal "expired", store.read_json(valid_path).data.fetch("status")
+    assert_includes stderr.string, "invalid claim.expired event destination"
+  end
+
   def test_event_payload_preserves_subsecond_lifecycle_order
     now = Time.utc(2026, 7, 12, 12, 0, 0) + Rational(123_456_789, 1_000_000_000)
     runner = AgentCoord::Runner.new([], stdout: StringIO.new, clock: FixedClock.new(now))
@@ -1279,6 +1304,58 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     refute settled.key?("expired_event_pending")
     assert_empty stderr.string
     assert_equal 1, event_records("settled-race-batch").length
+  end
+
+  def test_gc_standalone_reconcile_accepts_exact_history_settled_then_immediately_reacquired
+    now = Time.utc(2026, 7, 12, 12, 0, 0)
+    claim_path = write_abandoned_claim(
+      "standalone-settled-reacquired", now - (3 * 86_400),
+      "batch_id" => "standalone-settled-reacquired-batch", "agent_id" => "expired-holder",
+      "status" => "expired", "reaped_at" => now.iso8601,
+      "expired_event_id" => "claim-expired-standalone-reacquired",
+      "expired_event_batch_id" => "standalone-settled-reacquired-batch",
+      "expired_event_at" => now.iso8601, "expired_event_pending" => true
+    )
+    store = SettleExpiredEventAndReacquireDuringReconcileStore.new(@state_root, claim_path, now)
+    runner = StoreInjectedRunner.new([], store: store, clock: FixedClock.new(now))
+
+    assert_equal 0, runner.send(
+      :gc, state_root: @state_root, dry_run: false, execute: true, json: true,
+           prefixes: %w[claims events]
+    )
+
+    action = JSON.parse(runner.captured_stdout.string).fetch("actions").fetch(0)
+    refute action.key?("outcome")
+    claim = store.read_json(claim_path).data
+    assert_equal "active", claim.fetch("status")
+    assert_equal "new-holder", claim.fetch("agent_id")
+    assert_equal 1, event_records("standalone-settled-reacquired-batch").length
+  end
+
+  def test_gc_standalone_reconcile_accepts_reacquire_during_redundant_marker_clear
+    now = Time.utc(2026, 7, 12, 12, 0, 0)
+    claim_path = write_abandoned_claim(
+      "standalone-late-reacquire", now - (3 * 86_400),
+      "batch_id" => "standalone-late-reacquire-batch", "agent_id" => "expired-holder",
+      "status" => "expired", "reaped_at" => now.iso8601,
+      "expired_event_id" => "claim-expired-standalone-late-reacquire",
+      "expired_event_batch_id" => "standalone-late-reacquire-batch",
+      "expired_event_at" => now.iso8601, "expired_event_pending" => true
+    )
+    store = SettleThenReacquireOnMarkerClearStore.new(@state_root, claim_path, now)
+    runner = StoreInjectedRunner.new([], store: store, clock: FixedClock.new(now))
+
+    assert_equal 0, runner.send(
+      :gc, state_root: @state_root, dry_run: false, execute: true, json: true,
+           prefixes: %w[claims events]
+    )
+
+    action = JSON.parse(runner.captured_stdout.string).fetch("actions").fetch(0)
+    refute action.key?("outcome")
+    claim = store.read_json(claim_path).data
+    assert_equal "active", claim.fetch("status")
+    assert_equal "new-holder", claim.fetch("agent_id")
+    assert_equal 1, event_records("standalone-late-reacquire-batch").length
   end
 
   def test_pending_expiry_history_blocks_release_and_archive_before_reacquisition
@@ -15334,6 +15411,89 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
       event = AgentCoord::Runner.new([]).send(:gc_claim_expired_event_payload, pending.data)
       write_json(AgentCoord.event_path(event.fetch("batch_id"), event.fetch("event_id")), event,
                  message: "Write event elsewhere", create: true)
+    end
+  end
+
+  class SettleExpiredEventAndReacquireDuringReconcileStore < CountingLocalStore
+    EXPIRY_FIELDS = %w[
+      reaped_at expired_event_id expired_event_batch_id expired_event_at expired_event_pending
+    ].freeze
+
+    def initialize(root, claim_path, now)
+      super(root)
+      @claim_path = claim_path
+      @now = now
+      @reacquired = false
+    end
+
+    def write_json(path, data, **options)
+      result = super
+      settle_and_reacquire if !@reacquired && path.start_with?("events/") && data["type"] == "claim.expired"
+      result
+    end
+
+    private
+
+    def settle_and_reacquire
+      @reacquired = true
+      pending = read_json(@claim_path)
+      write_json(@claim_path, pending.data.except("expired_event_pending"),
+                 message: "Confirm event elsewhere", sha: pending.sha)
+      settled = read_json(@claim_path)
+      active = settled.data.except(*EXPIRY_FIELDS).merge(
+        "status" => "active", "agent_id" => "new-holder", "generation" => 2,
+        "instance_id" => "new-instance", "claimed_at" => @now.iso8601,
+        "updated_at" => @now.iso8601, "expires_at" => (@now + 3600).iso8601
+      )
+      write_json(@claim_path, active, message: "Reacquire immediately", sha: settled.sha)
+    end
+  end
+
+  class SettleThenReacquireOnMarkerClearStore < CountingLocalStore
+    EXPIRY_FIELDS = %w[
+      reaped_at expired_event_id expired_event_batch_id expired_event_at expired_event_pending
+    ].freeze
+
+    def initialize(root, claim_path, now)
+      super(root)
+      @claim_path = claim_path
+      @now = now
+      @settled_elsewhere = false
+      @reacquired = false
+    end
+
+    def write_json(path, data, **options)
+      reacquire_after_settled_read if marker_clear_write?(path, data)
+      result = super
+      settle_elsewhere if !@settled_elsewhere && path.start_with?("events/") && data["type"] == "claim.expired"
+      result
+    end
+
+    private
+
+    def settle_elsewhere
+      pending = read_json(@claim_path)
+      @settling = true
+      write_json(@claim_path, pending.data.except("expired_event_pending"),
+                 message: "Confirm event elsewhere", sha: pending.sha)
+      @settling = false
+      @settled_elsewhere = true
+    end
+
+    def marker_clear_write?(path, data)
+      @settled_elsewhere && !@settling && !@reacquired && path == @claim_path &&
+        data["status"] == "expired" && !data.key?("expired_event_pending")
+    end
+
+    def reacquire_after_settled_read
+      settled = read_json(@claim_path)
+      active = settled.data.except(*EXPIRY_FIELDS).merge(
+        "status" => "active", "agent_id" => "new-holder", "generation" => 2,
+        "instance_id" => "new-instance", "claimed_at" => @now.iso8601,
+        "updated_at" => @now.iso8601, "expires_at" => (@now + 3600).iso8601
+      )
+      @reacquired = true
+      write_json(@claim_path, active, message: "Reacquire during marker clear", sha: settled.sha)
     end
   end
 
