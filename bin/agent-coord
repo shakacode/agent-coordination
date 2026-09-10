@@ -2139,7 +2139,7 @@ module AgentCoord
         action = candidate.fetch(:action)
         skipped = %i[
           claim_changed_at_apply holder_present_at_apply holder_liveness_unknown_at_apply
-          invalid_expired_event_destination_at_apply
+          invalid_claim_path_at_apply invalid_expired_event_destination_at_apply
         ]
         if skipped.include?(outcome)
           action.merge!("outcome" => "skipped", "skip_reason" => outcome.to_s)
@@ -2648,6 +2648,8 @@ module AgentCoord
     # the gc write instead, and the archive pass reads the hot window from it.
     def gc_reap_claim(store, candidate, now)
       entry = candidate.fetch(:entry)
+      return :invalid_claim_path_at_apply unless gc_canonical_claim_path?(entry.path)
+
       read_method = store.respond_to?(:read_json_fresh) ? :read_json_fresh : :read_json
       current_entry = store.public_send(read_method, entry.path)
       return :claim_changed_at_apply unless current_entry&.sha == entry.sha
@@ -2699,6 +2701,14 @@ module AgentCoord
         "expires_at" => claim["expires_at"]
       }
       "claim-expired-#{Digest::SHA256.hexdigest(gc_canonical_json(identity))[0, 16]}"
+    end
+
+    def gc_canonical_claim_path?(path)
+      repo = AgentCoord.repo_from_claim_path(path)
+      target = AgentCoord.target_from_path(path)
+      AgentCoord.claim_path(repo, target) == path
+    rescue Error, ArgumentError
+      false
     end
 
     def gc_expired_event_destination_valid?(claim)

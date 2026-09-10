@@ -518,6 +518,35 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     assert_equal "path-only", event.fetch("target")
   end
 
+  def test_gc_reap_skips_malformed_claim_paths_and_continues_valid_peers
+    now = Time.utc(2026, 7, 12, 12, 0, 0)
+    claim = {
+      "schema_version" => 1, "agent_id" => "gone-holder", "status" => "active",
+      "claimed_at" => (now - (4 * 86_400)).iso8601,
+      "updated_at" => (now - (4 * 86_400)).iso8601,
+      "expires_at" => (now - (3 * 86_400)).iso8601
+    }
+    malformed_paths = [
+      "claims/shakacode/example/extra/too-deep.json",
+      "claims/too-short.json"
+    ]
+    malformed_paths.each { |path| write_state_record(path, claim) }
+    valid_path = write_abandoned_claim("valid-peer", now - (3 * 86_400), "agent_id" => "gone-holder")
+    stdout = StringIO.new
+    runner = AgentCoord::Runner.new([], stdout: stdout, clock: FixedClock.new(now))
+
+    assert_equal 0, runner.send(:gc, state_root: @state_root, dry_run: false, execute: true, json: true)
+
+    actions = JSON.parse(stdout.string).fetch("actions")
+    malformed_paths.each do |path|
+      action = actions.find { |candidate| candidate.fetch("source_path") == path }
+      assert_equal "skipped", action.fetch("outcome")
+      assert_equal "invalid_claim_path_at_apply", action.fetch("skip_reason")
+      assert_equal "active", JSON.parse(File.read(File.join(@state_root, path))).fetch("status")
+    end
+    assert_equal "expired", JSON.parse(File.read(File.join(@state_root, valid_path))).fetch("status")
+  end
+
   def test_gc_archives_a_reaped_claim_on_a_hot_window_that_starts_at_the_reap # rubocop:disable Metrics/AbcSize
     now = Time.utc(2026, 7, 12, 12, 0, 0)
     claim_path = write_abandoned_claim("aged-out", now - (30 * 86_400))
