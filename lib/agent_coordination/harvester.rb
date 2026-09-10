@@ -732,11 +732,21 @@ module AgentCoord
         event_repo = repo(event["repo"])
         target = known(event["target"])
         event_type = enum(event["type"], EVENT_TYPES)
-        # claim.expired is an outcome-bearing lifecycle fact, not merely a
-        # caller-selected label. Keep malformed/manual rows visible to drift
-        # reporting through event_type_raw, but do not let the label alone
-        # manufacture an expired target outcome.
-        event_type = nil if event_type == "claim.expired" && event["status"] != "expired"
+        # Lifecycle labels participate in current-outcome ordering only when
+        # their optional/required status agrees with the transition. Keep
+        # malformed/manual rows visible to drift reporting through
+        # event_type_raw, but do not let a conflicting label supersede valid
+        # immutable history.
+        event_type = case event_type
+                     when "claim.acquired"
+                       event_type unless event.key?("status") && event["status"] != "active"
+                     when "claim.released"
+                       event_type unless event.key?("status") && event["status"] != "released"
+                     when "claim.expired"
+                       event_type if event["status"] == "expired"
+                     else
+                       event_type
+                     end
         {
           "event_ref" => opaque_value(event["id"]) || "record-#{index}",
           "batch_id" => batch_id,

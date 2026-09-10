@@ -892,6 +892,45 @@ class TelemetryHarvesterTest < Minitest::Test # rubocop:disable Metrics/ClassLen
     end
   end
 
+  def test_malformed_lifecycle_statuses_cannot_supersede_a_valid_expiry
+    Dir.mktmpdir("agent-coordination-ledger-lifecycle-status") do |dir| # rubocop:disable Metrics/BlockLength
+      source_path = File.join(dir, "coordination.json")
+      ledger_path = File.join(dir, "telemetry.sqlite3")
+      coordination = coordination_fixture
+      coordination["claims"] = []
+      coordination["events"] = [
+        {
+          "id" => "expired-valid", "batch_id" => "batch-fixture", "type" => "claim.expired",
+          "status" => "expired", "repo" => "shakacode/agent-coordination", "target" => "78",
+          "at" => "2026-07-18T01:00:00Z"
+        },
+        {
+          "id" => "acquired-failed", "batch_id" => "batch-fixture", "type" => "claim.acquired",
+          "status" => "failed", "repo" => "shakacode/agent-coordination", "target" => "78",
+          "at" => "2026-07-18T02:00:00Z"
+        },
+        {
+          "id" => "released-active", "batch_id" => "batch-fixture", "type" => "claim.released",
+          "status" => "active", "repo" => "shakacode/agent-coordination", "target" => "78",
+          "at" => "2026-07-18T03:00:00Z"
+        }
+      ]
+      File.write(source_path, JSON.generate(coordination))
+
+      _stdout, stderr, status = Open3.capture3(
+        CLI, "harvest", "--ledger", ledger_path,
+        "--coordination-json", source_path, "--batch-id", "batch-fixture"
+      )
+
+      assert status.success?, stderr
+      assert_equal ["expired"], sqlite_query(ledger_path, "SELECT outcome FROM target_units WHERE target = '78'")
+      assert_equal ["claim.expired|claim.expired", "|claim.acquired", "|claim.released"], sqlite_query(
+        ledger_path,
+        "SELECT COALESCE(event_type, ''), event_type_raw FROM events ORDER BY event_ref"
+      )
+    end
+  end
+
   def test_same_second_lifecycle_events_do_not_manufacture_current_expiry_from_ingestion_order
     Dir.mktmpdir("agent-coordination-ledger-same-second-history") do |dir| # rubocop:disable Metrics/BlockLength
       source_path = File.join(dir, "coordination.json")
