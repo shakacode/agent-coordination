@@ -1912,8 +1912,8 @@ module AgentCoord
       opts.separator "    default  lightweight auth, ref, and layout checks without reading every JSON file"
       opts.separator "    --deep   parse every claim, heartbeat, and batch JSON file"
       opts.separator "    --stack-json  emit the versioned component report for stack aggregators"
-      opts.separator "Exit 2 means doctor found an operational problem; inspect status and diagnostics"
-      opts.separator "before choosing a recovery path."
+      opts.separator "Exit 2 means doctor found an operational problem. When doctor emitted a payload,"
+      opts.separator "inspect status and diagnostics before choosing a recovery path; otherwise inspect stderr."
       opts.separator "Exit 2 with status: split_brain means a consumer env file configures"
       opts.separator "AGENT_COORD_API_URL while this CLI resolved to a local root; the JSON payload"
       opts.separator "names the file in split_brain_env_file."
@@ -8113,8 +8113,7 @@ module AgentCoord
       name = batch_lane_name_for_validation(lane, position)
       raise Error, "batch lane #{name} cannot contain ':'" if malformed_lane_name?(name)
 
-      owner = batch_lane_owner_for_validation(lane, name)
-      AgentCoord.validate_segment!(owner, "lane owner")
+      batch_lane_owner_for_validation(lane, name)
       targets = Array(lane["targets"] || lane["target"]).compact.map(&:to_s).reject(&:empty?)
       raise Error, "batch lane #{name} missing targets" if targets.empty?
 
@@ -8134,6 +8133,7 @@ module AgentCoord
       raise Error, "batch lane #{position} missing name" if name.nil?
       raise Error, "batch lane #{position} name must be a string" unless name.is_a?(String)
       raise Error, "batch lane #{position} missing name" if name.empty?
+      raise PathValidationError, "invalid lane name: #{AgentCoord.utf8_diagnostic(name)}" unless name.valid_encoding?
       raise Error, reserved_lane_identity_error("#{position} name", name) if reserved_lane_identity?(name)
 
       name
@@ -8144,6 +8144,8 @@ module AgentCoord
       raise Error, "batch lane #{name} missing owner" if owner.nil?
       raise Error, "batch lane #{name} owner must be a string" unless owner.is_a?(String)
       raise Error, "batch lane #{name} missing owner" if owner.empty?
+
+      AgentCoord.validate_segment!(owner, "lane owner")
       raise Error, reserved_lane_identity_error("#{name} owner", owner) if reserved_lane_identity?(owner)
 
       owner

@@ -5714,6 +5714,7 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
 
     assert_equal 0, result.status.exitstatus, result.stderr
     assert_includes result.stdout, "inspect status and diagnostics"
+    assert_includes result.stdout, "When doctor emitted a payload"
     assert_includes result.stdout, "status: split_brain"
     assert_includes result.stdout, "split_brain_env_file"
     assert_includes result.stdout, "--state-root PATH"
@@ -12754,6 +12755,47 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
       assert_includes result.stderr, "no-name/no-owner sentinel"
       refute_path_exists File.join(@state_root, "batches", "batch-b.json")
     end
+  end
+
+  def test_register_batch_rejects_invalid_utf8_lane_identities_without_backtrace_or_write
+    invalid_identity = "bad\xFF".b
+    name_manifest = '{"batch_id":"batch-b","lanes":[{"name":"'.b + invalid_identity +
+                    '","owner":"worker-docs","targets":["3972"]}]}'.b
+    owner_manifest = '{"batch_id":"batch-b","lanes":[{"name":"docs","owner":"'.b + invalid_identity +
+                     '","targets":["3972"]}]}'.b
+    cases = [
+      ["lane name", name_manifest],
+      ["lane owner", owner_manifest]
+    ]
+
+    cases.each do |field, manifest|
+      manifest_path = File.join(@state_root, "batch-manifest.json")
+      File.binwrite(manifest_path, manifest.b)
+
+      result = run_agent_coord("register-batch", "--file", manifest_path)
+
+      assert_equal 1, result.status.exitstatus, result.stderr
+      assert_includes result.stderr, "invalid #{field}"
+      refute_includes result.stderr, "ArgumentError"
+      refute_includes result.stderr, "bin/agent-coord:"
+      refute_path_exists File.join(@state_root, "batches", "batch-b.json")
+    end
+  end
+
+  def test_register_batch_accepts_supported_lane_name_characters
+    manifest_path = File.join(@state_root, "batch-manifest.json")
+    File.write(
+      manifest_path,
+      JSON.pretty_generate(
+        "batch_id" => "batch-b",
+        "lanes" => [{ "name" => "docs/api copy", "owner" => "worker-docs", "targets" => ["3972"] }]
+      )
+    )
+
+    result = run_agent_coord("register-batch", "--file", manifest_path)
+
+    assert_equal 0, result.status.exitstatus, result.stderr
+    assert_path_exists File.join(@state_root, "batches", "batch-b.json")
   end
 
   def test_register_batch_accepts_lane_identities_that_only_contain_unknown
