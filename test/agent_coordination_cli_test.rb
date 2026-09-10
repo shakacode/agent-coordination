@@ -959,6 +959,35 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     assert_includes stderr.string, "cannot establish liveness for claim holder"
   end
 
+  def test_gc_fails_closed_on_a_non_object_holder_heartbeat_and_keeps_a_valid_control
+    now = Time.utc(2026, 7, 12, 12, 0, 0)
+    invalid_path = write_abandoned_claim(
+      "non-object-heartbeat", now - (3 * 86_400), "agent_id" => "non-object-holder"
+    )
+    valid_path = write_abandoned_claim(
+      "valid-heartbeat-control", now - (3 * 86_400), "agent_id" => "valid-dead-holder"
+    )
+    write_state_record("heartbeats/non-object-holder.json", [])
+    write_state_record(
+      "heartbeats/valid-dead-holder.json",
+      "schema_version" => 1, "agent_id" => "valid-dead-holder", "status" => "in_progress",
+      "updated_at" => (now - (3 * 86_400)).iso8601,
+      "expires_at" => (now - (3 * 86_400) + 3600).iso8601
+    )
+    stderr = StringIO.new
+    store = AgentCoord::LocalStore.new(@state_root)
+    runner = AgentCoord::Runner.new([], stdout: StringIO.new, stderr: stderr, clock: FixedClock.new(now))
+
+    candidates = runner.send(:gc_reap_candidates, store, now, 1, %w[claims heartbeats events batches])
+    candidate_paths = candidates.map { |candidate| candidate.dig(:action, "source_path") }
+    assert_equal [valid_path], candidate_paths
+    runner.send(:execute_gc_candidates, store, candidates, now, 30)
+
+    assert_equal "active", store.read_json(invalid_path).data.fetch("status")
+    assert_equal "expired", store.read_json(valid_path).data.fetch("status")
+    assert_includes stderr.string, "cannot establish liveness for claim holder \"non-object-holder\""
+  end
+
   def test_gc_apply_fails_closed_on_unreadable_and_unknown_holder_heartbeats
     now = Time.utc(2026, 7, 12, 12, 0, 0)
     unreadable_path = write_abandoned_claim(

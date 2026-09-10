@@ -8335,6 +8335,7 @@ module AgentCoord
 
       heartbeat = holder.empty? ? nil : holder_heartbeat(store, holder, holder_heartbeats, fresh:)
       return fallback_holder_state(claim, now, "invalid") if heartbeat == :invalid
+      return fallback_holder_state(claim, now, "invalid") if heartbeat && !heartbeat.data.is_a?(Hash)
       return fallback_holder_state(claim, now, "unknown") if heartbeat && heartbeat.data["agent_id"] != holder
 
       liveness = heartbeat && heartbeat_liveness(heartbeat.data, now)
