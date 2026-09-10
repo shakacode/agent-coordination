@@ -1288,6 +1288,38 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     assert_empty Dir.glob(File.join(@state_root, AgentCoord::INTERNAL_UNBATCHED_CLAIM_EXPIRY_EVENT_PREFIX, "*.json"))
   end
 
+  def test_gc_checks_internal_namespace_collision_before_archiving_its_manifest
+    now = Time.utc(2026, 7, 12, 12, 0, 0)
+    internal_batch_id = AgentCoord::INTERNAL_UNBATCHED_CLAIM_EXPIRY_BATCH_ID
+    write_batch(internal_batch_id, lanes: [])
+    batch_path = File.join(@state_root, AgentCoord.batch_path(internal_batch_id))
+    batch = JSON.parse(File.read(batch_path)).merge(
+      "status" => "completed", "completed_at" => (now - (8 * 86_400)).iso8601,
+      "updated_at" => (now - (8 * 86_400)).iso8601
+    )
+    File.write(batch_path, JSON.generate(batch))
+    claim_path = write_abandoned_claim(
+      "unbatched-before-manifest-archive", now - (3 * 86_400), "agent_id" => "gone-holder"
+    )
+    valid_path = write_abandoned_claim(
+      "batched-peer-before-manifest-archive", now - (3 * 86_400),
+      "agent_id" => "gone-holder", "batch_id" => "valid-archive-order-peer"
+    )
+    stdout = StringIO.new
+    runner = AgentCoord::Runner.new([], stdout: stdout, clock: FixedClock.new(now))
+
+    assert_equal 0, runner.send(:gc, state_root: @state_root, dry_run: false, execute: true, json: true)
+
+    actions = JSON.parse(stdout.string).fetch("actions")
+    reap = actions.find { |row| row["source_path"] == claim_path }
+    assert_equal "skipped", reap.fetch("outcome")
+    assert_equal "invalid_expired_event_destination_at_apply", reap.fetch("skip_reason")
+    assert_equal "active", JSON.parse(File.read(File.join(@state_root, claim_path))).fetch("status")
+    assert_equal "expired", JSON.parse(File.read(File.join(@state_root, valid_path))).fetch("status")
+    assert_path_exists File.join(@state_root, "archive", AgentCoord.batch_path(internal_batch_id))
+    assert_empty Dir.glob(File.join(@state_root, AgentCoord::INTERNAL_UNBATCHED_CLAIM_EXPIRY_EVENT_PREFIX, "*.json"))
+  end
+
   def test_gc_execute_reports_a_still_pending_expired_event
     now = Time.utc(2026, 7, 12, 12, 0, 0)
     claim_path = write_abandoned_claim(

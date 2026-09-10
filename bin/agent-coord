@@ -2134,7 +2134,7 @@ module AgentCoord
     end
 
     def execute_gc_candidates(store, candidates, now, archive_days)
-      candidates.each do |candidate|
+      candidates.sort_by { |candidate| gc_action_rank(candidate) }.each do |candidate|
         outcome = execute_gc_candidate(store, candidate, now, archive_days)
         action = candidate.fetch(:action)
         skipped = %i[
