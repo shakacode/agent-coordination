@@ -831,6 +831,44 @@ class TelemetryHarvesterTest < Minitest::Test # rubocop:disable Metrics/ClassLen
     end
   end
 
+  def test_expired_status_only_classifies_claim_lifecycle_evidence
+    Dir.mktmpdir("agent-coordination-ledger-expired-qualification") do |dir| # rubocop:disable Metrics/BlockLength
+      source_path = File.join(dir, "coordination.json")
+      ledger_path = File.join(dir, "telemetry.sqlite3")
+      coordination = JSON.parse(File.read(File.join(FIXTURES, "coordination.json")))
+      lanes = coordination.fetch("batches").first.fetch("lanes")
+      lanes << { "name" => "invalid-expired-lane", "targets" => ["80"], "status" => "expired" }
+      lanes << { "name" => "event-terminal-control", "targets" => ["81"], "status" => "waiting" }
+      coordination.fetch("events") << {
+        "id" => "unrelated-expired-terminal", "batch_id" => "batch-fixture",
+        "repo" => "shakacode/agent-coordination", "target" => "81",
+        "type" => "error", "terminal" => "expired", "at" => "2026-07-18T03:00:00Z"
+      }
+      File.write(source_path, JSON.pretty_generate(coordination))
+
+      _stdout, stderr, status = Open3.capture3(
+        CLI, "harvest", "--ledger", ledger_path,
+        "--coordination-json", source_path, "--batch-id", "batch-fixture"
+      )
+      assert status.success?, stderr
+      assert_equal ["80||unknown", "81|waiting|exact"], sqlite_query(
+        ledger_path,
+        "SELECT target, COALESCE(outcome, ''), COALESCE(outcome_evidence_status, '') " \
+        "FROM target_units WHERE target IN ('80', '81') ORDER BY target"
+      )
+      assert_equal ["invalid-expired-lane|", "invalid-expired-lane|"], sqlite_query(
+        ledger_path,
+        "SELECT lane_id, COALESCE(status, '') FROM lanes WHERE lane_id = 'invalid-expired-lane' " \
+        "UNION ALL SELECT lane_id, COALESCE(status, '') FROM target_observations " \
+        "WHERE lane_id = 'invalid-expired-lane'"
+      )
+      assert_equal [""], sqlite_query(
+        ledger_path,
+        "SELECT COALESCE(terminal, '') FROM events WHERE target = '81'"
+      )
+    end
+  end
+
   def test_later_immutable_acquire_and_release_prevent_old_expiry_resurfacing_after_claim_archive # rubocop:disable Metrics/MethodLength
     Dir.mktmpdir("agent-coordination-ledger-expired-history") do |dir| # rubocop:disable Metrics/BlockLength
       source_path = File.join(dir, "coordination.json")

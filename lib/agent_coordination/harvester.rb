@@ -610,7 +610,7 @@ module AgentCoord
           "batch_id" => batch_id,
           "lane_id" => lane_id,
           "owner_ref" => opaque_value(lane["owner"]),
-          "status" => enum(lane["status"], STRUCTURED_STATUSES),
+          "status" => non_expiry_status(lane["status"]),
           "host_family" => enum(lane["host"], HOST_FAMILIES),
           "session_ref" => opaque_value(lane["session_id"])
         }
@@ -624,7 +624,7 @@ module AgentCoord
             "lane_id" => lane_id,
             "repo" => repo(lane["repo"]) || batch_repo,
             "target" => known(target_value),
-            "status" => enum(lane["status"], STRUCTURED_STATUSES),
+            "status" => non_expiry_status(lane["status"]),
             "pr_url" => github_url(lane["pr_url"]),
             "join_status" => join_status(batch_id, repo(lane["repo"]) || batch_repo, known(target_value)),
             "source_ordinal" => [lane_index, target_index]
@@ -671,7 +671,7 @@ module AgentCoord
           "repo" => repo(claim["repo"]),
           "target" => known(claim["target"]),
           "status" => enum(claim["status"], STRUCTURED_STATUSES),
-          "terminal" => enum(claim["terminal"], STRUCTURED_STATUSES),
+          "terminal" => non_expiry_status(claim["terminal"]),
           "pr_url" => github_url(claim["pr_url"]),
           "join_status" => join_status(known(claim["batch_id"]), repo(claim["repo"]), known(claim["target"])),
           "source_artifact_id" => source_artifact_id,
@@ -758,7 +758,7 @@ module AgentCoord
           # observation to keep, not an absent value. Contrast `category` below.
           "event_type_raw" => bounded_signal(event["type"], unknown_is_value: true),
           "observed_at" => precise_timestamp(event["at"] || event["timestamp"]),
-          "terminal" => enum(event["terminal"], STRUCTURED_STATUSES),
+          "terminal" => non_expiry_status(event["terminal"]),
           "join_status" => join_status(batch_id, event_repo, target),
           "source_artifact_id" => source_artifact_id,
           "source_ordinal" => index
@@ -1023,6 +1023,11 @@ module AgentCoord
         latest_at = timed_rows.map(&:last).max
         latest_rows = timed_rows.select { |_row, at| at == latest_at }
         latest_rows.one? ? latest_rows.first.first : nil
+      end
+
+      def non_expiry_status(value)
+        status = enum(value, STRUCTURED_STATUSES)
+        status unless status == "expired"
       end
 
       def outcome_for(statuses, pr_states, terminal_statuses)
