@@ -2371,7 +2371,7 @@ module AgentCoord
       lane = data["lane"]
       lanes = terminal_lanes[provenance]
       lane = lanes.first if lane.to_s.empty? && lanes&.one?
-      lane = "unbatched-claim-expiration" if gc_unbatched_claim_expiration_event?(entry)
+      lane = "unbatched-claim-expiration:#{data.fetch('event_id')}" if gc_unbatched_claim_expiration_event?(entry)
       [*provenance, lane]
     end
 

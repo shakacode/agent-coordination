@@ -1938,6 +1938,31 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     assert_equal(["claim-expired-retained"], archive.fetch("records").map { |record| record.fetch("event_id") })
   end
 
+  def test_gc_compacts_each_unbatched_claim_expiry_generation_independently
+    now = Time.utc(2026, 7, 12, 12, 0, 0)
+    batch_id = AgentCoord::INTERNAL_UNBATCHED_CLAIM_EXPIRY_BATCH_ID
+    prefix = AgentCoord::INTERNAL_UNBATCHED_CLAIM_EXPIRY_EVENT_PREFIX
+    old_path = "#{prefix}/claim-expired-old-generation.json"
+    new_path = "#{prefix}/claim-expired-new-generation.json"
+    { old_path => now - (8 * 86_400), new_path => now - 86_400 }.each do |path, at|
+      write_state_record(
+        path,
+        "schema_version" => 1, "event_id" => File.basename(path, ".json"), "batch_id" => batch_id,
+        "type" => "claim.expired", "status" => "expired", "agent_id" => "gone-holder",
+        "repo" => "shakacode/example", "target" => "reused-target", "at" => at.iso8601
+      )
+    end
+    stdout = StringIO.new
+    runner = AgentCoord::Runner.new([], stdout: stdout, clock: FixedClock.new(now))
+
+    assert_equal 0, runner.send(:gc, state_root: @state_root, dry_run: true, execute: false, json: true)
+
+    compact = JSON.parse(stdout.string).fetch("actions").select { |action| action["action"] == "compact" }
+    assert_equal 1, compact.length
+    assert_equal [old_path], compact.fetch(0).fetch("source_paths")
+    assert_path_exists File.join(@state_root, new_path)
+  end
+
   def test_gc_defers_synthetic_orphan_group_until_every_event_ages
     now = Time.utc(2026, 7, 12, 12, 0, 0)
     { "old" => now - (2 * 86_400), "fresh" => now - 3600 }.each do |event_id, at|

@@ -1240,8 +1240,12 @@ archive mirror and can write/delete both. Forbidden selected prefixes remain an
 operational error; GC never silently widens or skips requested scope.
 Expired-lease reaping is the one disposition that needs supporting prefixes: it
 must read holder heartbeats to tell an abandoned lane from a working one and write
-the immutable outcome. Run `--prefix claims --prefix heartbeats --prefix events`,
-or the default all-family scan, to reap.
+the immutable outcome. Unbatched claims also need `batches` so GC can fail closed
+if its reserved internal history identity collides with a pre-existing manifest.
+Run `--prefix claims --prefix heartbeats --prefix events --prefix batches`, or
+the default all-family scan, to reap both batched and unbatched claims. Without
+`--prefix batches`, eligible unbatched claims remain unreaped with a warning;
+ordinary batched expiry reconciliation remains available.
 Scoped HTTP tokens used for GC need read and write coverage for each selected
 hot prefix and `archive`; use `--all-state` only for a trusted operator machine.
 `release` marks a claim released while preserving the record for auditability.
