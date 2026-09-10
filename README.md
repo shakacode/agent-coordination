@@ -773,7 +773,8 @@ all older than the claim — `claim` permits omitting `--batch-id`, and no
 acquisition lifecycle event is emitted without a batch, so stale events and a
 live claim can coexist. GC is the exception: reaping an unbatched claim writes
 its immutable `claim.expired` event under the reserved
-`unbatched-claim-expirations` namespace before that claim can be reused. The
+`unbatched-claim-expirations` namespace, which cannot be used as a batch ID,
+before that claim can be reused. The
 claim is never reported when a filter emptied the trail, since it is
 not evaluated against `--since`, `--machine`, `--host`, or `--type`:
 

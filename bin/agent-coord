@@ -52,7 +52,7 @@ module AgentCoord
   CLAIM_EXPIRED_STATUS = "expired"
   UNBATCHED_CLAIM_EXPIRY_BATCH_ID = "unbatched-claim-expirations"
   CLAIM_CLOSEOUT_FIELDS = %w[
-    terminal pr_state evidence_url closed_by released_at release_mode handoff_to handoff_note
+    terminal pr_state evidence_url closed_by released_by released_at release_mode handoff_to handoff_note
   ].freeze
   # gc plans each disposition in an independent pass, so nothing structural
   # stops two passes from selecting the same record: a claim that is still
@@ -2024,6 +2024,7 @@ module AgentCoord
       prefixes = gc_prefixes(options[:prefixes])
       now = now_utc
       store = build_store(options)
+      @gc_holder_liveness_warnings = {}
       candidates = gc_candidates(store, now, hot_days, synthetic_hot_days, prefixes)
       candidates.concat(gc_reap_candidates(store, now, lease_grace_days, prefixes))
       candidates.concat(gc_expired_event_candidates(store, prefixes))
@@ -2235,7 +2236,11 @@ module AgentCoord
 
       holder_state = claim_holder_state(store, claim, now, holder_heartbeats, fresh:)
       if %w[invalid unknown].include?(holder_state.fetch(:liveness))
-        @stderr.puts "warning: gc cannot establish liveness for claim holder #{holder.inspect}; not reaping its claims"
+        unless (@gc_holder_liveness_warnings ||= {})[holder]
+          @stderr.puts "warning: gc cannot establish liveness for claim holder #{holder.inspect}; " \
+                       "not reaping its claims"
+          @gc_holder_liveness_warnings[holder] = true
+        end
         return :unknown
       end
 
@@ -2627,7 +2632,12 @@ module AgentCoord
       end
 
       settled = current.data.except("expired_event_pending")
-      store.write_json(entry.path, settled, message: "Confirm expired claim event #{entry.path}", sha: current.sha)
+      begin
+        store.write_json(entry.path, settled, message: "Confirm expired claim event #{entry.path}", sha: current.sha)
+      rescue Conflict
+        latest = store.read_json(entry.path)
+        raise unless latest && latest.data == settled
+      end
       true
     rescue Error, KeyError, TypeError, SystemCallError => e
       @stderr.puts "warning: claim.expired event pending for #{entry.path}: #{e.message}"
@@ -2784,10 +2794,10 @@ module AgentCoord
     def gc_action_text(action)
       source = action["source_path"] || Array(action["source_paths"]).join(",")
       destination = action["archive_path"] ? " -> #{action['archive_path']}" : ""
-      outcome = if action["outcome"] == "skipped"
-                  " [skipped: #{action.fetch('skip_reason')}]"
-                else
-                  ""
+      outcome = case action["outcome"]
+                when "skipped" then " [skipped: #{action.fetch('skip_reason')}]"
+                when "pending" then " [pending: #{action.fetch('skip_reason')}]"
+                else ""
                 end
       "#{action.fetch('action')} #{source}#{destination} (#{action.fetch('reason')})#{outcome}"
     end
@@ -9852,6 +9862,10 @@ module AgentCoord
 
   def self.batch_path(batch_id)
     validate_segment!(batch_id, "batch-id")
+    if batch_id == UNBATCHED_CLAIM_EXPIRY_BATCH_ID
+      raise Error, "batch-id #{batch_id.inspect} is reserved for unbatched claim expiry history"
+    end
+
     "batches/#{batch_id}.json"
   end
 

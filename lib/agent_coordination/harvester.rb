@@ -989,7 +989,16 @@ module AgentCoord
           "SELECT event_type, terminal FROM events WHERE batch_id = ? AND repo = ? AND target = ?", target_key
         )
         terminal_statuses.concat(event_rows.filter_map { |row| STATUS_OUTCOMES[row["terminal"]] })
-        event_statuses = event_rows.filter_map { |row| "expired" if row["event_type"] == "claim.expired" }
+        # A current non-expired mutable claim necessarily follows the reap that
+        # emitted claim.expired. Preserve that immutable event in the ledger,
+        # but do not present historical abandonment as the target's current
+        # outcome after a legitimate reclaim.
+        current_claim_is_nonexpired = claims.any? { |row| row["status"] != "expired" }
+        event_statuses = if current_claim_is_nonexpired
+                           []
+                         else
+                           event_rows.filter_map { |row| "expired" if row["event_type"] == "claim.expired" }
+                         end
         [claim_statuses + terminal_statuses + event_statuses, terminal_statuses]
       end
 

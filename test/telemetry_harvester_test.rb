@@ -790,16 +790,20 @@ class TelemetryHarvesterTest < Minitest::Test # rubocop:disable Metrics/ClassLen
     end
   end
 
-  def test_expired_event_preserves_the_distinct_outcome_after_claim_reuse
+  def test_expired_event_is_retained_without_overriding_a_reused_active_claim
     Dir.mktmpdir("agent-coordination-ledger-expired") do |dir| # rubocop:disable Metrics/BlockLength
       source_path = File.join(dir, "coordination.json")
       ledger_path = File.join(dir, "telemetry.sqlite3")
       coordination = JSON.parse(File.read(File.join(FIXTURES, "coordination.json")))
       claim = coordination.fetch("claims").find { |row| row["target"] == "78" }
-      # The target was reclaimed before harvest, so the mutable claim row no
-      # longer carries the expired outcome. The immutable event is authoritative.
+      # The target was reclaimed before harvest, so the mutable claim row is
+      # authoritative for current outcome while the immutable event retains the
+      # historical expiry for audit and scorecard consumers.
       claim["status"] = "active"
       claim.delete("terminal")
+      coordination.fetch("batches").first.fetch("lanes").each do |lane|
+        lane["status"] = "in_progress" if lane.fetch("targets", []).include?("78")
+      end
       coordination.fetch("events") << {
         "schema_version" => 1,
         "id" => "expired-78",
@@ -818,7 +822,7 @@ class TelemetryHarvesterTest < Minitest::Test # rubocop:disable Metrics/ClassLen
         "--coordination-json", source_path, "--batch-id", "batch-fixture"
       )
       assert status.success?, stderr
-      assert_equal ["expired"], sqlite_query(
+      assert_equal ["in-progress"], sqlite_query(
         ledger_path, "SELECT outcome FROM target_units WHERE target = '78'"
       )
       assert_equal ["claim.expired"], sqlite_query(

@@ -788,6 +788,24 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     assert_includes stderr.string, "cannot read the heartbeat for claim holder \"unreadable-apply\""
   end
 
+  def test_gc_warns_once_for_multiple_claims_with_the_same_unknown_holder
+    now = Time.utc(2026, 7, 12, 12, 0, 0)
+    2.times do |index|
+      write_abandoned_claim("unknown-shared-#{index}", now - (3 * 86_400), "agent_id" => "unknown-shared")
+    end
+    write_state_record(
+      "heartbeats/unknown-shared.json",
+      "schema_version" => 1, "agent_id" => "unknown-shared", "status" => "in_progress",
+      "updated_at" => "not-a-time", "expires_at" => "also-not-a-time"
+    )
+    stderr = StringIO.new
+    runner = AgentCoord::Runner.new([], stdout: StringIO.new, stderr: stderr, clock: FixedClock.new(now))
+
+    assert_equal 0, runner.send(:gc, state_root: @state_root, dry_run: true, execute: false, json: true)
+
+    assert_equal 1, stderr.string.scan("cannot establish liveness for claim holder \"unknown-shared\"").length
+  end
+
   def test_gc_reconciles_a_transient_expired_event_failure_exactly_once
     now = Time.utc(2026, 7, 12, 12, 0, 0)
     claim_path = write_abandoned_claim(
@@ -839,6 +857,7 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     assert_equal "expired", immutable_event.fetch("status")
     assert_equal "unbatched-reuse", immutable_event.fetch("target")
     refute_empty immutable_event.fetch("batch_id")
+    assert_raises(AgentCoord::Error) { AgentCoord.batch_path(immutable_event.fetch("batch_id")) }
 
     replacement = run_agent_coord(
       "claim", "--agent-id", "new-holder", "--repo", "shakacode/example", "--target", "unbatched-reuse"
@@ -874,6 +893,14 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     assert_equal "pending", action.fetch("outcome")
     assert_equal "expired_event_pending", action.fetch("skip_reason")
     assert_equal true, store.read_json(claim_path).data.fetch("expired_event_pending")
+
+    text_store = FailExpiredEventStore.new(@state_root)
+    text_runner = StoreInjectedRunner.new([], store: text_store, clock: FixedClock.new(now))
+    assert_equal 0, text_runner.send(
+      :gc, state_root: @state_root, dry_run: false, execute: true, json: false,
+           prefixes: %w[claims events]
+    )
+    assert_includes text_runner.captured_stdout.string, "[pending: expired_event_pending]"
   end
 
   def test_gc_reconcile_warns_when_the_pending_event_identity_moves
@@ -893,6 +920,28 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
 
     assert_equal false, result
     assert_includes stderr.string, "claim.expired event identity changed"
+  end
+
+  def test_gc_reconcile_accepts_an_exact_settlement_won_by_another_reconciler
+    now = Time.utc(2026, 7, 12, 12, 0, 0)
+    claim_path = write_abandoned_claim(
+      "settled-race", now - (3 * 86_400),
+      "batch_id" => "settled-race-batch", "agent_id" => "expired-holder",
+      "status" => "expired", "reaped_at" => now.iso8601,
+      "expired_event_id" => "claim-expired-settled-race",
+      "expired_event_batch_id" => "settled-race-batch",
+      "expired_event_at" => now.iso8601, "expired_event_pending" => true
+    )
+    stderr = StringIO.new
+    store = SettleConflictExpiredEventStore.new(@state_root, claim_path)
+    runner = AgentCoord::Runner.new([], stdout: StringIO.new, stderr: stderr, clock: FixedClock.new(now))
+
+    assert_equal true, runner.send(:gc_reconcile_expired_event, store, { entry: store.read_json(claim_path) })
+
+    settled = store.read_json(claim_path).data
+    refute settled.key?("expired_event_pending")
+    assert_empty stderr.string
+    assert_equal 1, event_records("settled-race-batch").length
   end
 
   def test_pending_expiry_history_blocks_release_and_archive_before_reacquisition
@@ -985,6 +1034,7 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
       "terminal" => "done",
       "pr_state" => "merged",
       "evidence_url" => "https://example.test/stale-closeout",
+      "released_by" => "expired-holder",
       "closed_by" => { "agent_id" => "expired-holder", "machine" => "old-host" }
     )
     dry = StringIO.new
@@ -1003,7 +1053,7 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     reaped = JSON.parse(File.read(File.join(@state_root, claim_path)))
 
     assert_equal "expired", reaped.fetch("status")
-    %w[terminal pr_state evidence_url closed_by].each { |field| refute reaped.key?(field) }
+    %w[terminal pr_state evidence_url released_by closed_by].each { |field| refute reaped.key?(field) }
     expired_event = event_records("expired-batch").fetch(0)
     assert_equal "claim.expired", expired_event.fetch("type")
     assert_equal "expired", expired_event.fetch("status")
@@ -14728,6 +14778,24 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     def write_json(path, data, **options)
       super
       @event_written = true if path.start_with?("events/") && data["type"] == "claim.expired"
+    end
+  end
+
+  class SettleConflictExpiredEventStore < CountingLocalStore
+    def initialize(root, claim_path)
+      super(root)
+      @claim_path = claim_path
+      @settled_elsewhere = false
+    end
+
+    def write_json(path, data, **options)
+      if path == @claim_path && !data.key?("expired_event_pending") && !@settled_elsewhere
+        @settled_elsewhere = true
+        super
+        raise AgentCoord::Conflict, "another reconciler settled the same claim"
+      end
+
+      super
     end
   end
 
