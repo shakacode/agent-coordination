@@ -1332,6 +1332,38 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     assert_empty Dir.glob(File.join(@state_root, AgentCoord::INTERNAL_UNBATCHED_CLAIM_EXPIRY_EVENT_PREFIX, "*.json"))
   end
 
+  def test_gc_preserves_an_archived_internal_namespace_collision_sentinel_across_runs
+    now = Time.utc(2026, 7, 12, 12, 0, 0)
+    internal_batch_id = AgentCoord::INTERNAL_UNBATCHED_CLAIM_EXPIRY_BATCH_ID
+    source_path = AgentCoord.batch_path(internal_batch_id)
+    archived_path = AgentCoord.archive_path(source_path)
+    old = (now - (40 * 86_400)).iso8601
+    write_state_record(
+      archived_path,
+      "schema_version" => 1, "record_family" => "archived_record", "source_path" => source_path,
+      "reason" => "completed_batch", "synthetic" => false, "archived_at" => old,
+      "delete_after" => old,
+      "data" => { "schema_version" => 1, "batch_id" => internal_batch_id, "status" => "completed" }
+    )
+    claim_path = write_abandoned_claim(
+      "unbatched-with-archived-collision", now - (3 * 86_400), "agent_id" => "gone-holder"
+    )
+
+    2.times do |index|
+      stdout = StringIO.new
+      runner = AgentCoord::Runner.new([], stdout: stdout, clock: FixedClock.new(now + (index * 60)))
+      assert_equal 0, runner.send(:gc, state_root: @state_root, dry_run: false, execute: true, json: true)
+      action = JSON.parse(stdout.string).fetch("actions").find { |row| row["source_path"] == claim_path }
+      assert_equal "skipped", action.fetch("outcome")
+      assert_equal "invalid_expired_event_destination_at_apply", action.fetch("skip_reason")
+      assert_equal "active", JSON.parse(File.read(File.join(@state_root, claim_path))).fetch("status")
+      assert_path_exists File.join(@state_root, archived_path)
+      assert_empty Dir.glob(
+        File.join(@state_root, AgentCoord::INTERNAL_UNBATCHED_CLAIM_EXPIRY_EVENT_PREFIX, "*.json")
+      )
+    end
+  end
+
   def test_gc_execute_reports_a_still_pending_expired_event
     now = Time.utc(2026, 7, 12, 12, 0, 0)
     claim_path = write_abandoned_claim(

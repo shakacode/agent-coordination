@@ -2179,6 +2179,14 @@ module AgentCoord
 
     def gc_delete_candidates(store, now)
       store.list_json("archive").filter_map do |entry|
+        internal_batch_archive = AgentCoord.archive_path(
+          AgentCoord.batch_path(INTERNAL_UNBATCHED_CLAIM_EXPIRY_BATCH_ID)
+        )
+        # Older versions may already have archived the collision sentinel.
+        # Retain that exact archive record so namespace reuse never becomes
+        # possible merely because its ordinary delete window elapsed.
+        next if entry.path == internal_batch_archive
+
         delete_after = gc_archive_delete_after(entry)
         next if delete_after > now
 
@@ -2806,7 +2814,10 @@ module AgentCoord
     def gc_assert_internal_expiry_namespace_available!(store, event)
       batch_id = event.fetch("batch_id")
       return unless batch_id == INTERNAL_UNBATCHED_CLAIM_EXPIRY_BATCH_ID
-      return unless store.read_json(AgentCoord.batch_path(batch_id))
+
+      batch_path = AgentCoord.batch_path(batch_id)
+      archived_path = AgentCoord.archive_path(batch_path)
+      return unless store.read_json(batch_path) || store.read_json(archived_path)
 
       raise OperationalError, "internal claim expiry namespace collides with existing batch #{batch_id}"
     end
