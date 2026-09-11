@@ -763,6 +763,13 @@ own lease and folding two keys together would break exclusion. `--json` reports
 the spellings that actually matched under `work_item.matched_targets`, and a
 `trail` of `complete` or `incomplete` alongside them, so an empty `events` array
 from a scoped token is never mistaken for a work item that was never touched.
+It also always reports archive provenance under `archive`: `read_state` says
+whether the archive answered completely, `events_read` counts the filtered
+archive-winning rows before `--limit`,
+`source_events_dropped` reports compaction loss, and `delete_after` reports the
+soonest retention deadline. The last two fields are `null` when an incomplete or
+malformed archive makes those facts unknowable; a complete live-only trail
+reports zero for both counts and `null` for the deadline.
 
 A work item can also hold a claim while having no event trail, since claims
 written before lifecycle auto-emit were overwritten in place rather than
