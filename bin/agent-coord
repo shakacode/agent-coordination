@@ -180,8 +180,12 @@ module AgentCoord
   DEPENDENCY_DONE_STATUSES = ((HEARTBEAT_TERMINAL_STATUSES - %w[abandoned superseded]) + %w[complete completed]).freeze
   STATUS_BATCH_METADATA_FIELDS = %w[
     repo objective instructions launch_prompt operator dashboard_url status updated_at registered_at completed_at
-    synthetic synthetic_kind
+    synthetic synthetic_kind merge_authority
   ].freeze
+  BATCH_MERGE_AUTHORITIES = %w[none ask auto].freeze
+  BATCH_MERGE_AUTHORITY_ALIASES = {
+    "auto_merge_when_gates_pass" => "auto"
+  }.freeze
   STATUS_LANE_METADATA_FIELDS = %w[
     thread_handle chat_handle host pr_url dashboard_url operator phase branch terminal closed_at closed_by
     pr_state evidence_url
@@ -4066,6 +4070,7 @@ module AgentCoord
         "updated_at" => timestamp(now)
       )
       payload["launch_prompt"] = load_launch_prompt(options[:launch_prompt]) if options[:launch_prompt]
+      normalize_batch_merge_authority!(payload)
       validate_batch_manifest!(payload)
 
       store = build_store(options)
@@ -8094,6 +8099,7 @@ module AgentCoord
 
       AgentCoord.batch_path(batch_id)
       AgentCoord.validate_repo!(manifest["repo"], "batch") if manifest["repo"]
+      validate_batch_merge_authority!(manifest)
       lanes = manifest["lanes"]
       raise Error, "batch manifest lanes must be an array" unless lanes.is_a?(Array)
       raise Error, "batch manifest lanes must not be empty" if lanes.empty?
@@ -8105,6 +8111,22 @@ module AgentCoord
 
         seen_names[name] = true
       end
+    end
+
+    def normalize_batch_merge_authority!(manifest)
+      return unless manifest.key?("merge_authority")
+
+      authority = manifest["merge_authority"]
+      manifest["merge_authority"] = BATCH_MERGE_AUTHORITY_ALIASES.fetch(authority, authority) if authority.is_a?(String)
+    end
+
+    def validate_batch_merge_authority!(manifest)
+      return unless manifest.key?("merge_authority")
+
+      authority = manifest["merge_authority"]
+      return if authority.is_a?(String) && BATCH_MERGE_AUTHORITIES.include?(authority)
+
+      raise Error, "batch merge_authority must be one of: #{BATCH_MERGE_AUTHORITIES.join(', ')}"
     end
 
     def validate_batch_lane!(lane, position)
