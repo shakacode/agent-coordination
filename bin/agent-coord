@@ -6852,6 +6852,7 @@ module AgentCoord
           "target" => target.to_s
         },
         section_notes: section_notes,
+        omitted_sections: { "batches" => unchecked, "events" => unchecked },
         claim_entries: claim_entries,
         heartbeat_entries: heartbeat_entries,
         batch_entries: nil,
@@ -7156,6 +7157,7 @@ module AgentCoord
       malformed_dependency_refs = []
       unresolved_dependency_refs = []
       malformed_lane_names = []
+      dependency_heartbeat_owners = []
 
       if batch_entry
         batch_id = batch_entry.data.fetch("batch_id", AgentCoord.target_from_path(batch_entry.path))
@@ -7199,7 +7201,9 @@ module AgentCoord
               next
             end
 
-            heartbeat = read_cached_status_heartbeat(store, lane_owner(dependency_lane), heartbeat_entries_by_agent)
+            dependency_owner = lane_owner(dependency_lane)
+            dependency_heartbeat_owners << dependency_owner
+            heartbeat = read_cached_status_heartbeat(store, dependency_owner, heartbeat_entries_by_agent)
             lane_states[dependency] = lane_status(dependency_lane, status_heartbeat_data(heartbeat))
             break
           end
@@ -7210,7 +7214,10 @@ module AgentCoord
         heartbeat_notes = []
         unreadable_heartbeat_owners = heartbeat_entries_by_agent.select { |_, entry| entry == :invalid }.keys
         mismatched_heartbeat_owners = heartbeat_entries_by_agent.select { |_, entry| entry == :mismatched }.keys
-        missing_heartbeat_owners = heartbeat_entries_by_agent.select { |_, entry| entry.nil? }.keys
+        held_lane_owners = dependency_held_lane_owners(lanes, lane_states, dependency_heartbeat_owners)
+        missing_heartbeat_owners = heartbeat_entries_by_agent.select do |owner, entry|
+          entry.nil? && !held_lane_owners.include?(owner)
+        end.keys
         unless unreadable_heartbeat_owners.empty?
           heartbeat_notes << "lane-owner heartbeats unreadable: #{unreadable_heartbeat_owners.join(', ')}"
         end
@@ -7240,6 +7247,7 @@ module AgentCoord
       status_payload(
         scope: { "kind" => "batch", "batch_id" => options.fetch(:batch_id).to_s },
         section_notes: section_notes,
+        omitted_sections: { "claims" => section_notes.fetch("claims") },
         claim_entries: [],
         heartbeat_entries: heartbeat_entries_by_agent.values.select { |entry| valid_status_heartbeat?(entry) },
         batch_entries: batch_entries,
@@ -7253,11 +7261,12 @@ module AgentCoord
 
     # rubocop:disable Metrics/ParameterLists
     def status_payload(scope:, section_notes:, claim_entries:, heartbeat_entries:, batch_entries:,
-                       event_entries:, heartbeats_by_agent:, lane_states:, now:)
+                       event_entries:, heartbeats_by_agent:, lane_states:, now:, omitted_sections: {})
       {
         "version" => VERSION,
         "scope" => scope,
-        "degraded" => section_notes.values.uniq,
+        "degraded" => section_notes.reject { |section, _note| omitted_sections.key?(section) }.values.uniq,
+        "omitted_sections" => omitted_sections,
         "section_notes" => section_notes,
         "claims" => claim_entries.map { |entry| claim_status_hash(entry) },
         "heartbeats" => heartbeat_entries.map { |entry| heartbeat_status_hash(entry, now) },
@@ -7659,6 +7668,27 @@ module AgentCoord
 
     def lane_dependencies(lane)
       Array(lane["depends_on"]).compact.map(&:to_s)
+    end
+
+    def dependency_held_lane_owners(lanes, lane_states, dependency_heartbeat_owners)
+      lanes.group_by { |lane| lane_owner(lane) }.filter_map do |owner, owner_lanes|
+        next if dependency_heartbeat_owners.include?(owner)
+        next unless addressable_lane_owner?(owner)
+        next unless owner_lanes.all? do |lane|
+          lane_dependencies(lane).any? { |dependency| !dependency_met?(dependency, lane_states) }
+        end
+
+        owner
+      end
+    end
+
+    def addressable_lane_owner?(owner)
+      return false if reserved_lane_identity?(owner)
+
+      AgentCoord.heartbeat_path(owner)
+      true
+    rescue PathValidationError
+      false
     end
 
     def dependency_met?(dependency, lane_states)
