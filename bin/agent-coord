@@ -3226,7 +3226,7 @@ module AgentCoord
       payload["branch"] = options[:branch] if options[:branch]
       payload = terminal_release_payload(payload, options)
       validate_terminal_contract_payload!(payload) if options[:terminal]
-      validate_lifecycle_batch_id!(payload["batch_id"])
+      validate_lifecycle_batch_id!(payload["batch_id"]) unless handoff_release?(options)
 
       if options[:terminal]
         close_terminal_release(store, existing, payload, now, options)

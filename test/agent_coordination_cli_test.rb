@@ -10074,6 +10074,31 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     assert_equal "Continue elsewhere.", released_payload.fetch("handoff_note")
   end
 
+  def test_release_handoff_tolerates_reserved_existing_batch_id_without_lifecycle_event
+    batch_id = AgentCoord::INTERNAL_UNBATCHED_CLAIM_EXPIRY_BATCH_ID
+    claim_path = AgentCoord.claim_path("shakacode/react_on_rails", "3979-reserved")
+    write_state_record(
+      claim_path,
+      "schema_version" => 1, "repo" => "shakacode/react_on_rails", "target" => "3979-reserved",
+      "agent_id" => "worker-a", "batch_id" => batch_id, "status" => "active",
+      "claimed_at" => Time.now.utc.iso8601, "updated_at" => Time.now.utc.iso8601,
+      "expires_at" => (Time.now.utc + 3600).iso8601
+    )
+
+    release = run_agent_coord(
+      "release", "--agent-id", "worker-a", "--repo", "shakacode/react_on_rails",
+      "--target", "3979-reserved", "--handoff-note", "Continue elsewhere."
+    )
+
+    assert_equal 0, release.status.exitstatus, release.stderr
+    assert_includes release.stderr, "warning: claim.released event not recorded"
+    released = JSON.parse(File.read(File.join(@state_root, claim_path)))
+    assert_equal "released", released.fetch("status")
+    assert_equal "handoff", released.fetch("release_mode")
+    assert_equal "Continue elsewhere.", released.fetch("handoff_note")
+    assert_empty event_records(batch_id)
+  end
+
   def test_release_handoff_tolerates_local_event_write_failure
     claim = run_agent_coord(
       "claim",
