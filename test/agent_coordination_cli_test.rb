@@ -5402,6 +5402,49 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     JSON.generate(http_details)
   end
 
+  # A raw state-root path remains a syscall argument, but the doctor JSON copy
+  # must be diagnostic UTF-8 or JSON generation can crash before printing it.
+  def test_doctor_json_normalizes_invalid_state_root_without_mutating_the_input
+    stdout = StringIO.new
+    raw_state_root = "/tmp/state-\xFF".b
+    original_state_root = raw_state_root.dup
+    options = { backend: "", api_url: nil, state_root: raw_state_root }
+    runner = AgentCoord::Runner.new([], stdout:)
+    payload = runner.send(:doctor_payload, options, "local", nil)
+
+    runner.send(:emit_payload, payload, json: true) { flunk "doctor JSON should not render text" }
+
+    assert_equal "/tmp/state-�", JSON.parse(stdout.string).fetch("state_root")
+    assert_equal original_state_root, raw_state_root
+    assert_equal Encoding::ASCII_8BIT, raw_state_root.encoding
+  end
+
+  # An ordinary non-ASCII path arrives as BINARY under the C locale. Both
+  # doctor modes must emit clean JSON before json 3 turns today's warning into
+  # a generation failure.
+  def test_doctor_json_normalizes_state_root_in_c_locale
+    state_root = File.join(@state_root, "state-café").b
+    FileUtils.mkdir_p(state_root)
+
+    [[], ["--deep"]].each do |mode|
+      result = run_command(
+        { "LC_ALL" => "C", "LANG" => "C" },
+        RbConfig.ruby,
+        BIN,
+        "doctor",
+        "--state-root",
+        state_root,
+        "--json",
+        *mode
+      )
+
+      assert_equal 0, result.status.exitstatus, "#{mode}: #{result.stderr}"
+      report = JSON.parse(result.stdout)
+      assert_equal state_root.dup.force_encoding(Encoding::UTF_8), report.fetch("state_root"), mode.inspect
+      refute_includes result.stderr, "JSON.generate: UTF-8 string passed as BINARY", mode.inspect
+    end
+  end
+
   # Binary environment strings report every byte sequence as encoding-valid.
   # Invalid UTF-8 bytes must still collapse to the fixed diagnostic before JSON.
   def test_stack_backend_details_reject_invalid_binary_url_bytes
