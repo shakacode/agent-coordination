@@ -2241,7 +2241,11 @@ module AgentCoord
     end
 
     def gc_archived_heartbeat_holder(envelope)
-      source_path = envelope["source_path"].to_s
+      gc_heartbeat_holder_from_path(envelope["source_path"])
+    end
+
+    def gc_heartbeat_holder_from_path(path)
+      source_path = path.to_s
       match = source_path.match(%r{\Aheartbeats/([^/]+)\.json\z})
       return unless match
 
@@ -3073,7 +3077,9 @@ module AgentCoord
 
         ["terminal_claim", gc_record_time(data, nil, path)]
       when "heartbeats"
-        if HEARTBEAT_TERMINAL_STATUSES.include?(data["status"])
+        holder = gc_heartbeat_holder_from_path(path)
+        identity_matches = holder && data["agent_id"] == holder
+        if identity_matches && HEARTBEAT_TERMINAL_STATUSES.include?(data["status"])
           ["terminal_heartbeat", gc_record_time(data, nil, path)]
         else
           gc_nonterminal_heartbeat_archive_eligibility(data, path, now)
@@ -3110,7 +3116,13 @@ module AgentCoord
     end
 
     def gc_nonterminal_heartbeat_archive_eligibility(data, path, now)
-      case heartbeat_liveness(data, now)
+      holder = gc_heartbeat_holder_from_path(path)
+      liveness = if holder && data["agent_id"] == holder
+                   heartbeat_liveness(data, now)
+                 else
+                   "unknown"
+                 end
+      case liveness
       when "dead"
         ["dead_heartbeat", gc_heartbeat_dead_at(data, path)]
       when "unknown"
