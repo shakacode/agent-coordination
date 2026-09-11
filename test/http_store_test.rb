@@ -84,6 +84,47 @@ class HttpStoreTestCase < Minitest::Test
 end
 
 class HttpStoreReadTest < HttpStoreTestCase
+  # A realistic regression here is changing one adapter's accepted URL set or
+  # public error while editing the shared policy, leaving config validation and
+  # HTTP backend construction to disagree about the same deployment URL.
+  def test_config_and_http_store_url_policy_stay_in_sync
+    runner = AgentCoord::Runner.new([], stdout: StringIO.new, stderr: StringIO.new)
+    accepted_urls = [
+      "https://coord.example",
+      "https://user:password@coord.example/base/path",
+      "http://LOCALHOST:8787/base",
+      "http://127.0.0.1:8787",
+      "http://[::1]:8787/base"
+    ]
+    accepted_urls.each do |url|
+      runner.send(:validate_config_api_url!, url)
+      store = AgentCoord::HttpStore.new(base_url: url, token: "tok")
+      assert_instance_of AgentCoord::HttpStore, store, url
+      store.close
+    end
+
+    rejected_urls = [
+      ["coord.example", "absolute HTTP(S) URL", "expected http(s) URL with host"],
+      ["https://coord.example?tenant=one", "query or fragment", "query or fragment"],
+      ["https://coord.example#section", "query or fragment", "query or fragment"],
+      ["http://127.0.0.1:99999", "port must be between", "port must be between"],
+      ["http://coord.example", "must use https", "must use https"],
+      ["https://user:secret@bad host", "absolute HTTP(S) URL", "malformed URL"]
+    ]
+    rejected_urls.each do |url, config_message, store_message|
+      config_error = assert_raises(AgentCoord::Error, url) do
+        runner.send(:validate_config_api_url!, url)
+      end
+      store_error = assert_raises(AgentCoord::OperationalError, url) do
+        AgentCoord::HttpStore.new(base_url: url, token: "tok")
+      end
+      assert_includes config_error.message, config_message
+      assert_includes store_error.message, store_message
+      refute_includes config_error.message, "secret"
+      refute_includes store_error.message, "secret"
+    end
+  end
+
   def test_plain_http_ipv6_loopback_uses_unbracketed_network_host
     network_host = nil
     response = Struct.new(:code, :body).new("200", JSON.generate("entries" => []))
