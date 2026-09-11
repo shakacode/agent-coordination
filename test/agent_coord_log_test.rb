@@ -413,6 +413,8 @@ class AgentCoordLogTest < AgentCoordLogTestCase
     first = payload.fetch("events").first
 
     assert_equal 5, payload.fetch("events").length
+    assert_equal({ "read_state" => "complete", "events_read" => 0,
+                   "source_events_dropped" => 0, "delete_after" => nil }, payload.fetch("archive"))
     assert_equal "shakacode/example#104", first.fetch("work_item")
     assert_equal "m5", first.fetch("machine")
     assert_equal "codex", first.fetch("host")
@@ -2403,6 +2405,58 @@ class AgentCoordLogInvalidEncodingTest < AgentCoordLogTestCase
     bytes = "#{JSON.generate(envelope)}\n".b.sub("corrupt-key".b, "corrupt-\xFF".b)
     File.binwrite(path, bytes)
     path
+  end
+end
+
+# The JSON archive summary is an envelope-level machine contract. Direct archive
+# fixtures isolate its ledger arithmetic from gc's independent selection policy.
+class AgentCoordLogArchiveJsonTest < AgentCoordLogTestCase
+  DELETE_AFTER = "2026-09-04T00:00:00Z"
+
+  def test_log_json_reports_scoped_archive_provenance_before_the_display_limit
+    write_archive([archived_event], ["events/b9/x1.json", "events/b9/x2.json"])
+    write_event("b2", "e9", "type" => "merged", "repo" => "shakacode/example", "target" => "104",
+                            "machine_id" => "m2", "host" => "codex", "at" => "2026-08-09T00:00:00Z")
+
+    result = run_log("shakacode/example#104", "--limit", "1", "--json")
+    payload = JSON.parse(result.stdout)
+    live_only = JSON.parse(run_log("shakacode/example#104", "--machine", "m2", "--json").stdout)
+
+    assert_equal 0, result.status.exitstatus, result.stderr
+    assert_equal 1, payload.fetch("events").length, "the display limit still applies to event rows"
+    assert_equal({ "read_state" => "complete", "events_read" => 1,
+                   "source_events_dropped" => 1, "delete_after" => DELETE_AFTER }, payload.fetch("archive"))
+    assert_equal 0, live_only.fetch("archive").fetch("events_read"), "row filters apply before the count"
+  end
+
+  def test_log_json_marks_malformed_archive_provenance_unknown
+    write_trace
+    write_archive([archived_event, "not-an-event"], ["events/b9/x1.json", "events/b9/x2.json"])
+
+    result = run_log("shakacode/example#104", "--json")
+    payload = JSON.parse(result.stdout)
+
+    assert_equal 0, result.status.exitstatus, result.stderr
+    assert_includes result.stderr, "1 unreadable archived record"
+    assert_equal({ "read_state" => "incomplete", "events_read" => 1,
+                   "source_events_dropped" => nil, "delete_after" => nil }, payload.fetch("archive"))
+  end
+
+  private
+
+  def write_archive(records, source_paths)
+    path = File.join(@state_root, "archive", "events", "b9", "compact.json")
+    FileUtils.mkdir_p(File.dirname(path))
+    envelope = { "schema_version" => 1, "record_family" => "compacted_events",
+                 "source_paths" => source_paths, "archived_at" => "2026-08-05T00:00:00Z",
+                 "delete_after" => DELETE_AFTER, "records" => records }
+    File.write(path, "#{JSON.generate(envelope)}\n")
+  end
+
+  def archived_event
+    { "schema_version" => 2, "event_id" => "x1", "batch_id" => "b9", "type" => "merged",
+      "repo" => "shakacode/example", "target" => "104", "machine_id" => "m9", "host" => "codex",
+      "at" => "2026-08-06T00:00:00Z" }
   end
 end
 

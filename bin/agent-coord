@@ -5683,9 +5683,9 @@ module AgentCoord
     # Degrading is not the same as swallowing. Every path through here warns on
     # stderr on every invocation and marks the trail incomplete, and an
     # incomplete trail makes --sync refuse with exit 2 and write nothing, which
-    # is the operation where completeness actually matters. (The marker reaches
-    # the operator through those two channels; it is not yet a field in --json
-    # output.)
+    # is the operation where completeness actually matters. JSON also carries
+    # the archive-specific read state so machine consumers do not have to parse
+    # this warning.
     #
     # The asymmetry with the live events prefix, which fails hard on the same
     # listing errors, is intended at this level: an unreadable events prefix
@@ -5744,6 +5744,24 @@ module AgentCoord
       parts << "archive deleted after #{expires}" if expires
       parts << "mirror it with log --sync" unless options[:sync]
       @stderr.puts log_scrub(parts.join("; "))
+    end
+
+    # Machine-readable provenance comes from the same scoped ledger as the
+    # operator note. `events_read` counts archive-winning rows that matched the
+    # requested filters before --limit trims the display; live duplicates remain
+    # live winners and therefore do not inflate it. Once an archive read or
+    # envelope is incomplete, its loss and expiry are unknown rather than
+    # reconstructed from the legible remainder.
+    def log_archive_json(options, matched)
+      envelopes = log_archive_ledger(options)
+      incomplete = Array(@log_incomplete).include?(LOG_ARCHIVED_EVENTS_PREFIX) ||
+                   envelopes.any? { |envelope| envelope.fetch("malformed") }
+      {
+        "read_state" => incomplete ? "incomplete" : "complete",
+        "events_read" => matched.count { |row| row["archived"] },
+        "source_events_dropped" => incomplete ? nil : log_archive_dropped(envelopes),
+        "delete_after" => incomplete ? nil : log_archive_soonest_expiry(envelopes)
+      }
     end
 
     # Unique source paths against unique retained identities. Two envelopes left
@@ -5963,6 +5981,7 @@ module AgentCoord
         # A display limit that shrank it would understate which spellings answered.
         payload = { "work_item" => log_work_item_summary(options, matched, claims),
                     "trail" => log_trail_state,
+                    "archive" => log_archive_json(options, matched),
                     "events_suppressed" => log_events_suppressed?(rows),
                     "events" => events, "claim" => records.last }.compact
         # Oldest first, like the trail above it, so the last thing printed or listed
