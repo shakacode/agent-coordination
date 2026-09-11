@@ -125,6 +125,31 @@ class HttpStoreReadTest < HttpStoreTestCase
     end
   end
 
+  # A newly added shared-policy violation must not become an accidental allow
+  # until both public adapters learn a more specific safe diagnostic for it.
+  def test_unknown_shared_url_policy_violation_fails_closed_for_both_adapters
+    url = "https://user:future-secret@coord.example"
+    runner = AgentCoord::Runner.new([], stdout: StringIO.new, stderr: StringIO.new)
+
+    original_policy = AgentCoord.method(:http_api_url_policy)
+    AgentCoord.define_singleton_method(:http_api_url_policy) { |_| [nil, :future_violation] }
+    begin
+      config_error = assert_raises(AgentCoord::Error) do
+        runner.send(:validate_config_api_url!, url)
+      end
+      store_error = assert_raises(AgentCoord::OperationalError) do
+        AgentCoord::HttpStore.new(base_url: url, token: "tok")
+      end
+
+      assert_equal "--api-url must be an absolute HTTP(S) URL", config_error.message
+      assert_equal "invalid HTTP backend URL: malformed URL", store_error.message
+      refute_includes config_error.message, "future-secret"
+      refute_includes store_error.message, "future-secret"
+    ensure
+      AgentCoord.define_singleton_method(:http_api_url_policy, original_policy)
+    end
+  end
+
   def test_plain_http_ipv6_loopback_uses_unbracketed_network_host
     network_host = nil
     response = Struct.new(:code, :body).new("200", JSON.generate("entries" => []))

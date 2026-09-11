@@ -112,10 +112,11 @@ module AgentCoord
   MAX_ATTENTION_RECORD_BYTES = 256 * 1024
   MAX_ATTENTION_KEY_COMPONENT_LENGTH = 160
   MAX_ATTENTION_TIMESTAMP_LENGTH = 64
-  # Both persisted config and HttpStore accept the same API URL forms. Keep the
-  # policy result symbolic so their established exception classes and messages
-  # remain adapter concerns.
+  # Both persisted config and HttpStore accept the same API URL forms. DNS host
+  # names are case-insensitive even though URI#hostname preserves casing.
   HTTP_API_LOOPBACK_HOSTS = %w[localhost 127.0.0.1 ::1].freeze
+  # URI.parse accepts any integer port, but a TCP port is 16-bit. Reject typos
+  # here before a resolver can reject or silently truncate them.
   HTTP_API_VALID_PORT_RANGE = (1..65_535)
   STATE_PATH_PATTERN = %r{\A(?:
     claims/[A-Za-z0-9_.:-]+/[A-Za-z0-9_.:-]+/[A-Za-z0-9_.:-]+\.json |
@@ -2786,16 +2787,17 @@ module AgentCoord
 
     def validate_config_api_url!(value)
       _uri, violation = AgentCoord.http_api_url_policy(value)
-      case violation
-      when :malformed, :not_absolute
-        raise Error, "--api-url must be an absolute HTTP(S) URL"
-      when :query_or_fragment
-        raise Error, "--api-url must not include a query or fragment"
-      when :invalid_port
-        raise Error, "--api-url port must be between 1 and 65535"
-      when :insecure_remote
-        raise Error, "--api-url must use https unless it points at localhost"
-      end
+      return if violation.nil?
+
+      fallback = "--api-url must be an absolute HTTP(S) URL"
+      messages = {
+        malformed: fallback,
+        not_absolute: fallback,
+        query_or_fragment: "--api-url must not include a query or fragment",
+        invalid_port: "--api-url port must be between 1 and 65535",
+        insecure_remote: "--api-url must use https unless it points at localhost"
+      }
+      raise Error, messages.fetch(violation, fallback)
     end
 
     def read_token_from_stdin
@@ -8878,13 +8880,6 @@ module AgentCoord
   class HttpStore
     OPEN_TIMEOUT = 5
     READ_TIMEOUT = 10
-    # DNS hostnames are case-insensitive but URI#hostname preserves the
-    # caller's casing, so compare against this allowlist downcased.
-    LOOPBACK_HOSTS = HTTP_API_LOOPBACK_HOSTS
-    # URI.parse accepts any integer port, but a TCP port is 16-bit. An
-    # out-of-range port is a typo that must fail closed here rather than
-    # reach a resolver, which may reject it or silently truncate it.
-    VALID_PORT_RANGE = HTTP_API_VALID_PORT_RANGE
     PERCENT_ENCODE_UNSAFE = /[^A-Za-z0-9._~-]/
     RETRYABLE_REUSED_CONNECTION_ERRORS = [EOFError, Errno::ECONNRESET, Errno::EPIPE].freeze
 
@@ -9019,23 +9014,19 @@ module AgentCoord
 
     def parse_base_url(base_url)
       uri, violation = AgentCoord.http_api_url_policy(base_url.to_s)
-      case violation
-      when :not_absolute
-        raise OperationalError, "invalid HTTP backend URL: expected http(s) URL with host"
-      when :query_or_fragment
-        raise OperationalError, "invalid HTTP backend URL: must not include a query or fragment"
-      when :invalid_port
-        raise OperationalError, "invalid HTTP backend URL: port must be between 1 and 65535"
-      when :insecure_remote
-        raise OperationalError, "HTTP backend URL must use https unless it points at localhost"
-      when :malformed
-        # URI's exception embeds the rejected input. That value is untrusted and
-        # may contain malformed userinfo that no finite URL-shaped regex can
-        # reliably redact, so diagnostics describe the failure without echoing it.
-        raise OperationalError, "invalid HTTP backend URL: malformed URL"
-      end
+      return uri if violation.nil?
 
-      uri
+      # URI's exception embeds the rejected input, and future policy violations
+      # may also carry unsafe input. The fallback therefore never echoes it.
+      fallback = "invalid HTTP backend URL: malformed URL"
+      messages = {
+        malformed: fallback,
+        not_absolute: "invalid HTTP backend URL: expected http(s) URL with host",
+        query_or_fragment: "invalid HTTP backend URL: must not include a query or fragment",
+        invalid_port: "invalid HTTP backend URL: port must be between 1 and 65535",
+        insecure_remote: "HTTP backend URL must use https unless it points at localhost"
+      }
+      raise OperationalError, messages.fetch(violation, fallback)
     end
 
     def state_path(path)
