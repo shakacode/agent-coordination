@@ -2108,7 +2108,7 @@ module AgentCoord
       protected_destinations = (archive_candidates + compaction_candidates).to_h do |candidate|
         [candidate.dig(:action, "archive_path"), true]
       end
-      delete_candidates = gc_delete_candidates(store, now).reject do |candidate|
+      delete_candidates = gc_delete_candidates(store, now, prefixes).reject do |candidate|
         protected_destinations[candidate.dig(:action, "source_path")]
       end
       archive_candidates + compaction_candidates + delete_candidates
@@ -2151,6 +2151,7 @@ module AgentCoord
           claim_changed_at_apply claim_identity_mismatch_at_apply
           holder_present_at_apply holder_liveness_unknown_at_apply
           invalid_claim_path_at_apply invalid_expired_event_destination_at_apply
+          aged_heartbeat_referenced_at_apply
         ]
         if skipped.include?(outcome)
           action.merge!("outcome" => "skipped", "skip_reason" => outcome.to_s)
@@ -2187,7 +2188,8 @@ module AgentCoord
       candidates.sort_by { |candidate| candidate.dig(:action, "source_path") }
     end
 
-    def gc_delete_candidates(store, now)
+    def gc_delete_candidates(store, now, prefixes)
+      active_claim_holders = gc_visible_active_claim_holders(store, prefixes)
       store.list_json("archive").filter_map do |entry|
         internal_batch_archive = AgentCoord.archive_path(
           AgentCoord.batch_path(INTERNAL_UNBATCHED_CLAIM_EXPIRY_BATCH_ID)
@@ -2196,6 +2198,7 @@ module AgentCoord
         # Retain that exact archive record so namespace reuse never becomes
         # possible merely because its ordinary delete window elapsed.
         next if entry.path == internal_batch_archive
+        next if gc_preserve_aged_heartbeat_archive?(entry, active_claim_holders)
 
         delete_after = gc_archive_delete_after(entry)
         next if delete_after > now
@@ -2210,6 +2213,41 @@ module AgentCoord
           }
         }
       end
+    end
+
+    def gc_visible_active_claim_holders(store, prefixes)
+      return unless prefixes.include?("claims")
+
+      claims = store.list_json("claims")
+      return if store.respond_to?(:filtered_list?) && store.filtered_list?("claims")
+
+      claims.each_with_object({}) do |claim, holders|
+        holders[claim.data["agent_id"]] = true if active_claim_record?(claim.data)
+      end
+    end
+
+    def gc_preserve_aged_heartbeat_archive?(entry, active_claim_holders)
+      envelope = entry.data
+      return false unless envelope["record_family"] == "archived_record"
+      return false unless envelope["reason"] == "aged_heartbeat"
+
+      holder = gc_archived_heartbeat_holder(envelope)
+      return true unless active_claim_holders && holder
+
+      active_claim_holders[holder]
+    rescue TypeError
+      true
+    end
+
+    def gc_archived_heartbeat_holder(envelope)
+      source_path = envelope["source_path"].to_s
+      match = source_path.match(%r{\Aheartbeats/([^/]+)\.json\z})
+      return unless match
+
+      holder = match[1]
+      holder if AgentCoord.heartbeat_path(holder) == source_path
+    rescue Error
+      nil
     end
 
     # An active claim whose lease elapsed is never transitioned by anything
@@ -2294,6 +2332,9 @@ module AgentCoord
       return :unknown if holder_heartbeats[holder] == :unreadable
 
       holder_state = claim_holder_state(store, claim, now, holder_heartbeats, fresh:)
+      if holder_state.fetch(:liveness) == "missing" && gc_archived_unknown_holder_heartbeat?(store, holder, fresh:)
+        holder_state = fallback_holder_state(claim, now, "unknown")
+      end
       if %w[invalid unknown].include?(holder_state.fetch(:liveness))
         unless (@gc_holder_liveness_warnings ||= {})[holder]
           @stderr.puts "warning: gc cannot establish liveness for claim holder #{holder.inspect}; " \
@@ -2309,6 +2350,21 @@ module AgentCoord
       @stderr.puts "warning: gc cannot read the heartbeat for claim holder #{holder.inspect}; " \
                    "not reaping its claims: #{e.message}"
       :unknown
+    end
+
+    def gc_archived_unknown_holder_heartbeat?(store, holder, fresh: false)
+      path = AgentCoord.archive_path(AgentCoord.heartbeat_path(holder))
+      method = fresh && store.respond_to?(:read_json_fresh) ? :read_json_fresh : :read_json
+      entry = store.public_send(method, path)
+      return false unless entry
+
+      envelope = entry.data
+      envelope.is_a?(Hash) && envelope["record_family"] == "archived_record" &&
+        envelope["source_path"] == AgentCoord.heartbeat_path(holder) && envelope["reason"] == "aged_heartbeat"
+    rescue OperationalError
+      raise
+    rescue JSON::ParserError, Error
+      true
     end
 
     def gc_expired_event_candidates(store, prefixes)
@@ -2655,9 +2711,22 @@ module AgentCoord
 
     def gc_delete_archive(store, candidate)
       entry = candidate.fetch(:entry)
+      holder = gc_archived_heartbeat_holder(entry.data) if entry.data["reason"] == "aged_heartbeat"
+      return :aged_heartbeat_referenced_at_apply if holder && gc_active_claim_holder?(store, holder)
+
       store.delete_json(entry.path, message: "Delete expired archive #{entry.path}", sha: entry.sha)
     rescue Conflict => e
       raise OperationalError, "gc archive changed at #{entry.path}; #{e.message}"
+    end
+
+    def gc_active_claim_holder?(store, holder)
+      method = store.respond_to?(:list_json_fresh) ? :list_json_fresh : :list_json
+      claims = store.public_send(method, "claims")
+      return true if store.respond_to?(:filtered_list?) && store.filtered_list?("claims")
+
+      claims.any? do |claim|
+        active_claim_record?(claim.data) && claim.data["agent_id"] == holder
+      end
     end
 
     # updated_at is left alone on purpose: it records when the holder last
@@ -3002,8 +3071,8 @@ module AgentCoord
       when "heartbeats"
         if HEARTBEAT_TERMINAL_STATUSES.include?(data["status"])
           ["terminal_heartbeat", gc_record_time(data, nil, path)]
-        elsif heartbeat_liveness(data, now) == "dead"
-          ["dead_heartbeat", gc_heartbeat_dead_at(data, path)]
+        else
+          gc_nonterminal_heartbeat_archive_eligibility(data, path, now)
         end
       when "batches"
         # A pre-existing manifest at the reserved internal ID is a permanent
@@ -3034,6 +3103,22 @@ module AgentCoord
       updated_at + (ttl * HEARTBEAT_DEAD_AFTER_TTL_MULTIPLIER)
     rescue KeyError, ArgumentError
       gc_record_time(data, nil, path)
+    end
+
+    def gc_nonterminal_heartbeat_archive_eligibility(data, path, now)
+      case heartbeat_liveness(data, now)
+      when "dead"
+        ["dead_heartbeat", gc_heartbeat_dead_at(data, path)]
+      when "unknown"
+        # Retention may retire an old malformed heartbeat without claiming its
+        # holder is dead. Claim reaping independently treats the same record as
+        # unknown and therefore fails closed.
+        ["aged_heartbeat", gc_record_time(data, nil, path)]
+      end
+    rescue OperationalError
+      # Unknown liveness with no trustworthy age remains hot. The reaper emits
+      # the holder-level warning and continues other records fail closed.
+      nil
     end
 
     def render_gc_text(payload)
@@ -9467,6 +9552,13 @@ module AgentCoord
     def read_json_fresh(path)
       invalidate_read_cache(path)
       read_json(path)
+    end
+
+    def list_json_fresh(prefix, maximum: nil, status: nil, &on_error)
+      AgentCoord.safe_path!(prefix)
+      @json_cache.delete_if { |path, _entry| path.start_with?("#{prefix}/") }
+      remove_instance_variable(:@tree_nodes) if defined?(@tree_nodes)
+      list_json(prefix, maximum:, status:, &on_error)
     end
 
     private

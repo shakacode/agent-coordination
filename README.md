@@ -1205,6 +1205,7 @@ execute response keeps the planned reap but marks it `outcome: skipped` with
 | Active claim past its lease, holder heartbeat not live or stale | lease + 1 day | n/a | Reap to `expired` in place |
 | Released/terminal claim | 7 days | 30 days | Archive, then delete |
 | Dead or terminal heartbeat | 7 days | 30 days | Archive, then delete |
+| Aged heartbeat with unknown liveness | 7 days | 30 days after no active claim depends on it | Archive as `aged_heartbeat`; retain its fail-closed evidence while referenced |
 | Completed batch | 7 days | 30 days | Archive, then delete |
 | Events for a terminal target | 7 days | 30 days | Compact, then delete |
 | Eligible claim/heartbeat/batch with `synthetic: true` | 1 day | 30 days | Aggressive archive, then delete |
@@ -1215,6 +1216,11 @@ execute response keeps the planned reap but marks it `outcome: skipped` with
 Archive retention starts at `archived_at`, so the default lifecycle
 is 7 hot days followed by 30 archive days. A reaped claim then follows the
 ordinary claim lifecycle from its reap, including the synthetic window.
+An old malformed heartbeat is archive-eligible without being classified as a
+dead holder. While an active claim still names that holder, GC consults the
+exact `aged_heartbeat` archive mirror for fail-closed liveness and withholds
+deletion of that mirror; once no active claim depends on it, ordinary archive
+deletion resumes.
 The effective policy, `--lease-grace-days` included, is echoed in the `policy`
 block of every plan, so a `--dry-run --json` plan is self-describing and
 `--execute` applies exactly the actions the dry run listed. Producers mark non-production state

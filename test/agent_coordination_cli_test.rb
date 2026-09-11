@@ -1039,6 +1039,131 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     assert_includes stderr.string, "cannot establish liveness for claim holder \"negative-ttl-holder\""
   end
 
+  def test_gc_archives_an_aged_nonpositive_ttl_heartbeat_without_reaping_its_claim # rubocop:disable Metrics/AbcSize, Metrics/MethodLength
+    now = Time.utc(2026, 7, 12, 12, 0, 0)
+    heartbeat_time = now - (8 * 86_400)
+    claim_path = write_abandoned_claim(
+      "aged-zero-ttl-heartbeat", heartbeat_time, "agent_id" => "aged-zero-ttl-holder"
+    )
+    heartbeat_path = "heartbeats/aged-zero-ttl-holder.json"
+    write_state_record(
+      heartbeat_path,
+      "schema_version" => 1, "agent_id" => "different-payload-holder", "status" => "in_progress",
+      "updated_at" => heartbeat_time.iso8601, "expires_at" => heartbeat_time.iso8601
+    )
+    stdout = StringIO.new
+    stderr = StringIO.new
+    runner = AgentCoord::Runner.new([], stdout: stdout, stderr: stderr, clock: FixedClock.new(now))
+
+    assert_equal 0, runner.send(:gc, state_root: @state_root, dry_run: false, execute: true, json: true)
+
+    actions = JSON.parse(stdout.string).fetch("actions")
+    heartbeat_action = actions.find { |action| action["source_path"] == heartbeat_path }
+    assert_equal "archive", heartbeat_action.fetch("action")
+    assert_equal "aged_heartbeat", heartbeat_action.fetch("reason")
+    refute(actions.any? { |action| action["source_path"] == claim_path })
+    assert_equal "active", JSON.parse(File.read(File.join(@state_root, claim_path))).fetch("status")
+    assert_path_exists File.join(@state_root, "archive", heartbeat_path)
+    assert_empty Dir.glob(File.join(@state_root, "events", "**", "claim-expired-*.json"))
+    assert_includes stderr.string, "cannot establish liveness for claim holder \"aged-zero-ttl-holder\""
+
+    later = now + (31 * 86_400)
+    later_stdout = StringIO.new
+    later_runner = AgentCoord::Runner.new(
+      [], stdout: later_stdout, stderr: StringIO.new, clock: FixedClock.new(later)
+    )
+    assert_equal 0, later_runner.send(
+      :gc, state_root: @state_root, dry_run: false, execute: true, json: true
+    )
+    later_actions = JSON.parse(later_stdout.string).fetch("actions")
+    refute(later_actions.any? { |action| action["source_path"] == claim_path })
+    refute(later_actions.any? { |action| action["source_path"] == "archive/#{heartbeat_path}" })
+    assert_equal "active", JSON.parse(File.read(File.join(@state_root, claim_path))).fetch("status")
+    assert_path_exists File.join(@state_root, "archive", heartbeat_path)
+    assert_empty Dir.glob(File.join(@state_root, "events", "**", "claim-expired-*.json"))
+
+    released_claim = JSON.parse(File.read(File.join(@state_root, claim_path))).merge("status" => "released")
+    write_state_record(claim_path, released_claim)
+    final_stdout = StringIO.new
+    final_runner = AgentCoord::Runner.new(
+      [], stdout: final_stdout, stderr: StringIO.new, clock: FixedClock.new(later + 1)
+    )
+    assert_equal 0, final_runner.send(
+      :gc, state_root: @state_root, dry_run: false, execute: true, json: true
+    )
+    final_actions = JSON.parse(final_stdout.string).fetch("actions")
+    heartbeat_delete = final_actions.find { |action| action["source_path"] == "archive/#{heartbeat_path}" }
+    assert_equal "delete", heartbeat_delete.fetch("action")
+    refute_path_exists File.join(@state_root, "archive", heartbeat_path)
+  end
+
+  def test_gc_retains_an_aged_heartbeat_archive_when_claim_listing_is_filtered
+    now = Time.utc(2026, 7, 12, 12, 0, 0)
+    heartbeat_path = "heartbeats/filtered-claim-holder.json"
+    archive_path = "archive/#{heartbeat_path}"
+    claim_path = write_abandoned_claim(
+      "filtered-claim", now - (40 * 86_400), "agent_id" => "filtered-claim-holder"
+    )
+    heartbeat = {
+      "schema_version" => 1, "agent_id" => "payload-mismatch", "status" => "in_progress",
+      "updated_at" => (now - (40 * 86_400)).iso8601,
+      "expires_at" => (now - (40 * 86_400)).iso8601
+    }
+    write_state_record(
+      archive_path,
+      "schema_version" => 1, "record_family" => "archived_record", "source_path" => heartbeat_path,
+      "reason" => "aged_heartbeat", "synthetic" => false,
+      "archived_at" => (now - (31 * 86_400)).iso8601, "delete_after" => (now - 1).iso8601,
+      "data" => heartbeat
+    )
+    filtered_runner = StoreInjectedRunner.new(
+      [], store: FilteredClaimsGcStore.new(@state_root), clock: FixedClock.new(now)
+    )
+
+    assert_equal 0, filtered_runner.send(:gc, state_root: @state_root, dry_run: false, execute: true, json: true)
+    assert_path_exists File.join(@state_root, archive_path)
+
+    stdout = StringIO.new
+    runner = AgentCoord::Runner.new([], stdout: stdout, stderr: StringIO.new, clock: FixedClock.new(now + 1))
+    assert_equal 0, runner.send(:gc, state_root: @state_root, dry_run: false, execute: true, json: true)
+    actions = JSON.parse(stdout.string).fetch("actions")
+    refute(actions.any? { |action| action["source_path"] == claim_path })
+    assert_equal "active", JSON.parse(File.read(File.join(@state_root, claim_path))).fetch("status")
+    assert_path_exists File.join(@state_root, archive_path)
+    assert_empty Dir.glob(File.join(@state_root, "events", "**", "claim-expired-*.json"))
+  end
+
+  def test_gc_rechecks_aged_heartbeat_archive_dependencies_before_delete
+    now = Time.utc(2026, 7, 12, 12, 0, 0)
+    heartbeat_path = "heartbeats/concurrent-claim-holder.json"
+    archive_path = "archive/#{heartbeat_path}"
+    heartbeat = {
+      "schema_version" => 1, "agent_id" => "concurrent-claim-holder", "status" => "in_progress",
+      "updated_at" => (now - (40 * 86_400)).iso8601,
+      "expires_at" => (now - (40 * 86_400)).iso8601
+    }
+    write_state_record(
+      archive_path,
+      "schema_version" => 1, "record_family" => "archived_record", "source_path" => heartbeat_path,
+      "reason" => "aged_heartbeat", "synthetic" => false,
+      "archived_at" => (now - (31 * 86_400)).iso8601, "delete_after" => (now - 1).iso8601,
+      "data" => heartbeat
+    )
+    store = AgentCoord::LocalStore.new(@state_root)
+    runner = AgentCoord::Runner.new([], stdout: StringIO.new, stderr: StringIO.new, clock: FixedClock.new(now))
+    candidate = runner.send(:gc_delete_candidates, store, now, %w[claims heartbeats events batches]).fetch(0)
+    claim_path = write_abandoned_claim(
+      "concurrent-claim", now - (40 * 86_400), "agent_id" => "concurrent-claim-holder"
+    )
+
+    runner.send(:execute_gc_candidates, store, [candidate], now, 30)
+
+    assert_equal "skipped", candidate.dig(:action, "outcome")
+    assert_equal "aged_heartbeat_referenced_at_apply", candidate.dig(:action, "skip_reason")
+    assert_path_exists File.join(@state_root, archive_path)
+    assert_equal "active", store.read_json(claim_path).data.fetch("status")
+  end
+
   def test_gc_apply_fails_closed_on_unreadable_and_unknown_holder_heartbeats
     now = Time.utc(2026, 7, 12, 12, 0, 0)
     unreadable_path = write_abandoned_claim(
@@ -1079,11 +1204,15 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
       "schema_version" => 1, "agent_id" => "unknown-shared", "status" => "in_progress",
       "updated_at" => "not-a-time", "expires_at" => "also-not-a-time"
     )
+    stdout = StringIO.new
     stderr = StringIO.new
-    runner = AgentCoord::Runner.new([], stdout: StringIO.new, stderr: stderr, clock: FixedClock.new(now))
+    runner = AgentCoord::Runner.new([], stdout: stdout, stderr: stderr, clock: FixedClock.new(now))
 
     assert_equal 0, runner.send(:gc, state_root: @state_root, dry_run: true, execute: false, json: true)
 
+    actions = JSON.parse(stdout.string).fetch("actions")
+    refute(actions.any? { |action| action["source_path"] == "heartbeats/unknown-shared.json" })
+    refute(actions.any? { |action| action["source_path"]&.include?("unknown-shared-") })
     assert_equal 1, stderr.string.scan("cannot establish liveness for claim holder \"unknown-shared\"").length
   end
 
@@ -7965,6 +8094,28 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     second = store.read_json(path)
     assert_equal "new", second.data.fetch("status")
     assert_equal "sha-new", second.sha
+  end
+
+  def test_github_store_fresh_list_refreshes_tree_and_cached_claim_payloads
+    store = FreshClaimsListGitHubStore.new
+
+    first = store.list_json("claims")
+    first_states = first.map { |entry| entry.data.values_at("status", "agent_id") }
+    assert_equal [%w[released old-holder]], first_states
+
+    store.advance_claims
+    stale = store.list_json("claims")
+    stale_states = stale.map { |entry| entry.data.values_at("status", "agent_id") }
+    assert_equal [%w[released old-holder]], stale_states
+
+    runner = AgentCoord::Runner.new([])
+    assert runner.send(:gc_active_claim_holder?, store, "old-holder")
+    fresh = store.list_json("claims")
+    fresh_statuses = fresh.map { |entry| entry.data.fetch("status") }
+    assert_equal %w[active active], fresh_statuses
+    assert_equal %w[new-holder old-holder], fresh.map { |entry| entry.data.fetch("agent_id") }.sort
+    assert_equal 2, store.tree_reads
+    assert_equal 3, store.content_reads
   end
 
   def test_github_store_invalidates_cached_tree_after_write_conflict
@@ -15690,6 +15841,18 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     end
   end
 
+  class FilteredClaimsGcStore < AgentCoord::LocalStore
+    def list_json(prefix)
+      return [] if prefix == "claims"
+
+      super
+    end
+
+    def filtered_list?(prefix)
+      prefix == "claims"
+    end
+  end
+
   # Stands in for a least-privileged HTTP token: one heartbeat path answers the
   # way a forbidden read does, while every other record reads normally.
   class ForbiddenHeartbeatStore < CountingLocalStore
@@ -16527,6 +16690,52 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
 
     def result(stdout, stderr: "", success: true)
       AgentCoord::GhResult.new(stdout: stdout, stderr: stderr, status: FakeStatus.new(success))
+    end
+  end
+
+  class FreshClaimsListGitHubStore < AgentCoord::GitHubStore
+    attr_reader :content_reads, :tree_reads
+
+    def initialize
+      super(backend: "shakacode/agent-coordination-state", ref: "state")
+      @advanced = false
+      @content_reads = 0
+      @tree_reads = 0
+    end
+
+    def advance_claims
+      @advanced = true
+    end
+
+    private
+
+    def gh_api(*args)
+      case args
+      when ["repos/shakacode/agent-coordination-state/git/trees/state?recursive=1"]
+        @tree_reads += 1
+        tree = [{ "path" => "claims/shakacode/example/old.json", "type" => "blob" }]
+        tree << { "path" => "claims/shakacode/example/new.json", "type" => "blob" } if @advanced
+        github_result(JSON.generate("tree" => tree))
+      when ["repos/shakacode/agent-coordination-state/contents/claims/shakacode/example/old.json?ref=state"]
+        @content_reads += 1
+        claim = { "status" => @advanced ? "active" : "released", "agent_id" => "old-holder" }
+        github_content_result(claim, @advanced ? "sha-old-active" : "sha-old-released")
+      when ["repos/shakacode/agent-coordination-state/contents/claims/shakacode/example/new.json?ref=state"]
+        @content_reads += 1
+        github_content_result({ "status" => "active", "agent_id" => "new-holder" }, "sha-new")
+      else
+        raise "unexpected gh api #{args.inspect}"
+      end
+    end
+
+    def github_content_result(data, sha)
+      github_result(
+        JSON.generate("content" => Base64.strict_encode64(JSON.generate(data)), "sha" => sha)
+      )
+    end
+
+    def github_result(stdout)
+      AgentCoord::GhResult.new(stdout: stdout, stderr: "", status: FakeStatus.new(true))
     end
   end
 
