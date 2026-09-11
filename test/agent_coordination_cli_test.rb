@@ -1174,23 +1174,29 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     assert_empty Dir.glob(File.join(@state_root, "events", "**", "claim-expired-*.json"))
   end
 
-  def test_gc_preserves_unknown_terminal_heartbeat_identities_across_archive
+  def test_gc_preserves_unknown_terminal_heartbeat_evidence_across_archive
     now = Time.utc(2026, 7, 12, 12, 0, 0)
     old = now - (8 * 86_400)
     cases = {
-      "terminal-missing-holder" => nil,
-      "terminal-mismatched-holder" => "different-holder"
+      "terminal-invalid-ttl-holder" => ["terminal-invalid-ttl-holder", 0],
+      "terminal-missing-holder" => [nil, 3600],
+      "terminal-mismatched-holder" => ["different-holder", 3600]
     }
-    claim_paths = cases.map do |holder, payload_holder|
+    claim_paths = cases.map do |holder, (payload_holder, ttl)|
       claim_path = write_abandoned_claim(holder, old, "agent_id" => holder)
       heartbeat = {
         "schema_version" => 1, "status" => "merged",
-        "updated_at" => old.iso8601, "expires_at" => (old + 3600).iso8601
+        "updated_at" => old.iso8601, "expires_at" => (old + ttl).iso8601
       }
       heartbeat["agent_id"] = payload_holder if payload_holder
       write_state_record("heartbeats/#{holder}.json", heartbeat)
       claim_path
     end
+    write_state_record(
+      "heartbeats/terminal-valid-control.json",
+      "schema_version" => 1, "agent_id" => "terminal-valid-control", "status" => "merged",
+      "updated_at" => old.iso8601, "expires_at" => (old + 3600).iso8601
+    )
 
     2.times do |run|
       stdout = StringIO.new
@@ -1202,9 +1208,13 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
       refute(actions.any? { |action| claim_paths.include?(action["source_path"]) })
       next unless run.zero?
 
-      heartbeat_actions = actions.select { |action| action["source_path"]&.start_with?("heartbeats/terminal-") }
-      heartbeat_reasons = heartbeat_actions.map { |action| action.fetch("reason") }
-      assert_equal %w[aged_heartbeat aged_heartbeat], heartbeat_reasons
+      heartbeat_reasons = actions.filter_map do |action|
+        [action.fetch("source_path"), action.fetch("reason")] if action["source_path"]&.start_with?("heartbeats/")
+      end.to_h
+      cases.each_key do |holder|
+        assert_equal "aged_heartbeat", heartbeat_reasons.fetch("heartbeats/#{holder}.json")
+      end
+      assert_equal "terminal_heartbeat", heartbeat_reasons.fetch("heartbeats/terminal-valid-control.json")
     end
     claim_paths.each do |claim_path|
       assert_equal "active", JSON.parse(File.read(File.join(@state_root, claim_path))).fetch("status")

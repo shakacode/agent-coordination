@@ -3077,13 +3077,7 @@ module AgentCoord
 
         ["terminal_claim", gc_record_time(data, nil, path)]
       when "heartbeats"
-        holder = gc_heartbeat_holder_from_path(path)
-        identity_matches = holder && data["agent_id"] == holder
-        if identity_matches && HEARTBEAT_TERMINAL_STATUSES.include?(data["status"])
-          ["terminal_heartbeat", gc_record_time(data, nil, path)]
-        else
-          gc_nonterminal_heartbeat_archive_eligibility(data, path, now)
-        end
+        gc_heartbeat_archive_eligibility(data, path, now)
       when "batches"
         # A pre-existing manifest at the reserved internal ID is a permanent
         # collision sentinel. Archiving it would let a later GC run reuse its
@@ -3115,13 +3109,17 @@ module AgentCoord
       gc_record_time(data, nil, path)
     end
 
-    def gc_nonterminal_heartbeat_archive_eligibility(data, path, now)
+    def gc_heartbeat_archive_eligibility(data, path, now)
       holder = gc_heartbeat_holder_from_path(path)
       liveness = if holder && data["agent_id"] == holder
                    heartbeat_liveness(data, now)
                  else
                    "unknown"
                  end
+      if liveness != "unknown" && HEARTBEAT_TERMINAL_STATUSES.include?(data["status"])
+        return ["terminal_heartbeat", gc_record_time(data, nil, path)]
+      end
+
       case liveness
       when "dead"
         ["dead_heartbeat", gc_heartbeat_dead_at(data, path)]
