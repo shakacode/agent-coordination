@@ -988,6 +988,57 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     assert_includes stderr.string, "cannot establish liveness for claim holder \"non-object-holder\""
   end
 
+  def test_gc_fails_closed_on_nonpositive_holder_heartbeat_ttls_and_keeps_a_valid_control
+    now = Time.utc(2026, 7, 12, 12, 0, 0)
+    zero_path = write_abandoned_claim(
+      "zero-ttl-heartbeat", now - (3 * 86_400), "agent_id" => "zero-ttl-holder"
+    )
+    negative_path = write_abandoned_claim(
+      "negative-ttl-heartbeat", now - (3 * 86_400), "agent_id" => "negative-ttl-holder"
+    )
+    valid_path = write_abandoned_claim(
+      "positive-ttl-control", now - (3 * 86_400), "agent_id" => "positive-ttl-holder"
+    )
+    heartbeat_time = now - (3 * 86_400)
+    {
+      "zero-ttl-holder" => heartbeat_time,
+      "negative-ttl-holder" => heartbeat_time - 1,
+      "positive-ttl-holder" => heartbeat_time + 3600
+    }.each do |agent_id, expires_at|
+      write_state_record(
+        "heartbeats/#{agent_id}.json",
+        "schema_version" => 1, "agent_id" => agent_id, "status" => "in_progress",
+        "updated_at" => heartbeat_time.iso8601, "expires_at" => expires_at.iso8601
+      )
+    end
+    stderr = StringIO.new
+    store = AgentCoord::LocalStore.new(@state_root)
+    runner = AgentCoord::Runner.new([], stdout: StringIO.new, stderr: stderr, clock: FixedClock.new(now))
+
+    candidates = runner.send(:gc_reap_candidates, store, now, 1, %w[claims heartbeats events batches])
+    candidate_paths = candidates.map { |candidate| candidate.dig(:action, "source_path") }
+    assert_equal [valid_path], candidate_paths
+
+    FileUtils.rm_f(File.join(@state_root, "heartbeats", "zero-ttl-holder.json"))
+    apply_entry = store.read_json(zero_path)
+    apply_candidate = {
+      entry: apply_entry,
+      action: { "action" => "reap", "source_path" => zero_path, "reason" => "expired_lease" }
+    }
+    write_state_record(
+      "heartbeats/zero-ttl-holder.json",
+      "schema_version" => 1, "agent_id" => "zero-ttl-holder", "status" => "in_progress",
+      "updated_at" => heartbeat_time.iso8601, "expires_at" => heartbeat_time.iso8601
+    )
+    runner.send(:execute_gc_candidates, store, [apply_candidate], now, 30)
+
+    assert_equal "active", store.read_json(zero_path).data.fetch("status")
+    assert_equal "holder_liveness_unknown_at_apply", apply_candidate.dig(:action, "skip_reason")
+    assert_equal "active", store.read_json(negative_path).data.fetch("status")
+    assert_includes stderr.string, "cannot establish liveness for claim holder \"zero-ttl-holder\""
+    assert_includes stderr.string, "cannot establish liveness for claim holder \"negative-ttl-holder\""
+  end
+
   def test_gc_apply_fails_closed_on_unreadable_and_unknown_holder_heartbeats
     now = Time.utc(2026, 7, 12, 12, 0, 0)
     unreadable_path = write_abandoned_claim(
@@ -1245,6 +1296,44 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     assert_equal original_claim, File.binread(File.join(@state_root, claim_path))
     assert_equal original_heartbeat, File.binread(File.join(@state_root, heartbeat_path))
     assert_empty event_records(batch_id)
+  end
+
+  def test_lifecycle_writes_tolerate_generic_invalid_batch_ids_preserved_from_existing_records
+    batch_id = "../bad"
+    claim_path = AgentCoord.claim_path("shakacode/example", "invalid-release")
+    heartbeat_path = AgentCoord.heartbeat_path("worker-a")
+    write_state_record(
+      claim_path,
+      "schema_version" => 1, "repo" => "shakacode/example", "target" => "invalid-release",
+      "agent_id" => "worker-a", "batch_id" => batch_id, "status" => "active",
+      "claimed_at" => "2026-07-12T10:00:00Z", "updated_at" => "2026-07-12T10:00:00Z",
+      "expires_at" => "2026-07-12T14:00:00Z"
+    )
+    write_state_record(
+      heartbeat_path,
+      "schema_version" => 1, "agent_id" => "worker-a", "repo" => "shakacode/example",
+      "target" => "invalid-release", "batch_id" => batch_id, "status" => "in_progress",
+      "phase" => "implementing", "updated_at" => "2026-07-12T10:00:00Z",
+      "expires_at" => "2026-07-12T14:00:00Z"
+    )
+
+    release = run_agent_coord(
+      "release", "--agent-id", "worker-a", "--repo", "shakacode/example", "--target", "invalid-release"
+    )
+    heartbeat = run_agent_coord(
+      "heartbeat", "--agent-id", "worker-a", "--repo", "shakacode/example", "--target", "invalid-release",
+      "--status", "in_progress", "--phase", "validating"
+    )
+
+    assert_equal 0, release.status.exitstatus, release.stderr
+    assert_includes release.stderr, "warning: claim.released event not recorded"
+    assert_includes release.stderr, "invalid batch-id"
+    assert_equal 0, heartbeat.status.exitstatus, heartbeat.stderr
+    assert_includes heartbeat.stderr, "warning: phase.changed event not recorded"
+    assert_includes heartbeat.stderr, "invalid batch-id"
+    assert_equal "released", JSON.parse(File.read(File.join(@state_root, claim_path))).fetch("status")
+    assert_equal "validating", JSON.parse(File.read(File.join(@state_root, heartbeat_path))).fetch("phase")
+    assert_empty Dir.glob(File.join(@state_root, "events", "**", "*.json"))
   end
 
   def test_preexisting_reserved_name_batch_remains_readable_but_cannot_be_created_again
