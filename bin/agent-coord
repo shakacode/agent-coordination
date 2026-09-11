@@ -2175,6 +2175,7 @@ module AgentCoord
             "reason" => reason,
             "eligible_at" => timestamp(eligible_at)
           }
+          archive_reason = reason
           existing = store.read_json(action.fetch("archive_path"))
           if existing && !gc_same_archived_record?(existing.data, { "source_path" => entry.path, "data" => entry.data })
             next if gc_archive_delete_after(existing) > now
@@ -2182,7 +2183,7 @@ module AgentCoord
             action["action"] = "replace_archive"
             action["reason"] = "expired_archive_replacement"
           end
-          { entry: entry, existing_archive: existing, action: action }
+          { entry: entry, existing_archive: existing, archive_reason:, action: action }
         end
       end
       candidates.sort_by { |candidate| candidate.dig(:action, "source_path") }
@@ -2989,7 +2990,7 @@ module AgentCoord
       entry = candidate.fetch(:entry)
       action = candidate.fetch(:action)
       archive_path = action.fetch("archive_path")
-      envelope = gc_archive_envelope(entry, action, now, archive_days)
+      envelope = gc_archive_envelope(entry, action, now, archive_days, reason: candidate.fetch(:archive_reason))
       begin
         store.write_json(archive_path, envelope, message: "Archive #{entry.path}", create: true)
       rescue Conflict
@@ -3009,19 +3010,19 @@ module AgentCoord
       action = candidate.fetch(:action)
       archive_path = action.fetch("archive_path")
       store.delete_json(archive_path, message: "Replace expired archive #{archive_path}", sha: existing.sha)
-      envelope = gc_archive_envelope(entry, action, now, archive_days)
+      envelope = gc_archive_envelope(entry, action, now, archive_days, reason: candidate.fetch(:archive_reason))
       store.write_json(archive_path, envelope, message: "Replace archive #{entry.path}", create: true)
       store.delete_json(entry.path, message: "Archive #{entry.path}", sha: entry.sha)
     rescue Conflict => e
       raise OperationalError, "gc archive replacement changed at #{archive_path}; #{e.message}"
     end
 
-    def gc_archive_envelope(entry, action, now, archive_days)
+    def gc_archive_envelope(entry, action, now, archive_days, reason: action.fetch("reason"))
       {
         "schema_version" => SCHEMA_VERSION,
         "record_family" => "archived_record",
         "source_path" => entry.path,
-        "reason" => action.fetch("reason"),
+        "reason" => reason,
         "synthetic" => entry.data["synthetic"] == true,
         "archived_at" => timestamp(now),
         "delete_after" => timestamp(now + (archive_days * 86_400)),
@@ -3034,7 +3035,10 @@ module AgentCoord
         action = candidate.fetch(:action)
         envelope = case action.fetch("action")
                    when "archive", "replace_archive"
-                     gc_archive_envelope(candidate.fetch(:entry), action, now, archive_days)
+                     gc_archive_envelope(
+                       candidate.fetch(:entry), action, now, archive_days,
+                       reason: candidate.fetch(:archive_reason)
+                     )
                    when "compact"
                      entries = candidate.fetch(:entries)
                      gc_compaction_envelope(entries, gc_compacted_entries(entries), action, now, archive_days)
@@ -3113,11 +3117,20 @@ module AgentCoord
         # Retention may retire an old malformed heartbeat without claiming its
         # holder is dead. Claim reaping independently treats the same record as
         # unknown and therefore fails closed.
-        ["aged_heartbeat", gc_record_time(data, nil, path)]
+        retention_at = gc_heartbeat_retention_time(data)
+        ["aged_heartbeat", retention_at] if retention_at
       end
-    rescue OperationalError
-      # Unknown liveness with no trustworthy age remains hot. The reaper emits
-      # the holder-level warning and continues other records fail closed.
+    end
+
+    def gc_heartbeat_retention_time(data)
+      %w[updated_at expires_at at].each do |field|
+        value = data[field]
+        next unless value
+
+        return Time.iso8601(value).utc
+      rescue ArgumentError, TypeError
+        next
+      end
       nil
     end
 

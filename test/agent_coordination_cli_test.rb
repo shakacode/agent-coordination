@@ -1051,6 +1051,13 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
       "schema_version" => 1, "agent_id" => "different-payload-holder", "status" => "in_progress",
       "updated_at" => heartbeat_time.iso8601, "expires_at" => heartbeat_time.iso8601
     )
+    write_state_record(
+      "archive/#{heartbeat_path}",
+      "schema_version" => 1, "record_family" => "archived_record", "source_path" => heartbeat_path,
+      "reason" => "dead_heartbeat", "synthetic" => false,
+      "archived_at" => (now - (40 * 86_400)).iso8601, "delete_after" => (now - 1).iso8601,
+      "data" => { "schema_version" => 1, "agent_id" => "older-holder", "status" => "in_progress" }
+    )
     stdout = StringIO.new
     stderr = StringIO.new
     runner = AgentCoord::Runner.new([], stdout: stdout, stderr: stderr, clock: FixedClock.new(now))
@@ -1059,11 +1066,14 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
 
     actions = JSON.parse(stdout.string).fetch("actions")
     heartbeat_action = actions.find { |action| action["source_path"] == heartbeat_path }
-    assert_equal "archive", heartbeat_action.fetch("action")
-    assert_equal "aged_heartbeat", heartbeat_action.fetch("reason")
+    assert_equal "replace_archive", heartbeat_action.fetch("action")
+    assert_equal "expired_archive_replacement", heartbeat_action.fetch("reason")
     refute(actions.any? { |action| action["source_path"] == claim_path })
     assert_equal "active", JSON.parse(File.read(File.join(@state_root, claim_path))).fetch("status")
     assert_path_exists File.join(@state_root, "archive", heartbeat_path)
+    assert_equal "aged_heartbeat", JSON.parse(
+      File.read(File.join(@state_root, "archive", heartbeat_path))
+    ).fetch("reason")
     assert_empty Dir.glob(File.join(@state_root, "events", "**", "claim-expired-*.json"))
     assert_includes stderr.string, "cannot establish liveness for claim holder \"aged-zero-ttl-holder\""
 
@@ -1214,6 +1224,26 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     refute(actions.any? { |action| action["source_path"] == "heartbeats/unknown-shared.json" })
     refute(actions.any? { |action| action["source_path"]&.include?("unknown-shared-") })
     assert_equal 1, stderr.string.scan("cannot establish liveness for claim holder \"unknown-shared\"").length
+  end
+
+  def test_gc_uses_a_valid_expiry_as_unknown_heartbeat_retention_fallback
+    now = Time.utc(2026, 7, 12, 12, 0, 0)
+    expires_at = now - (8 * 86_400)
+    heartbeat_path = "heartbeats/retention-fallback.json"
+    write_state_record(
+      heartbeat_path,
+      "schema_version" => 1, "agent_id" => "retention-fallback", "status" => "in_progress",
+      "updated_at" => "not-a-time", "expires_at" => expires_at.iso8601
+    )
+    stdout = StringIO.new
+    runner = AgentCoord::Runner.new([], stdout: stdout, stderr: StringIO.new, clock: FixedClock.new(now))
+
+    assert_equal 0, runner.send(:gc, state_root: @state_root, dry_run: true, execute: false, json: true)
+
+    action = JSON.parse(stdout.string).fetch("actions").find { |row| row["source_path"] == heartbeat_path }
+    assert_equal "archive", action.fetch("action")
+    assert_equal "aged_heartbeat", action.fetch("reason")
+    assert_equal expires_at.iso8601, action.fetch("eligible_at")
   end
 
   def test_gc_reconciles_a_transient_expired_event_failure_exactly_once
@@ -10870,6 +10900,32 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     )
 
     assert_equal 0, invalid_heartbeat_claim.status.exitstatus, invalid_heartbeat_claim.stderr
+  end
+
+  def test_mismatched_heartbeat_identity_uses_claim_expiry_as_takeover_fallback
+    now = Time.now.utc
+    write_claim(
+      "3971-mismatched-live-fallback",
+      agent_id: "worker-mismatched",
+      updated_at: now - (30 * 60),
+      expires_at: now + (60 * 60)
+    )
+    write_state_record(
+      "heartbeats/worker-mismatched.json",
+      "schema_version" => 1, "agent_id" => "different-holder", "status" => "in_progress",
+      "updated_at" => (now - (70 * 60)).iso8601,
+      "expires_at" => (now - (55 * 60)).iso8601
+    )
+
+    competing_claim = run_agent_coord(
+      "claim", "--agent-id", "worker-b", "--repo", "shakacode/react_on_rails",
+      "--target", "3971-mismatched-live-fallback", "--batch-id", "batch-1",
+      "--branch", "jg-codex/b", "--ttl", "3600"
+    )
+
+    assert_equal 3, competing_claim.status.exitstatus
+    assert_includes competing_claim.stderr, "heartbeat unknown"
+    assert_includes competing_claim.stderr, "worker-mismatched"
   end
 
   def test_status_renders_batches_and_claims
