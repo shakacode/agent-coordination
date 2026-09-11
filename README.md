@@ -891,7 +891,12 @@ Scoped status is the preferred batch-workflow path:
     folds them and reports one.
 - `status --batch-id ID` reads only `batches/<id>.json`, `events/<id>/`,
   lane-owner heartbeats, and dependency batch files plus referenced lane-owner
-  heartbeats needed to compute `blocked_on`.
+  heartbeats needed to compute `blocked_on`. A lane with an unmet declared
+  dependency remains visible with `liveness: no-heartbeat` and its `blocked_on`
+  refs, but the missing heartbeat does not degrade the result: a lane held by
+  dependency has not necessarily launched. A missing heartbeat still degrades
+  an owner that has any unblocked lane. Unreadable or mismatched heartbeats and
+  malformed or unresolved dependency refs also remain degraded.
 
 A heartbeat record that is valid JSON but is not an object is unreadable state,
 not a heartbeat. All three status scopes degrade consistently for that record:
@@ -900,13 +905,17 @@ broad audit omits the invalid heartbeat row, preserves healthy rows, and reports
 `heartbeat records unreadable`. The command still exits 0 because the degraded
 note makes the incomplete section explicit; this does not make the record valid.
 
-Scoped JSON payloads include `scope` and `degraded` fields. A scoped command can
-show `degraded` notes for intentionally omitted unrelated state, such as claims
-not checked in batch scope; that is different from exit 2. Exit 2 means the
-coordination backend result is `UNKNOWN` for that command. Text status renders the
-same degraded notes as a footer when rows are present. In large backends, prefer
-target or batch scoped status for React on Rails batch lanes and treat a timed
-out full coordination read as degraded/`UNKNOWN` rather than guessing.
+Scoped JSON payloads include `scope`, `degraded`, and `omitted_sections` fields.
+`omitted_sections` names state that the selected scope intentionally did not
+inspect: batch scope omits claims, while target scope omits batches and events.
+Those notes remain in `section_notes` for compatibility and in the matching text
+sections, but they do not make the result degraded. `degraded` is reserved for
+evidence that was expected but missing, unreadable, mismatched, malformed, or
+unresolved. Exit 2 means the coordination backend result is `UNKNOWN` for that
+command. Text status renders real degradation as a footer when rows are present.
+In large backends, prefer target or batch scoped status for React on Rails batch
+lanes and treat a timed-out full coordination read as degraded/`UNKNOWN` rather
+than guessing.
 Unscoped `status` excludes `archive/` by default. Pass `--include-archived` for
 an explicit archive inventory; scoped status remains hot-state-only so target
 and batch dependency checks never turn into an all-archive scan.

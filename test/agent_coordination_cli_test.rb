@@ -9148,7 +9148,8 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     assert_equal "shakacode/react_on_rails", payload.fetch("scope").fetch("repo")
     assert_equal "4150", payload.fetch("scope").fetch("target")
     unchecked = "not checked in target scope; run `agent-coord log` for this target's history"
-    assert_equal [unchecked], payload.fetch("degraded")
+    assert_empty payload.fetch("degraded")
+    assert_equal({ "batches" => unchecked, "events" => unchecked }, payload.fetch("omitted_sections"))
     assert_equal unchecked, payload.fetch("section_notes").fetch("batches")
     assert_equal unchecked, payload.fetch("section_notes").fetch("events")
     assert_equal "jg-codex/4150-worker", payload.fetch("claims").first.fetch("branch")
@@ -12814,6 +12815,140 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     assert_path_exists File.join(@state_root, "batches", "batch-b.json")
   end
 
+  # A scoped query deliberately skips claims. That omission must stay visible
+  # without making an otherwise complete batch read look unreliable.
+  def test_status_batch_scope_separates_omitted_claims_from_degradation
+    now = Time.now.utc
+    write_batch(
+      "batch-b",
+      lanes: [{ "name" => "docs", "owner" => "worker-docs", "targets" => ["3972"] }]
+    )
+    write_heartbeat("worker-docs", updated_at: now - 60, expires_at: now + 600)
+
+    status = run_agent_coord("status", "--batch-id", "batch-b", "--json")
+
+    assert_equal 0, status.status.exitstatus, status.stderr
+    payload = JSON.parse(status.stdout)
+    assert_empty payload.fetch("degraded")
+    assert_equal({ "claims" => "not checked in batch scope" }, payload.fetch("omitted_sections"))
+    assert_equal "not checked in batch scope", payload.fetch("section_notes").fetch("claims")
+  end
+
+  # An unmet dependency is positive evidence that the downstream lane is held.
+  # Its owner may therefore have no heartbeat without making status unreliable.
+  def test_status_batch_scope_does_not_degrade_a_dependency_held_lane_without_a_heartbeat
+    now = Time.now.utc
+    write_batch(
+      "batch-a",
+      lanes: [{ "name" => "backend", "owner" => "worker-backend", "targets" => ["3971"] }]
+    )
+    write_batch(
+      "batch-b",
+      lanes: [
+        {
+          "name" => "docs",
+          "owner" => "worker-docs",
+          "targets" => ["3972"],
+          "depends_on" => ["batch-a:backend"]
+        }
+      ]
+    )
+    write_heartbeat(
+      "worker-backend", status: "in_progress", updated_at: now - 60, expires_at: now + 600
+    )
+
+    status = run_agent_coord("status", "--batch-id", "batch-b", "--json")
+
+    assert_equal 0, status.status.exitstatus, status.stderr
+    payload = JSON.parse(status.stdout)
+    lane = payload.fetch("batches").first.fetch("lanes").first
+    assert_equal "no-heartbeat", lane.fetch("liveness")
+    assert_equal ["batch-a:backend"], lane.fetch("blocked_on")
+    assert_empty payload.fetch("degraded")
+    refute payload.fetch("section_notes").key?("heartbeats")
+  end
+
+  def test_status_batch_scope_still_degrades_a_shared_owner_with_an_unblocked_lane
+    now = Time.now.utc
+    write_batch(
+      "batch-a",
+      lanes: [{ "name" => "backend", "owner" => "worker-backend", "targets" => ["3971"] }]
+    )
+    write_batch(
+      "batch-b",
+      lanes: [
+        { "name" => "active", "owner" => "worker-shared", "targets" => ["3972"] },
+        {
+          "name" => "held",
+          "owner" => "worker-shared",
+          "targets" => ["3973"],
+          "depends_on" => ["batch-a:backend"]
+        }
+      ]
+    )
+    write_heartbeat(
+      "worker-backend", status: "in_progress", updated_at: now - 60, expires_at: now + 600
+    )
+
+    status = run_agent_coord("status", "--batch-id", "batch-b", "--json")
+
+    assert_equal 0, status.status.exitstatus, status.stderr
+    payload = JSON.parse(status.stdout)
+    assert_includes payload.fetch("degraded"), "lane-owner heartbeats not found: worker-shared"
+    lanes = payload.fetch("batches").first.fetch("lanes")
+    assert_empty lanes.find { |lane| lane.fetch("name") == "active" }.fetch("blocked_on")
+    assert_equal ["batch-a:backend"], lanes.find { |lane| lane.fetch("name") == "held" }.fetch("blocked_on")
+  end
+
+  def test_status_batch_scope_keeps_a_missing_held_lane_owner_degraded
+    now = Time.now.utc
+    write_batch(
+      "batch-a",
+      lanes: [{ "name" => "backend", "owner" => "worker-backend", "targets" => ["3971"] }]
+    )
+    write_batch(
+      "batch-b",
+      lanes: [{ "name" => "docs", "targets" => ["3972"], "depends_on" => ["batch-a:backend"] }]
+    )
+    write_heartbeat(
+      "worker-backend", status: "in_progress", updated_at: now - 60, expires_at: now + 600
+    )
+
+    status = run_agent_coord("status", "--batch-id", "batch-b", "--json")
+
+    assert_equal 0, status.status.exitstatus, status.stderr
+    payload = JSON.parse(status.stdout)
+    assert_includes payload.fetch("degraded"), "lane-owner heartbeats not found: UNKNOWN"
+    assert_equal ["batch-a:backend"], payload.fetch("batches").first.fetch("lanes").first.fetch("blocked_on")
+  end
+
+  def test_status_batch_scope_keeps_unreadable_held_lane_heartbeat_degraded
+    now = Time.now.utc
+    write_batch(
+      "batch-a",
+      lanes: [{ "name" => "backend", "owner" => "worker-backend", "targets" => ["3971"],
+                "terminal" => "abandoned" }]
+    )
+    write_batch(
+      "batch-b",
+      lanes: [{ "name" => "docs", "owner" => "worker-docs", "targets" => ["3972"],
+                "depends_on" => ["batch-a:backend"] }]
+    )
+    write_heartbeat(
+      "worker-backend", status: "abandoned", updated_at: now - 60, expires_at: now + 600
+    )
+    write_state_file("heartbeats/worker-docs.json", "[]")
+
+    status = run_agent_coord("status", "--batch-id", "batch-b", "--json")
+
+    assert_equal 0, status.status.exitstatus, status.stderr
+    payload = JSON.parse(status.stdout)
+    lane = payload.fetch("batches").first.fetch("lanes").first
+    assert_equal ["batch-a:backend"], lane.fetch("blocked_on")
+    assert_equal "unreadable", lane.fetch("liveness")
+    assert_includes payload.fetch("degraded"), "lane-owner heartbeats unreadable: worker-docs"
+  end
+
   def test_status_batch_scope_reports_missing_lane_owner_heartbeats
     write_batch(
       "batch-b",
@@ -12959,8 +13094,8 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
 
     assert_equal 0, status.status.exitstatus, status.stderr
     assert_includes status.stdout, "- worker-docs done live - updated"
-    assert_includes status.stdout,
-                    "degraded\n- not checked in batch scope\n- lane-owner heartbeats not found: worker-qa"
+    assert_includes status.stdout, "claims\n- not checked in batch scope"
+    assert_includes status.stdout, "degraded\n- lane-owner heartbeats not found: worker-qa"
   end
 
   def test_status_batch_scope_reads_only_batch_dependencies_and_lane_heartbeats
