@@ -10491,6 +10491,85 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     assert_equal "https://coord.example.test/batches/batch-b/docs", lane.fetch("dashboard_url")
   end
 
+  # A coordinator choosing editable `auto` must retain that authority in the
+  # stored batch record and its consumer-facing status projection; otherwise a
+  # later merge gate cannot distinguish it from an undeclared authority.
+  def test_register_batch_persists_auto_merge_authority_in_status
+    manifest_path = File.join(@state_root, "batch-merge-authority.json")
+    File.write(
+      manifest_path,
+      JSON.pretty_generate(
+        "batch_id" => "batch-merge-authority",
+        "merge_authority" => "auto",
+        "lanes" => [{ "name" => "code", "owner" => "worker-code", "targets" => ["86"] }]
+      )
+    )
+
+    result = run_agent_coord("register-batch", "--file", manifest_path)
+
+    assert_equal 0, result.status.exitstatus, result.stderr
+    stored = JSON.parse(File.read(File.join(@state_root, "batches", "batch-merge-authority.json")))
+    assert_equal "auto", stored.fetch("merge_authority")
+    status = run_agent_coord("status", "--batch-id", "batch-merge-authority", "--json")
+    assert_equal 0, status.status.exitstatus, status.stderr
+    assert_equal "auto", JSON.parse(status.stdout).fetch("batches").first.fetch("merge_authority")
+  end
+
+  def test_register_batch_normalizes_all_accepted_merge_authorities
+    {
+      "none" => "none",
+      "ask" => "ask",
+      "auto" => "auto",
+      "auto_merge_when_gates_pass" => "auto"
+    }.each do |declared, expected|
+      batch_id = "batch-merge-authority-#{declared}"
+      manifest_path = File.join(@state_root, "#{batch_id}.json")
+      File.write(
+        manifest_path,
+        JSON.pretty_generate(
+          "batch_id" => batch_id,
+          "merge_authority" => declared,
+          "lanes" => [{ "name" => "code", "owner" => "worker-code", "targets" => ["86"] }]
+        )
+      )
+
+      result = run_agent_coord("register-batch", "--file", manifest_path)
+
+      assert_equal 0, result.status.exitstatus, result.stderr
+      stored = JSON.parse(File.read(File.join(@state_root, "batches", "#{batch_id}.json")))
+      assert_equal expected, stored.fetch("merge_authority")
+      status = run_agent_coord("status", "--batch-id", batch_id, "--json")
+      assert_equal expected, JSON.parse(status.stdout).fetch("batches").first.fetch("merge_authority")
+    end
+  end
+
+  def test_register_batch_omits_undeclared_merge_authority_and_rejects_invalid_values
+    manifest_path = File.join(@state_root, "batch-merge-authority.json")
+    manifest = {
+      "batch_id" => "batch-merge-authority",
+      "lanes" => [{ "name" => "code", "owner" => "worker-code", "targets" => ["86"] }]
+    }
+    File.write(manifest_path, JSON.pretty_generate(manifest))
+
+    result = run_agent_coord("register-batch", "--file", manifest_path)
+
+    assert_equal 0, result.status.exitstatus, result.stderr
+    stored = JSON.parse(File.read(File.join(@state_root, "batches", "batch-merge-authority.json")))
+    refute stored.key?("merge_authority")
+    status = run_agent_coord("status", "--batch-id", "batch-merge-authority", "--json")
+    refute JSON.parse(status.stdout).fetch("batches").first.key?("merge_authority")
+
+    [nil, "merge-now", true].each do |invalid_authority|
+      invalid = manifest.merge("merge_authority" => invalid_authority)
+      File.write(manifest_path, JSON.pretty_generate(invalid))
+
+      invalid_result = run_agent_coord("register-batch", "--file", manifest_path)
+
+      assert_equal 1, invalid_result.status.exitstatus
+      assert_includes invalid_result.stderr, "batch merge_authority must be one of: none, ask, auto"
+    end
+  end
+
   def test_register_batch_persists_and_renews_synthetic_metadata_for_one_day_gc
     now = Time.utc(2026, 7, 12, 12, 0, 0)
     manifest_path = File.join(@state_root, "synthetic-batch.json")
