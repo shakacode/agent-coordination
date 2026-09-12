@@ -18,6 +18,7 @@ module AgentCoord
         MODELS = %w[
           gpt-5.6-sol gpt-5.6-terra gpt-5.6-luna
           claude-opus-4-6 claude-opus-4-7 claude-opus-4-8
+          grok-4.6 cursor-grok-4.6
         ].freeze
         EFFORTS = %w[low medium high xhigh max ultra].freeze
         PRICING_PROFILES = %w[standard].freeze
@@ -39,7 +40,16 @@ module AgentCoord
 
         def parse_line(line, ordinal, source_ref)
           record = JSON.parse(line)
-          @host_family == "codex" ? parse_codex(record, ordinal, source_ref) : parse_claude(record, ordinal, source_ref)
+          case @host_family
+          when "codex"
+            parse_codex(record, ordinal, source_ref)
+          when "claude"
+            parse_claude(record, ordinal, source_ref)
+          when "cursor"
+            parse_cursor(record, ordinal, source_ref)
+          else
+            @errors << { "record_ordinal" => ordinal, "reason" => "unsupported_host_family" }
+          end
         rescue JSON::ParserError, EncodingError
           @errors << { "record_ordinal" => ordinal, "reason" => "invalid_json" }
         end
@@ -81,6 +91,33 @@ module AgentCoord
               reasoning_keys: %w[reasoning_output_tokens reasoning_output]
             )
           end
+        end
+
+        def parse_cursor(record, ordinal, source_ref)
+          return unless record.is_a?(Hash)
+
+          role = record["role"]
+          return unless %w[user assistant].include?(role)
+
+          message = record["message"]
+          return unless message.is_a?(Hash)
+
+          reference = session_ref(source_ref)
+          model_value = present_value(record, "model")
+          model_value = present_value(message, "model") if model_value.equal?(MISSING)
+          usage = message["usage"]
+          usage = record["usage"] unless usage.is_a?(Hash)
+
+          session = fetch_session(reference)
+          merge_known!(session, "model" => model(model_value))
+          return unless usage.is_a?(Hash)
+
+          session.fetch("usage") << usage_row(
+            usage, ordinal, session,
+            cache_read_keys: %w[cache_read_input_tokens cached_input_tokens],
+            cache_write_keys: %w[cache_creation_input_tokens cache_write_input_tokens],
+            reasoning_keys: %w[reasoning_output_tokens]
+          )
         end
 
         def parse_claude(record, ordinal, _source_ref)
