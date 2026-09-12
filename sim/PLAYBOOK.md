@@ -2,7 +2,10 @@
 
 Prereqs: HTTP backend env set (`AGENT_COORD_API_URL` plus
 `AGENT_COORD_API_TOKEN`), `gh` authed, `codex` and/or `claude` CLIs installed,
-sim repos seeded (`sim/bin/seed <repo> --reset`).
+sim repos seeded (`sim/bin/seed <repo> --reset`). HostAdapters can parse Cursor
+`role`/`message` JSONL when given `host_family=cursor`; the harvester still walks
+only Codex and Claude roots. `sim/bin/llm-worker cursor` is not a Claude CLI
+shim and exits until a measured `cursor-agent` recipe exists.
 
 ## Scenario A -- split batch, one host per repo
 

@@ -43,6 +43,18 @@ class LlmWorkerTest < Minitest::Test
     end
   end
 
+  def test_cursor_host_does_not_fake_claude_or_codex
+    with_fake_tools do |_env, prompt_path|
+      _stdout, stderr, status = Open3.capture3(
+        LLM_WORKER, "cursor", "shakacode/agent-coord-sim-alpha", "7", "batch-42"
+      )
+      assert_equal 1, status.exitstatus, stderr
+      assert_includes stderr, "Cursor simulation is not implemented"
+      refute_includes stderr, "claude -p"
+      refute_path_exists prompt_path
+    end
+  end
+
   def test_non_ascii_manifest_title_is_read_under_ascii_and_utf8_locales
     issue_title = "positive_sum must exclude negative numbers"
     extra_issues = [{ "key" => "task_cafe", "title" => "land the fix — café" }]

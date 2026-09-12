@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# Usage: sim/bin/llm-worker (codex|claude) <owner/repo> <issue-number> <batch-id>
+# Usage: sim/bin/llm-worker (codex|claude|cursor) <owner/repo> <issue-number> <batch-id>
 set -euo pipefail
 
-HOST="${1:?usage: llm-worker (codex|claude) <owner/repo> <issue> <batch-id>}"
+HOST="${1:?usage: llm-worker (codex|claude|cursor) <owner/repo> <issue> <batch-id>}"
 REPO="${2:?}"
 ISSUE="${3:?}"
 BATCH="${4:?}"
@@ -12,9 +12,14 @@ CODEX_BIN="${CODEX_BIN:-codex}"
 CLAUDE_BIN="${CLAUDE_BIN:-claude}"
 
 case "$HOST" in
+  cursor)
+    echo "llm-worker: Cursor simulation is not implemented; do not substitute claude or codex" >&2
+    echo "Use cursor-agent once a measured worker recipe exists." >&2
+    exit 1
+    ;;
   codex | claude) ;;
   *)
-    echo "host must be codex or claude"
+    echo "host must be codex, claude, or cursor"
     exit 1
     ;;
 esac
