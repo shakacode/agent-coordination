@@ -6135,22 +6135,11 @@ module AgentCoord
 
         log_identity_match?(log_claim_identity(candidate), wanted_identity, lane_exact: true)
       end
-      # A listing can return one lease more than once, including two reads around
-      # a renewal, so group on the immutable identity the record names and retain
-      # its newest snapshot. Repo and target stay exact: case variants are separate
-      # literal keys on case-sensitive stores, and collapsing them would conceal
-      # double custody. A different holder also stays visible because two reads
-      # around a takeover are genuinely ambiguous. Lanes remain exact because each
-      # lane holds its own lease.
-      matches.group_by { |candidate| claim_lease_key(candidate) }
-             .values
-             .map { |variants| variants.max_by { |candidate| log_at_key(candidate.data["updated_at"]) } }
-             .sort_by { |candidate| log_at_key(candidate.data["updated_at"]) }
-             .map do |candidate|
-               { "record" => log_claim_record(candidate.data, now_utc, log_claim_target(candidate)),
-                 "target" => log_claim_target(candidate),
-                 "identity" => log_claim_identity(candidate) }
-             end
+      log_unique_claim_entries(matches).map do |candidate|
+        { "record" => log_claim_record(candidate.data, now_utc, log_claim_target(candidate)),
+          "target" => log_claim_target(candidate),
+          "identity" => log_claim_identity(candidate) }
+      end
     end
 
     def log_claim_identity(entry)
@@ -6185,6 +6174,20 @@ module AgentCoord
       return entry.path if data["target"].to_s.empty? || data["agent_id"].to_s.empty?
 
       [log_claim_repo(entry), data["target"], data["agent_id"]]
+    end
+
+    # A listing can return one lease more than once, including two reads around
+    # a renewal, so group on the immutable identity the record names and retain
+    # its newest snapshot. Repo and target stay exact: case variants are separate
+    # literal keys on case-sensitive stores, and collapsing them would conceal
+    # double custody. A different holder also stays visible because two reads
+    # around a takeover are genuinely ambiguous. Lanes remain exact because each
+    # lane holds its own lease.
+    def log_unique_claim_entries(entries)
+      entries.group_by { |candidate| claim_lease_key(candidate) }
+             .values
+             .map { |variants| variants.max_by { |candidate| log_at_key(candidate.data["updated_at"]) } }
+             .sort_by { |candidate| log_at_key(candidate.data["updated_at"]) }
     end
 
     # Built from claim fields directly rather than through log_row, whose "phase"
@@ -6229,7 +6232,7 @@ module AgentCoord
     # use the event-shaped TSV contract so existing consumers remain readable,
     # while their type and deterministic id make the distinction explicit.
     def log_claim_snapshot_rows(entries, include_synthetic: false)
-      entries.filter_map do |entry|
+      log_unique_claim_entries(entries).filter_map do |entry|
         data = entry.data
         next if data["synthetic"] && !include_synthetic
 
@@ -6252,7 +6255,7 @@ module AgentCoord
         log_row(
           "at" => data["updated_at"], "machine_id" => data["machine_id"],
           "host" => data["host"], "repo" => snapshot_fields["repo"],
-          "target" => target, "type" => "claim.snapshot", "phase" => data["phase"] || data["status"],
+          "target" => target, "type" => "claim.snapshot", "phase" => data["phase"],
           "agent_id" => data["agent_id"], "batch_id" => data["batch_id"],
           "message" => detail, "event_id" => "claim-snapshot-#{digest}",
           "synthetic" => data["synthetic"], "synthetic_kind" => data["synthetic_kind"]

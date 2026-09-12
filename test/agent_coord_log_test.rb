@@ -1212,6 +1212,7 @@ class AgentCoordLogSyncTest < AgentCoordLogTestCase
     assert_includes lines.first, "claim.snapshot"
     assert_includes lines.first, "shakacode/example#issue:404"
     assert_includes lines.first, "expires_at=2026-08-03T06:00:00Z"
+    assert_equal "?", lines.first.split("\t").fetch(5), "status must not be mislabeled as phase"
   end
 
   def test_log_sync_updates_a_changed_claim_snapshot_without_duplication
@@ -1225,6 +1226,77 @@ class AgentCoordLogSyncTest < AgentCoordLogTestCase
     lines = File.readlines(File.join(@state_root, "log.tsv"), encoding: "UTF-8")
     assert_equal 2, lines.length
     assert_equal(1, lines.count { |line| line.include?("status=done") })
+  end
+
+  def test_log_sync_keeps_only_the_newest_copy_of_a_lease_returned_twice
+    older = AgentCoord::StoredJson.new(
+      path: "claims/shakacode/example/404.json",
+      data: { "repo" => "shakacode/example", "target" => "404", "agent_id" => "worker",
+              "updated_at" => "2026-08-03T02:00:00Z" }
+    )
+    newer = AgentCoord::StoredJson.new(
+      path: older.path,
+      data: older.data.merge("updated_at" => "2026-08-03T03:00:00Z")
+    )
+    runner = AgentCoord::Runner.new([])
+
+    rows = runner.send(:log_claim_snapshot_rows, [older, newer, newer])
+
+    assert_equal 1, rows.length
+    assert_equal "2026-08-03T03:00:00Z", rows.first.fetch("at")
+  end
+
+  def test_log_sync_preserves_literal_alias_and_case_claim_targets
+    write_claim("shakacode/example", "Issue:9832", "status" => "active", "agent_id" => "issue-worker",
+                                                   "updated_at" => "2026-08-03T02:00:00Z")
+    write_claim("shakacode/example", "pr:9832", "status" => "active", "agent_id" => "pr-worker",
+                                                "updated_at" => "2026-08-03T03:00:00Z")
+
+    assert_equal 0, run_log("--sync").status.exitstatus
+    work_items = File.readlines(File.join(@state_root, "log.tsv"), encoding: "UTF-8")
+                     .map { |line| line.split("\t").fetch(3) }
+
+    assert_equal ["shakacode/example#Issue:9832", "shakacode/example#pr:9832"], work_items.sort
+  end
+
+  def test_log_sync_preserves_released_claim_expiry_and_generation
+    write_claim("shakacode/example", "404", "status" => "released", "agent_id" => "worker",
+                                            "updated_at" => "2026-08-03T03:00:00Z",
+                                            "expires_at" => "2026-08-03T03:00:00Z", "generation" => 4)
+
+    assert_equal 0, run_log("--sync").status.exitstatus
+    line = File.read(File.join(@state_root, "log.tsv"), encoding: "UTF-8")
+
+    assert_includes line, "status=released"
+    assert_includes line, "expires_at=2026-08-03T03:00:00Z"
+    assert_includes line, "generation=4"
+  end
+
+  def test_log_sync_excludes_synthetic_claim_snapshots_by_default
+    write_claim("shakacode/example", "404", "status" => "active", "agent_id" => "sim-worker",
+                                            "updated_at" => "2026-08-03T03:00:00Z",
+                                            "synthetic" => true, "synthetic_kind" => "simulation")
+
+    assert_equal 0, run_log("--sync").status.exitstatus
+    refute_path_exists File.join(@state_root, "log.tsv")
+
+    assert_equal 0, run_log("--sync", "--include-synthetic").status.exitstatus
+    line = File.read(File.join(@state_root, "log.tsv"), encoding: "UTF-8")
+    assert_includes line, "claim.snapshot"
+    assert_includes line, "simulation"
+  end
+
+  def test_log_sync_orders_equal_timestamp_events_and_snapshots_by_row_id
+    write_event("b1", "zzz", "type" => "phase.changed", "repo" => "shakacode/example", "target" => "404",
+                             "at" => "2026-08-03T03:00:00Z")
+    write_claim("shakacode/example", "404", "status" => "active", "agent_id" => "worker",
+                                            "updated_at" => "2026-08-03T03:00:00Z")
+
+    assert_equal 0, run_log("--sync").status.exitstatus
+    types = File.readlines(File.join(@state_root, "log.tsv"), encoding: "UTF-8")
+                .map { |line| line.split("\t").fetch(4) }
+
+    assert_equal ["claim.snapshot", "phase.changed"], types
   end
 
   # The read path treats an empty flag value as unset; --sync must agree, or a
