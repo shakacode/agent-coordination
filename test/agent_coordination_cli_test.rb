@@ -405,9 +405,1794 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     assert_equal "dry-run", payload.fetch("mode")
     assert_equal 7, payload.fetch("policy").fetch("hot_days")
     assert_equal 30, payload.fetch("policy").fetch("archive_days")
-    assert_equal(["claims/shakacode/example/old.json"], payload.fetch("actions").map { |row| row.fetch("source_path") })
-    assert_equal "archive", payload.fetch("actions").first.fetch("action")
+    archived = payload.fetch("actions").select { |row| row.fetch("action") == "archive" }
+    assert_equal(["claims/shakacode/example/old.json"], archived.map { |row| row.fetch("source_path") })
+    # Terminal semantics still gate the archive path: the active claim reaches
+    # the plan through the expired-lease reaper, not through archive.
+    assert_equal(["claims/shakacode/example/active.json"], reap_sources(payload))
     assert_empty Dir.glob(File.join(@state_root, "archive", "**", "*.json"))
+  end
+
+  def test_gc_reaps_an_expired_claim_only_when_its_holder_heartbeat_is_gone
+    now = Time.utc(2026, 7, 12, 12, 0, 0)
+    expired_lease_holder_records(now).each { |path, data| write_state_record(path, data) }
+    stdout = StringIO.new
+    runner = AgentCoord::Runner.new([], stdout: stdout, clock: FixedClock.new(now))
+
+    assert_equal 0, runner.send(:gc, state_root: @state_root, dry_run: true, execute: false, json: true)
+
+    payload = JSON.parse(stdout.string)
+    # live and stale holders still own their lanes past the lease, exactly as
+    # the takeover path treats them; only dead and missing holders are reaped.
+    assert_equal(
+      %w[claims/shakacode/example/dead.json claims/shakacode/example/missing.json],
+      reap_sources(payload)
+    )
+    reaps = payload.fetch("actions").select { |action| action.fetch("action") == "reap" }
+    assert_equal payload.fetch("actions"), reaps
+    assert_equal(["expired_lease"], reaps.map { |action| action.fetch("reason") }.uniq)
+    assert_equal(
+      [(now - (3 * 86_400)).iso8601],
+      reaps.map { |action| action.fetch("eligible_at") }.uniq
+    )
+    assert_equal 1, payload.fetch("policy").fetch("lease_grace_days")
+
+    scoped = StringIO.new
+    scoped_runner = AgentCoord::Runner.new([], stdout: scoped, clock: FixedClock.new(now))
+    assert_equal 0, scoped_runner.send(
+      :gc, state_root: @state_root, dry_run: true, execute: false, json: true, prefixes: ["heartbeats"]
+    )
+    assert_empty reap_sources(JSON.parse(scoped.string))
+  end
+
+  def test_gc_reap_holds_a_claim_inside_the_lease_grace_margin_and_takes_it_just_past
+    now = Time.utc(2026, 7, 12, 12, 0, 0)
+    write_abandoned_claim("inside-grace", now - 86_400 + 1)
+    write_abandoned_claim("past-grace", now - 86_400)
+    stdout = StringIO.new
+    runner = AgentCoord::Runner.new([], stdout: stdout, clock: FixedClock.new(now))
+
+    assert_equal 0, runner.send(:gc, state_root: @state_root, dry_run: true, execute: false, json: true)
+
+    assert_equal(["claims/shakacode/example/past-grace.json"], reap_sources(JSON.parse(stdout.string)))
+
+    widened = StringIO.new
+    widened_runner = AgentCoord::Runner.new([], stdout: widened, clock: FixedClock.new(now))
+    assert_equal 0, widened_runner.send(
+      :gc, state_root: @state_root, dry_run: true, execute: false, json: true, lease_grace_days: 2
+    )
+    widened_payload = JSON.parse(widened.string)
+    assert_empty reap_sources(widened_payload)
+    assert_equal 2, widened_payload.fetch("policy").fetch("lease_grace_days")
+  end
+
+  def test_gc_rejects_a_negative_lease_grace_window
+    runner = AgentCoord::Runner.new([], stdout: StringIO.new)
+
+    error = assert_raises(AgentCoord::Error) do
+      runner.send(:gc, state_root: @state_root, dry_run: true, execute: false, json: true, lease_grace_days: -1)
+    end
+
+    assert_equal "--lease-grace-days must be zero or greater", error.message
+  end
+
+  def test_gc_reap_execute_matches_the_dry_run_plan_and_does_not_repeat_itself
+    now = Time.utc(2026, 7, 12, 12, 0, 0)
+    lease_ended = now - (3 * 86_400)
+    claim_path = write_abandoned_claim("abandoned", lease_ended)
+    dry = StringIO.new
+    dry_runner = AgentCoord::Runner.new([], stdout: dry, clock: FixedClock.new(now))
+    assert_equal 0, dry_runner.send(:gc, state_root: @state_root, dry_run: true, execute: false, json: true)
+    executed = StringIO.new
+    execute_runner = AgentCoord::Runner.new([], stdout: executed, clock: FixedClock.new(now))
+    assert_equal 0, execute_runner.send(:gc, state_root: @state_root, dry_run: false, execute: true, json: true)
+
+    assert_equal JSON.parse(dry.string).fetch("actions"), JSON.parse(executed.string).fetch("actions")
+    reaped = JSON.parse(File.read(File.join(@state_root, claim_path)))
+    assert_equal "expired", reaped.fetch("status")
+    assert_equal now.iso8601, reaped.fetch("reaped_at")
+    # The lease and the holder's last write survive the reap, so an abandoned
+    # lane stays countable instead of reading as a fresh or clean handoff.
+    assert_equal (lease_ended - 14_400).iso8601, reaped.fetch("updated_at")
+    assert_equal lease_ended.iso8601, reaped.fetch("expires_at")
+    refute reaped.key?("released_at")
+
+    replay = StringIO.new
+    replay_runner = AgentCoord::Runner.new([], stdout: replay, clock: FixedClock.new(now + 60))
+    assert_equal 0, replay_runner.send(:gc, state_root: @state_root, dry_run: true, execute: false, json: true)
+    assert_empty JSON.parse(replay.string).fetch("actions")
+  end
+
+  def test_gc_reap_preserves_path_only_claim_identity_in_the_expiry_event
+    now = Time.utc(2026, 7, 12, 12, 0, 0)
+    claim_path = write_abandoned_claim("path-only", now - (3 * 86_400))
+    path = File.join(@state_root, claim_path)
+    path_only = JSON.parse(File.read(path)).except("repo", "target")
+    File.write(path, JSON.generate(path_only))
+    runner = AgentCoord::Runner.new([], stdout: StringIO.new, clock: FixedClock.new(now))
+
+    assert_equal 0, runner.send(:gc, state_root: @state_root, dry_run: false, execute: true, json: true)
+
+    event = event_records(AgentCoord::INTERNAL_UNBATCHED_CLAIM_EXPIRY_BATCH_ID).fetch(0)
+    assert_equal "shakacode/example", event.fetch("repo")
+    assert_equal "path-only", event.fetch("target")
+  end
+
+  def test_gc_reap_skips_malformed_claim_paths_and_continues_valid_peers
+    now = Time.utc(2026, 7, 12, 12, 0, 0)
+    claim = {
+      "schema_version" => 1, "agent_id" => "gone-holder", "status" => "active",
+      "claimed_at" => (now - (4 * 86_400)).iso8601,
+      "updated_at" => (now - (4 * 86_400)).iso8601,
+      "expires_at" => (now - (3 * 86_400)).iso8601
+    }
+    malformed_paths = [
+      "claims/shakacode/example/extra/too-deep.json",
+      "claims/too-short.json"
+    ]
+    malformed_paths.each { |path| write_state_record(path, claim) }
+    valid_path = write_abandoned_claim("valid-peer", now - (3 * 86_400), "agent_id" => "gone-holder")
+    stdout = StringIO.new
+    runner = AgentCoord::Runner.new([], stdout: stdout, clock: FixedClock.new(now))
+
+    assert_equal 0, runner.send(:gc, state_root: @state_root, dry_run: false, execute: true, json: true)
+
+    actions = JSON.parse(stdout.string).fetch("actions")
+    malformed_paths.each do |path|
+      action = actions.find { |candidate| candidate.fetch("source_path") == path }
+      assert_equal "skipped", action.fetch("outcome")
+      assert_equal "invalid_claim_path_at_apply", action.fetch("skip_reason")
+      assert_equal "active", JSON.parse(File.read(File.join(@state_root, path))).fetch("status")
+    end
+    assert_equal "expired", JSON.parse(File.read(File.join(@state_root, valid_path))).fetch("status")
+  end
+
+  def test_gc_reap_skips_claim_identity_that_disagrees_with_its_path_and_continues
+    now = Time.utc(2026, 7, 12, 12, 0, 0)
+    mismatched_path = write_abandoned_claim(
+      "mismatched-identity", now - (3 * 86_400),
+      "repo" => "shakacode/other", "target" => "different-target", "agent_id" => "gone-holder"
+    )
+    valid_path = write_abandoned_claim("valid-after-mismatch", now - (3 * 86_400), "agent_id" => "gone-holder")
+    stdout = StringIO.new
+    runner = AgentCoord::Runner.new([], stdout: stdout, clock: FixedClock.new(now))
+
+    assert_equal 0, runner.send(:gc, state_root: @state_root, dry_run: false, execute: true, json: true)
+
+    action = JSON.parse(stdout.string).fetch("actions").find do |candidate|
+      candidate.fetch("source_path") == mismatched_path
+    end
+    assert_equal "skipped", action.fetch("outcome")
+    assert_equal "claim_identity_mismatch_at_apply", action.fetch("skip_reason")
+    assert_equal "active", JSON.parse(File.read(File.join(@state_root, mismatched_path))).fetch("status")
+    assert_equal "expired", JSON.parse(File.read(File.join(@state_root, valid_path))).fetch("status")
+  end
+
+  def test_gc_archives_a_reaped_claim_on_a_hot_window_that_starts_at_the_reap # rubocop:disable Metrics/AbcSize
+    now = Time.utc(2026, 7, 12, 12, 0, 0)
+    claim_path = write_abandoned_claim("aged-out", now - (30 * 86_400))
+    synthetic_path = write_abandoned_claim("aged-out-synthetic", now - (30 * 86_400), "synthetic" => true)
+    reap_runner = AgentCoord::Runner.new([], stdout: StringIO.new, clock: FixedClock.new(now))
+    assert_equal 0, reap_runner.send(:gc, state_root: @state_root, dry_run: false, execute: true, json: true)
+
+    early = StringIO.new
+    early_runner = AgentCoord::Runner.new([], stdout: early, clock: FixedClock.new(now + (2 * 86_400)))
+    assert_equal 0, early_runner.send(:gc, state_root: @state_root, dry_run: true, execute: false, json: true)
+    early_actions = JSON.parse(early.string).fetch("actions")
+    archive_actions = early_actions.select { |action| action.fetch("action") == "archive" }
+    assert_equal([synthetic_path], archive_actions.map { |action| action.fetch("source_path") })
+    assert_equal "terminal_claim", archive_actions.first.fetch("reason")
+    assert_equal now.iso8601, archive_actions.first.fetch("eligible_at")
+    # The new immutable expiry history follows the same synthetic retention
+    # marker as its source claim and is compacted independently, never erased.
+    compact_actions = early_actions.select { |action| action.fetch("action") == "compact" }
+    assert_equal 1, compact_actions.length
+    assert_equal "unbatched_claim_expirations", compact_actions.first.fetch("reason")
+
+    late = StringIO.new
+    late_runner = AgentCoord::Runner.new([], stdout: late, clock: FixedClock.new(now + (8 * 86_400)))
+    assert_equal 0, late_runner.send(:gc, state_root: @state_root, dry_run: true, execute: false, json: true)
+    late_actions = JSON.parse(late.string).fetch("actions")
+    late_archives = late_actions.select { |action| action.fetch("action") == "archive" }
+    assert_equal([claim_path, synthetic_path].sort, late_archives.map { |action| action.fetch("source_path") }.sort)
+    assert_equal(["terminal_claim"], late_archives.map { |action| action.fetch("reason") }.uniq)
+    assert_equal(2, late_actions.count { |action| action.fetch("action") == "compact" })
+  end
+
+  def test_gc_never_reaps_a_claim_whose_lease_is_absent_and_fails_closed_on_an_unparseable_one
+    now = Time.utc(2026, 7, 12, 12, 0, 0)
+    lease_less_path = "claims/shakacode/example/lease-less.json"
+    write_state_record(
+      lease_less_path,
+      "schema_version" => 1, "repo" => "shakacode/example", "target" => "lease-less",
+      "agent_id" => "worker-lease-less", "status" => "active",
+      "claimed_at" => (now - (30 * 86_400)).iso8601, "updated_at" => (now - (30 * 86_400)).iso8601
+    )
+    stdout = StringIO.new
+    runner = AgentCoord::Runner.new([], stdout: stdout, clock: FixedClock.new(now))
+    assert_equal 0, runner.send(:gc, state_root: @state_root, dry_run: true, execute: false, json: true)
+
+    assert_empty JSON.parse(stdout.string).fetch("actions")
+    assert_path_exists File.join(@state_root, lease_less_path)
+
+    { "text" => "not-a-time", "typed" => 12_345 }.each do |name, value|
+      claim_path = write_abandoned_claim("bad-lease-#{name}", now - (30 * 86_400), "expires_at" => value)
+
+      result = run_agent_coord("gc", "--dry-run", "--json")
+
+      # Fail closed on the record, not on the run: the corrupt claim is never
+      # reaped, but it is reported rather than raised so it cannot deny gc to
+      # every other record in the fleet.
+      assert_equal 0, result.status.exitstatus, result.stderr
+      assert_includes result.stderr, "gc claim has invalid expires_at at #{claim_path}"
+      refute_includes result.stderr, "bin/agent-coord:"
+      assert_empty reap_sources(JSON.parse(result.stdout))
+      assert_path_exists File.join(@state_root, claim_path)
+      FileUtils.rm(File.join(@state_root, claim_path))
+    end
+  end
+
+  def test_gc_corrupt_claim_lease_does_not_deny_retention_work_for_every_other_record
+    now = Time.utc(2026, 7, 12, 12, 0, 0)
+    write_abandoned_claim("bad-lease", now - (30 * 86_400), "expires_at" => "soon")
+    # A non-string lease must be named by type: interpolating it raw would spill
+    # the whole nested value into the operator's warning.
+    write_abandoned_claim("typed-lease", now - (30 * 86_400), "expires_at" => { "nested" => "leaked-secret" })
+    write_state_record(
+      "claims/shakacode/example/good.json",
+      "schema_version" => 1, "repo" => "shakacode/example", "target" => "good",
+      "agent_id" => "worker-good", "status" => "released", "updated_at" => (now - (30 * 86_400)).iso8601
+    )
+    stdout = StringIO.new
+    stderr = StringIO.new
+    runner = AgentCoord::Runner.new([], stdout: stdout, stderr: stderr, clock: FixedClock.new(now))
+
+    assert_equal 0, runner.send(:gc, state_root: @state_root, dry_run: true, execute: false, json: true)
+
+    actions = JSON.parse(stdout.string).fetch("actions")
+
+    assert_equal(["claims/shakacode/example/good.json"], actions.map { |action| action.fetch("source_path") })
+    assert_equal(["archive"], actions.map { |action| action.fetch("action") })
+    assert_includes stderr.string, "invalid expires_at at claims/shakacode/example/bad-lease.json: \"soon\""
+    assert_includes stderr.string, "invalid expires_at at claims/shakacode/example/typed-lease.json: non-string Hash"
+    refute_includes stderr.string, "leaked-secret"
+  end
+
+  def test_gc_reads_each_claim_holder_heartbeat_once_per_run
+    now = Time.utc(2026, 7, 12, 12, 0, 0)
+    3.times do |index|
+      write_abandoned_claim("shared-#{index}", now - (3 * 86_400), "agent_id" => "shared-holder")
+    end
+    write_state_record(
+      "heartbeats/shared-holder.json",
+      "schema_version" => 1, "agent_id" => "shared-holder", "status" => "in_progress",
+      "updated_at" => (now - 7200).iso8601, "expires_at" => (now - 6300).iso8601
+    )
+    store = CountingLocalStore.new(@state_root)
+    runner = AgentCoord::Runner.new([], stdout: StringIO.new, clock: FixedClock.new(now))
+
+    candidates = runner.send(:gc_reap_candidates, store, now, 1, %w[claims heartbeats events batches])
+
+    assert_equal 3, candidates.length
+    assert_equal 1, store.reads.count("heartbeats/shared-holder.json")
+  end
+
+  def test_gc_withholds_the_reaper_when_heartbeats_are_outside_the_selected_prefixes
+    now = Time.utc(2026, 7, 12, 12, 0, 0)
+    claim_path = write_abandoned_claim("abandoned", now - (3 * 86_400))
+    stdout = StringIO.new
+    stderr = StringIO.new
+    runner = AgentCoord::Runner.new([], stdout: stdout, stderr: stderr, clock: FixedClock.new(now))
+
+    assert_equal 0, runner.send(
+      :gc, state_root: @state_root, dry_run: true, execute: false, json: true, prefixes: ["claims"]
+    )
+
+    # The documented claims-scoped token can read claims and their archive
+    # mirror and nothing else, so the reaper must withdraw rather than widen the
+    # run into heartbeats. It says why, so an empty plan is not a mystery.
+    assert_empty reap_sources(JSON.parse(stdout.string))
+    assert_includes stderr.string, "--prefix heartbeats and --prefix events alongside --prefix claims"
+    assert_path_exists File.join(@state_root, claim_path)
+
+    store = CountingLocalStore.new(@state_root)
+
+    assert_empty runner.send(:gc_reap_candidates, store, now, 1, ["claims"])
+    assert_empty store.reads.grep(%r{\Aheartbeats/})
+  end
+
+  def test_gc_withholds_unbatched_reap_and_reconciliation_when_batches_are_outside_selected_prefixes
+    now = Time.utc(2026, 7, 12, 12, 0, 0)
+    write_abandoned_claim("unbatched-no-batches", now - (3 * 86_400), "agent_id" => "gone-holder")
+    pending_path = write_abandoned_claim(
+      "unbatched-pending-no-batches", now - (3 * 86_400),
+      "status" => "expired", "reaped_at" => now.iso8601,
+      "expired_event_id" => "claim-expired-no-batches",
+      "expired_event_batch_id" => AgentCoord::INTERNAL_UNBATCHED_CLAIM_EXPIRY_BATCH_ID,
+      "expired_event_at" => now.iso8601, "expired_event_pending" => true
+    )
+    internal_batch_path = AgentCoord.batch_path(AgentCoord::INTERNAL_UNBATCHED_CLAIM_EXPIRY_BATCH_ID)
+    store = ForbiddenBatchStore.new(@state_root, internal_batch_path)
+    stderr = StringIO.new
+    runner = AgentCoord::Runner.new([], stdout: StringIO.new, stderr: stderr, clock: FixedClock.new(now))
+
+    reaps = runner.send(:gc_reap_candidates, store, now, 1, %w[claims heartbeats events])
+    reconciliations = runner.send(:gc_expired_event_candidates, store, %w[claims events])
+
+    assert_empty reaps
+    assert_empty reconciliations
+    assert_empty store.reads.grep(%r{\Abatches/})
+    assert_includes stderr.string, "need --prefix batches alongside --prefix claims"
+    assert_includes stderr.string, "alongside --prefix claims and --prefix events"
+    assert_path_exists File.join(@state_root, pending_path)
+  end
+
+  def test_gc_does_not_reap_a_claim_whose_holder_heartbeat_is_unreadable
+    now = Time.utc(2026, 7, 12, 12, 0, 0)
+    2.times { |index| write_abandoned_claim("forbidden-#{index}", now - (3 * 86_400), "agent_id" => "forbidden") }
+    readable_path = write_abandoned_claim("readable", now - (3 * 86_400), "agent_id" => "readable")
+    stderr = StringIO.new
+    runner = AgentCoord::Runner.new([], stdout: StringIO.new, stderr: stderr, clock: FixedClock.new(now))
+    store = ForbiddenHeartbeatStore.new(@state_root, "heartbeats/forbidden.json")
+
+    candidates = runner.send(:gc_reap_candidates, store, now, 1, %w[claims heartbeats events batches])
+
+    # An unreadable heartbeat is not evidence the holder is gone, so its claims
+    # are left alone; a backend that answered 404 instead of 403 would otherwise
+    # let gc reap a live lane. Unrelated reaping still proceeds.
+    assert_equal([readable_path], candidates.map { |candidate| candidate.dig(:action, "source_path") })
+    assert_equal 1, stderr.string.scan("cannot read the heartbeat for claim holder \"forbidden\"").length
+    assert_equal 1, store.reads.count("heartbeats/forbidden.json")
+  end
+
+  def test_gc_rechecks_holder_liveness_immediately_before_applying_a_reap
+    now = Time.utc(2026, 7, 12, 12, 0, 0)
+    claim_path = write_abandoned_claim(
+      "resumed", now - (3 * 86_400), "agent_id" => "resumed-holder"
+    )
+    runner = AgentCoord::Runner.new([], stdout: StringIO.new, clock: FixedClock.new(now))
+    store = CountingLocalStore.new(@state_root)
+    candidate = runner.send(:gc_reap_candidates, store, now, 1, %w[claims heartbeats events batches]).fetch(0)
+
+    # A holder can resume after planning without changing the claim. The claim
+    # CAS would still succeed, so apply must re-read liveness rather than reap
+    # work that is demonstrably live at the mutation boundary.
+    write_state_record(
+      "heartbeats/resumed-holder.json",
+      {
+        "schema_version" => 1,
+        "agent_id" => "resumed-holder",
+        "status" => "in_progress",
+        "updated_at" => (now - 60).iso8601,
+        "expires_at" => (now + 600).iso8601
+      }
+    )
+
+    runner.send(:gc_reap_claim, store, candidate, now)
+
+    claim = JSON.parse(File.read(File.join(@state_root, claim_path)))
+    assert_equal "active", claim.fetch("status")
+    refute claim.key?("reaped_at")
+    assert_equal 2, store.reads.count("heartbeats/resumed-holder.json")
+  end
+
+  def test_gc_skips_a_claim_renewed_between_plan_and_apply_without_aborting
+    now = Time.utc(2026, 7, 12, 12, 0, 0)
+    claim_path = write_abandoned_claim(
+      "renewed-at-apply", now - (3 * 86_400), "agent_id" => "gone-holder"
+    )
+    other_path = write_abandoned_claim(
+      "still-expired", now - (3 * 86_400), "agent_id" => "another-gone-holder"
+    )
+    store = AgentCoord::LocalStore.new(@state_root)
+    runner = AgentCoord::Runner.new([], stdout: StringIO.new, clock: FixedClock.new(now))
+    candidates = runner.send(:gc_reap_candidates, store, now, 1, %w[claims heartbeats events batches])
+    candidate = candidates.find { |item| item.dig(:action, "source_path") == claim_path }
+    renewed = JSON.parse(File.read(File.join(@state_root, claim_path))).merge(
+      "updated_at" => now.iso8601, "expires_at" => (now + 3600).iso8601
+    )
+    File.write(File.join(@state_root, claim_path), JSON.pretty_generate(renewed))
+
+    runner.send(:execute_gc_candidates, store, candidates, now, 30)
+
+    assert_equal "active", JSON.parse(File.read(File.join(@state_root, claim_path))).fetch("status")
+    assert_equal "expired", JSON.parse(File.read(File.join(@state_root, other_path))).fetch("status")
+    assert_equal "skipped", candidate.dig(:action, "outcome")
+    assert_equal "claim_changed_at_apply", candidate.dig(:action, "skip_reason")
+  end
+
+  def test_gc_skips_a_legacy_claim_with_an_invalid_event_destination_before_mutation
+    now = Time.utc(2026, 7, 12, 12, 0, 0)
+    invalid_path = write_abandoned_claim(
+      "invalid-event-destination", now - (3 * 86_400),
+      "agent_id" => "gone-holder", "batch_id" => "invalid/batch"
+    )
+    valid_path = write_abandoned_claim(
+      "valid-after-invalid", now - (3 * 86_400),
+      "agent_id" => "another-gone-holder", "batch_id" => "valid-batch"
+    )
+    stderr = StringIO.new
+    store = AgentCoord::LocalStore.new(@state_root)
+    runner = AgentCoord::Runner.new([], stdout: StringIO.new, stderr: stderr, clock: FixedClock.new(now))
+    candidates = runner.send(:gc_reap_candidates, store, now, 1, %w[claims heartbeats events batches])
+
+    runner.send(:execute_gc_candidates, store, candidates, now, 30)
+
+    invalid = candidates.find { |item| item.dig(:action, "source_path") == invalid_path }
+    assert_equal "active", store.read_json(invalid_path).data.fetch("status")
+    assert_equal "skipped", invalid.dig(:action, "outcome")
+    assert_equal "invalid_expired_event_destination_at_apply", invalid.dig(:action, "skip_reason")
+    assert_equal "expired", store.read_json(valid_path).data.fetch("status")
+    assert_includes stderr.string, "invalid claim.expired event destination"
+  end
+
+  def test_event_payload_preserves_subsecond_lifecycle_order
+    now = Time.utc(2026, 7, 12, 12, 0, 0) + Rational(123_456_789, 1_000_000_000)
+    runner = AgentCoord::Runner.new([], stdout: StringIO.new, clock: FixedClock.new(now))
+    options = { batch_id: "precision", type: "claim.acquired" }
+
+    payload = runner.send(:event_payload, options, "event-precision", now)
+
+    assert_equal "2026-07-12T12:00:00.123456789Z", payload.fetch("at")
+  end
+
+  def test_gc_apply_bypasses_a_cached_planning_heartbeat
+    now = Time.utc(2026, 7, 12, 12, 0, 0)
+    claim_path = write_abandoned_claim(
+      "cached-resume", now - (3 * 86_400), "agent_id" => "cached-resume-holder"
+    )
+    runner = AgentCoord::Runner.new([], stdout: StringIO.new, clock: FixedClock.new(now))
+    store = CachingLocalStore.new(@state_root)
+    candidate = runner.send(:gc_reap_candidates, store, now, 1, %w[claims heartbeats events batches]).fetch(0)
+
+    write_state_record(
+      "heartbeats/cached-resume-holder.json",
+      {
+        "schema_version" => 1,
+        "agent_id" => "cached-resume-holder",
+        "status" => "in_progress",
+        "updated_at" => (now - 60).iso8601,
+        "expires_at" => (now + 600).iso8601
+      }
+    )
+
+    runner.send(:gc_reap_claim, store, candidate, now)
+
+    claim = JSON.parse(File.read(File.join(@state_root, claim_path)))
+    assert_equal "active", claim.fetch("status")
+    assert_equal 2, store.reads.count("heartbeats/cached-resume-holder.json")
+  end
+
+  def test_gc_fails_closed_when_heartbeat_payload_agent_id_does_not_match_claim_holder
+    now = Time.utc(2026, 7, 12, 12, 0, 0)
+    claim_path = write_abandoned_claim(
+      "mismatched-heartbeat", now - (3 * 86_400), "agent_id" => "expected-holder"
+    )
+    heartbeat_path = "heartbeats/expected-holder.json"
+    write_state_record(
+      heartbeat_path,
+      "schema_version" => 1, "agent_id" => "different-holder", "status" => "dead",
+      "updated_at" => (now - (3 * 86_400)).iso8601, "expires_at" => (now - (2 * 86_400)).iso8601
+    )
+    stderr = StringIO.new
+    runner = AgentCoord::Runner.new([], stdout: StringIO.new, stderr: stderr, clock: FixedClock.new(now))
+    store = CountingLocalStore.new(@state_root)
+
+    assert_empty runner.send(:gc_reap_candidates, store, now, 1, %w[claims heartbeats events batches])
+    assert_includes stderr.string, "cannot establish liveness for claim holder \"expected-holder\""
+
+    FileUtils.rm(File.join(@state_root, heartbeat_path))
+    candidate = runner.send(
+      :gc_reap_candidates, store, now, 1, %w[claims heartbeats events batches]
+    ).fetch(0)
+    write_state_record(
+      heartbeat_path,
+      "schema_version" => 1, "agent_id" => "different-holder", "status" => "dead",
+      "updated_at" => (now - (3 * 86_400)).iso8601, "expires_at" => (now - (2 * 86_400)).iso8601
+    )
+
+    assert_equal :holder_liveness_unknown_at_apply, runner.send(:gc_reap_claim, store, candidate, now)
+    assert_equal "active", JSON.parse(File.read(File.join(@state_root, claim_path))).fetch("status")
+  end
+
+  def test_gc_fails_closed_when_claim_holder_identity_is_missing_or_path_invalid
+    now = Time.utc(2026, 7, 12, 12, 0, 0)
+    missing_path = write_abandoned_claim("missing-holder", now - (3 * 86_400), "agent_id" => nil)
+    invalid_path = write_abandoned_claim("invalid-holder", now - (3 * 86_400), "agent_id" => "bad/holder")
+    stderr = StringIO.new
+    runner = AgentCoord::Runner.new([], stdout: StringIO.new, stderr: stderr, clock: FixedClock.new(now))
+    store = CountingLocalStore.new(@state_root)
+
+    candidates = runner.send(:gc_reap_candidates, store, now, 1, %w[claims heartbeats events batches])
+
+    assert_empty candidates
+    assert_includes stderr.string, "claim holder \"\""
+    assert_includes stderr.string, "claim holder \"bad/holder\""
+    [missing_path, invalid_path].each do |path|
+      assert_equal "active", JSON.parse(File.read(File.join(@state_root, path))).fetch("status")
+    end
+  end
+
+  def test_gc_execute_reports_a_reap_rejected_by_apply_time_liveness_as_skipped
+    now = Time.utc(2026, 7, 12, 12, 0, 0)
+    claim_path = write_abandoned_claim(
+      "resumed-output", now - (3 * 86_400), "agent_id" => "resumed-output-holder"
+    )
+    store = HolderResumesAtReapStore.new(@state_root, "resumed-output-holder", now)
+    runner = StoreInjectedRunner.new([], store: store, clock: FixedClock.new(now))
+
+    assert_equal 0, runner.send(
+      :gc, state_root: @state_root, dry_run: false, execute: true, json: true,
+           prefixes: %w[claims heartbeats events batches]
+    )
+
+    action = JSON.parse(runner.captured_stdout.string).fetch("actions").fetch(0)
+    assert_equal "reap", action.fetch("action")
+    assert_equal "skipped", action.fetch("outcome")
+    assert_equal "holder_present_at_apply", action.fetch("skip_reason")
+    assert_equal "active", JSON.parse(File.read(File.join(@state_root, claim_path))).fetch("status")
+    assert_equal 2, store.reads.count("heartbeats/resumed-output-holder.json")
+  end
+
+  def test_gc_apply_fails_closed_on_a_malformed_holder_heartbeat
+    now = Time.utc(2026, 7, 12, 12, 0, 0)
+    claim_path = write_abandoned_claim(
+      "malformed-holder", now - (3 * 86_400), "agent_id" => "malformed-holder"
+    )
+    heartbeat_path = File.join(@state_root, "heartbeats", "malformed-holder.json")
+    FileUtils.mkdir_p(File.dirname(heartbeat_path))
+    File.write(heartbeat_path, "{not-json")
+    stderr = StringIO.new
+    runner = AgentCoord::Runner.new([], stdout: StringIO.new, stderr: stderr, clock: FixedClock.new(now))
+    store = CountingLocalStore.new(@state_root)
+    entry = store.read_json(claim_path)
+    candidate = {
+      entry: entry,
+      action: { "action" => "reap", "source_path" => claim_path, "reason" => "expired_lease" }
+    }
+
+    runner.send(:execute_gc_candidates, store, [candidate], now, 30)
+
+    assert_equal "active", JSON.parse(File.read(File.join(@state_root, claim_path))).fetch("status")
+    assert_equal "skipped", candidate.dig(:action, "outcome")
+    assert_equal "holder_liveness_unknown_at_apply", candidate.dig(:action, "skip_reason")
+    assert_includes stderr.string, "cannot establish liveness for claim holder"
+  end
+
+  def test_gc_fails_closed_on_a_non_object_holder_heartbeat_and_keeps_a_valid_control
+    now = Time.utc(2026, 7, 12, 12, 0, 0)
+    invalid_path = write_abandoned_claim(
+      "non-object-heartbeat", now - (3 * 86_400), "agent_id" => "non-object-holder"
+    )
+    valid_path = write_abandoned_claim(
+      "valid-heartbeat-control", now - (3 * 86_400), "agent_id" => "valid-dead-holder"
+    )
+    write_state_record("heartbeats/non-object-holder.json", [])
+    write_state_record(
+      "heartbeats/valid-dead-holder.json",
+      "schema_version" => 1, "agent_id" => "valid-dead-holder", "status" => "in_progress",
+      "updated_at" => (now - (3 * 86_400)).iso8601,
+      "expires_at" => (now - (3 * 86_400) + 3600).iso8601
+    )
+    stderr = StringIO.new
+    store = AgentCoord::LocalStore.new(@state_root)
+    runner = AgentCoord::Runner.new([], stdout: StringIO.new, stderr: stderr, clock: FixedClock.new(now))
+
+    candidates = runner.send(:gc_reap_candidates, store, now, 1, %w[claims heartbeats events batches])
+    candidate_paths = candidates.map { |candidate| candidate.dig(:action, "source_path") }
+    assert_equal [valid_path], candidate_paths
+    runner.send(:execute_gc_candidates, store, candidates, now, 30)
+
+    assert_equal "active", store.read_json(invalid_path).data.fetch("status")
+    assert_equal "expired", store.read_json(valid_path).data.fetch("status")
+    assert_includes stderr.string, "cannot establish liveness for claim holder \"non-object-holder\""
+  end
+
+  def test_gc_fails_closed_on_nonpositive_holder_heartbeat_ttls_and_keeps_a_valid_control
+    now = Time.utc(2026, 7, 12, 12, 0, 0)
+    zero_path = write_abandoned_claim(
+      "zero-ttl-heartbeat", now - (3 * 86_400), "agent_id" => "zero-ttl-holder"
+    )
+    negative_path = write_abandoned_claim(
+      "negative-ttl-heartbeat", now - (3 * 86_400), "agent_id" => "negative-ttl-holder"
+    )
+    valid_path = write_abandoned_claim(
+      "positive-ttl-control", now - (3 * 86_400), "agent_id" => "positive-ttl-holder"
+    )
+    heartbeat_time = now - (3 * 86_400)
+    {
+      "zero-ttl-holder" => heartbeat_time,
+      "negative-ttl-holder" => heartbeat_time - 1,
+      "positive-ttl-holder" => heartbeat_time + 3600
+    }.each do |agent_id, expires_at|
+      write_state_record(
+        "heartbeats/#{agent_id}.json",
+        "schema_version" => 1, "agent_id" => agent_id, "status" => "in_progress",
+        "updated_at" => heartbeat_time.iso8601, "expires_at" => expires_at.iso8601
+      )
+    end
+    stderr = StringIO.new
+    store = AgentCoord::LocalStore.new(@state_root)
+    runner = AgentCoord::Runner.new([], stdout: StringIO.new, stderr: stderr, clock: FixedClock.new(now))
+
+    candidates = runner.send(:gc_reap_candidates, store, now, 1, %w[claims heartbeats events batches])
+    candidate_paths = candidates.map { |candidate| candidate.dig(:action, "source_path") }
+    assert_equal [valid_path], candidate_paths
+
+    FileUtils.rm_f(File.join(@state_root, "heartbeats", "zero-ttl-holder.json"))
+    apply_entry = store.read_json(zero_path)
+    apply_candidate = {
+      entry: apply_entry,
+      action: { "action" => "reap", "source_path" => zero_path, "reason" => "expired_lease" }
+    }
+    write_state_record(
+      "heartbeats/zero-ttl-holder.json",
+      "schema_version" => 1, "agent_id" => "zero-ttl-holder", "status" => "in_progress",
+      "updated_at" => heartbeat_time.iso8601, "expires_at" => heartbeat_time.iso8601
+    )
+    runner.send(:execute_gc_candidates, store, [apply_candidate], now, 30)
+
+    assert_equal "active", store.read_json(zero_path).data.fetch("status")
+    assert_equal "holder_liveness_unknown_at_apply", apply_candidate.dig(:action, "skip_reason")
+    assert_equal "active", store.read_json(negative_path).data.fetch("status")
+    assert_includes stderr.string, "cannot establish liveness for claim holder \"zero-ttl-holder\""
+    assert_includes stderr.string, "cannot establish liveness for claim holder \"negative-ttl-holder\""
+  end
+
+  def test_gc_archives_an_aged_nonpositive_ttl_heartbeat_without_reaping_its_claim # rubocop:disable Metrics/AbcSize, Metrics/MethodLength
+    now = Time.utc(2026, 7, 12, 12, 0, 0)
+    heartbeat_time = now - (8 * 86_400)
+    claim_path = write_abandoned_claim(
+      "aged-zero-ttl-heartbeat", heartbeat_time, "agent_id" => "aged-zero-ttl-holder"
+    )
+    heartbeat_path = "heartbeats/aged-zero-ttl-holder.json"
+    write_state_record(
+      heartbeat_path,
+      "schema_version" => 1, "agent_id" => "different-payload-holder", "status" => "in_progress",
+      "updated_at" => heartbeat_time.iso8601, "expires_at" => (heartbeat_time + 3600).iso8601
+    )
+    write_state_record(
+      "archive/#{heartbeat_path}",
+      "schema_version" => 1, "record_family" => "archived_record", "source_path" => heartbeat_path,
+      "reason" => "dead_heartbeat", "synthetic" => false,
+      "archived_at" => (now - (40 * 86_400)).iso8601, "delete_after" => (now - 1).iso8601,
+      "data" => { "schema_version" => 1, "agent_id" => "older-holder", "status" => "in_progress" }
+    )
+    stdout = StringIO.new
+    stderr = StringIO.new
+    runner = AgentCoord::Runner.new([], stdout: stdout, stderr: stderr, clock: FixedClock.new(now))
+
+    assert_equal 0, runner.send(:gc, state_root: @state_root, dry_run: false, execute: true, json: true)
+
+    actions = JSON.parse(stdout.string).fetch("actions")
+    heartbeat_action = actions.find { |action| action["source_path"] == heartbeat_path }
+    assert_equal "replace_archive", heartbeat_action.fetch("action")
+    assert_equal "expired_archive_replacement", heartbeat_action.fetch("reason")
+    refute(actions.any? { |action| action["source_path"] == claim_path })
+    assert_equal "active", JSON.parse(File.read(File.join(@state_root, claim_path))).fetch("status")
+    assert_path_exists File.join(@state_root, "archive", heartbeat_path)
+    assert_equal "aged_heartbeat", JSON.parse(
+      File.read(File.join(@state_root, "archive", heartbeat_path))
+    ).fetch("reason")
+    assert_empty Dir.glob(File.join(@state_root, "events", "**", "claim-expired-*.json"))
+    assert_includes stderr.string, "cannot establish liveness for claim holder \"aged-zero-ttl-holder\""
+
+    later = now + (31 * 86_400)
+    later_stdout = StringIO.new
+    later_runner = AgentCoord::Runner.new(
+      [], stdout: later_stdout, stderr: StringIO.new, clock: FixedClock.new(later)
+    )
+    assert_equal 0, later_runner.send(
+      :gc, state_root: @state_root, dry_run: false, execute: true, json: true
+    )
+    later_actions = JSON.parse(later_stdout.string).fetch("actions")
+    refute(later_actions.any? { |action| action["source_path"] == claim_path })
+    refute(later_actions.any? { |action| action["source_path"] == "archive/#{heartbeat_path}" })
+    assert_equal "active", JSON.parse(File.read(File.join(@state_root, claim_path))).fetch("status")
+    assert_path_exists File.join(@state_root, "archive", heartbeat_path)
+    assert_empty Dir.glob(File.join(@state_root, "events", "**", "claim-expired-*.json"))
+
+    released_claim = JSON.parse(File.read(File.join(@state_root, claim_path))).merge("status" => "released")
+    write_state_record(claim_path, released_claim)
+    final_stdout = StringIO.new
+    final_runner = AgentCoord::Runner.new(
+      [], stdout: final_stdout, stderr: StringIO.new, clock: FixedClock.new(later + 1)
+    )
+    assert_equal 0, final_runner.send(
+      :gc, state_root: @state_root, dry_run: false, execute: true, json: true
+    )
+    final_actions = JSON.parse(final_stdout.string).fetch("actions")
+    heartbeat_delete = final_actions.find { |action| action["source_path"] == "archive/#{heartbeat_path}" }
+    assert_equal "delete", heartbeat_delete.fetch("action")
+    refute_path_exists File.join(@state_root, "archive", heartbeat_path)
+  end
+
+  def test_gc_retains_an_aged_heartbeat_archive_when_claim_listing_is_filtered
+    now = Time.utc(2026, 7, 12, 12, 0, 0)
+    heartbeat_path = "heartbeats/filtered-claim-holder.json"
+    archive_path = "archive/#{heartbeat_path}"
+    claim_path = write_abandoned_claim(
+      "filtered-claim", now - (40 * 86_400), "agent_id" => "filtered-claim-holder"
+    )
+    heartbeat = {
+      "schema_version" => 1, "agent_id" => "payload-mismatch", "status" => "in_progress",
+      "updated_at" => (now - (40 * 86_400)).iso8601,
+      "expires_at" => (now - (40 * 86_400)).iso8601
+    }
+    write_state_record(
+      archive_path,
+      "schema_version" => 1, "record_family" => "archived_record", "source_path" => heartbeat_path,
+      "reason" => "aged_heartbeat", "synthetic" => false,
+      "archived_at" => (now - (31 * 86_400)).iso8601, "delete_after" => (now - 1).iso8601,
+      "data" => heartbeat
+    )
+    filtered_runner = StoreInjectedRunner.new(
+      [], store: FilteredClaimsGcStore.new(@state_root), clock: FixedClock.new(now)
+    )
+
+    assert_equal 0, filtered_runner.send(:gc, state_root: @state_root, dry_run: false, execute: true, json: true)
+    assert_path_exists File.join(@state_root, archive_path)
+
+    stdout = StringIO.new
+    runner = AgentCoord::Runner.new([], stdout: stdout, stderr: StringIO.new, clock: FixedClock.new(now + 1))
+    assert_equal 0, runner.send(:gc, state_root: @state_root, dry_run: false, execute: true, json: true)
+    actions = JSON.parse(stdout.string).fetch("actions")
+    refute(actions.any? { |action| action["source_path"] == claim_path })
+    assert_equal "active", JSON.parse(File.read(File.join(@state_root, claim_path))).fetch("status")
+    assert_path_exists File.join(@state_root, archive_path)
+    assert_empty Dir.glob(File.join(@state_root, "events", "**", "claim-expired-*.json"))
+  end
+
+  def test_gc_preserves_missing_heartbeat_identity_as_unknown_across_archive
+    now = Time.utc(2026, 7, 12, 12, 0, 0)
+    old = now - (8 * 86_400)
+    claim_path = write_abandoned_claim(
+      "missing-heartbeat-identity", old, "agent_id" => "missing-identity-holder"
+    )
+    heartbeat_path = "heartbeats/missing-identity-holder.json"
+    write_state_record(
+      heartbeat_path,
+      "schema_version" => 1, "status" => "in_progress",
+      "updated_at" => old.iso8601, "expires_at" => (old + 3600).iso8601
+    )
+
+    2.times do |run|
+      stdout = StringIO.new
+      runner = AgentCoord::Runner.new(
+        [], stdout: stdout, stderr: StringIO.new, clock: FixedClock.new(now + run)
+      )
+      assert_equal 0, runner.send(:gc, state_root: @state_root, dry_run: false, execute: true, json: true)
+      actions = JSON.parse(stdout.string).fetch("actions")
+      refute(actions.any? { |action| action["source_path"] == claim_path })
+      if run.zero?
+        heartbeat_action = actions.find { |action| action["source_path"] == heartbeat_path }
+        assert_equal "aged_heartbeat", heartbeat_action.fetch("reason")
+      end
+    end
+    assert_equal "active", JSON.parse(File.read(File.join(@state_root, claim_path))).fetch("status")
+    assert_path_exists File.join(@state_root, "archive", heartbeat_path)
+    assert_empty Dir.glob(File.join(@state_root, "events", "**", "claim-expired-*.json"))
+  end
+
+  def test_gc_preserves_unknown_terminal_heartbeat_evidence_across_archive
+    now = Time.utc(2026, 7, 12, 12, 0, 0)
+    old = now - (8 * 86_400)
+    cases = {
+      "terminal-invalid-ttl-holder" => ["terminal-invalid-ttl-holder", 0],
+      "terminal-missing-holder" => [nil, 3600],
+      "terminal-mismatched-holder" => ["different-holder", 3600]
+    }
+    claim_paths = cases.map do |holder, (payload_holder, ttl)|
+      claim_path = write_abandoned_claim(holder, old, "agent_id" => holder)
+      heartbeat = {
+        "schema_version" => 1, "status" => "merged",
+        "updated_at" => old.iso8601, "expires_at" => (old + ttl).iso8601
+      }
+      heartbeat["agent_id"] = payload_holder if payload_holder
+      write_state_record("heartbeats/#{holder}.json", heartbeat)
+      claim_path
+    end
+    write_state_record(
+      "heartbeats/terminal-valid-control.json",
+      "schema_version" => 1, "agent_id" => "terminal-valid-control", "status" => "merged",
+      "updated_at" => old.iso8601, "expires_at" => (old + 3600).iso8601
+    )
+
+    2.times do |run|
+      stdout = StringIO.new
+      runner = AgentCoord::Runner.new(
+        [], stdout: stdout, stderr: StringIO.new, clock: FixedClock.new(now + run)
+      )
+      assert_equal 0, runner.send(:gc, state_root: @state_root, dry_run: false, execute: true, json: true)
+      actions = JSON.parse(stdout.string).fetch("actions")
+      refute(actions.any? { |action| claim_paths.include?(action["source_path"]) })
+      next unless run.zero?
+
+      heartbeat_reasons = actions.filter_map do |action|
+        [action.fetch("source_path"), action.fetch("reason")] if action["source_path"]&.start_with?("heartbeats/")
+      end.to_h
+      cases.each_key do |holder|
+        assert_equal "aged_heartbeat", heartbeat_reasons.fetch("heartbeats/#{holder}.json")
+      end
+      assert_equal "terminal_heartbeat", heartbeat_reasons.fetch("heartbeats/terminal-valid-control.json")
+    end
+    claim_paths.each do |claim_path|
+      assert_equal "active", JSON.parse(File.read(File.join(@state_root, claim_path))).fetch("status")
+    end
+    assert_empty Dir.glob(File.join(@state_root, "events", "**", "claim-expired-*.json"))
+  end
+
+  def test_gc_rechecks_aged_heartbeat_archive_dependencies_before_delete
+    now = Time.utc(2026, 7, 12, 12, 0, 0)
+    heartbeat_path = "heartbeats/concurrent-claim-holder.json"
+    archive_path = "archive/#{heartbeat_path}"
+    heartbeat = {
+      "schema_version" => 1, "agent_id" => "concurrent-claim-holder", "status" => "in_progress",
+      "updated_at" => (now - (40 * 86_400)).iso8601,
+      "expires_at" => (now - (40 * 86_400)).iso8601
+    }
+    write_state_record(
+      archive_path,
+      "schema_version" => 1, "record_family" => "archived_record", "source_path" => heartbeat_path,
+      "reason" => "aged_heartbeat", "synthetic" => false,
+      "archived_at" => (now - (31 * 86_400)).iso8601, "delete_after" => (now - 1).iso8601,
+      "data" => heartbeat
+    )
+    store = AgentCoord::LocalStore.new(@state_root)
+    runner = AgentCoord::Runner.new([], stdout: StringIO.new, stderr: StringIO.new, clock: FixedClock.new(now))
+    candidate = runner.send(:gc_delete_candidates, store, now, %w[claims heartbeats events batches]).fetch(0)
+    claim_path = write_abandoned_claim(
+      "concurrent-claim", now - (40 * 86_400), "agent_id" => "concurrent-claim-holder"
+    )
+
+    runner.send(:execute_gc_candidates, store, [candidate], now, 30)
+
+    assert_equal "skipped", candidate.dig(:action, "outcome")
+    assert_equal "aged_heartbeat_referenced_at_apply", candidate.dig(:action, "skip_reason")
+    assert_path_exists File.join(@state_root, archive_path)
+    assert_equal "active", store.read_json(claim_path).data.fetch("status")
+  end
+
+  def test_gc_apply_fails_closed_on_unreadable_and_unknown_holder_heartbeats
+    now = Time.utc(2026, 7, 12, 12, 0, 0)
+    unreadable_path = write_abandoned_claim(
+      "unreadable-apply", now - (3 * 86_400), "agent_id" => "unreadable-apply"
+    )
+    unknown_path = write_abandoned_claim(
+      "unknown-apply", now - (3 * 86_400), "agent_id" => "unknown-apply"
+    )
+    write_state_record(
+      "heartbeats/unknown-apply.json",
+      { "schema_version" => 1, "agent_id" => "unknown-apply", "status" => "in_progress" }
+    )
+    stderr = StringIO.new
+    runner = AgentCoord::Runner.new([], stdout: StringIO.new, stderr: stderr, clock: FixedClock.new(now))
+    unreadable_store = ForbiddenHeartbeatStore.new(@state_root, "heartbeats/unreadable-apply.json")
+    unknown_store = CountingLocalStore.new(@state_root)
+
+    [[unreadable_store, unreadable_path], [unknown_store, unknown_path]].each do |store, path|
+      candidate = {
+        entry: store.read_json(path),
+        action: { "action" => "reap", "source_path" => path, "reason" => "expired_lease" }
+      }
+      runner.send(:execute_gc_candidates, store, [candidate], now, 30)
+      assert_equal "active", JSON.parse(File.read(File.join(@state_root, path))).fetch("status")
+      assert_equal "holder_liveness_unknown_at_apply", candidate.dig(:action, "skip_reason")
+    end
+    assert_includes stderr.string, "cannot establish liveness for claim holder \"unknown-apply\""
+    assert_includes stderr.string, "cannot read the heartbeat for claim holder \"unreadable-apply\""
+  end
+
+  def test_gc_warns_once_for_multiple_claims_with_the_same_unknown_holder
+    now = Time.utc(2026, 7, 12, 12, 0, 0)
+    2.times do |index|
+      write_abandoned_claim("unknown-shared-#{index}", now - (3 * 86_400), "agent_id" => "unknown-shared")
+    end
+    write_state_record(
+      "heartbeats/unknown-shared.json",
+      "schema_version" => 1, "agent_id" => "unknown-shared", "status" => "in_progress",
+      "updated_at" => "not-a-time", "expires_at" => "also-not-a-time"
+    )
+    stdout = StringIO.new
+    stderr = StringIO.new
+    runner = AgentCoord::Runner.new([], stdout: stdout, stderr: stderr, clock: FixedClock.new(now))
+
+    assert_equal 0, runner.send(:gc, state_root: @state_root, dry_run: true, execute: false, json: true)
+
+    actions = JSON.parse(stdout.string).fetch("actions")
+    refute(actions.any? { |action| action["source_path"] == "heartbeats/unknown-shared.json" })
+    refute(actions.any? { |action| action["source_path"]&.include?("unknown-shared-") })
+    assert_equal 1, stderr.string.scan("cannot establish liveness for claim holder \"unknown-shared\"").length
+  end
+
+  def test_gc_uses_a_valid_expiry_as_unknown_heartbeat_retention_fallback
+    now = Time.utc(2026, 7, 12, 12, 0, 0)
+    expires_at = now - (8 * 86_400)
+    heartbeat_path = "heartbeats/retention-fallback.json"
+    write_state_record(
+      heartbeat_path,
+      "schema_version" => 1, "agent_id" => "retention-fallback", "status" => "in_progress",
+      "updated_at" => "not-a-time", "expires_at" => expires_at.iso8601
+    )
+    stdout = StringIO.new
+    runner = AgentCoord::Runner.new([], stdout: stdout, stderr: StringIO.new, clock: FixedClock.new(now))
+
+    assert_equal 0, runner.send(:gc, state_root: @state_root, dry_run: true, execute: false, json: true)
+
+    action = JSON.parse(stdout.string).fetch("actions").find { |row| row["source_path"] == heartbeat_path }
+    assert_equal "archive", action.fetch("action")
+    assert_equal "aged_heartbeat", action.fetch("reason")
+    assert_equal expires_at.iso8601, action.fetch("eligible_at")
+  end
+
+  def test_gc_reconciles_a_transient_expired_event_failure_exactly_once
+    now = Time.utc(2026, 7, 12, 12, 0, 0)
+    claim_path = write_abandoned_claim(
+      "retry-event", now - (3 * 86_400),
+      "batch_id" => "retry-expired-batch", "agent_id" => "gone-holder"
+    )
+    stderr = StringIO.new
+    runner = AgentCoord::Runner.new([], stdout: StringIO.new, stderr: stderr, clock: FixedClock.new(now))
+    store = FailOnceExpiredEventStore.new(@state_root)
+    candidate = runner.send(:gc_reap_candidates, store, now, 1, %w[claims heartbeats events]).fetch(0)
+
+    runner.send(:gc_reap_claim, store, candidate, now)
+
+    pending = store.read_json(claim_path)
+    assert_equal "expired", pending.data.fetch("status")
+    assert_equal true, pending.data.fetch("expired_event_pending")
+    assert_empty event_records("retry-expired-batch")
+    assert_includes stderr.string, "claim.expired event pending"
+
+    2.times do
+      runner.send(
+        :gc, state_root: @state_root, dry_run: false, execute: true, json: true,
+             prefixes: %w[claims events]
+      )
+    end
+
+    settled = store.read_json(claim_path)
+    refute settled.data.key?("expired_event_pending")
+    assert_empty runner.send(:gc_expired_event_candidates, store, %w[claims events])
+    events = event_records("retry-expired-batch")
+    assert_equal 1, events.length
+    assert_equal "claim.expired", events.fetch(0).fetch("type")
+    assert_equal 1, store.expired_event_write_attempts
+  end
+
+  def test_gc_initial_reap_reports_pending_when_expired_event_write_fails
+    now = Time.utc(2026, 7, 12, 12, 0, 0)
+    claim_path = write_abandoned_claim(
+      "initial-pending", now - (3 * 86_400),
+      "batch_id" => "initial-pending-batch", "agent_id" => "gone-holder"
+    )
+    store = FailExpiredEventStore.new(@state_root)
+    runner = StoreInjectedRunner.new([], store: store, clock: FixedClock.new(now))
+
+    assert_equal 0, runner.send(
+      :gc, state_root: @state_root, dry_run: false, execute: true, json: true,
+           prefixes: %w[claims heartbeats events]
+    )
+
+    action = JSON.parse(runner.captured_stdout.string).fetch("actions").fetch(0)
+    assert_equal "reap", action.fetch("action")
+    assert_equal "pending", action.fetch("outcome")
+    assert_equal "expired_event_pending", action.fetch("skip_reason")
+    assert_equal true, store.read_json(claim_path).data.fetch("expired_event_pending")
+  end
+
+  def test_gc_initial_reap_accepts_exact_history_settled_before_its_reread
+    now = Time.utc(2026, 7, 12, 12, 0, 0)
+    claim_path = write_abandoned_claim(
+      "initial-settled-race", now - (3 * 86_400),
+      "batch_id" => "initial-settled-race-batch", "agent_id" => "gone-holder"
+    )
+    store = SettleExpiredEventBeforeReadStore.new(@state_root, claim_path)
+    runner = StoreInjectedRunner.new([], store: store, clock: FixedClock.new(now))
+
+    assert_equal 0, runner.send(
+      :gc, state_root: @state_root, dry_run: false, execute: true, json: true,
+           prefixes: %w[claims heartbeats events]
+    )
+
+    action = JSON.parse(runner.captured_stdout.string).fetch("actions").fetch(0)
+    assert_equal "reap", action.fetch("action")
+    refute action.key?("outcome")
+    refute store.read_json(claim_path).data.key?("expired_event_pending")
+    assert_equal 1, event_records("initial-settled-race-batch").length
+  end
+
+  def test_gc_initial_reap_accepts_exact_history_settled_then_immediately_reacquired
+    now = Time.utc(2026, 7, 12, 12, 0, 0)
+    claim_path = write_abandoned_claim(
+      "initial-settled-reacquired-race", now - (3 * 86_400),
+      "batch_id" => "initial-settled-reacquired-batch", "agent_id" => "gone-holder"
+    )
+    store = SettleExpiredEventAndReacquireBeforeReadStore.new(@state_root, claim_path, now)
+    runner = StoreInjectedRunner.new([], store: store, clock: FixedClock.new(now))
+
+    assert_equal 0, runner.send(
+      :gc, state_root: @state_root, dry_run: false, execute: true, json: true,
+           prefixes: %w[claims heartbeats events]
+    )
+
+    action = JSON.parse(runner.captured_stdout.string).fetch("actions").fetch(0)
+    refute action.key?("outcome")
+    claim = store.read_json(claim_path).data
+    assert_equal "active", claim.fetch("status")
+    assert_equal "new-holder", claim.fetch("agent_id")
+    assert_equal 1, event_records("initial-settled-reacquired-batch").length
+  end
+
+  def test_gc_initial_reap_finishes_a_pending_claim_after_another_reconciler_writes_the_event
+    now = Time.utc(2026, 7, 12, 12, 0, 0)
+    claim_path = write_abandoned_claim(
+      "initial-event-written-race", now - (3 * 86_400),
+      "batch_id" => "initial-event-written-batch", "agent_id" => "gone-holder"
+    )
+    store = ExpiredEventWrittenBeforeReadStore.new(@state_root, claim_path)
+    runner = StoreInjectedRunner.new([], store: store, clock: FixedClock.new(now))
+
+    assert_equal 0, runner.send(
+      :gc, state_root: @state_root, dry_run: false, execute: true, json: true,
+           prefixes: %w[claims heartbeats events]
+    )
+
+    action = JSON.parse(runner.captured_stdout.string).fetch("actions").fetch(0)
+    refute action.key?("outcome")
+    refute store.read_json(claim_path).data.key?("expired_event_pending")
+    assert_equal 1, event_records("initial-event-written-batch").length
+  end
+
+  def test_gc_retains_an_unbatched_expiry_event_after_the_claim_is_reused
+    now = Time.utc(2026, 7, 12, 12, 0, 0)
+    claim_path = write_abandoned_claim("unbatched-reuse", now - (3 * 86_400), "agent_id" => "gone-holder")
+    runner = AgentCoord::Runner.new([], stdout: StringIO.new, clock: FixedClock.new(now))
+
+    assert_equal 0, runner.send(:gc, state_root: @state_root, dry_run: false, execute: true, json: true)
+
+    expired = JSON.parse(File.read(File.join(@state_root, claim_path)))
+    assert_equal "expired", expired.fetch("status")
+    event_paths = Dir.glob(File.join(@state_root, "events", "**", "*.json"))
+    assert_equal 1, event_paths.length
+    immutable_event = JSON.parse(File.read(event_paths.fetch(0)))
+    assert_equal "claim.expired", immutable_event.fetch("type")
+    assert_equal "expired", immutable_event.fetch("status")
+    assert_equal "unbatched-reuse", immutable_event.fetch("target")
+    assert_equal AgentCoord::INTERNAL_UNBATCHED_CLAIM_EXPIRY_BATCH_ID, immutable_event.fetch("batch_id")
+    assert event_paths.fetch(0).include?(AgentCoord::INTERNAL_UNBATCHED_CLAIM_EXPIRY_EVENT_PREFIX)
+
+    replacement = run_agent_coord(
+      "claim", "--agent-id", "new-holder", "--repo", "shakacode/example", "--target", "unbatched-reuse"
+    )
+
+    assert_equal 0, replacement.status.exitstatus, replacement.stderr
+    reused = JSON.parse(File.read(File.join(@state_root, claim_path)))
+    assert_equal "active", reused.fetch("status")
+    refute reused.key?("reaped_at")
+    assert_equal immutable_event, JSON.parse(File.read(event_paths.fetch(0)))
+    assert_equal 1, Dir.glob(File.join(@state_root, "events", "**", "*.json")).length
+  end
+
+  def test_claim_and_heartbeat_reject_the_reserved_unbatched_expiry_namespace
+    reserved_batch_ids = [
+      AgentCoord::UNBATCHED_CLAIM_EXPIRY_BATCH_ID,
+      AgentCoord::INTERNAL_UNBATCHED_CLAIM_EXPIRY_BATCH_ID
+    ]
+    reserved_batch_ids.each do |batch_id|
+      claim = run_agent_coord(
+        "claim", "--agent-id", "worker-a", "--repo", "shakacode/example", "--target", "reserved-claim",
+        "--batch-id", batch_id
+      )
+      heartbeat = run_agent_coord(
+        "heartbeat", "--agent-id", "worker-a", "--repo", "shakacode/example", "--target", "reserved-heartbeat",
+        "--batch-id", batch_id
+      )
+
+      [claim, heartbeat].each do |result|
+        assert_equal 1, result.status.exitstatus
+        assert_includes result.stderr, "reserved for unbatched claim expiry history"
+      end
+    end
+    assert_empty Dir.glob(File.join(@state_root, "claims", "**", "*.json"))
+    assert_empty Dir.glob(File.join(@state_root, "heartbeats", "*.json"))
+  end
+
+  def test_lifecycle_writes_reject_reserved_batch_ids_preserved_from_existing_records
+    batch_id = AgentCoord::INTERNAL_UNBATCHED_CLAIM_EXPIRY_BATCH_ID
+    claim_path = AgentCoord.claim_path("shakacode/example", "reserved-release")
+    heartbeat_path = AgentCoord.heartbeat_path("worker-a")
+    write_state_record(
+      claim_path,
+      "schema_version" => 1, "repo" => "shakacode/example", "target" => "reserved-release",
+      "agent_id" => "worker-a", "batch_id" => batch_id, "status" => "active",
+      "claimed_at" => "2026-07-12T10:00:00Z", "updated_at" => "2026-07-12T10:00:00Z",
+      "expires_at" => "2026-07-12T14:00:00Z"
+    )
+    write_state_record(
+      heartbeat_path,
+      "schema_version" => 1, "agent_id" => "worker-a", "repo" => "shakacode/example",
+      "target" => "reserved-release", "batch_id" => batch_id, "status" => "in_progress",
+      "phase" => "implementing", "updated_at" => "2026-07-12T10:00:00Z",
+      "expires_at" => "2026-07-12T14:00:00Z"
+    )
+    original_claim = File.binread(File.join(@state_root, claim_path))
+    original_heartbeat = File.binread(File.join(@state_root, heartbeat_path))
+
+    release = run_agent_coord(
+      "release", "--agent-id", "worker-a", "--repo", "shakacode/example", "--target", "reserved-release"
+    )
+    heartbeat = run_agent_coord(
+      "heartbeat", "--agent-id", "worker-a", "--repo", "shakacode/example", "--target", "reserved-release",
+      "--status", "in_progress", "--phase", "validating"
+    )
+
+    [release, heartbeat].each do |result|
+      assert_equal 1, result.status.exitstatus
+      assert_includes result.stderr, "reserved for unbatched claim expiry history"
+    end
+    assert_equal original_claim, File.binread(File.join(@state_root, claim_path))
+    assert_equal original_heartbeat, File.binread(File.join(@state_root, heartbeat_path))
+    assert_empty event_records(batch_id)
+  end
+
+  def test_lifecycle_writes_tolerate_generic_invalid_batch_ids_preserved_from_existing_records
+    batch_id = "../bad"
+    claim_path = AgentCoord.claim_path("shakacode/example", "invalid-release")
+    heartbeat_path = AgentCoord.heartbeat_path("worker-a")
+    write_state_record(
+      claim_path,
+      "schema_version" => 1, "repo" => "shakacode/example", "target" => "invalid-release",
+      "agent_id" => "worker-a", "batch_id" => batch_id, "status" => "active",
+      "claimed_at" => "2026-07-12T10:00:00Z", "updated_at" => "2026-07-12T10:00:00Z",
+      "expires_at" => "2026-07-12T14:00:00Z"
+    )
+    write_state_record(
+      heartbeat_path,
+      "schema_version" => 1, "agent_id" => "worker-a", "repo" => "shakacode/example",
+      "target" => "invalid-release", "batch_id" => batch_id, "status" => "in_progress",
+      "phase" => "implementing", "updated_at" => "2026-07-12T10:00:00Z",
+      "expires_at" => "2026-07-12T14:00:00Z"
+    )
+
+    release = run_agent_coord(
+      "release", "--agent-id", "worker-a", "--repo", "shakacode/example", "--target", "invalid-release"
+    )
+    heartbeat = run_agent_coord(
+      "heartbeat", "--agent-id", "worker-a", "--repo", "shakacode/example", "--target", "invalid-release",
+      "--status", "in_progress", "--phase", "validating"
+    )
+
+    assert_equal 0, release.status.exitstatus, release.stderr
+    assert_includes release.stderr, "warning: claim.released event not recorded"
+    assert_includes release.stderr, "invalid batch-id"
+    assert_equal 0, heartbeat.status.exitstatus, heartbeat.stderr
+    assert_includes heartbeat.stderr, "warning: phase.changed event not recorded"
+    assert_includes heartbeat.stderr, "invalid batch-id"
+    assert_equal "released", JSON.parse(File.read(File.join(@state_root, claim_path))).fetch("status")
+    assert_equal "validating", JSON.parse(File.read(File.join(@state_root, heartbeat_path))).fetch("phase")
+    assert_empty Dir.glob(File.join(@state_root, "events", "**", "*.json"))
+  end
+
+  def test_preexisting_reserved_name_batch_remains_readable_but_cannot_be_created_again
+    batch_id = AgentCoord::UNBATCHED_CLAIM_EXPIRY_BATCH_ID
+    write_batch(batch_id, lanes: [{ "name" => "legacy", "owner" => "worker-a", "targets" => ["99"] }])
+
+    status = run_agent_coord("status", "--batch-id", batch_id, "--json")
+
+    assert_equal 0, status.status.exitstatus, status.stderr
+    assert_equal batch_id, JSON.parse(status.stdout).fetch("batches").fetch(0).fetch("batch_id")
+
+    manifest = File.join(@state_root, "reserved-batch.json")
+    File.write(manifest, JSON.generate("batch_id" => batch_id, "lanes" => []))
+    create = run_agent_coord("register-batch", "--file", manifest)
+    assert_equal 1, create.status.exitstatus
+    assert_includes create.stderr, "reserved for unbatched claim expiry history"
+  end
+
+  def test_unbatched_expiry_history_cannot_enter_a_preexisting_reserved_batch_event_lineage
+    now = Time.utc(2026, 7, 12, 12, 0, 0)
+    batch_id = AgentCoord::UNBATCHED_CLAIM_EXPIRY_BATCH_ID
+    legacy_event_path = "events/#{batch_id}/legacy-event.json"
+    write_batch(batch_id, lanes: [{ "name" => "legacy", "owner" => "worker-a", "targets" => ["99"] }])
+    write_state_record(
+      legacy_event_path,
+      "schema_version" => 1, "event_id" => "legacy-event", "batch_id" => batch_id,
+      "type" => "phase", "repo" => "shakacode/example", "target" => "99",
+      "phase" => "implementing", "at" => (now - 3600).iso8601
+    )
+    write_abandoned_claim("unbatched-disjoint", now - (3 * 86_400), "agent_id" => "gone-holder")
+    runner = AgentCoord::Runner.new([], stdout: StringIO.new, clock: FixedClock.new(now))
+
+    assert_equal 0, runner.send(:gc, state_root: @state_root, dry_run: false, execute: true, json: true)
+
+    generated = Dir.glob(File.join(@state_root, "events", "**", "claim-expired-*.json"))
+    assert_equal 1, generated.length
+    refute generated.fetch(0).start_with?(File.join(@state_root, "events", batch_id, ""))
+    internal_path = AgentCoord.event_path(
+      AgentCoord::INTERNAL_UNBATCHED_CLAIM_EXPIRY_BATCH_ID,
+      File.basename(generated.fetch(0), ".json")
+    )
+    assert_match AgentCoord::STATE_PATH_PATTERN, internal_path
+    assert_match AgentCoord::STATE_PATH_PATTERN, "archive/#{internal_path}"
+    assert_path_exists File.join(@state_root, legacy_event_path)
+    assert_equal batch_id, JSON.parse(File.read(File.join(@state_root, legacy_event_path))).fetch("batch_id")
+    status = run_agent_coord("status", "--batch-id", batch_id, "--json")
+    assert_equal 0, status.status.exitstatus, status.stderr
+    status_event_paths = JSON.parse(status.stdout).fetch("events").map { |event| event.fetch("path") }
+    assert_equal [legacy_event_path], status_event_paths
+  end
+
+  def test_unbatched_expiry_history_fails_closed_if_internal_namespace_has_a_preexisting_batch
+    now = Time.utc(2026, 7, 12, 12, 0, 0)
+    internal_batch_id = AgentCoord::INTERNAL_UNBATCHED_CLAIM_EXPIRY_BATCH_ID
+    write_batch(internal_batch_id, lanes: [])
+    claim_path = write_abandoned_claim(
+      "unbatched-internal-collision", now - (3 * 86_400), "agent_id" => "gone-holder"
+    )
+    valid_path = write_abandoned_claim(
+      "batched-after-internal-collision", now - (3 * 86_400),
+      "agent_id" => "gone-holder", "batch_id" => "valid-collision-peer-batch"
+    )
+    stdout = StringIO.new
+    stderr = StringIO.new
+    runner = AgentCoord::Runner.new([], stdout: stdout, stderr: stderr, clock: FixedClock.new(now))
+
+    assert_equal 0, runner.send(:gc, state_root: @state_root, dry_run: false, execute: true, json: true)
+
+    action = JSON.parse(stdout.string).fetch("actions").find do |row|
+      row["source_path"] == claim_path
+    end
+    assert_equal "skipped", action.fetch("outcome")
+    assert_equal "invalid_expired_event_destination_at_apply", action.fetch("skip_reason")
+    assert_includes stderr.string, "internal claim expiry namespace collides with existing batch"
+    claim = JSON.parse(File.read(File.join(@state_root, claim_path)))
+    assert_equal "active", claim.fetch("status")
+    refute claim.key?("expired_event_pending")
+    assert_equal "expired", JSON.parse(File.read(File.join(@state_root, valid_path))).fetch("status")
+    assert_empty Dir.glob(File.join(@state_root, AgentCoord::INTERNAL_UNBATCHED_CLAIM_EXPIRY_EVENT_PREFIX, "*.json"))
+  end
+
+  def test_gc_checks_internal_namespace_collision_before_archiving_its_manifest # rubocop:disable Metrics/AbcSize
+    now = Time.utc(2026, 7, 12, 12, 0, 0)
+    internal_batch_id = AgentCoord::INTERNAL_UNBATCHED_CLAIM_EXPIRY_BATCH_ID
+    write_batch(internal_batch_id, lanes: [])
+    batch_path = File.join(@state_root, AgentCoord.batch_path(internal_batch_id))
+    batch = JSON.parse(File.read(batch_path)).merge(
+      "status" => "completed", "completed_at" => (now - (8 * 86_400)).iso8601,
+      "updated_at" => (now - (8 * 86_400)).iso8601
+    )
+    File.write(batch_path, JSON.generate(batch))
+    claim_path = write_abandoned_claim(
+      "unbatched-before-manifest-archive", now - (3 * 86_400), "agent_id" => "gone-holder"
+    )
+    valid_path = write_abandoned_claim(
+      "batched-peer-before-manifest-archive", now - (3 * 86_400),
+      "agent_id" => "gone-holder", "batch_id" => "valid-archive-order-peer"
+    )
+    stdout = StringIO.new
+    runner = AgentCoord::Runner.new([], stdout: stdout, clock: FixedClock.new(now))
+
+    assert_equal 0, runner.send(:gc, state_root: @state_root, dry_run: false, execute: true, json: true)
+
+    actions = JSON.parse(stdout.string).fetch("actions")
+    reap = actions.find { |row| row["source_path"] == claim_path }
+    assert_equal "skipped", reap.fetch("outcome")
+    assert_equal "invalid_expired_event_destination_at_apply", reap.fetch("skip_reason")
+    assert_equal "active", JSON.parse(File.read(File.join(@state_root, claim_path))).fetch("status")
+    assert_equal "expired", JSON.parse(File.read(File.join(@state_root, valid_path))).fetch("status")
+    assert_path_exists batch_path
+    refute_path_exists File.join(@state_root, "archive", AgentCoord.batch_path(internal_batch_id))
+    assert_empty Dir.glob(File.join(@state_root, AgentCoord::INTERNAL_UNBATCHED_CLAIM_EXPIRY_EVENT_PREFIX, "*.json"))
+
+    replay_stdout = StringIO.new
+    replay = AgentCoord::Runner.new([], stdout: replay_stdout, clock: FixedClock.new(now + 60))
+    assert_equal 0, replay.send(:gc, state_root: @state_root, dry_run: false, execute: true, json: true)
+    replay_action = JSON.parse(replay_stdout.string).fetch("actions").find do |row|
+      row["source_path"] == claim_path
+    end
+    assert_equal "skipped", replay_action.fetch("outcome")
+    assert_equal "invalid_expired_event_destination_at_apply", replay_action.fetch("skip_reason")
+    assert_equal "active", JSON.parse(File.read(File.join(@state_root, claim_path))).fetch("status")
+    assert_empty Dir.glob(File.join(@state_root, AgentCoord::INTERNAL_UNBATCHED_CLAIM_EXPIRY_EVENT_PREFIX, "*.json"))
+  end
+
+  def test_gc_preserves_an_archived_internal_namespace_collision_sentinel_across_runs
+    now = Time.utc(2026, 7, 12, 12, 0, 0)
+    internal_batch_id = AgentCoord::INTERNAL_UNBATCHED_CLAIM_EXPIRY_BATCH_ID
+    source_path = AgentCoord.batch_path(internal_batch_id)
+    archived_path = AgentCoord.archive_path(source_path)
+    old = (now - (40 * 86_400)).iso8601
+    write_state_record(
+      archived_path,
+      "schema_version" => 1, "record_family" => "archived_record", "source_path" => source_path,
+      "reason" => "completed_batch", "synthetic" => false, "archived_at" => old,
+      "delete_after" => old,
+      "data" => { "schema_version" => 1, "batch_id" => internal_batch_id, "status" => "completed" }
+    )
+    claim_path = write_abandoned_claim(
+      "unbatched-with-archived-collision", now - (3 * 86_400), "agent_id" => "gone-holder"
+    )
+
+    2.times do |index|
+      stdout = StringIO.new
+      runner = AgentCoord::Runner.new([], stdout: stdout, clock: FixedClock.new(now + (index * 60)))
+      assert_equal 0, runner.send(:gc, state_root: @state_root, dry_run: false, execute: true, json: true)
+      action = JSON.parse(stdout.string).fetch("actions").find { |row| row["source_path"] == claim_path }
+      assert_equal "skipped", action.fetch("outcome")
+      assert_equal "invalid_expired_event_destination_at_apply", action.fetch("skip_reason")
+      assert_equal "active", JSON.parse(File.read(File.join(@state_root, claim_path))).fetch("status")
+      assert_path_exists File.join(@state_root, archived_path)
+      assert_empty Dir.glob(
+        File.join(@state_root, AgentCoord::INTERNAL_UNBATCHED_CLAIM_EXPIRY_EVENT_PREFIX, "*.json")
+      )
+    end
+  end
+
+  def test_gc_execute_reports_a_still_pending_expired_event
+    now = Time.utc(2026, 7, 12, 12, 0, 0)
+    claim_path = write_abandoned_claim(
+      "pending-output", now - (3 * 86_400),
+      "batch_id" => "pending-output-batch", "agent_id" => "gone-holder",
+      "status" => "expired", "reaped_at" => now.iso8601,
+      "expired_event_id" => "claim-expired-pending-output",
+      "expired_event_at" => now.iso8601, "expired_event_pending" => true
+    )
+    store = FailExpiredEventStore.new(@state_root)
+    runner = StoreInjectedRunner.new([], store: store, clock: FixedClock.new(now))
+
+    assert_equal 0, runner.send(
+      :gc, state_root: @state_root, dry_run: false, execute: true, json: true,
+           prefixes: %w[claims events]
+    )
+
+    action = JSON.parse(runner.captured_stdout.string).fetch("actions").fetch(0)
+    assert_equal "reconcile_expired_event", action.fetch("action")
+    assert_equal "pending", action.fetch("outcome")
+    assert_equal "expired_event_pending", action.fetch("skip_reason")
+    assert_equal true, store.read_json(claim_path).data.fetch("expired_event_pending")
+
+    text_store = FailExpiredEventStore.new(@state_root)
+    text_runner = StoreInjectedRunner.new([], store: text_store, clock: FixedClock.new(now))
+    assert_equal 0, text_runner.send(
+      :gc, state_root: @state_root, dry_run: false, execute: true, json: false,
+           prefixes: %w[claims events]
+    )
+    assert_includes text_runner.captured_stdout.string, "[pending: expired_event_pending]"
+  end
+
+  def test_gc_reconcile_treats_an_already_settled_expiry_event_as_success
+    now = Time.utc(2026, 7, 12, 12, 0, 0)
+    claim_path = write_abandoned_claim(
+      "already-settled", now - (3 * 86_400),
+      "batch_id" => "already-settled-batch", "status" => "expired", "reaped_at" => now.iso8601,
+      "expired_event_id" => "claim-expired-already-settled",
+      "expired_event_batch_id" => "already-settled-batch", "expired_event_at" => now.iso8601
+    )
+    store = AgentCoord::LocalStore.new(@state_root)
+    runner = AgentCoord::Runner.new([], stdout: StringIO.new, clock: FixedClock.new(now))
+    entry = store.read_json(claim_path)
+    event = runner.send(:gc_claim_expired_event_payload, entry.data, entry.path)
+    store.write_json(
+      AgentCoord.event_path(event.fetch("batch_id"), event.fetch("event_id")), event,
+      message: "seed settled history", create: true
+    )
+    candidate = {
+      entry: entry,
+      action: { "action" => "reconcile_expired_event", "source_path" => claim_path }
+    }
+
+    runner.send(:execute_gc_candidates, store, [candidate], now, 30)
+
+    refute candidate.fetch(:action).key?("outcome")
+    refute candidate.fetch(:action).key?("skip_reason")
+  end
+
+  def test_gc_claims_only_scope_warns_when_pending_expiry_history_needs_events
+    now = Time.utc(2026, 7, 12, 12, 0, 0)
+    write_abandoned_claim(
+      "pending-prefix", now - (3 * 86_400),
+      "status" => "expired", "reaped_at" => now.iso8601,
+      "expired_event_id" => "claim-expired-pending-prefix",
+      "expired_event_batch_id" => AgentCoord::INTERNAL_UNBATCHED_CLAIM_EXPIRY_BATCH_ID,
+      "expired_event_at" => now.iso8601, "expired_event_pending" => true
+    )
+    stderr = StringIO.new
+    runner = AgentCoord::Runner.new([], stdout: StringIO.new, stderr: stderr, clock: FixedClock.new(now))
+
+    assert_equal 0, runner.send(
+      :gc, state_root: @state_root, dry_run: true, execute: false, json: true, prefixes: ["claims"]
+    )
+
+    assert_includes stderr.string, "1 pending claim.expired event(s) unreconciled"
+    assert_includes stderr.string, "needs --prefix events alongside --prefix claims"
+  end
+
+  def test_claims_only_reacquisition_preserves_pending_expiry_for_privileged_gc # rubocop:disable Metrics/AbcSize
+    now = Time.utc(2026, 7, 12, 12, 0, 0)
+    claim_path = write_abandoned_claim(
+      "claims-only-reacquire", now - (3 * 86_400),
+      "agent_id" => "expired-holder", "status" => "expired", "reaped_at" => now.iso8601,
+      "expired_event_id" => "claim-expired-claims-only",
+      "expired_event_batch_id" => AgentCoord::INTERNAL_UNBATCHED_CLAIM_EXPIRY_BATCH_ID,
+      "expired_event_at" => now.iso8601, "expired_event_pending" => true
+    )
+    claims_store = ClaimsOnlyStore.new(@state_root)
+    claim_runner = StoreInjectedRunner.new([], store: claims_store, clock: FixedClock.new(now + 60))
+
+    assert_equal 0, claim_runner.send(
+      :claim, agent_id: "new-holder", repo: "shakacode/example", target: "claims-only-reacquire", ttl: 3600
+    )
+
+    active = claims_store.read_json(claim_path).data
+    assert_equal "active", active.fetch("status")
+    assert_equal "new-holder", active.fetch("agent_id")
+    assert_equal true, active.fetch("expired_event_pending")
+    assert_equal "expired-holder", active.fetch("expired_event_replay").fetch("agent_id")
+    assert_empty claims_store.non_claim_accesses
+
+    store = AgentCoord::LocalStore.new(@state_root)
+    gc_runner = AgentCoord::Runner.new([], stdout: StringIO.new, clock: FixedClock.new(now + (3 * 86_400)))
+    assert_empty gc_runner.send(
+      :gc_reap_candidates, store, now + (3 * 86_400), 1, %w[claims heartbeats events batches]
+    )
+
+    release_runner = StoreInjectedRunner.new([], store: claims_store, clock: FixedClock.new(now + 90))
+    assert_equal 0, release_runner.send(
+      :release, agent_id: "new-holder", repo: "shakacode/example", target: "claims-only-reacquire"
+    )
+    released = claims_store.read_json(claim_path).data
+    assert_equal "released", released.fetch("status")
+    assert_equal true, released.fetch("expired_event_pending")
+    assert_equal "expired-holder", released.fetch("expired_event_replay").fetch("agent_id")
+    assert_empty claims_store.non_claim_accesses
+
+    gc_runner = AgentCoord::Runner.new([], stdout: StringIO.new, clock: FixedClock.new(now + 120))
+    candidates = gc_runner.send(:gc_expired_event_candidates, store, %w[claims events batches])
+    gc_runner.send(:execute_gc_candidates, store, candidates, now + 120, 30)
+
+    reconciled = store.read_json(claim_path).data
+    assert_equal "released", reconciled.fetch("status")
+    assert_equal "new-holder", reconciled.fetch("agent_id")
+    refute reconciled.key?("expired_event_pending")
+    refute reconciled.key?("expired_event_replay")
+    event = event_records(AgentCoord::INTERNAL_UNBATCHED_CLAIM_EXPIRY_BATCH_ID).fetch(0)
+    assert_equal "expired-holder", event.fetch("agent_id")
+  end
+
+  def test_claim_and_gc_reject_legacy_pending_expiry_destination_without_mutation
+    now = Time.utc(2026, 7, 12, 12, 0, 0)
+    claim_path = write_abandoned_claim(
+      "legacy-pending-expiry", now - (3 * 86_400),
+      "agent_id" => "expired-holder", "status" => "expired", "reaped_at" => now.iso8601,
+      "expired_event_id" => "claim-expired-legacy-pending",
+      "expired_event_batch_id" => AgentCoord::UNBATCHED_CLAIM_EXPIRY_BATCH_ID,
+      "expired_event_at" => now.iso8601, "expired_event_pending" => true
+    )
+    original = File.binread(File.join(@state_root, claim_path))
+    claim_runner = AgentCoord::Runner.new([], stdout: StringIO.new, clock: FixedClock.new(now + 60))
+
+    error = assert_raises(AgentCoord::Error) do
+      claim_runner.send(
+        :claim, state_root: @state_root, agent_id: "new-holder", repo: "shakacode/example",
+                target: "legacy-pending-expiry", ttl: 3600
+      )
+    end
+    assert_includes error.message, "legacy unbatched claim expiry destination is unsupported"
+    assert_equal original, File.binread(File.join(@state_root, claim_path))
+
+    stdout = StringIO.new
+    gc_runner = AgentCoord::Runner.new([], stdout: stdout, clock: FixedClock.new(now + 120))
+    assert_equal 0, gc_runner.send(
+      :gc, state_root: @state_root, dry_run: false, execute: true, json: true,
+           prefixes: %w[claims events]
+    )
+    action = JSON.parse(stdout.string).fetch("actions").fetch(0)
+    assert_equal "pending", action.fetch("outcome")
+    assert_equal original, File.binread(File.join(@state_root, claim_path))
+    assert_empty event_records(AgentCoord::UNBATCHED_CLAIM_EXPIRY_BATCH_ID)
+  end
+
+  def test_claim_and_gc_reject_malformed_nested_expiry_replays_without_mutation
+    now = Time.utc(2026, 7, 12, 12, 0, 0)
+    mutations = {
+      "missing-schema" => ->(event) { event.delete("schema_version") },
+      "missing-holder" => ->(event) { event.delete("agent_id") },
+      "blank-repo" => ->(event) { event["repo"] = "" },
+      "wrong-repo" => ->(event) { event["repo"] = "shakacode/other" },
+      "missing-target" => ->(event) { event.delete("target") },
+      "wrong-target" => ->(event) { event["target"] = "another-target" },
+      "invalid-time" => ->(event) { event["at"] = "not-a-timestamp" }
+    }
+
+    mutations.each do |label, mutate| # rubocop:disable Metrics/BlockLength
+      target = "malformed-replay-#{label}"
+      event_id = "claim-expired-#{label}"
+      replay = {
+        "schema_version" => AgentCoord::SCHEMA_VERSION,
+        "event_id" => event_id, "batch_id" => "malformed-replay-batch",
+        "type" => "claim.expired", "agent_id" => "expired-holder",
+        "repo" => "shakacode/example", "target" => target,
+        "status" => "expired", "at" => now.iso8601
+      }
+      mutate.call(replay)
+      event_at = replay.fetch("at")
+      claim_path = write_abandoned_claim(
+        target, now - (3 * 86_400),
+        "agent_id" => "expired-holder", "status" => "expired", "reaped_at" => now.iso8601,
+        "expired_event_id" => event_id, "expired_event_batch_id" => "malformed-replay-batch",
+        "expired_event_at" => event_at, "expired_event_pending" => true,
+        "expired_event_replay" => replay
+      )
+      original = File.binread(File.join(@state_root, claim_path))
+      runner = AgentCoord::Runner.new([], stdout: StringIO.new, stderr: StringIO.new, clock: FixedClock.new(now + 60))
+
+      error = assert_raises(AgentCoord::OperationalError, label) do
+        runner.send(
+          :claim, state_root: @state_root, agent_id: "new-holder", repo: "shakacode/example",
+                  target: target, ttl: 3600
+        )
+      end
+      assert_includes error.message, "claim.expired event pending replay", label
+      assert_equal false, runner.send(
+        :gc_reconcile_expired_event, AgentCoord::LocalStore.new(@state_root),
+        { entry: AgentCoord::LocalStore.new(@state_root).read_json(claim_path) }
+      ), label
+      assert_equal original, File.binread(File.join(@state_root, claim_path)), label
+      assert_empty event_records("malformed-replay-batch"), label
+    end # rubocop:enable Metrics/BlockLength
+  end
+
+  def test_pending_expiry_replay_rejects_invalid_optional_metadata_encoding
+    claim_path = "claims/shakacode/example/invalid-replay-encoding.json"
+    event = {
+      "schema_version" => AgentCoord::SCHEMA_VERSION,
+      "event_id" => "claim-expired-invalid-encoding", "batch_id" => "invalid-encoding-batch",
+      "type" => "claim.expired", "agent_id" => "expired-holder",
+      "repo" => "shakacode/example", "target" => "invalid-replay-encoding",
+      "status" => "expired", "at" => "2026-07-12T12:00:00Z",
+      "host" => "bad\xFF".b.force_encoding(Encoding::UTF_8)
+    }
+    claim = {
+      "expired_event_id" => event.fetch("event_id"),
+      "expired_event_batch_id" => event.fetch("batch_id"),
+      "expired_event_at" => event.fetch("at")
+    }
+    runner = AgentCoord::Runner.new([])
+
+    error = assert_raises(AgentCoord::OperationalError) do
+      runner.send(:gc_validate_expired_event_replay!, claim, event, claim_path)
+    end
+    assert_includes error.message, "invalid generated event shape"
+  end
+
+  def test_gc_reconcile_warns_when_the_pending_event_identity_moves
+    now = Time.utc(2026, 7, 12, 12, 0, 0)
+    claim_path = write_abandoned_claim(
+      "moved-event", now - (3 * 86_400),
+      "batch_id" => "moved-event-batch", "agent_id" => "gone-holder",
+      "status" => "expired", "reaped_at" => now.iso8601,
+      "expired_event_id" => "claim-expired-original",
+      "expired_event_at" => now.iso8601, "expired_event_pending" => true
+    )
+    stderr = StringIO.new
+    runner = AgentCoord::Runner.new([], stdout: StringIO.new, stderr: stderr, clock: FixedClock.new(now))
+    store = ExpiredEventIdentityMovesStore.new(@state_root, claim_path)
+
+    result = runner.send(:gc_reconcile_expired_event, store, { entry: store.read_json(claim_path) })
+
+    assert_equal false, result
+    assert_includes stderr.string, "claim.expired event identity changed"
+  end
+
+  def test_gc_reconcile_accepts_an_exact_settlement_won_by_another_reconciler
+    now = Time.utc(2026, 7, 12, 12, 0, 0)
+    claim_path = write_abandoned_claim(
+      "settled-race", now - (3 * 86_400),
+      "batch_id" => "settled-race-batch", "agent_id" => "expired-holder",
+      "status" => "expired", "reaped_at" => now.iso8601,
+      "expired_event_id" => "claim-expired-settled-race",
+      "expired_event_batch_id" => "settled-race-batch",
+      "expired_event_at" => now.iso8601, "expired_event_pending" => true
+    )
+    stderr = StringIO.new
+    store = SettleConflictExpiredEventStore.new(@state_root, claim_path)
+    runner = AgentCoord::Runner.new([], stdout: StringIO.new, stderr: stderr, clock: FixedClock.new(now))
+
+    assert_equal true, runner.send(:gc_reconcile_expired_event, store, { entry: store.read_json(claim_path) })
+
+    settled = store.read_json(claim_path).data
+    refute settled.key?("expired_event_pending")
+    assert_empty stderr.string
+    assert_equal 1, event_records("settled-race-batch").length
+  end
+
+  def test_gc_standalone_reconcile_accepts_exact_history_settled_then_immediately_reacquired
+    now = Time.utc(2026, 7, 12, 12, 0, 0)
+    claim_path = write_abandoned_claim(
+      "standalone-settled-reacquired", now - (3 * 86_400),
+      "batch_id" => "standalone-settled-reacquired-batch", "agent_id" => "expired-holder",
+      "status" => "expired", "reaped_at" => now.iso8601,
+      "expired_event_id" => "claim-expired-standalone-reacquired",
+      "expired_event_batch_id" => "standalone-settled-reacquired-batch",
+      "expired_event_at" => now.iso8601, "expired_event_pending" => true
+    )
+    store = SettleExpiredEventAndReacquireDuringReconcileStore.new(@state_root, claim_path, now)
+    runner = StoreInjectedRunner.new([], store: store, clock: FixedClock.new(now))
+
+    assert_equal 0, runner.send(
+      :gc, state_root: @state_root, dry_run: false, execute: true, json: true,
+           prefixes: %w[claims events]
+    )
+
+    action = JSON.parse(runner.captured_stdout.string).fetch("actions").fetch(0)
+    refute action.key?("outcome")
+    claim = store.read_json(claim_path).data
+    assert_equal "active", claim.fetch("status")
+    assert_equal "new-holder", claim.fetch("agent_id")
+    assert_equal 1, event_records("standalone-settled-reacquired-batch").length
+  end
+
+  def test_gc_standalone_reconcile_accepts_reacquire_during_redundant_marker_clear
+    now = Time.utc(2026, 7, 12, 12, 0, 0)
+    claim_path = write_abandoned_claim(
+      "standalone-late-reacquire", now - (3 * 86_400),
+      "batch_id" => "standalone-late-reacquire-batch", "agent_id" => "expired-holder",
+      "status" => "expired", "reaped_at" => now.iso8601,
+      "expired_event_id" => "claim-expired-standalone-late-reacquire",
+      "expired_event_batch_id" => "standalone-late-reacquire-batch",
+      "expired_event_at" => now.iso8601, "expired_event_pending" => true
+    )
+    store = SettleThenReacquireOnMarkerClearStore.new(@state_root, claim_path, now)
+    runner = StoreInjectedRunner.new([], store: store, clock: FixedClock.new(now))
+
+    assert_equal 0, runner.send(
+      :gc, state_root: @state_root, dry_run: false, execute: true, json: true,
+           prefixes: %w[claims events]
+    )
+
+    action = JSON.parse(runner.captured_stdout.string).fetch("actions").fetch(0)
+    refute action.key?("outcome")
+    claim = store.read_json(claim_path).data
+    assert_equal "active", claim.fetch("status")
+    assert_equal "new-holder", claim.fetch("agent_id")
+    assert_equal 1, event_records("standalone-late-reacquire-batch").length
+  end
+
+  def test_pending_expiry_history_blocks_release_and_archive_before_reacquisition
+    now = Time.utc(2026, 7, 12, 12, 0, 0)
+    claim_path = write_abandoned_claim(
+      "pending-lifecycle", now - (3 * 86_400),
+      "batch_id" => "pending-lifecycle-batch",
+      "agent_id" => "expired-holder",
+      "status" => "expired",
+      "reaped_at" => now.iso8601,
+      "expired_event_id" => "claim-expired-pending-lifecycle",
+      "expired_event_at" => now.iso8601,
+      "expired_event_pending" => true,
+      "synthetic" => true,
+      "synthetic_kind" => "smoke"
+    )
+    runner = AgentCoord::Runner.new([], stdout: StringIO.new, clock: FixedClock.new(now))
+    store = CountingLocalStore.new(@state_root)
+
+    assert_nil runner.send(:gc_archive_eligibility, store.read_json(claim_path), "claims", now + (8 * 86_400))
+    release = run_agent_coord(
+      "release", "--agent-id", "expired-holder", "--repo", "shakacode/example",
+      "--target", "pending-lifecycle"
+    )
+    assert_equal 1, release.status.exitstatus
+    assert_includes release.stderr, "expired claim must be reacquired"
+
+    claim = run_agent_coord(
+      "claim", "--agent-id", "new-holder", "--repo", "shakacode/example",
+      "--target", "pending-lifecycle", "--batch-id", "pending-lifecycle-batch"
+    )
+    assert_equal 0, claim.status.exitstatus, claim.stderr
+    pending = store.read_json(claim_path).data
+    assert_equal "active", pending.fetch("status")
+    assert_equal true, pending.fetch("expired_event_pending")
+    assert_equal "expired-holder", pending.fetch("expired_event_replay").fetch("agent_id")
+    runner.send(
+      :execute_gc_candidates, store,
+      runner.send(:gc_expired_event_candidates, store, %w[claims events]), now, 30
+    )
+    event = event_records("pending-lifecycle-batch").find { |record| record["type"] == "claim.expired" }
+    refute_nil event
+    assert_equal "claim.expired", event.fetch("type")
+    assert_equal true, event.fetch("synthetic")
+    assert_equal "smoke", event.fetch("synthetic_kind")
+  end
+
+  def test_malformed_pending_expiry_history_fails_through_the_controlled_cli_surface
+    now = Time.utc(2026, 7, 12, 12, 0, 0)
+    write_abandoned_claim(
+      "malformed-pending", now - (3 * 86_400),
+      "agent_id" => "expired-holder", "status" => "expired",
+      "reaped_at" => now.iso8601, "expired_event_pending" => true
+    )
+
+    claim = run_agent_coord(
+      "claim", "--agent-id", "new-holder", "--repo", "shakacode/example",
+      "--target", "malformed-pending", "--batch-id", "replacement-batch"
+    )
+
+    assert_equal 2, claim.status.exitstatus, claim.stderr
+    assert_includes claim.stderr, "claim.expired event pending"
+    refute_includes claim.stderr, "KeyError"
+    refute_includes claim.stderr, "bin/agent-coord:"
+  end
+
+  def test_gc_reports_malformed_pending_expiry_history_without_a_backtrace
+    now = Time.utc(2026, 7, 12, 12, 0, 0)
+    claim_path = write_abandoned_claim(
+      "malformed-pending-gc", now - (3 * 86_400),
+      "agent_id" => "expired-holder", "status" => "expired",
+      "reaped_at" => now.iso8601, "expired_event_pending" => true
+    )
+    store = CountingLocalStore.new(@state_root)
+    runner = StoreInjectedRunner.new([], store: store, clock: FixedClock.new(now))
+
+    assert_equal 0, runner.send(
+      :gc, state_root: @state_root, dry_run: false, execute: true, json: true,
+           prefixes: %w[claims events]
+    )
+
+    action = JSON.parse(runner.captured_stdout.string).fetch("actions").fetch(0)
+    assert_equal claim_path, action.fetch("source_path")
+    assert_equal "pending", action.fetch("outcome")
+    assert_includes runner.captured_stderr.string, "claim.expired event pending"
+    refute_includes runner.captured_stderr.string, "KeyError"
+  end
+
+  def test_gc_plans_one_action_per_record_and_reaping_outranks_archiving
+    now = Time.utc(2026, 7, 12, 12, 0, 0)
+    # Active but already carrying a terminal marker: eligible for the archive
+    # pass and the reaper at once.
+    claim_path = write_abandoned_claim(
+      "dual", now - (4 * 86_400),
+      "batch_id" => "expired-batch",
+      "agent_id" => "expired-holder",
+      "terminal" => "done",
+      "pr_state" => "merged",
+      "evidence_url" => "https://example.test/stale-closeout",
+      "released_by" => "expired-holder",
+      "closed_by" => { "agent_id" => "expired-holder", "machine" => "old-host" }
+    )
+    dry = StringIO.new
+    AgentCoord::Runner.new([], stdout: dry, clock: FixedClock.new(now))
+                      .send(:gc, state_root: @state_root, dry_run: true, execute: false, json: true)
+    executed = StringIO.new
+    execute_runner = AgentCoord::Runner.new([], stdout: executed, clock: FixedClock.new(now))
+
+    assert_equal 0, execute_runner.send(:gc, state_root: @state_root, dry_run: false, execute: true, json: true)
+
+    planned = JSON.parse(dry.string).fetch("actions")
+
+    assert_equal planned, JSON.parse(executed.string).fetch("actions")
+    assert_equal([{ "action" => "reap", "source_path" => claim_path, "reason" => "expired_lease",
+                    "eligible_at" => (now - (4 * 86_400)).iso8601 }], planned)
+    reaped = JSON.parse(File.read(File.join(@state_root, claim_path)))
+
+    assert_equal "expired", reaped.fetch("status")
+    %w[terminal pr_state evidence_url released_by closed_by].each { |field| refute reaped.key?(field) }
+    expired_event = event_records("expired-batch").fetch(0)
+    assert_equal "claim.expired", expired_event.fetch("type")
+    assert_equal "expired", expired_event.fetch("status")
+    assert_equal "dual", expired_event.fetch("target")
+    assert_empty Dir.glob(File.join(@state_root, "archive", "**", "*.json"))
+
+    # The reap is not a dead end: the ordinary terminal-claim path collects the
+    # mutable record and the immutable expiry generation compacts independently
+    # once their hot windows elapse from the reap.
+    later = StringIO.new
+    later_runner = AgentCoord::Runner.new([], stdout: later, clock: FixedClock.new(now + (8 * 86_400)))
+
+    assert_equal 0, later_runner.send(:gc, state_root: @state_root, dry_run: true, execute: false, json: true)
+    assert_equal(
+      [["archive", claim_path, "terminal_claim"], ["compact", nil, "claim_expirations"]],
+      JSON.parse(later.string).fetch("actions").map { |action| action.values_at("action", "source_path", "reason") }
+    )
   end
 
   def test_gc_applies_synthetic_window_only_after_family_specific_eligibility
@@ -1064,6 +2849,96 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     assert_path_exists File.join(@state_root, "events/orphan-normal/old.json")
   end
 
+  def test_gc_compacts_unbatched_claim_expiry_history_after_the_normal_hot_window
+    now = Time.utc(2026, 7, 12, 12, 0, 0)
+    batch_id = AgentCoord::INTERNAL_UNBATCHED_CLAIM_EXPIRY_BATCH_ID
+    event_path = "#{AgentCoord::INTERNAL_UNBATCHED_CLAIM_EXPIRY_EVENT_PREFIX}/claim-expired-retained.json"
+    write_state_record(
+      event_path,
+      "schema_version" => 1, "event_id" => "claim-expired-retained", "batch_id" => batch_id,
+      "type" => "claim.expired", "status" => "expired", "agent_id" => "gone-holder",
+      "repo" => "shakacode/example", "target" => "retained", "at" => (now - (6 * 86_400)).iso8601
+    )
+    early = StringIO.new
+    early_runner = AgentCoord::Runner.new([], stdout: early, clock: FixedClock.new(now))
+    assert_equal 0, early_runner.send(:gc, state_root: @state_root, dry_run: true, execute: false, json: true)
+    assert_empty JSON.parse(early.string).fetch("actions")
+
+    stdout = StringIO.new
+    runner = AgentCoord::Runner.new([], stdout: stdout, clock: FixedClock.new(now + (2 * 86_400)))
+
+    assert_equal 0, runner.send(:gc, state_root: @state_root, dry_run: false, execute: true, json: true)
+
+    action = JSON.parse(stdout.string).fetch("actions").find { |row| row["action"] == "compact" }
+    refute_nil action
+    assert_equal "unbatched_claim_expirations", action.fetch("reason")
+    assert_equal [event_path], action.fetch("source_paths")
+    refute_path_exists File.join(@state_root, event_path)
+    archive = JSON.parse(File.read(File.join(@state_root, action.fetch("archive_path"))))
+    assert_equal(["claim-expired-retained"], archive.fetch("records").map { |record| record.fetch("event_id") })
+  end
+
+  def test_gc_compacts_each_unbatched_claim_expiry_generation_independently
+    now = Time.utc(2026, 7, 12, 12, 0, 0)
+    batch_id = AgentCoord::INTERNAL_UNBATCHED_CLAIM_EXPIRY_BATCH_ID
+    prefix = AgentCoord::INTERNAL_UNBATCHED_CLAIM_EXPIRY_EVENT_PREFIX
+    old_path = "#{prefix}/claim-expired-old-generation.json"
+    new_path = "#{prefix}/claim-expired-new-generation.json"
+    { old_path => now - (8 * 86_400), new_path => now - 86_400 }.each do |path, at|
+      write_state_record(
+        path,
+        "schema_version" => 1, "event_id" => File.basename(path, ".json"), "batch_id" => batch_id,
+        "type" => "claim.expired", "status" => "expired", "agent_id" => "gone-holder",
+        "repo" => "shakacode/example", "target" => "reused-target", "at" => at.iso8601
+      )
+    end
+    stdout = StringIO.new
+    runner = AgentCoord::Runner.new([], stdout: stdout, clock: FixedClock.new(now))
+
+    assert_equal 0, runner.send(:gc, state_root: @state_root, dry_run: true, execute: false, json: true)
+
+    compact = JSON.parse(stdout.string).fetch("actions").select { |action| action["action"] == "compact" }
+    assert_equal 1, compact.length
+    assert_equal [old_path], compact.fetch(0).fetch("source_paths")
+    assert_path_exists File.join(@state_root, new_path)
+  end
+
+  def test_gc_compacts_a_batched_expiry_generation_after_its_terminal_generation_was_compacted
+    now = Time.utc(2026, 7, 12, 12, 0, 0)
+    batch_id = "terminal-then-expired"
+    target = "reaped-after-terminal-plan"
+    terminal_path = "events/#{batch_id}/lane-closed.json"
+    write_state_record(
+      terminal_path,
+      valid_gc_lane_closed(
+        event_id: "lane-closed", batch_id: batch_id, target: target, at: (now - (8 * 86_400)).iso8601
+      )
+    )
+    write_abandoned_claim(
+      target, now - (3 * 86_400), "batch_id" => batch_id, "agent_id" => "gone-holder"
+    )
+    first_stdout = StringIO.new
+    first = AgentCoord::Runner.new([], stdout: first_stdout, clock: FixedClock.new(now))
+
+    assert_equal 0, first.send(:gc, state_root: @state_root, dry_run: false, execute: true, json: true)
+    first_actions = JSON.parse(first_stdout.string).fetch("actions")
+    terminal_compacted = first_actions.any? do |action|
+      action["action"] == "compact" && action["source_paths"] == [terminal_path]
+    end
+    claim_reaped = first_actions.any? { |action| action["action"] == "reap" }
+    assert terminal_compacted
+    assert claim_reaped
+
+    later_stdout = StringIO.new
+    later = AgentCoord::Runner.new([], stdout: later_stdout, clock: FixedClock.new(now + (8 * 86_400)))
+    assert_equal 0, later.send(:gc, state_root: @state_root, dry_run: true, execute: false, json: true)
+    expiry_compaction = JSON.parse(later_stdout.string).fetch("actions").find do |action|
+      action["action"] == "compact" && action["reason"] == "claim_expirations"
+    end
+    refute_nil expiry_compaction
+    assert_equal 1, expiry_compaction.fetch("source_paths").length
+  end
+
   def test_gc_defers_synthetic_orphan_group_until_every_event_ages
     now = Time.utc(2026, 7, 12, 12, 0, 0)
     { "old" => now - (2 * 86_400), "fresh" => now - 3600 }.each do |event_id, at|
@@ -1540,7 +3415,7 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     assert_equal 15 * 60, payload.fetch("default_heartbeat_ttl_seconds")
     assert_equal 4, payload.fetch("heartbeat_dead_after_ttl_multiplier")
     assert_equal(
-      { "hot_days" => 7, "archive_days" => 30, "synthetic_hot_days" => 1 },
+      { "hot_days" => 7, "archive_days" => 30, "synthetic_hot_days" => 1, "lease_grace_days" => 1 },
       payload.fetch("retention_policy")
     )
     assert_includes payload.fetch("dependency_terminal_statuses"), "done"
@@ -6330,6 +8205,28 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     assert_equal "sha-new", second.sha
   end
 
+  def test_github_store_fresh_list_refreshes_tree_and_cached_claim_payloads
+    store = FreshClaimsListGitHubStore.new
+
+    first = store.list_json("claims")
+    first_states = first.map { |entry| entry.data.values_at("status", "agent_id") }
+    assert_equal [%w[released old-holder]], first_states
+
+    store.advance_claims
+    stale = store.list_json("claims")
+    stale_states = stale.map { |entry| entry.data.values_at("status", "agent_id") }
+    assert_equal [%w[released old-holder]], stale_states
+
+    runner = AgentCoord::Runner.new([])
+    assert runner.send(:gc_active_claim_holder?, store, "old-holder")
+    fresh = store.list_json("claims")
+    fresh_statuses = fresh.map { |entry| entry.data.fetch("status") }
+    assert_equal %w[active active], fresh_statuses
+    assert_equal %w[new-holder old-holder], fresh.map { |entry| entry.data.fetch("agent_id") }.sort
+    assert_equal 2, store.tree_reads
+    assert_equal 3, store.content_reads
+  end
+
   def test_github_store_invalidates_cached_tree_after_write_conflict
     store = ConflictTreeCachingGitHubStore.new
     path = "heartbeats/worker-a.json"
@@ -8526,6 +10423,31 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     assert_equal "Continue elsewhere.", released_payload.fetch("handoff_note")
   end
 
+  def test_release_handoff_tolerates_reserved_existing_batch_id_without_lifecycle_event
+    batch_id = AgentCoord::INTERNAL_UNBATCHED_CLAIM_EXPIRY_BATCH_ID
+    claim_path = AgentCoord.claim_path("shakacode/react_on_rails", "3979-reserved")
+    write_state_record(
+      claim_path,
+      "schema_version" => 1, "repo" => "shakacode/react_on_rails", "target" => "3979-reserved",
+      "agent_id" => "worker-a", "batch_id" => batch_id, "status" => "active",
+      "claimed_at" => Time.now.utc.iso8601, "updated_at" => Time.now.utc.iso8601,
+      "expires_at" => (Time.now.utc + 3600).iso8601
+    )
+
+    release = run_agent_coord(
+      "release", "--agent-id", "worker-a", "--repo", "shakacode/react_on_rails",
+      "--target", "3979-reserved", "--handoff-note", "Continue elsewhere."
+    )
+
+    assert_equal 0, release.status.exitstatus, release.stderr
+    assert_includes release.stderr, "warning: claim.released event not recorded"
+    released = JSON.parse(File.read(File.join(@state_root, claim_path)))
+    assert_equal "released", released.fetch("status")
+    assert_equal "handoff", released.fetch("release_mode")
+    assert_equal "Continue elsewhere.", released.fetch("handoff_note")
+    assert_empty event_records(batch_id)
+  end
+
   def test_release_handoff_tolerates_local_event_write_failure
     claim = run_agent_coord(
       "claim",
@@ -9057,6 +10979,32 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     )
 
     assert_equal 0, invalid_heartbeat_claim.status.exitstatus, invalid_heartbeat_claim.stderr
+  end
+
+  def test_mismatched_heartbeat_identity_uses_claim_expiry_as_takeover_fallback
+    now = Time.now.utc
+    write_claim(
+      "3971-mismatched-live-fallback",
+      agent_id: "worker-mismatched",
+      updated_at: now - (30 * 60),
+      expires_at: now + (60 * 60)
+    )
+    write_state_record(
+      "heartbeats/worker-mismatched.json",
+      "schema_version" => 1, "agent_id" => "different-holder", "status" => "in_progress",
+      "updated_at" => (now - (70 * 60)).iso8601,
+      "expires_at" => (now - (55 * 60)).iso8601
+    )
+
+    competing_claim = run_agent_coord(
+      "claim", "--agent-id", "worker-b", "--repo", "shakacode/react_on_rails",
+      "--target", "3971-mismatched-live-fallback", "--batch-id", "batch-1",
+      "--branch", "jg-codex/b", "--ttl", "3600"
+    )
+
+    assert_equal 3, competing_claim.status.exitstatus
+    assert_includes competing_claim.stderr, "heartbeat unknown"
+    assert_includes competing_claim.stderr, "worker-mismatched"
   end
 
   def test_status_renders_batches_and_claims
@@ -11172,6 +13120,45 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     assert_equal "running tests", status_event.fetch("message")
   end
 
+  def test_record_event_requires_expired_status_for_claim_expired
+    write_batch("batch-expired-event", lanes: [{ "name" => "code", "owner" => "worker-a", "targets" => ["3991"] }])
+
+    missing = run_agent_coord(
+      "record-event", "--batch-id", "batch-expired-event", "--type", "claim.expired",
+      "--agent-id", "worker-a", "--repo", "shakacode/example", "--target", "3991"
+    )
+    wrong = run_agent_coord(
+      "record-event", "--batch-id", "batch-expired-event", "--type", "claim.expired",
+      "--agent-id", "worker-a", "--repo", "shakacode/example", "--target", "3991", "--status", "active"
+    )
+
+    assert_equal 1, missing.status.exitstatus
+    assert_includes missing.stderr, "claim.expired requires --status expired"
+    assert_equal 1, wrong.status.exitstatus
+    assert_includes wrong.stderr, "claim.expired requires --status expired"
+    assert_empty event_records("batch-expired-event")
+
+    valid = run_agent_coord(
+      "record-event", "--batch-id", "batch-expired-event", "--type", "claim.expired",
+      "--agent-id", "worker-a", "--repo", "shakacode/example", "--target", "3991", "--status", "expired"
+    )
+    assert_equal 0, valid.status.exitstatus, valid.stderr
+    assert_empty valid.stderr
+    exact = event_of_type("batch-expired-event", "claim.expired")
+    assert_equal "expired", exact.fetch("status")
+    refute exact.key?("status_raw")
+
+    folded = run_agent_coord(
+      "record-event", "--batch-id", "batch-expired-event", "--type", "claim.expired",
+      "--agent-id", "worker-a", "--repo", "shakacode/example", "--target", "3991", "--status", "EXPIRED"
+    )
+    assert_equal 0, folded.status.exitstatus, folded.stderr
+    assert_empty folded.stderr
+    folded_event = events_of_type("batch-expired-event", "claim.expired").last
+    assert_equal "expired", folded_event.fetch("status")
+    assert_equal "EXPIRED", folded_event.fetch("status_raw")
+  end
+
   def test_record_event_coerces_alias_status_and_projects_status_raw
     write_batch("batch-vocab", lanes: [{ "name" => "code", "owner" => "worker-a", "targets" => ["3990"] }])
 
@@ -11946,6 +13933,28 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     assert_includes result.stdout, "batch-audit batch-audit-ok complete"
     assert_includes result.stdout, "lane code owner worker-a complete"
     assert_includes result.stdout, "lane docs owner worker-b complete"
+  end
+
+  def test_batch_audit_treats_claim_expired_as_lifecycle_but_not_completion
+    write_batch(
+      "batch-audit-expired",
+      lanes: [{ "name" => "code", "owner" => "worker-a", "targets" => ["101"] }]
+    )
+    seed_event(
+      "batch-audit-expired", "acquired",
+      "type" => "claim.acquired", "agent_id" => "worker-a", "target" => "101"
+    )
+    seed_event(
+      "batch-audit-expired", "expired",
+      "type" => "claim.expired", "agent_id" => "worker-a", "target" => "101", "status" => "expired"
+    )
+
+    result = run_agent_coord("batch-audit", "--batch-id", "batch-audit-expired", "--json")
+
+    assert_equal 1, result.status.exitstatus, result.stderr
+    lane = JSON.parse(result.stdout).fetch("lanes").fetch(0)
+    assert_equal false, lane.fetch("complete")
+    assert_equal ["terminal"], lane.fetch("missing")
   end
 
   def test_batch_audit_attributes_events_to_a_prefixed_lane_target
@@ -13800,6 +15809,46 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     }
   end
 
+  # Four claims whose leases all ended three days ago, differing only in the
+  # holder heartbeat the reaper has to consult before touching them.
+  def expired_lease_holder_records(now)
+    lease_ended = now - (3 * 86_400)
+    ttls = { "live" => [now - 300, now + 600], "stale" => [now - 1800, now - 900],
+             "dead" => [now - 7200, now - 6300] }
+    records = ttls.to_h do |holder, (updated_at, expires_at)|
+      ["heartbeats/#{holder}-holder.json",
+       { "schema_version" => 1, "agent_id" => "#{holder}-holder", "status" => "in_progress",
+         "updated_at" => updated_at.iso8601, "expires_at" => expires_at.iso8601 }]
+    end
+    (ttls.keys + ["missing"]).each_with_object(records) do |holder, all|
+      all["claims/shakacode/example/#{holder}.json"] = {
+        "schema_version" => 1, "repo" => "shakacode/example", "target" => holder,
+        "agent_id" => "#{holder}-holder", "status" => "active",
+        "claimed_at" => (lease_ended - 14_400).iso8601, "updated_at" => (lease_ended - 14_400).iso8601,
+        "expires_at" => lease_ended.iso8601
+      }
+    end
+  end
+
+  def write_abandoned_claim(target, lease_ended, extra = {})
+    path = "claims/shakacode/example/#{target}.json"
+    write_state_record(
+      path,
+      { "schema_version" => 1, "repo" => "shakacode/example", "target" => target,
+        "agent_id" => "worker-#{target}", "status" => "active",
+        "claimed_at" => (lease_ended - 14_400).iso8601, "updated_at" => (lease_ended - 14_400).iso8601,
+        "expires_at" => lease_ended.iso8601 }.merge(extra)
+    )
+    path
+  end
+
+  def reap_sources(payload)
+    payload.fetch("actions")
+           .select { |action| action.fetch("action") == "reap" }
+           .map { |action| action.fetch("source_path") }
+           .sort
+  end
+
   def write_expired_reuse_candidates(now)
     old = (now - (8 * 86_400)).iso8601
     expired = (now - 86_400).iso8601
@@ -13908,6 +15957,387 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
   FixedClock = Struct.new(:time) do
     def now
       time
+    end
+  end
+
+  # Records every record read so a gc pass can be held to one heartbeat round
+  # trip per holder rather than one per claim.
+  class CountingLocalStore < AgentCoord::LocalStore
+    attr_reader :reads
+
+    def initialize(root)
+      super
+      @reads = []
+    end
+
+    def read_json(path)
+      @reads << path
+      super
+    end
+  end
+
+  class FilteredClaimsGcStore < AgentCoord::LocalStore
+    def list_json(prefix)
+      return [] if prefix == "claims"
+
+      super
+    end
+
+    def filtered_list?(prefix)
+      prefix == "claims"
+    end
+  end
+
+  # Stands in for a least-privileged HTTP token: one heartbeat path answers the
+  # way a forbidden read does, while every other record reads normally.
+  class ForbiddenHeartbeatStore < CountingLocalStore
+    def initialize(root, forbidden_path)
+      super(root)
+      @forbidden_path = forbidden_path
+    end
+
+    def read_json(path)
+      return super unless path == @forbidden_path
+
+      @reads << path
+      raise AgentCoord::OperationalError, "state read forbidden at #{path}"
+    end
+  end
+
+  class ForbiddenBatchStore < CountingLocalStore
+    def initialize(root, forbidden_path)
+      super(root)
+      @forbidden_path = forbidden_path
+    end
+
+    def read_json(path)
+      return super unless path == @forbidden_path
+
+      @reads << path
+      raise AgentCoord::OperationalError, "state read forbidden at #{path}"
+    end
+  end
+
+  class ClaimsOnlyStore < CountingLocalStore
+    attr_reader :non_claim_accesses
+
+    def initialize(root)
+      super
+      @non_claim_accesses = []
+    end
+
+    def read_json(path)
+      reject_non_claim(path)
+      super
+    end
+
+    def write_json(path, data, **options)
+      reject_non_claim(path)
+      super
+    end
+
+    private
+
+    def reject_non_claim(path)
+      return if path.start_with?("claims/")
+
+      @non_claim_accesses << path
+      raise AgentCoord::OperationalError, "claims-only store forbids #{path}"
+    end
+  end
+
+  # Mirrors GitHubStore's per-path read cache so the apply-time liveness test
+  # proves the recheck explicitly invalidates a planning-time heartbeat read.
+  class CachingLocalStore < CountingLocalStore
+    def initialize(root)
+      super
+      @cache = {}
+    end
+
+    def read_json(path)
+      return @cache[path] if @cache.key?(path)
+
+      @cache[path] = super
+    end
+
+    def invalidate_read_cache(path)
+      @cache.delete(path)
+    end
+
+    def read_json_fresh(path)
+      invalidate_read_cache(path)
+      read_json(path)
+    end
+
+    private :invalidate_read_cache
+  end
+
+  class FailOnceExpiredEventStore < CountingLocalStore
+    attr_reader :expired_event_write_attempts
+
+    def initialize(root)
+      super
+      @expired_event_write_attempts = 0
+    end
+
+    def write_json(path, data, **options)
+      if path.start_with?("events/") && data["type"] == "claim.expired"
+        @expired_event_write_attempts += 1
+        raise AgentCoord::OperationalError, "transient event outage" if @expired_event_write_attempts == 1
+      end
+      super
+    end
+  end
+
+  class FailExpiredEventStore < CountingLocalStore
+    def write_json(path, data, **options)
+      if path.start_with?("events/") && data["type"] == "claim.expired"
+        raise AgentCoord::OperationalError, "event store unavailable"
+      end
+
+      super
+    end
+  end
+
+  class ExpiredEventIdentityMovesStore < CountingLocalStore
+    def initialize(root, claim_path)
+      super(root)
+      @claim_path = claim_path
+      @event_written = false
+    end
+
+    def read_json(path)
+      entry = super
+      return entry unless @event_written && path == @claim_path && entry
+
+      AgentCoord::StoredJson.new(
+        path: entry.path, data: entry.data.merge("expired_event_id" => "claim-expired-replacement"), sha: entry.sha
+      )
+    end
+
+    def write_json(path, data, **options)
+      super
+      @event_written = true if path.start_with?("events/") && data["type"] == "claim.expired"
+    end
+  end
+
+  class SettleConflictExpiredEventStore < CountingLocalStore
+    def initialize(root, claim_path)
+      super(root)
+      @claim_path = claim_path
+      @settled_elsewhere = false
+    end
+
+    def write_json(path, data, **options)
+      if path == @claim_path && !data.key?("expired_event_pending") && !@settled_elsewhere
+        @settled_elsewhere = true
+        super
+        raise AgentCoord::Conflict, "another reconciler settled the same claim"
+      end
+
+      super
+    end
+  end
+
+  class SettleExpiredEventBeforeReadStore < CountingLocalStore
+    def initialize(root, claim_path)
+      super(root)
+      @claim_path = claim_path
+      @settle_on_read = false
+    end
+
+    def write_json(path, data, **options)
+      @settle_on_read = true if path == @claim_path && data["expired_event_pending"] == true
+      super
+    end
+
+    def read_json(path)
+      if path == @claim_path && @settle_on_read
+        @settle_on_read = false
+        pending = super
+        event = AgentCoord::Runner.new([]).send(:gc_claim_expired_event_payload, pending.data, @claim_path)
+        write_json(AgentCoord.event_path(event.fetch("batch_id"), event.fetch("event_id")), event,
+                   message: "Settle event elsewhere", create: true)
+        write_json(path, pending.data.except("expired_event_pending"),
+                   message: "Confirm event elsewhere", sha: pending.sha)
+      end
+      super
+    end
+  end
+
+  class SettleExpiredEventAndReacquireBeforeReadStore < CountingLocalStore
+    EXPIRY_FIELDS = %w[
+      reaped_at expired_event_id expired_event_batch_id expired_event_at expired_event_pending
+    ].freeze
+
+    def initialize(root, claim_path, now)
+      super(root)
+      @claim_path = claim_path
+      @now = now
+      @settle_on_read = false
+    end
+
+    def write_json(path, data, **options)
+      @settle_on_read = true if path == @claim_path && data["expired_event_pending"] == true
+      super
+    end
+
+    def read_json(path)
+      settle_and_reacquire if path == @claim_path && @settle_on_read
+      super
+    end
+
+    private
+
+    def settle_and_reacquire
+      @settle_on_read = false
+      pending = read_json(@claim_path)
+      event = AgentCoord::Runner.new([]).send(:gc_claim_expired_event_payload, pending.data, @claim_path)
+      write_json(AgentCoord.event_path(event.fetch("batch_id"), event.fetch("event_id")), event,
+                 message: "Settle event elsewhere", create: true)
+      write_json(@claim_path, pending.data.except("expired_event_pending"),
+                 message: "Confirm event elsewhere", sha: pending.sha)
+      settled = read_json(@claim_path)
+      active = settled.data.except(*EXPIRY_FIELDS).merge(
+        "status" => "active", "agent_id" => "new-holder", "generation" => 2,
+        "instance_id" => "new-instance", "claimed_at" => @now.iso8601,
+        "updated_at" => @now.iso8601, "expires_at" => (@now + 3600).iso8601
+      )
+      write_json(@claim_path, active, message: "Reacquire immediately", sha: settled.sha)
+    end
+  end
+
+  class ExpiredEventWrittenBeforeReadStore < CountingLocalStore
+    def initialize(root, claim_path)
+      super(root)
+      @claim_path = claim_path
+      @write_event_on_read = false
+    end
+
+    def write_json(path, data, **options)
+      @write_event_on_read = true if path == @claim_path && data["expired_event_pending"] == true
+      super
+    end
+
+    def read_json(path)
+      write_expired_event if path == @claim_path && @write_event_on_read
+      super
+    end
+
+    private
+
+    def write_expired_event
+      @write_event_on_read = false
+      pending = read_json(@claim_path)
+      event = AgentCoord::Runner.new([]).send(:gc_claim_expired_event_payload, pending.data, @claim_path)
+      write_json(AgentCoord.event_path(event.fetch("batch_id"), event.fetch("event_id")), event,
+                 message: "Write event elsewhere", create: true)
+    end
+  end
+
+  class SettleExpiredEventAndReacquireDuringReconcileStore < CountingLocalStore
+    EXPIRY_FIELDS = %w[
+      reaped_at expired_event_id expired_event_batch_id expired_event_at expired_event_pending
+    ].freeze
+
+    def initialize(root, claim_path, now)
+      super(root)
+      @claim_path = claim_path
+      @now = now
+      @reacquired = false
+    end
+
+    def write_json(path, data, **options)
+      result = super
+      settle_and_reacquire if !@reacquired && path.start_with?("events/") && data["type"] == "claim.expired"
+      result
+    end
+
+    private
+
+    def settle_and_reacquire
+      @reacquired = true
+      pending = read_json(@claim_path)
+      write_json(@claim_path, pending.data.except("expired_event_pending"),
+                 message: "Confirm event elsewhere", sha: pending.sha)
+      settled = read_json(@claim_path)
+      active = settled.data.except(*EXPIRY_FIELDS).merge(
+        "status" => "active", "agent_id" => "new-holder", "generation" => 2,
+        "instance_id" => "new-instance", "claimed_at" => @now.iso8601,
+        "updated_at" => @now.iso8601, "expires_at" => (@now + 3600).iso8601
+      )
+      write_json(@claim_path, active, message: "Reacquire immediately", sha: settled.sha)
+    end
+  end
+
+  class SettleThenReacquireOnMarkerClearStore < CountingLocalStore
+    EXPIRY_FIELDS = %w[
+      reaped_at expired_event_id expired_event_batch_id expired_event_at expired_event_pending
+    ].freeze
+
+    def initialize(root, claim_path, now)
+      super(root)
+      @claim_path = claim_path
+      @now = now
+      @settled_elsewhere = false
+      @reacquired = false
+    end
+
+    def write_json(path, data, **options)
+      reacquire_after_settled_read if marker_clear_write?(path, data)
+      result = super
+      settle_elsewhere if !@settled_elsewhere && path.start_with?("events/") && data["type"] == "claim.expired"
+      result
+    end
+
+    private
+
+    def settle_elsewhere
+      pending = read_json(@claim_path)
+      @settling = true
+      write_json(@claim_path, pending.data.except("expired_event_pending"),
+                 message: "Confirm event elsewhere", sha: pending.sha)
+      @settling = false
+      @settled_elsewhere = true
+    end
+
+    def marker_clear_write?(path, data)
+      @settled_elsewhere && !@settling && !@reacquired && path == @claim_path &&
+        data["status"] == "expired" && !data.key?("expired_event_pending")
+    end
+
+    def reacquire_after_settled_read
+      settled = read_json(@claim_path)
+      active = settled.data.except(*EXPIRY_FIELDS).merge(
+        "status" => "active", "agent_id" => "new-holder", "generation" => 2,
+        "instance_id" => "new-instance", "claimed_at" => @now.iso8601,
+        "updated_at" => @now.iso8601, "expires_at" => (@now + 3600).iso8601
+      )
+      @reacquired = true
+      write_json(@claim_path, active, message: "Reacquire during marker clear", sha: settled.sha)
+    end
+  end
+
+  class HolderResumesAtReapStore < CountingLocalStore
+    def initialize(root, holder, now)
+      super(root)
+      @heartbeat_path = AgentCoord.heartbeat_path(holder)
+      @holder = holder
+      @now = now
+    end
+
+    def read_json(path)
+      if path == @heartbeat_path && reads.count(path) == 1
+        write_json(
+          path,
+          {
+            "schema_version" => 1, "agent_id" => @holder, "status" => "in_progress",
+            "updated_at" => (@now - 60).iso8601, "expires_at" => (@now + 600).iso8601
+          },
+          message: "Resume holder", create: true
+        )
+      end
+      super
     end
   end
 
@@ -14209,9 +16639,13 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
   end
 
   class StoreInjectedRunner < AgentCoord::Runner
-    def initialize(argv, store:)
+    attr_reader :captured_stdout, :captured_stderr
+
+    def initialize(argv, store:, clock: Time)
       @injected_store = store
-      super(argv, stdout: StringIO.new, stderr: StringIO.new)
+      @captured_stdout = StringIO.new
+      @captured_stderr = StringIO.new
+      super(argv, stdout: @captured_stdout, stderr: @captured_stderr, clock: clock)
     end
 
     private
@@ -14391,6 +16825,52 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
 
     def result(stdout, stderr: "", success: true)
       AgentCoord::GhResult.new(stdout: stdout, stderr: stderr, status: FakeStatus.new(success))
+    end
+  end
+
+  class FreshClaimsListGitHubStore < AgentCoord::GitHubStore
+    attr_reader :content_reads, :tree_reads
+
+    def initialize
+      super(backend: "shakacode/agent-coordination-state", ref: "state")
+      @advanced = false
+      @content_reads = 0
+      @tree_reads = 0
+    end
+
+    def advance_claims
+      @advanced = true
+    end
+
+    private
+
+    def gh_api(*args)
+      case args
+      when ["repos/shakacode/agent-coordination-state/git/trees/state?recursive=1"]
+        @tree_reads += 1
+        tree = [{ "path" => "claims/shakacode/example/old.json", "type" => "blob" }]
+        tree << { "path" => "claims/shakacode/example/new.json", "type" => "blob" } if @advanced
+        github_result(JSON.generate("tree" => tree))
+      when ["repos/shakacode/agent-coordination-state/contents/claims/shakacode/example/old.json?ref=state"]
+        @content_reads += 1
+        claim = { "status" => @advanced ? "active" : "released", "agent_id" => "old-holder" }
+        github_content_result(claim, @advanced ? "sha-old-active" : "sha-old-released")
+      when ["repos/shakacode/agent-coordination-state/contents/claims/shakacode/example/new.json?ref=state"]
+        @content_reads += 1
+        github_content_result({ "status" => "active", "agent_id" => "new-holder" }, "sha-new")
+      else
+        raise "unexpected gh api #{args.inspect}"
+      end
+    end
+
+    def github_content_result(data, sha)
+      github_result(
+        JSON.generate("content" => Base64.strict_encode64(JSON.generate(data)), "sha" => sha)
+      )
+    end
+
+    def github_result(stdout)
+      AgentCoord::GhResult.new(stdout: stdout, stderr: "", status: FakeStatus.new(true))
     end
   end
 
