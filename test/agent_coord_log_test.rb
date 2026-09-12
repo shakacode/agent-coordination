@@ -1198,6 +1198,35 @@ class AgentCoordLogSyncTest < AgentCoordLogTestCase
     assert_includes File.read(File.join(@state_root, "log.tsv")), "shakacode/example#104"
   end
 
+  def test_log_sync_mirrors_a_claim_with_no_event_as_a_snapshot
+    write_claim("shakacode/example", "issue:404", "status" => "active", "agent_id" => "solo-worker",
+                                                  "machine_id" => "m1", "host" => "codex",
+                                                  "updated_at" => "2026-08-03T02:00:00Z",
+                                                  "expires_at" => "2026-08-03T06:00:00Z")
+
+    result = run_log("--sync")
+    lines = File.readlines(File.join(@state_root, "log.tsv"), encoding: "UTF-8")
+
+    assert_equal 0, result.status.exitstatus, result.stderr
+    assert_equal 1, lines.length
+    assert_includes lines.first, "claim.snapshot"
+    assert_includes lines.first, "shakacode/example#issue:404"
+    assert_includes lines.first, "expires_at=2026-08-03T06:00:00Z"
+  end
+
+  def test_log_sync_updates_a_changed_claim_snapshot_without_duplication
+    write_claim("shakacode/example", "404", "status" => "active", "agent_id" => "worker",
+                                            "updated_at" => "2026-08-03T02:00:00Z")
+    run_log("--sync")
+    write_claim("shakacode/example", "404", "status" => "done", "agent_id" => "worker",
+                                            "updated_at" => "2026-08-03T03:00:00Z")
+
+    assert_equal 0, run_log("--sync").status.exitstatus
+    lines = File.readlines(File.join(@state_root, "log.tsv"), encoding: "UTF-8")
+    assert_equal 2, lines.length
+    assert_equal(1, lines.count { |line| line.include?("status=done") })
+  end
+
   # The read path treats an empty flag value as unset; --sync must agree, or a
   # script expanding an unset variable gets a refusal instead of a full mirror.
   def test_log_sync_accepts_empty_filter_values

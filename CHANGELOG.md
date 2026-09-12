@@ -9,6 +9,13 @@ when releases begin.
 
 ### Added
 
+- `agent-coord log --sync` now mirrors readable live claims as deterministic
+  `claim.snapshot` rows, so an unbatched claim with no lifecycle events is not
+  absent from the durable mirror. Snapshots preserve the literal lease target,
+  holder, status, expiry, generation, and related claim facts; unchanged
+  observations deduplicate while changed observations remain timestamped
+  history. Incomplete or malformed claim listings continue to fail closed.
+
 - Durable workspace-scoped attention records with structured source task
   identity and capability truth. New bounded CLI reads and generation-fenced
   upsert/resolve commands have LocalStore/HTTP parity; resolve preserves audit

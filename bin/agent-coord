@@ -4978,10 +4978,11 @@ module AgentCoord
 
         # Claims are the final completeness check. Do not let a failed claims
         # probe mask an already-conclusive refusal for the event trail.
-        log_claim_entries(store, context: :sync)
+        claims = log_claim_entries(store, context: :sync)
         raise OperationalError, "refusing to sync an incomplete trail: #{log_incomplete_prefixes}" if @log_incomplete
 
-        return log_sync(log_options, rows)
+        snapshots = log_claim_snapshot_rows(claims, include_synthetic: options[:include_synthetic])
+        return log_sync(log_options, rows + snapshots)
       end
 
       claims = log_claim_for(store, options, rows)
@@ -6220,6 +6221,43 @@ module AgentCoord
          "synthetic" => data["synthetic"] ? true : false,
          "synthetic_kind" => log_scrub(log_present(data["synthetic_kind"]))
        )
+    end
+
+    # Claims are mutable state, not events. The durable mirror nevertheless needs
+    # an observation for a live unbatched claim, because that claim may be the only
+    # evidence of custody and can disappear before the next sync. Snapshot rows
+    # use the event-shaped TSV contract so existing consumers remain readable,
+    # while their type and deterministic id make the distinction explicit.
+    def log_claim_snapshot_rows(entries, include_synthetic: false)
+      entries.filter_map do |entry|
+        data = entry.data
+        next if data["synthetic"] && !include_synthetic
+
+        target = log_claim_target(entry)
+        snapshot_fields = {
+          "repo" => log_claim_repo(entry), "target" => target,
+          "status" => data["status"], "phase" => data["phase"],
+          "agent_id" => data["agent_id"], "machine_id" => data["machine_id"],
+          "host" => data["host"], "batch_id" => data["batch_id"],
+          "updated_at" => data["updated_at"], "expires_at" => data["expires_at"],
+          "generation" => data["generation"], "synthetic" => data["synthetic"],
+          "synthetic_kind" => data["synthetic_kind"]
+        }
+        digest = Digest::SHA256.hexdigest(JSON.generate(snapshot_fields.sort.to_h))[0, 16]
+        detail = snapshot_fields.sort_by { |key, _| key }.filter_map do |key, value|
+          next if value.nil? || value.to_s.empty? || key == "repo" || key == "target"
+
+          "#{key}=#{value}"
+        end.join(" ")
+        log_row(
+          "at" => data["updated_at"], "machine_id" => data["machine_id"],
+          "host" => data["host"], "repo" => snapshot_fields["repo"],
+          "target" => target, "type" => "claim.snapshot", "phase" => data["phase"] || data["status"],
+          "agent_id" => data["agent_id"], "batch_id" => data["batch_id"],
+          "message" => detail, "event_id" => "claim-snapshot-#{digest}",
+          "synthetic" => data["synthetic"], "synthetic_kind" => data["synthetic_kind"]
+        )
+      end
     end
 
     # The fleet carries claims left active with a lease long past, so a claim
