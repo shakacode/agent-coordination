@@ -7068,6 +7068,7 @@ module AgentCoord
       data = entry.data
       log_sync_claim_fields_valid!(data)
       log_sync_claim_path_valid!(entry)
+      log_sync_pending_expiry_valid!(entry)
       Time.iso8601(data.fetch("updated_at"))
       true
     rescue AgentCoord::Error, ArgumentError, TypeError => e
@@ -7099,6 +7100,17 @@ module AgentCoord
       valid_generation = !data.key?("generation") ||
                          (data["generation"].is_a?(Integer) && !data["generation"].negative?)
       raise ArgumentError, "generation is not a nonnegative integer" unless valid_generation
+    end
+
+    def log_sync_pending_expiry_valid!(entry)
+      data = entry.data
+      pending = data["expired_event_pending"]
+      raise ArgumentError, "expired_event_pending is not true" if data.key?("expired_event_pending") && pending != true
+      if data.key?("expired_event_replay") && pending != true
+        raise ArgumentError, "expired_event_replay exists without a pending marker"
+      end
+
+      gc_claim_expired_event_payload(data, entry.path) if pending
     end
 
     def log_sync_claim_path_valid!(entry)
@@ -7242,7 +7254,7 @@ module AgentCoord
     # while their type and deterministic id make the distinction explicit.
     def log_claim_snapshot_fields(entry, target)
       data = entry.data
-      {
+      fields = {
         "repo" => log_claim_repo(entry), "target" => target,
         "status" => data["status"], "phase" => data["phase"],
         "agent_id" => data["agent_id"], "machine_id" => data["machine_id"],
@@ -7266,6 +7278,12 @@ module AgentCoord
         "closed_by_machine" => data.dig("closed_by", "machine"),
         "synthetic" => data["synthetic"], "synthetic_kind" => data["synthetic_kind"]
       }
+      replay = data["expired_event_replay"]
+      return fields unless replay.is_a?(Hash)
+
+      fields.merge(replay.sort.to_h do |key, value|
+        ["expired_event_replay_#{key}", value]
+      end)
     end
 
     def log_claim_snapshot_rows(entries, include_synthetic: false)
@@ -7419,7 +7437,8 @@ module AgentCoord
     # Event ties break on stable event id. Snapshot ties preserve observation
     # order within each literal work item because same-second release/reacquire
     # pairs can have no generation to establish causality; work-item ordering
-    # keeps independent snapshots deterministic, and snapshots precede events.
+    # keeps independent snapshots deterministic. Events precede snapshots so the
+    # current mutable claim observation remains the final fact for that instant.
     def log_sync_ordered(lines, observed_lines: [])
       observed_at = observed_lines.each_with_index.to_h
       lines.sort_by.with_index do |line, index|
@@ -7429,7 +7448,7 @@ module AgentCoord
         work_item = fields[LOG_TSV_FIELDS.index("work_item")].to_s
         observed_index = observed_at[line]
         snapshot_order = observed_index.nil? ? [0, index] : [1, observed_index]
-        tie = type == "claim.snapshot" ? [0, work_item, *snapshot_order] : [1, event_id, index]
+        tie = type == "claim.snapshot" ? [1, work_item, *snapshot_order] : [0, event_id, index]
         [log_at_key(fields.first), *tie]
       end
     end

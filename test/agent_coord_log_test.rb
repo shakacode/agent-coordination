@@ -1391,6 +1391,29 @@ class AgentCoordLogSyncTest < AgentCoordLogTestCase
     assert_includes line, "expired_event_id=claim-expired-abc123"
   end
 
+  def test_log_sync_preserves_pending_expiry_replay_from_a_prior_holder
+    replay = {
+      "schema_version" => 1, "event_id" => "claim-expired-abc123", "batch_id" => "batch-1",
+      "type" => "claim.expired", "status" => "expired", "agent_id" => "expired-holder",
+      "repo" => "shakacode/example", "target" => "404", "at" => "2026-08-04T03:00:00Z"
+    }
+    write_claim("shakacode/example", "404", "status" => "active", "agent_id" => "new-holder",
+                                            "updated_at" => "2026-08-04T03:01:00Z",
+                                            "expired_event_pending" => true,
+                                            "expired_event_id" => "claim-expired-abc123",
+                                            "expired_event_batch_id" => "batch-1",
+                                            "expired_event_at" => "2026-08-04T03:00:00Z",
+                                            "expired_event_replay" => replay)
+
+    result = run_log("--sync")
+    line = File.read(File.join(@state_root, "log.tsv"), encoding: "UTF-8")
+
+    assert_equal 0, result.status.exitstatus, result.stderr
+    assert_includes line, "agent_id=new-holder"
+    assert_includes line, "expired_event_replay_agent_id=expired-holder"
+    assert_includes line, "expired_event_replay_event_id=claim-expired-abc123"
+  end
+
   def test_log_sync_fingerprints_same_timestamp_release_attribution_changes
     first = AgentCoord::StoredJson.new(
       path: "claims/shakacode/example/404.json",
@@ -1425,7 +1448,7 @@ class AgentCoordLogSyncTest < AgentCoordLogTestCase
     assert_includes line, "simulation"
   end
 
-  def test_log_sync_orders_equal_timestamp_events_and_snapshots_by_row_id
+  def test_log_sync_orders_current_snapshot_after_equal_timestamp_events
     write_event("b1", "zzz", "type" => "phase.changed", "repo" => "shakacode/example", "target" => "404",
                              "at" => "2026-08-03T03:00:00Z")
     write_claim("shakacode/example", "404", "status" => "active", "agent_id" => "worker",
@@ -1435,7 +1458,7 @@ class AgentCoordLogSyncTest < AgentCoordLogTestCase
     types = File.readlines(File.join(@state_root, "log.tsv"), encoding: "UTF-8")
                 .map { |line| line.split("\t").fetch(4) }
 
-    assert_equal ["claim.snapshot", "phase.changed"], types
+    assert_equal ["phase.changed", "claim.snapshot"], types
   end
 
   # The read path treats an empty flag value as unset; --sync must agree, or a
@@ -2574,6 +2597,19 @@ class AgentCoordLogClaimRecordResilienceTest < AgentCoordLogTestCase
 
     assert_equal 2, result.status.exitstatus, result.stderr
     assert_includes result.stderr, "missing reaped_at"
+    assert_includes result.stderr, "refusing to sync an incomplete trail: claims"
+    refute_path_exists File.join(@state_root, "log.tsv")
+  end
+
+  def test_log_refuses_to_sync_an_incomplete_pending_expiry_replay
+    write_raw_claim("invalid-pending", { "status" => "active", "agent_id" => "worker",
+                                         "updated_at" => "2026-08-03T03:00:00Z",
+                                         "expired_event_pending" => true })
+
+    result = run_log("--sync")
+
+    assert_equal 2, result.status.exitstatus, result.stderr
+    assert_includes result.stderr, "pending replay is malformed"
     assert_includes result.stderr, "refusing to sync an incomplete trail: claims"
     refute_path_exists File.join(@state_root, "log.tsv")
   end
