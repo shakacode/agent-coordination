@@ -6098,7 +6098,8 @@ module AgentCoord
         "warning: claims #{reason}; #{subject} would not be reported"
       end
       claims.select do |candidate|
-        next true if candidate.data.is_a?(Hash)
+        log_validate_record_encoding!(candidate)
+        next context != :sync || log_sync_claim_valid?(candidate) if candidate.data.is_a?(Hash)
 
         # A malformed sibling cannot shorten a scoped answer when its path
         # proves that it belongs to a different work item. Unscoped --sync
@@ -6114,6 +6115,50 @@ module AgentCoord
         log_note_incomplete("claims", log_scrub(message))
         false
       end
+    end
+
+    def log_sync_claim_valid?(entry)
+      data = entry.data
+      log_sync_claim_fields_valid!(data)
+      log_sync_claim_path_valid!(entry)
+      Time.iso8601(data.fetch("updated_at"))
+      true
+    rescue AgentCoord::Error, ArgumentError, TypeError => e
+      message = "warning: malformed live claim record at #{entry.path}: #{e.message}; " \
+                "claim data would not be reported"
+      log_note_incomplete("claims", log_scrub(message))
+      false
+    end
+
+    def log_sync_claim_fields_valid!(data)
+      missing = %w[status agent_id updated_at].select { |field| data[field].to_s.strip.empty? }
+      raise ArgumentError, "missing #{missing.join(', ')}" unless missing.empty?
+
+      nonstrings = %w[status agent_id updated_at].reject { |field| data[field].is_a?(String) }
+      raise ArgumentError, "non-string #{nonstrings.join(', ')}" unless nonstrings.empty?
+
+      raise ArgumentError, "closed_by is not an object" if data.key?("closed_by") && !data["closed_by"].is_a?(Hash)
+
+      valid_status = %w[active released].include?(data["status"])
+      raise ArgumentError, "unsupported status #{data['status'].inspect}" unless valid_status
+
+      valid_generation = !data.key?("generation") ||
+                         (data["generation"].is_a?(Integer) && !data["generation"].negative?)
+      raise ArgumentError, "generation is not a nonnegative integer" unless valid_generation
+    end
+
+    def log_sync_claim_path_valid!(entry)
+      data = entry.data
+      path_repo = AgentCoord.repo_from_claim_path(entry.path)
+      path_target = AgentCoord.target_from_path(entry.path)
+      canonical_path = AgentCoord.claim_path(path_repo, path_target)
+      raise ArgumentError, "noncanonical storage path" unless entry.path == canonical_path
+
+      if (data.key?("repo") && data["repo"] != path_repo) || (data.key?("target") && data["target"].to_s != path_target)
+        raise ArgumentError, "payload identity does not match storage path"
+      end
+
+      AgentCoord.validate_segment!(data.fetch("agent_id"), "agent-id")
     end
 
     def log_claim_event_key(entry)
@@ -6178,16 +6223,26 @@ module AgentCoord
 
     # A listing can return one lease more than once, including two reads around
     # a renewal, so group on the immutable identity the record names and retain
-    # its newest snapshot. Repo and target stay exact: case variants are separate
+    # every distinct snapshot at its newest timestamp. Claim timestamps have
+    # second precision, so choosing one tied variant could discard a release or
+    # renewal observed later in the same second. Repo and target stay exact:
+    # case variants are separate
     # literal keys on case-sensitive stores, and collapsing them would conceal
     # double custody. A different holder also stays visible because two reads
     # around a takeover are genuinely ambiguous. Lanes remain exact because each
     # lane holds its own lease.
-    def log_unique_claim_entries(entries)
-      entries.group_by { |candidate| claim_lease_key(candidate) }
-             .values
-             .map { |variants| variants.max_by { |candidate| log_at_key(candidate.data["updated_at"]) } }
-             .sort_by { |candidate| log_at_key(candidate.data["updated_at"]) }
+    def log_unique_claim_entries(entries, preserve_ties: false)
+      observed_at = {}.compare_by_identity
+      entries.each_with_index { |candidate, index| observed_at[candidate] = index }
+      newest = entries.group_by { |candidate| claim_lease_key(candidate) }.values.flat_map do |variants|
+        newest_at = variants.map { |candidate| log_at_key(candidate.data["updated_at"]) }.max
+        tied = variants.select { |candidate| log_at_key(candidate.data["updated_at"]) == newest_at }.uniq(&:data)
+        preserve_ties ? tied : [tied.max_by { |candidate| JSON.generate(candidate.data.sort.to_h) }]
+      end
+      newest.sort_by do |candidate|
+        tie_key = preserve_ties ? observed_at.fetch(candidate) : JSON.generate(candidate.data.sort.to_h)
+        [log_at_key(candidate.data["updated_at"]), tie_key]
+      end
     end
 
     # Built from claim fields directly rather than through log_row, whose "phase"
@@ -6231,21 +6286,37 @@ module AgentCoord
     # evidence of custody and can disappear before the next sync. Snapshot rows
     # use the event-shaped TSV contract so existing consumers remain readable,
     # while their type and deterministic id make the distinction explicit.
+    def log_claim_snapshot_fields(entry, target)
+      data = entry.data
+      {
+        "repo" => log_claim_repo(entry), "target" => target,
+        "status" => data["status"], "phase" => data["phase"],
+        "agent_id" => data["agent_id"], "machine_id" => data["machine_id"],
+        "host" => data["host"], "session_id" => data["session_id"],
+        "session_source" => data["session_source"], "instance_id" => data["instance_id"],
+        "thread_handle" => data["thread_handle"], "chat_handle" => data["chat_handle"],
+        "batch_id" => data["batch_id"], "branch" => data["branch"],
+        "claimed_at" => data["claimed_at"], "updated_at" => data["updated_at"],
+        "expires_at" => data["expires_at"], "generation" => data["generation"],
+        "operator" => data["operator"], "pr_url" => data["pr_url"],
+        "dashboard_url" => data["dashboard_url"], "release_mode" => data["release_mode"],
+        "handoff_to" => data["handoff_to"], "handoff_note" => data["handoff_note"],
+        "terminal" => data["terminal"], "pr_state" => data["pr_state"],
+        "evidence_url" => data["evidence_url"], "workspace" => data["workspace"],
+        "released_by" => data["released_by"], "released_at" => data["released_at"],
+        "closed_by_agent_id" => data.dig("closed_by", "agent_id"),
+        "closed_by_machine" => data.dig("closed_by", "machine"),
+        "synthetic" => data["synthetic"], "synthetic_kind" => data["synthetic_kind"]
+      }
+    end
+
     def log_claim_snapshot_rows(entries, include_synthetic: false)
-      log_unique_claim_entries(entries).filter_map do |entry|
+      log_unique_claim_entries(entries, preserve_ties: true).filter_map do |entry|
         data = entry.data
         next if data["synthetic"] && !include_synthetic
 
         target = log_claim_target(entry)
-        snapshot_fields = {
-          "repo" => log_claim_repo(entry), "target" => target,
-          "status" => data["status"], "phase" => data["phase"],
-          "agent_id" => data["agent_id"], "machine_id" => data["machine_id"],
-          "host" => data["host"], "batch_id" => data["batch_id"],
-          "updated_at" => data["updated_at"], "expires_at" => data["expires_at"],
-          "generation" => data["generation"], "synthetic" => data["synthetic"],
-          "synthetic_kind" => data["synthetic_kind"]
-        }
+        snapshot_fields = log_claim_snapshot_fields(entry, target)
         digest = Digest::SHA256.hexdigest(JSON.generate(snapshot_fields.sort.to_h))[0, 16]
         detail = snapshot_fields.sort_by { |key, _| key }.filter_map do |key, value|
           next if value.nil? || value.to_s.empty? || key == "repo" || key == "target"
@@ -6352,7 +6423,8 @@ module AgentCoord
         existing = log_sync_existing(path)
         seen = existing.to_h { |line| [line, true] }
         fresh = lines.reject { |line| seen.key?(line) }
-        log_sync_replace(path, log_sync_ordered(existing + fresh)) unless fresh.empty?
+        ordered = log_sync_ordered(existing + fresh, observed_lines: lines)
+        log_sync_replace(path, ordered) unless ordered == existing
         fresh
       end
     end
@@ -6386,12 +6458,21 @@ module AgentCoord
       FileUtils.rm_f(temp) if temp && File.exist?(temp)
     end
 
-    # Ties break on event id exactly as log_rows does, so a grep of the mirror and
-    # a `log` invocation cannot disagree about what happened last.
-    def log_sync_ordered(lines)
+    # Event ties break on stable event id. Snapshot ties preserve observation
+    # order within each literal work item because same-second release/reacquire
+    # pairs can have no generation to establish causality; work-item ordering
+    # keeps independent snapshots deterministic, and snapshots precede events.
+    def log_sync_ordered(lines, observed_lines: [])
+      observed_at = observed_lines.each_with_index.to_h
       lines.sort_by.with_index do |line, index|
         fields = line.split("\t")
-        [log_at_key(fields.first), fields[LOG_TSV_FIELDS.index("event_id")].to_s, index]
+        type = fields[LOG_TSV_FIELDS.index("type")].to_s
+        event_id = fields[LOG_TSV_FIELDS.index("event_id")].to_s
+        work_item = fields[LOG_TSV_FIELDS.index("work_item")].to_s
+        observed_index = observed_at[line]
+        snapshot_order = observed_index.nil? ? [0, index] : [1, observed_index]
+        tie = type == "claim.snapshot" ? [0, work_item, *snapshot_order] : [1, event_id, index]
+        [log_at_key(fields.first), *tie]
       end
     end
 

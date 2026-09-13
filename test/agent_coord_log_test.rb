@@ -1219,13 +1219,13 @@ class AgentCoordLogSyncTest < AgentCoordLogTestCase
     write_claim("shakacode/example", "404", "status" => "active", "agent_id" => "worker",
                                             "updated_at" => "2026-08-03T02:00:00Z")
     run_log("--sync")
-    write_claim("shakacode/example", "404", "status" => "done", "agent_id" => "worker",
+    write_claim("shakacode/example", "404", "status" => "released", "agent_id" => "worker",
                                             "updated_at" => "2026-08-03T03:00:00Z")
 
     assert_equal 0, run_log("--sync").status.exitstatus
     lines = File.readlines(File.join(@state_root, "log.tsv"), encoding: "UTF-8")
     assert_equal 2, lines.length
-    assert_equal(1, lines.count { |line| line.include?("status=done") })
+    assert_equal(1, lines.count { |line| line.include?("status=released") })
   end
 
   def test_log_sync_keeps_only_the_newest_copy_of_a_lease_returned_twice
@@ -1246,6 +1246,99 @@ class AgentCoordLogSyncTest < AgentCoordLogTestCase
     assert_equal "2026-08-03T03:00:00Z", rows.first.fetch("at")
   end
 
+  def test_log_sync_retains_distinct_lease_versions_with_the_same_timestamp
+    active = AgentCoord::StoredJson.new(
+      path: "claims/shakacode/example/404.json",
+      data: { "repo" => "shakacode/example", "target" => "404", "agent_id" => "worker",
+              "status" => "active", "generation" => 1, "updated_at" => "2026-08-03T03:00:00Z" }
+    )
+    released = AgentCoord::StoredJson.new(
+      path: active.path,
+      data: active.data.merge("status" => "released", "generation" => 2)
+    )
+    runner = AgentCoord::Runner.new([])
+
+    rows = runner.send(:log_claim_snapshot_rows, [active, released, released])
+
+    assert_equal 2, rows.length
+    assert_equal %w[active released], rows.map { |row| row.fetch("detail")[/status=(\w+)/, 1] }.sort
+    lines = rows.map { |row| runner.send(:log_tsv_line, row) }
+    ordered = runner.send(:log_sync_ordered, lines)
+    ordered_statuses = ordered.map { |line| line[/status=(\w+)/, 1] }
+    assert_equal %w[active released], ordered_statuses
+  end
+
+  def test_log_sync_preserves_release_then_reacquire_observation_order_without_generation
+    released = AgentCoord::StoredJson.new(
+      path: "claims/shakacode/example/404.json",
+      data: { "repo" => "shakacode/example", "target" => "404", "agent_id" => "worker",
+              "status" => "released", "updated_at" => "2026-08-03T03:00:00Z" }
+    )
+    active = AgentCoord::StoredJson.new(path: released.path, data: released.data.merge("status" => "active"))
+    runner = AgentCoord::Runner.new([])
+
+    rows = runner.send(:log_claim_snapshot_rows, [released, active])
+    lines = rows.map { |row| runner.send(:log_tsv_line, row) }
+    ordered = runner.send(:log_sync_ordered, lines)
+
+    ordered_statuses = ordered.map { |line| line[/status=(\w+)/, 1] }
+    assert_equal %w[released active], ordered_statuses
+  end
+
+  def test_log_sync_reorders_an_existing_tied_snapshot_when_current_state_is_reobserved
+    active = AgentCoord::StoredJson.new(
+      path: "claims/shakacode/example/404.json",
+      data: { "repo" => "shakacode/example", "target" => "404", "agent_id" => "worker",
+              "status" => "active", "updated_at" => "2026-08-03T03:00:00Z" }
+    )
+    released = AgentCoord::StoredJson.new(path: active.path, data: active.data.merge("status" => "released"))
+    runner = AgentCoord::Runner.new([])
+    rows = runner.send(:log_claim_snapshot_rows, [active, released])
+    lines = rows.to_h { |row| [row.fetch("detail")[/status=(\w+)/, 1], runner.send(:log_tsv_line, row)] }
+    path = File.join(@state_root, "log.tsv")
+    File.write(path, "#{lines.fetch('released')}\n#{lines.fetch('active')}\n")
+
+    fresh = runner.send(:log_sync_append, path, [lines.fetch("released")])
+    statuses = File.readlines(path, chomp: true).map { |line| line[/status=(\w+)/, 1] }
+
+    assert_empty fresh
+    assert_equal %w[active released], statuses
+  end
+
+  def test_live_claim_view_collapses_same_timestamp_history_variants
+    active = log_claim_entry(
+      path: "claims/shakacode/example/404.json", repo: "shakacode/example", target: "404",
+      agent_id: "worker", updated_at: "2026-08-03T03:00:00Z"
+    )
+    released = AgentCoord::StoredJson.new(path: active.path, data: active.data.merge("status" => "released"))
+
+    claims = log_payload_from_claim_entries([active, released], query: "shakacode/example#404").fetch("claims")
+
+    assert_equal 1, claims.length
+    assert_equal "released", claims.first.fetch("status")
+  end
+
+  def test_log_sync_fingerprints_same_timestamp_holder_identity_changes
+    first = AgentCoord::StoredJson.new(
+      path: "claims/shakacode/example/404.json",
+      data: { "repo" => "shakacode/example", "target" => "404", "agent_id" => "worker",
+              "status" => "active", "branch" => "first", "instance_id" => "process-1",
+              "claimed_at" => "2026-08-03T02:00:00Z", "updated_at" => "2026-08-03T03:00:00Z" }
+    )
+    second = AgentCoord::StoredJson.new(
+      path: first.path,
+      data: first.data.merge("branch" => "second", "instance_id" => "process-2",
+                             "claimed_at" => "2026-08-03T02:30:00Z")
+    )
+    runner = AgentCoord::Runner.new([])
+
+    rows = runner.send(:log_claim_snapshot_rows, [first, second])
+
+    assert_equal 2, rows.length
+    assert_equal %w[first second], rows.map { |row| row.fetch("detail")[/branch=(\w+)/, 1] }.sort
+    assert_equal 2, rows.map { |row| row.fetch("event_id") }.uniq.length
+  end
+
   def test_log_sync_preserves_literal_alias_and_case_claim_targets
     write_claim("shakacode/example", "Issue:9832", "status" => "active", "agent_id" => "issue-worker",
                                                    "updated_at" => "2026-08-03T02:00:00Z")
@@ -1262,7 +1355,9 @@ class AgentCoordLogSyncTest < AgentCoordLogTestCase
   def test_log_sync_preserves_released_claim_expiry_and_generation
     write_claim("shakacode/example", "404", "status" => "released", "agent_id" => "worker",
                                             "updated_at" => "2026-08-03T03:00:00Z",
-                                            "expires_at" => "2026-08-03T03:00:00Z", "generation" => 4)
+                                            "expires_at" => "2026-08-03T03:00:00Z", "generation" => 4,
+                                            "released_by" => "worker", "released_at" => "2026-08-03T03:00:00Z",
+                                            "closed_by" => { "agent_id" => "worker", "machine" => "m1" })
 
     assert_equal 0, run_log("--sync").status.exitstatus
     line = File.read(File.join(@state_root, "log.tsv"), encoding: "UTF-8")
@@ -1270,6 +1365,30 @@ class AgentCoordLogSyncTest < AgentCoordLogTestCase
     assert_includes line, "status=released"
     assert_includes line, "expires_at=2026-08-03T03:00:00Z"
     assert_includes line, "generation=4"
+    assert_includes line, "released_by=worker"
+    assert_includes line, "released_at=2026-08-03T03:00:00Z"
+    assert_includes line, "closed_by_agent_id=worker"
+    assert_includes line, "closed_by_machine=m1"
+  end
+
+  def test_log_sync_fingerprints_same_timestamp_release_attribution_changes
+    first = AgentCoord::StoredJson.new(
+      path: "claims/shakacode/example/404.json",
+      data: { "repo" => "shakacode/example", "target" => "404", "agent_id" => "worker",
+              "status" => "released", "updated_at" => "2026-08-03T03:00:00Z",
+              "released_by" => "worker-1", "closed_by" => { "agent_id" => "worker-1", "machine" => "m1" } }
+    )
+    second = AgentCoord::StoredJson.new(
+      path: first.path,
+      data: first.data.merge("released_by" => "worker-2",
+                             "closed_by" => { "agent_id" => "worker-2", "machine" => "m2" })
+    )
+    runner = AgentCoord::Runner.new([])
+
+    rows = runner.send(:log_claim_snapshot_rows, [first, second])
+
+    assert_equal 2, rows.length
+    assert_equal 2, rows.map { |row| row.fetch("event_id") }.uniq.length
   end
 
   def test_log_sync_excludes_synthetic_claim_snapshots_by_default
@@ -2403,6 +2522,69 @@ class AgentCoordLogClaimRecordResilienceTest < AgentCoordLogTestCase
     refute_path_exists File.join(@state_root, "log.tsv")
   end
 
+  def test_log_refuses_to_sync_past_a_structurally_incomplete_claim_record
+    write_raw_claim("empty", {})
+
+    result = run_log("--sync")
+
+    assert_equal 2, result.status.exitstatus, result.stderr
+    assert_includes result.stderr, "malformed live claim record"
+    assert_includes result.stderr, "missing status, agent_id, updated_at"
+    assert_includes result.stderr, "refusing to sync an incomplete trail: claims"
+    refute_path_exists File.join(@state_root, "log.tsv")
+  end
+
+  def test_log_refuses_to_sync_an_unsupported_claim_status
+    write_raw_claim("invalid-status", { "status" => "banana", "agent_id" => "worker",
+                                        "updated_at" => "2026-08-03T03:00:00Z" })
+
+    result = run_log("--sync")
+
+    assert_equal 2, result.status.exitstatus, result.stderr
+    assert_includes result.stderr, "unsupported status"
+    assert_includes result.stderr, "refusing to sync an incomplete trail: claims"
+    refute_path_exists File.join(@state_root, "log.tsv")
+  end
+
+  def test_log_refuses_to_sync_a_non_string_claim_holder
+    write_raw_claim("invalid-holder", { "status" => "active", "agent_id" => {},
+                                        "updated_at" => "2026-08-03T03:00:00Z" })
+
+    result = run_log("--sync")
+
+    assert_equal 2, result.status.exitstatus, result.stderr
+    assert_includes result.stderr, "non-string agent_id"
+    assert_includes result.stderr, "refusing to sync an incomplete trail: claims"
+    refute_path_exists File.join(@state_root, "log.tsv")
+  end
+
+  def test_log_refuses_to_sync_a_claim_whose_payload_identity_disagrees_with_its_path
+    write_raw_claim("404", { "repo" => "shakacode/other", "target" => "999",
+                             "status" => "active", "agent_id" => "worker",
+                             "updated_at" => "2026-08-03T03:00:00Z" })
+
+    result = run_log("--sync")
+
+    assert_equal 2, result.status.exitstatus, result.stderr
+    assert_includes result.stderr, "payload identity does not match storage path"
+    assert_includes result.stderr, "refusing to sync an incomplete trail: claims"
+    refute_path_exists File.join(@state_root, "log.tsv")
+  end
+
+  def test_log_refuses_to_sync_a_claim_from_a_noncanonical_nested_path
+    path = File.join(@state_root, "claims", "shakacode", "example", "extra", "404.json")
+    FileUtils.mkdir_p(File.dirname(path))
+    File.write(path, JSON.generate({ "status" => "active", "agent_id" => "worker",
+                                     "updated_at" => "2026-08-03T03:00:00Z" }))
+
+    result = run_log("--sync")
+
+    assert_equal 2, result.status.exitstatus, result.stderr
+    assert_includes result.stderr, "noncanonical storage path"
+    assert_includes result.stderr, "refusing to sync an incomplete trail: claims"
+    refute_path_exists File.join(@state_root, "log.tsv")
+  end
+
   private
 
   def write_raw_claim(name, record)
@@ -2418,6 +2600,23 @@ end
 # healthy sibling and must never rewrite the stored bytes.
 class AgentCoordLogInvalidEncodingTest < AgentCoordLogTestCase
   LOCALES = %w[C C.UTF-8].freeze
+
+  def test_log_sync_fails_closed_on_invalid_utf8_claim_values
+    path = File.join(@state_root, "claims", "shakacode", "example", "404.json")
+    FileUtils.mkdir_p(File.dirname(path))
+    File.binwrite(
+      path,
+      "{\"status\":\"active\",\"agent_id\":\"worker\",\"updated_at\":\"2026-08-03T03:00:00Z\"," \
+      "\"host\":\"\xFF\"}"
+    )
+
+    result = run_log("--sync")
+
+    assert_equal 2, result.status.exitstatus, result.stderr
+    assert_includes result.stderr, "state unreadable: invalid UTF-8 in persisted log record"
+    refute_match(%r{JSON::GeneratorError|bin/agent-coord:\d+}, result.stderr)
+    refute_path_exists File.join(@state_root, "log.tsv")
+  end
 
   def test_log_fails_closed_on_invalid_utf8_live_event_values
     write_event("b1", "healthy", "type" => "claim.acquired", "repo" => "shakacode/example", "target" => "42",
