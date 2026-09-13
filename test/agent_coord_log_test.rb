@@ -1268,30 +1268,32 @@ class AgentCoordLogSyncTest < AgentCoordLogTestCase
     assert_equal %w[active released], ordered_statuses
   end
 
-  def test_log_sync_orders_same_timestamp_claim_snapshots_by_generation
+  def test_log_sync_orders_same_timestamp_claim_snapshots_by_store_version
     released = AgentCoord::StoredJson.new(
       path: "claims/shakacode/example/404.json",
       data: { "repo" => "shakacode/example", "target" => "404", "agent_id" => "worker",
-              "status" => "released", "generation" => 1, "updated_at" => "2026-08-03T03:00:00Z" }
+              "status" => "released", "generation" => 10, "updated_at" => "2026-08-03T03:00:00Z" },
+      sha: "1"
     )
     active = AgentCoord::StoredJson.new(
       path: released.path,
-      data: released.data.merge("status" => "active", "generation" => 2)
+      data: released.data.merge("status" => "active", "generation" => 9),
+      sha: "2"
     )
     runner = AgentCoord::Runner.new([])
 
     rows = runner.send(:log_claim_snapshot_rows, [active, released])
     lines = rows.map { |row| runner.send(:log_tsv_line, row) }
-    generations = rows.to_h { |row| [runner.send(:log_tsv_line, row), row.fetch("_claim_generation")] }
+    versions = rows.to_h { |row| [runner.send(:log_tsv_line, row), row.fetch("_claim_store_version")] }
     ordered = runner.send(
-      :log_sync_ordered, lines, observed_lines: lines, observed_snapshot_generations: generations
+      :log_sync_ordered, lines, observed_lines: lines, observed_snapshot_versions: versions
     )
 
     ordered_statuses = ordered.map { |line| line[/status=(\w+)/, 1] }
     assert_equal %w[released active], ordered_statuses
   end
 
-  def test_log_sync_preserves_observation_order_when_a_tied_snapshot_has_no_generation
+  def test_log_sync_preserves_observation_order_when_a_tied_snapshot_has_no_store_version
     active = AgentCoord::StoredJson.new(
       path: "claims/shakacode/example/404.json",
       data: { "repo" => "shakacode/example", "target" => "404", "agent_id" => "worker",
@@ -1305,11 +1307,11 @@ class AgentCoordLogSyncTest < AgentCoordLogTestCase
 
     rows = runner.send(:log_claim_snapshot_rows, [active, released])
     lines = rows.map { |row| runner.send(:log_tsv_line, row) }
-    generations = rows.to_h do |row|
-      [runner.send(:log_tsv_line, row), row["_claim_generation"]]
+    versions = rows.to_h do |row|
+      [runner.send(:log_tsv_line, row), row["_claim_store_version"]]
     end.compact
     ordered = runner.send(
-      :log_sync_ordered, lines, observed_lines: lines, observed_snapshot_generations: generations
+      :log_sync_ordered, lines, observed_lines: lines, observed_snapshot_versions: versions
     )
 
     ordered_statuses = ordered.map { |line| line[/status=(\w+)/, 1] }
@@ -1387,6 +1389,23 @@ class AgentCoordLogSyncTest < AgentCoordLogTestCase
     assert_equal "released", claims.first.fetch("status")
   end
 
+  def test_live_claim_view_compares_tied_store_versions_numerically
+    newest = log_claim_entry(
+      path: "claims/shakacode/example/404.json", repo: "shakacode/example", target: "404",
+      agent_id: "worker", updated_at: "2026-08-03T03:00:00Z"
+    )
+    newest.sha = "10"
+    older = AgentCoord::StoredJson.new(
+      path: newest.path,
+      data: newest.data.merge("status" => "released"), sha: "9"
+    )
+
+    claims = AgentCoord::Runner.new([]).send(:log_unique_claim_entries, [newest, older])
+
+    assert_equal 1, claims.length
+    assert_equal "10", claims.first.sha
+  end
+
   def test_log_sync_fingerprints_same_timestamp_holder_identity_changes
     first = AgentCoord::StoredJson.new(
       path: "claims/shakacode/example/404.json",
@@ -1441,6 +1460,10 @@ class AgentCoordLogSyncTest < AgentCoordLogTestCase
   end
 
   def test_log_sync_mirrors_a_gc_expired_claim_snapshot
+    write_event(
+      "b1", "later-event", "type" => "phase.changed", "repo" => "shakacode/example", "target" => "404",
+                           "at" => "2026-08-04T02:00:00Z"
+    )
     write_claim("shakacode/example", "404", "status" => "expired", "agent_id" => "worker",
                                             "updated_at" => "2026-08-03T03:00:00Z",
                                             "expires_at" => "2026-08-02T03:00:00Z",
@@ -1458,6 +1481,35 @@ class AgentCoordLogSyncTest < AgentCoordLogTestCase
     assert_includes line, "reaped_at=2026-08-04T03:00:00.123456789Z"
     assert_includes line, "expired_event_pending=true"
     assert_includes line, "expired_event_id=claim-expired-abc123"
+    assert_equal "claim.snapshot", line.lines.last.split("\t").fetch(4)
+    assert_equal "2026-08-04T03:00:00.123456789Z", line.lines.last.split("\t").first
+    assert_match(/\tclaim-snapshot-v2-[0-9a-f]{16}\t/, line.lines.last)
+  end
+
+  def test_log_sync_accepts_a_holder_identity_that_claim_can_persist
+    claim = run_command(
+      COMMAND_ENV, "ruby", BIN, "claim", "--agent-id", "bad/holder", "--repo", "shakacode/example",
+      "--target", "404", "--state-root", @state_root
+    )
+
+    result = run_log("--sync")
+
+    assert_equal 0, claim.status.exitstatus, claim.stderr
+    assert_equal 0, result.status.exitstatus, result.stderr
+    assert_includes File.read(File.join(@state_root, "log.tsv")), "agent_id=bad/holder"
+  end
+
+  def test_log_sync_accepts_a_negative_generation_that_claim_can_persist
+    claim = run_command(
+      COMMAND_ENV, "ruby", BIN, "claim", "--agent-id", "worker", "--repo", "shakacode/example",
+      "--target", "404", "--generation", "-1", "--state-root", @state_root
+    )
+
+    result = run_log("--sync")
+
+    assert_equal 0, claim.status.exitstatus, claim.stderr
+    assert_equal 0, result.status.exitstatus, result.stderr
+    assert_includes File.read(File.join(@state_root, "log.tsv")), "generation=-1"
   end
 
   def test_log_sync_preserves_pending_expiry_replay_from_a_prior_holder
@@ -2594,6 +2646,28 @@ class AgentCoordLogClaimRecordResilienceTest < AgentCoordLogTestCase
     payload = JSON.parse(result.stdout)
     assert_equal "complete", payload.fetch("trail")
     assert_equal "readable-worker", payload.fetch("claim").fetch("agent_id")
+  end
+
+  def test_log_ignores_invalid_utf8_claim_data_outside_the_scoped_work_item
+    good = log_claim_entry(
+      path: "claims/shakacode/example/104.json", repo: "shakacode/example", target: "104",
+      agent_id: "readable-worker", updated_at: "2026-08-03T03:00:00Z"
+    )
+    bad_value = "bad-\xE2".b.force_encoding(Encoding::UTF_8)
+    bad = AgentCoord::StoredJson.new(
+      path: "claims/shakacode/example/unrelated.json",
+      data: { "status" => "active", "agent_id" => bad_value, "updated_at" => "2026-08-03T03:00:00Z" }
+    )
+    store = Object.new
+    store.define_singleton_method(:list_json) { |_prefix, &_handler| [good, bad] }
+    stderr = StringIO.new
+    runner = AgentCoord::Runner.new([], stderr: stderr)
+    wanted = runner.send(:log_identity, "shakacode/example", "104")
+
+    claims = runner.send(:log_claim_entries, store, wanted_identity: wanted)
+
+    assert_equal [good], claims
+    assert_empty stderr.string
   end
 
   # An invalidly encoded path cannot prove that a malformed claim belongs to a

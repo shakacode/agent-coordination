@@ -742,10 +742,14 @@ the bare, `issue:`, and `pr:` spellings, including their lanes.
 
 The mirror also contains `claim.snapshot` rows for readable live claims,
 including claims with no batch and therefore no lifecycle event. These are
-observations of mutable claim state, not fabricated events; they are timestamped
-from `updated_at` and carry lease facts in `detail`. Unchanged observations are
-deduplicated, while changed claims get new stable snapshot rows. Incomplete or
-malformed claim listings still refuse sync.
+observations of mutable claim state, not fabricated events. Active and released
+claims are timestamped from `updated_at`; expired claims use `reaped_at`, because
+GC deliberately preserves the holder's last-touch time in `updated_at`. Expired
+rows use the versioned `claim-snapshot-v2-*` identity so an existing mirror can
+retain the former timestamp representation without duplicating an event ID.
+Lease facts remain in `detail`. Unchanged observations are deduplicated, while
+changed claims get new stable snapshot rows. Incomplete or malformed claim
+listings still refuse sync.
 
 The `$'...'` quoting matters: GNU grep does not define `\t` inside an ERE, so the
 plain-quoted form matches a literal `t` rather than a tab. ANSI-C quoting puts

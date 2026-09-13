@@ -7045,18 +7045,18 @@ module AgentCoord
         "warning: claims #{reason}; #{subject} would not be reported"
       end
       claims.select do |candidate|
-        log_validate_record_encoding!(candidate)
-        next context != :sync || log_sync_claim_valid?(candidate) if candidate.data.is_a?(Hash)
-
-        # A malformed sibling cannot shorten a scoped answer when its path
-        # proves that it belongs to a different work item. Unscoped --sync
-        # deliberately keeps the fleet-wide completeness check.
         path_identity = log_claim_path_identity(candidate)
         if wanted_identity && path_identity &&
            !log_identity_match?(path_identity, wanted_identity, lane_exact: true)
           next false
         end
 
+        log_validate_record_encoding!(candidate)
+        next context != :sync || log_sync_claim_valid?(candidate) if candidate.data.is_a?(Hash)
+
+        # A malformed sibling cannot shorten a scoped answer when its path
+        # proves that it belongs to a different work item. Unscoped --sync
+        # deliberately keeps the fleet-wide completeness check.
         message = "warning: live claim record is not an object at #{candidate.path}; " \
                   "this trail may be incomplete"
         log_note_incomplete("claims", log_scrub(message))
@@ -7097,9 +7097,8 @@ module AgentCoord
         Time.iso8601(data["reaped_at"])
       end
 
-      valid_generation = !data.key?("generation") ||
-                         (data["generation"].is_a?(Integer) && !data["generation"].negative?)
-      raise ArgumentError, "generation is not a nonnegative integer" unless valid_generation
+      valid_generation = !data.key?("generation") || data["generation"].is_a?(Integer)
+      raise ArgumentError, "generation is not an integer" unless valid_generation
     end
 
     def log_sync_pending_expiry_valid!(entry)
@@ -7123,8 +7122,6 @@ module AgentCoord
       if (data.key?("repo") && data["repo"] != path_repo) || (data.key?("target") && data["target"].to_s != path_target)
         raise ArgumentError, "payload identity does not match storage path"
       end
-
-      AgentCoord.validate_segment!(data.fetch("agent_id"), "agent-id")
     end
 
     def log_claim_event_key(entry)
@@ -7161,8 +7158,12 @@ module AgentCoord
       path = entry.path
       return unless path.is_a?(String) && path.valid_encoding?
 
-      log_identity(AgentCoord.repo_from_claim_path(path), AgentCoord.target_from_path(path))
-    rescue ArgumentError
+      repo = AgentCoord.repo_from_claim_path(path)
+      target = AgentCoord.target_from_path(path)
+      return unless AgentCoord.claim_path(repo, target) == path
+
+      log_identity(repo, target)
+    rescue AgentCoord::Error, ArgumentError
       nil
     end
 
@@ -7203,12 +7204,31 @@ module AgentCoord
       newest = entries.group_by { |candidate| claim_lease_key(candidate) }.values.flat_map do |variants|
         newest_at = variants.map { |candidate| log_at_key(candidate.data["updated_at"]) }.max
         tied = variants.select { |candidate| log_at_key(candidate.data["updated_at"]) == newest_at }.uniq(&:data)
-        preserve_ties ? tied : [tied.max_by { |candidate| JSON.generate(candidate.data.sort.to_h) }]
+        next tied if preserve_ties
+
+        canonical = ->(candidate) { JSON.generate(candidate.data.sort.to_h) }
+        versions = tied.to_h { |candidate| [candidate, log_numeric_store_version(candidate)] }
+        selected = if versions.values.all?
+                     tied.max_by { |candidate| [versions.fetch(candidate), canonical.call(candidate)] }
+                   else
+                     tied.max_by(&canonical)
+                   end
+        [selected]
       end
       newest.sort_by do |candidate|
         tie_key = preserve_ties ? observed_at.fetch(candidate) : JSON.generate(candidate.data.sort.to_h)
         [log_at_key(candidate.data["updated_at"]), tie_key]
       end
+    end
+
+    # HTTP state versions are monotonic decimal counters. Local and GitHub
+    # stores use content hashes instead, so they retain observation-order
+    # fallback rather than pretending a digest establishes causality.
+    def log_numeric_store_version(entry)
+      value = entry.sha.to_s
+      return unless value.match?(/\A(?:0|[1-9]\d{0,18})\z/)
+
+      Integer(value, 10)
     end
 
     # Built from claim fields directly rather than through log_row, whose "phase"
@@ -7299,14 +7319,16 @@ module AgentCoord
 
           "#{key}=#{value}"
         end.join(" ")
+        snapshot_at = data["status"] == "expired" ? data.fetch("reaped_at") : data["updated_at"]
+        snapshot_version = data["status"] == "expired" ? "-v2" : ""
         log_row(
-          "at" => data["updated_at"], "machine_id" => data["machine_id"],
+          "at" => snapshot_at, "machine_id" => data["machine_id"],
           "host" => data["host"], "repo" => snapshot_fields["repo"],
           "target" => target, "type" => "claim.snapshot", "phase" => data["phase"],
           "agent_id" => data["agent_id"], "batch_id" => data["batch_id"],
-          "message" => detail, "event_id" => "claim-snapshot-#{digest}",
+          "message" => detail, "event_id" => "claim-snapshot#{snapshot_version}-#{digest}",
           "synthetic" => data["synthetic"], "synthetic_kind" => data["synthetic_kind"]
-        ).merge("_claim_generation" => data["generation"])
+        ).merge("_claim_store_version" => log_numeric_store_version(entry))
       end
     end
 
@@ -7378,11 +7400,11 @@ module AgentCoord
     def log_sync_write(path, rows, options)
       FileUtils.mkdir_p(File.dirname(path))
       lines = rows.map { |row| log_tsv_line(row) }
-      snapshot_generations = rows.each_with_index.with_object({}) do |(row, index), generations|
-        generation = row["_claim_generation"]
-        generations[lines.fetch(index)] = generation unless generation.nil?
+      snapshot_versions = rows.each_with_index.with_object({}) do |(row, index), versions|
+        version = row["_claim_store_version"]
+        versions[lines.fetch(index)] = version unless version.nil?
       end
-      fresh = log_sync_append(path, lines, observed_snapshot_generations: snapshot_generations)
+      fresh = log_sync_append(path, lines, observed_snapshot_versions: snapshot_versions)
       if options[:json]
         @stdout.puts JSON.pretty_generate({ "synced" => fresh.length, "path" => path })
       else
@@ -7398,7 +7420,7 @@ module AgentCoord
     # backfill -- so the merged set is rewritten in timestamp order rather than
     # appended blindly. Nothing already recorded is ever dropped, and the rewrite
     # happens under the same exclusive lock as the read.
-    def log_sync_append(path, lines, observed_snapshot_generations: {})
+    def log_sync_append(path, lines, observed_snapshot_versions: {})
       File.open("#{path}#{LOG_SYNC_LOCK_SUFFIX}", File::RDWR | File::CREAT, 0o600) do |lock|
         lock.flock(File::LOCK_EX)
         existing = log_sync_existing(path)
@@ -7406,11 +7428,11 @@ module AgentCoord
         fresh = lines.reject { |line| seen.key?(line) }
         combined = existing + fresh
         return fresh if fresh.empty? && log_sync_sorted?(
-          combined, observed_lines: lines, observed_snapshot_generations: observed_snapshot_generations
+          combined, observed_lines: lines, observed_snapshot_versions: observed_snapshot_versions
         )
 
         ordered = log_sync_ordered(
-          combined, observed_lines: lines, observed_snapshot_generations: observed_snapshot_generations
+          combined, observed_lines: lines, observed_snapshot_versions: observed_snapshot_versions
         )
         log_sync_replace(path, ordered) unless ordered == existing
         fresh
@@ -7446,29 +7468,28 @@ module AgentCoord
       FileUtils.rm_f(temp) if temp && File.exist?(temp)
     end
 
-    # Event ties break on stable event id. Snapshot ties use generation when the
-    # writer supplied it, making paginated backend order irrelevant, then retain
-    # observation order for legacy claims that carry no generation. Events
-    # precede snapshots so the current mutable claim remains the final fact for
-    # that instant.
-    def log_sync_ordered(lines, observed_lines: [], observed_snapshot_generations: {})
+    # Event ties break on stable event id. Snapshot ties use a monotonic numeric
+    # store version when every row in the tie has one, making HTTP pagination
+    # order irrelevant, then retain observation order for other stores. Events
+    # precede snapshots so the current mutable claim remains the final fact.
+    def log_sync_ordered(lines, observed_lines: [], observed_snapshot_versions: {})
       observed_at = observed_lines.each_with_index.to_h
-      generation_groups = log_sync_generation_groups(lines, observed_snapshot_generations)
+      version_groups = log_sync_version_groups(lines, observed_snapshot_versions)
       lines.sort_by.with_index do |line, index|
-        log_sync_order_key(line, index, observed_at, observed_snapshot_generations, generation_groups)
+        log_sync_order_key(line, index, observed_at, observed_snapshot_versions, version_groups)
       end
     end
 
     # Most syncs add nothing. A linear check avoids repeatedly sorting an
     # unbounded durable mirror while still detecting observation-order changes
     # for tied legacy snapshots.
-    def log_sync_sorted?(lines, observed_lines: [], observed_snapshot_generations: {})
+    def log_sync_sorted?(lines, observed_lines: [], observed_snapshot_versions: {})
       observed_at = observed_lines.each_with_index.to_h
-      generation_groups = log_sync_generation_groups(lines, observed_snapshot_generations)
+      version_groups = log_sync_version_groups(lines, observed_snapshot_versions)
       previous = nil
       lines.each_with_index do |line, index|
         current = log_sync_order_key(
-          line, index, observed_at, observed_snapshot_generations, generation_groups
+          line, index, observed_at, observed_snapshot_versions, version_groups
         )
         return false if previous && (previous <=> current) == 1
 
@@ -7477,7 +7498,7 @@ module AgentCoord
       true
     end
 
-    def log_sync_generation_groups(lines, observed_snapshot_generations)
+    def log_sync_version_groups(lines, observed_snapshot_versions)
       groups = Hash.new { |hash, key| hash[key] = [] }
       lines.each do |line|
         fields = line.split("\t")
@@ -7486,21 +7507,21 @@ module AgentCoord
         groups[[log_at_key(fields.first), fields[LOG_TSV_FIELDS.index("work_item")].to_s]] << line
       end
       groups.each_with_object({}) do |(key, snapshots), complete|
-        complete[key] = true if snapshots.all? { |line| observed_snapshot_generations.key?(line) }
+        complete[key] = true if snapshots.all? { |line| observed_snapshot_versions.key?(line) }
       end
     end
 
-    def log_sync_order_key(line, index, observed_at, observed_snapshot_generations, generation_groups)
+    def log_sync_order_key(line, index, observed_at, observed_snapshot_versions, version_groups)
       fields = line.split("\t")
       type = fields[LOG_TSV_FIELDS.index("type")].to_s
       event_id = fields[LOG_TSV_FIELDS.index("event_id")].to_s
       work_item = fields[LOG_TSV_FIELDS.index("work_item")].to_s
       observed_index = observed_at[line]
       snapshot_order = observed_index.nil? ? [0, index] : [1, observed_index]
-      generation_group = generation_groups[[log_at_key(fields.first), work_item]]
-      generation = observed_snapshot_generations[line] if generation_group
-      generation_order = generation_group ? [1, generation, *snapshot_order] : [0, *snapshot_order]
-      tie = type == "claim.snapshot" ? [1, work_item, *generation_order] : [0, event_id, index]
+      version_group = version_groups[[log_at_key(fields.first), work_item]]
+      version = observed_snapshot_versions[line] if version_group
+      version_order = version_group ? [1, version, *snapshot_order] : [0, *snapshot_order]
+      tie = type == "claim.snapshot" ? [1, work_item, *version_order] : [0, event_id, index]
       [log_at_key(fields.first), *tie]
     end
 
