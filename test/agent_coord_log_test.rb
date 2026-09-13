@@ -1406,6 +1406,32 @@ class AgentCoordLogSyncTest < AgentCoordLogTestCase
     assert_equal "10", claims.first.sha
   end
 
+  def test_tied_payload_deduplication_retains_the_latest_store_version
+    active_v1 = log_claim_entry(
+      path: "claims/shakacode/example/404.json", repo: "shakacode/example", target: "404",
+      agent_id: "worker", updated_at: "2026-08-03T03:00:00Z"
+    )
+    active_v1.sha = "1"
+    released_v2 = AgentCoord::StoredJson.new(
+      path: active_v1.path, data: active_v1.data.merge("status" => "released"), sha: "2"
+    )
+    active_v3 = AgentCoord::StoredJson.new(path: active_v1.path, data: active_v1.data, sha: "3")
+    entries = [active_v1, released_v2, active_v3]
+    runner = AgentCoord::Runner.new([])
+
+    current = runner.send(:log_unique_claim_entries, entries)
+    rows = runner.send(:log_claim_snapshot_rows, entries)
+    lines = rows.map { |row| runner.send(:log_tsv_line, row) }
+    versions = rows.to_h { |row| [runner.send(:log_tsv_line, row), row.fetch("_claim_store_version")] }
+    ordered = runner.send(
+      :log_sync_ordered, lines, observed_lines: lines, observed_snapshot_versions: versions
+    )
+
+    assert_equal "3", current.first.sha
+    ordered_statuses = ordered.map { |line| line[/status=(\w+)/, 1] }
+    assert_equal %w[released active], ordered_statuses
+  end
+
   def test_log_sync_fingerprints_same_timestamp_holder_identity_changes
     first = AgentCoord::StoredJson.new(
       path: "claims/shakacode/example/404.json",

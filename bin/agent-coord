@@ -7201,12 +7201,25 @@ module AgentCoord
     # double custody. A different holder also stays visible because two reads
     # around a takeover are genuinely ambiguous. Lanes remain exact because each
     # lane holds its own lease.
+    def log_latest_duplicate_claim_entry(duplicates, observed_at)
+      versions = duplicates.to_h { |candidate| [candidate, log_numeric_store_version(candidate)] }
+      return duplicates.max_by { |candidate| observed_at.fetch(candidate) } unless versions.values.all?
+
+      duplicates.max_by { |candidate| versions.fetch(candidate) }
+    end
+
+    def log_newest_claim_variants(variants, observed_at)
+      newest_at = variants.map { |candidate| log_at_key(candidate.data["updated_at"]) }.max
+      variants.select { |candidate| log_at_key(candidate.data["updated_at"]) == newest_at }
+              .group_by(&:data).values
+              .map { |duplicates| log_latest_duplicate_claim_entry(duplicates, observed_at) }
+    end
+
     def log_unique_claim_entries(entries, preserve_ties: false)
       observed_at = {}.compare_by_identity
       entries.each_with_index { |candidate, index| observed_at[candidate] = index }
       newest = entries.group_by { |candidate| claim_lease_key(candidate) }.values.flat_map do |variants|
-        newest_at = variants.map { |candidate| log_at_key(candidate.data["updated_at"]) }.max
-        tied = variants.select { |candidate| log_at_key(candidate.data["updated_at"]) == newest_at }.uniq(&:data)
+        tied = log_newest_claim_variants(variants, observed_at)
         next tied if preserve_ties
 
         canonical = ->(candidate) { JSON.generate(candidate.data.sort.to_h) }
