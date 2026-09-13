@@ -1538,6 +1538,28 @@ class AgentCoordLogSyncTest < AgentCoordLogTestCase
     assert_includes File.read(File.join(@state_root, "log.tsv")), "agent_id= "
   end
 
+  def test_log_sync_deduplicates_identical_projected_rows_within_one_listing
+    legacy = log_claim_entry(
+      path: "claims/shakacode/example/404.json", repo: "shakacode/example", target: "404",
+      agent_id: "worker", updated_at: "2026-08-03T03:00:00Z"
+    )
+    legacy.data.delete("repo")
+    legacy.data.delete("target")
+    upgraded = AgentCoord::StoredJson.new(
+      path: legacy.path, data: legacy.data.merge("repo" => "shakacode/example", "target" => "404")
+    )
+    runner = AgentCoord::Runner.new([])
+    rows = runner.send(:log_claim_snapshot_rows, [legacy, upgraded])
+    lines = rows.map { |row| runner.send(:log_tsv_line, row) }
+    path = File.join(@state_root, "log.tsv")
+
+    fresh = runner.send(:log_sync_append, path, lines)
+
+    assert_equal 2, rows.length
+    assert_equal 1, fresh.length
+    assert_equal 1, File.readlines(path).length
+  end
+
   def test_log_sync_accepts_a_negative_generation_that_claim_can_persist
     claim = run_command(
       COMMAND_ENV, "ruby", BIN, "claim", "--agent-id", "worker", "--repo", "shakacode/example",
@@ -2707,6 +2729,27 @@ class AgentCoordLogClaimRecordResilienceTest < AgentCoordLogTestCase
 
     assert_equal [good], claims
     assert_empty stderr.string
+  end
+
+  def test_log_ignores_invalid_utf8_claim_data_at_an_unrelated_noncanonical_path
+    good = log_claim_entry(
+      path: "claims/shakacode/example/104.json", repo: "shakacode/example", target: "104",
+      agent_id: "readable-worker", updated_at: "2026-08-03T03:00:00Z"
+    )
+    bad_value = "bad-\xE2".b.force_encoding(Encoding::UTF_8)
+    bad = AgentCoord::StoredJson.new(
+      path: "claims/shakacode/example/nested/999.json",
+      data: { "repo" => "shakacode/example", "target" => "999", "status" => "active",
+              "agent_id" => "other-worker", "host" => bad_value, "updated_at" => "2026-08-03T03:00:00Z" }
+    )
+    store = Object.new
+    store.define_singleton_method(:list_json) { |_prefix, &_handler| [good, bad] }
+    runner = AgentCoord::Runner.new([], stderr: StringIO.new)
+    wanted = runner.send(:log_identity, "shakacode/example", "104")
+
+    claims = runner.send(:log_claim_entries, store, wanted_identity: wanted)
+
+    assert_equal [good], claims
   end
 
   # An invalidly encoded path cannot prove that a malformed claim belongs to a

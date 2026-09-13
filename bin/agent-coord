@@ -7045,9 +7045,9 @@ module AgentCoord
         "warning: claims #{reason}; #{subject} would not be reported"
       end
       claims.select do |candidate|
-        path_identity = log_claim_path_identity(candidate)
-        if wanted_identity && path_identity &&
-           !log_identity_match?(path_identity, wanted_identity, lane_exact: true)
+        candidate_identity = log_claim_path_identity(candidate) || log_claim_payload_identity(candidate)
+        if wanted_identity && candidate_identity &&
+           !log_identity_match?(candidate_identity, wanted_identity, lane_exact: true)
           next false
         end
 
@@ -7166,6 +7166,18 @@ module AgentCoord
       return unless AgentCoord.claim_path(repo, target) == path
 
       log_identity(repo, target)
+    rescue AgentCoord::Error, ArgumentError
+      nil
+    end
+
+    def log_claim_payload_identity(entry)
+      data = entry.data
+      return unless data.is_a?(Hash)
+
+      repo, target = data.values_at("repo", "target")
+      return unless [repo, target].all? { |value| value.is_a?(String) && value.valid_encoding? }
+
+      log_identity(repo.strip, target.strip)
     rescue AgentCoord::Error, ArgumentError
       nil
     end
@@ -7441,7 +7453,7 @@ module AgentCoord
         lock.flock(File::LOCK_EX)
         existing = log_sync_existing(path)
         seen = existing.to_h { |line| [line, true] }
-        fresh = lines.reject { |line| seen.key?(line) }
+        fresh = lines.reject { |line| seen.key?(line) }.uniq
         combined = existing + fresh
         return fresh if fresh.empty? && log_sync_sorted?(
           combined, observed_lines: lines, observed_snapshot_versions: observed_snapshot_versions
