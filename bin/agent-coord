@@ -5051,7 +5051,7 @@ module AgentCoord
       validate_host_limit_record!(payload)
       write_with_cas(store, path, payload, existing, "Report host limit #{quota_host}/#{scope}")
       emit_payload({ "record" => payload }, options) do
-        @stdout.puts "reported host limit #{quota_host}/#{scope} on #{options.fetch(:machine)}"
+        @stdout.puts "reported host limit #{quota_host}/#{scope} on #{log_scrub(options.fetch(:machine))}"
       end
       0
     ensure
@@ -5077,7 +5077,7 @@ module AgentCoord
       validate_host_limit_record!(payload)
       write_with_cas(store, path, payload, existing, "Clear host limit #{quota_host}/#{scope}")
       emit_payload({ "record" => payload }, options) do
-        @stdout.puts "cleared host limit #{quota_host}/#{scope} on #{options.fetch(:machine)}"
+        @stdout.puts "cleared host limit #{quota_host}/#{scope} on #{log_scrub(options.fetch(:machine))}"
       end
       0
     ensure
@@ -8278,6 +8278,8 @@ module AgentCoord
     end
 
     def render_status_host_limits(payload, now)
+      return unless payload.key?("host_limits")
+
       @stdout.puts "host_limits"
       records = payload.fetch("host_limits", [])
       if records.empty?
@@ -8289,8 +8291,8 @@ module AgentCoord
         reset = record["resets_at"] || "unknown"
         details = [
           "- schema_version #{record.fetch('schema_version')}",
-          "workspace #{record.fetch('workspace')}",
-          "machine #{record.fetch('machine')}",
+          "workspace #{log_scrub(record.fetch('workspace'))}",
+          "machine #{log_scrub(record.fetch('machine'))}",
           "quota_host #{record.fetch('quota_host')}",
           "scope #{record.fetch('scope')}",
           "status #{record.fetch('status')}",

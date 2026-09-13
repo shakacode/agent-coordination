@@ -115,6 +115,46 @@ class HostLimitCliTest < Minitest::Test
     refute active.key?("cleared_at")
   end
 
+  def test_host_limit_text_scrubs_control_characters_but_json_preserves_workspace_and_machine
+    workspace = "team\n\t\e[31mred"
+    machine = "build\t\e[31mblue\nnode"
+
+    reported = run_cli(
+      "report-host-limit", "--workspace", workspace, "--machine", machine,
+      "--quota-host", "quota-host-a", "--scope", "weekly"
+    )
+
+    assert_success reported
+    assert_equal "reported host limit quota-host-a/weekly on build [31mblue node\n", reported.stdout
+    report_json = run_cli(
+      "report-host-limit", "--workspace", workspace, "--machine", machine,
+      "--quota-host", "quota-host-a", "--scope", "weekly", "--json"
+    )
+    assert_success report_json
+    assert_equal workspace, JSON.parse(report_json.stdout).dig("record", "workspace")
+    assert_equal machine, JSON.parse(report_json.stdout).dig("record", "machine")
+
+    status = run_cli("status")
+    assert_success status
+    assert_includes status.stdout, "workspace team [31mred machine build [31mblue node"
+    refute_includes status.stdout, workspace
+    refute_includes status.stdout, machine
+
+    cleared = run_cli(
+      "clear-host-limit", "--workspace", workspace, "--machine", machine,
+      "--quota-host", "quota-host-a", "--scope", "weekly"
+    )
+    assert_success cleared
+    assert_equal "cleared host limit quota-host-a/weekly on build [31mblue node\n", cleared.stdout
+    clear_json = run_cli(
+      "clear-host-limit", "--workspace", workspace, "--machine", machine,
+      "--quota-host", "quota-host-a", "--scope", "weekly", "--json"
+    )
+    assert_success clear_json
+    assert_equal workspace, JSON.parse(clear_json.stdout).dig("record", "workspace")
+    assert_equal machine, JSON.parse(clear_json.stdout).dig("record", "machine")
+  end
+
   def test_clear_refuses_to_write_a_timestamp_before_the_observation
     record = {
       "schema_version" => 1, "workspace" => "default", "machine" => "build-mac-01",
