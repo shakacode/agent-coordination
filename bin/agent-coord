@@ -5099,6 +5099,7 @@ module AgentCoord
     end
 
     def validate_stored_host_limit!(entry)
+      stored_path = log_scrub(entry.path)
       validate_host_limit_record!(entry.data)
       expected = AgentCoord.host_limit_path(
         entry.data.fetch("workspace"), entry.data.fetch("machine"), entry.data.fetch("quota_host"),
@@ -5106,10 +5107,10 @@ module AgentCoord
       )
       unless entry.path == expected
         raise OperationalError,
-              "stored host-limit identity does not match path #{entry.path}"
+              "stored host-limit identity does not match path #{stored_path}"
       end
     rescue Error, KeyError, TypeError => e
-      raise OperationalError, "invalid stored host-limit record at #{entry.path}: #{log_scrub(e.message)}"
+      raise OperationalError, "invalid stored host-limit record at #{stored_path}: #{log_scrub(e.message)}"
     end
 
     def validate_host_limit_record!(record)

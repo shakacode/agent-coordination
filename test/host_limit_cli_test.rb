@@ -172,6 +172,27 @@ class HostLimitCliTest < Minitest::Test
     assert_equal "active", JSON.parse(File.read(host_limit_file("weekly"))).fetch("status")
   end
 
+  def test_status_scrubs_controls_from_malformed_host_limit_path_diagnostic
+    record = {
+      "schema_version" => 1, "workspace" => "default", "machine" => "build-mac-01",
+      "quota_host" => "quota-host-a", "scope" => "weekly", "status" => "active",
+      "observed_at" => "2026-01-01T00:00:00Z", "resets_at" => nil, "source" => "manual"
+    }
+    path = File.join(@state_root, "host_limits", "default", "build-mac-01", "quota-host-a", "weekly\n\t\e[31mred.json")
+    FileUtils.mkdir_p(File.dirname(path))
+    File.write(path, "#{JSON.pretty_generate(record)}\n")
+
+    result = run_cli("status")
+
+    assert_equal 2, result.status.exitstatus
+    assert_includes result.stderr,
+                    "stored host-limit identity does not match path " \
+                    "host_limits/default/build-mac-01/quota-host-a/weekly [31mred.json"
+    refute_includes result.stderr, "\t"
+    refute_includes result.stderr, "\e"
+    assert_equal 1, result.stderr.count("\n")
+  end
+
   def test_gc_archives_only_cleared_records_using_cleared_at
     write_host_limit("cleared", "cleared", nil, "2026-01-02T00:00:00Z")
     write_host_limit("elapsed", "active", "2000-01-01T00:00:00Z")
