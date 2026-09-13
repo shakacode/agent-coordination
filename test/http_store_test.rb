@@ -446,6 +446,117 @@ class HttpStoreReadTest < HttpStoreTestCase
   end
 end
 
+class HttpHostLimitCliTest < HttpStoreTestCase
+  Clock = Struct.new(:now)
+
+  def test_report_and_clear_use_generic_state_routes_with_create_and_update_cas
+    path = "host_limits/default/build-mac-01/quota-host-a/five-hour.json"
+    observed = "2026-09-12T10:00:00Z"
+    existing = {
+      "schema_version" => 1, "workspace" => "default", "machine" => "build-mac-01",
+      "quota_host" => "quota-host-a", "scope" => "five-hour", "status" => "active",
+      "observed_at" => observed, "resets_at" => nil, "source" => "manual"
+    }
+    responses = [
+      [404, { "error" => "not_found" }],
+      [201, { "path" => path, "version" => 1 }],
+      [200, { "path" => path, "data" => existing, "version" => 3 }],
+      [200, { "path" => path, "version" => 4 }]
+    ]
+
+    with_stub(responses) do |store, stub|
+      report_output = StringIO.new
+      report = AgentCoord::Runner.new([], stdout: report_output, clock: Clock.new(Time.iso8601(observed)))
+      report.define_singleton_method(:build_store) { |_options| store }
+      report.send(
+        :report_host_limit,
+        machine: "build-mac-01", quota_host: "quota-host-a", host_limit_scope: "five-hour", json: true
+      )
+
+      clear_output = StringIO.new
+      clear = AgentCoord::Runner.new([], stdout: clear_output, clock: Clock.new(Time.iso8601(observed) + 60))
+      clear.define_singleton_method(:build_store) { |_options| store }
+      clear.send(
+        :clear_host_limit,
+        machine: "build-mac-01", quota_host: "quota-host-a", host_limit_scope: "five-hour", json: true
+      )
+
+      assert_equal(%w[GET PUT GET PUT], stub.requests.map { |request| request.fetch(:method) })
+      assert(stub.requests.all? do |request|
+        request.fetch(:path) == "/v1/state/#{URI.encode_www_form_component(path)}"
+      end)
+      assert_equal "*", stub.requests.fetch(1).fetch(:if_none_match)
+      assert_equal "3", stub.requests.fetch(3).fetch(:if_match)
+      assert_equal existing, JSON.parse(report_output.string).fetch("record")
+      assert_equal "2026-09-12T10:01:00Z", JSON.parse(clear_output.string).dig("record", "cleared_at")
+    end
+  end
+
+  def test_clear_twice_preserves_cleared_at_without_a_second_write
+    path = "host_limits/default/build-mac-01/quota-host-a/five-hour.json"
+    active = {
+      "schema_version" => 1, "workspace" => "default", "machine" => "build-mac-01",
+      "quota_host" => "quota-host-a", "scope" => "five-hour", "status" => "active",
+      "observed_at" => "2026-09-12T10:00:00Z", "resets_at" => nil, "source" => "manual"
+    }
+    cleared = active.merge(
+      "status" => "cleared",
+      "cleared_at" => "2026-09-12T10:02:00Z"
+    )
+    options = { machine: "build-mac-01", quota_host: "quota-host-a", host_limit_scope: "five-hour", json: true }
+
+    responses = [
+      [200, { "path" => path, "data" => active, "version" => 3 }],
+      [200, { "path" => path, "version" => 4 }],
+      [200, { "path" => path, "data" => cleared, "version" => 4 }]
+    ]
+
+    with_stub(responses) do |store, stub|
+      first_output = StringIO.new
+      first = AgentCoord::Runner.new([], stdout: first_output, clock: Clock.new(Time.iso8601("2026-09-12T10:02:00Z")))
+      first.define_singleton_method(:build_store) { |_options| store }
+      first.send(:clear_host_limit, options)
+
+      second_output = StringIO.new
+      second = AgentCoord::Runner.new([], stdout: second_output, clock: Clock.new(Time.iso8601("2026-09-12T10:03:00Z")))
+      second.define_singleton_method(:build_store) { |_options| store }
+      second.send(:clear_host_limit, options)
+
+      assert_equal(%w[GET PUT GET], stub.requests.map { |request| request.fetch(:method) })
+      assert_equal cleared, JSON.parse(first_output.string).fetch("record")
+      assert_equal cleared, JSON.parse(second_output.string).fetch("record")
+    end
+  end
+
+  def test_report_and_clear_surface_compare_and_swap_conflicts
+    path = "host_limits/default/build-mac-01/quota-host-a/five-hour.json"
+    existing = {
+      "schema_version" => 1, "workspace" => "default", "machine" => "build-mac-01",
+      "quota_host" => "quota-host-a", "scope" => "five-hour", "status" => "active",
+      "observed_at" => "2026-09-12T10:00:00Z", "resets_at" => nil, "source" => "manual"
+    }
+    options = { machine: "build-mac-01", quota_host: "quota-host-a", host_limit_scope: "five-hour", json: true }
+
+    %i[report_host_limit clear_host_limit].each do |command|
+      responses = [
+        [200, { "path" => path, "data" => existing, "version" => 7 }],
+        [409, { "error" => "version_conflict" }]
+      ]
+      with_stub(responses) do |store, stub|
+        runner = AgentCoord::Runner.new(
+          [], stdout: StringIO.new, clock: Clock.new(Time.iso8601("2026-09-12T10:01:00Z"))
+        )
+        runner.define_singleton_method(:build_store) { |_runner_options| store }
+
+        error = assert_raises(AgentCoord::Conflict) { runner.send(command, options) }
+
+        assert_includes error.message, "state changed at #{path}"
+        assert_equal "7", stub.requests.last.fetch(:if_match)
+      end
+    end
+  end
+end
+
 class HttpStoreWriteTest < HttpStoreTestCase
   def test_http_session_disables_net_http_automatic_write_retries
     response = Struct.new(:code, :body)
@@ -637,6 +748,7 @@ class HttpBackendSelectionTest < HttpEnvTestCase # rubocop:disable Metrics/Class
       [200, { "entries" => [] }],
       [200, { "entries" => [] }],
       [200, { "entries" => [] }],
+      [200, { "entries" => [] }],
       [200, { "entries" => [] }]
     ]
     stub = HttpStoreStub.new(responses)
@@ -647,7 +759,7 @@ class HttpBackendSelectionTest < HttpEnvTestCase # rubocop:disable Metrics/Class
       assert_includes out, "claims"
       assert_includes out, "events"
     end
-    assert_equal 4, stub.requests.length
+    assert_equal 5, stub.requests.length
   ensure
     stub.shutdown
   end
@@ -660,6 +772,7 @@ class HttpBackendSelectionTest < HttpEnvTestCase # rubocop:disable Metrics/Class
       original_close.bind_call(self)
     end
     responses = [
+      [200, { "entries" => [] }],
       [200, { "entries" => [] }],
       [200, { "entries" => [] }],
       [200, { "entries" => [] }],
@@ -682,6 +795,7 @@ class HttpBackendSelectionTest < HttpEnvTestCase # rubocop:disable Metrics/Class
       [200, { "entries" => [] }],
       [200, { "entries" => [] }],
       [200, { "entries" => [] }],
+      [400, { "error" => "invalid_prefix" }],
       [400, { "error" => "invalid_prefix" }]
     ]
     stub = HttpStoreStub.new(responses)
@@ -690,7 +804,7 @@ class HttpBackendSelectionTest < HttpEnvTestCase # rubocop:disable Metrics/Class
       assert_equal 0, code
       assert_includes out, "event state not supported by backend"
     end
-    assert_equal 4, stub.requests.length
+    assert_equal 5, stub.requests.length
   ensure
     stub.shutdown
   end
@@ -698,6 +812,7 @@ class HttpBackendSelectionTest < HttpEnvTestCase # rubocop:disable Metrics/Class
   def test_status_degrades_for_scoped_http_forbidden_sections
     responses = [
       [200, { "entries" => [], "filtered" => true }],
+      [403, { "error" => "forbidden" }],
       [403, { "error" => "forbidden" }],
       [403, { "error" => "forbidden" }],
       [403, { "error" => "forbidden" }]
@@ -712,6 +827,7 @@ class HttpBackendSelectionTest < HttpEnvTestCase # rubocop:disable Metrics/Class
       assert_includes payload.fetch("degraded"), "heartbeats not readable by scoped token"
       assert_includes payload.fetch("degraded"), "batches not readable by scoped token"
       assert_includes payload.fetch("degraded"), "events not readable by scoped token"
+      assert_includes payload.fetch("degraded"), "host_limits not readable by scoped token"
     end
   ensure
     stub.shutdown
@@ -1044,6 +1160,7 @@ class HttpBackendSelectionTest < HttpEnvTestCase # rubocop:disable Metrics/Class
       [200, { "entries" => [] }],
       [200, { "entries" => [] }],
       [200, { "entries" => [] }],
+      [200, { "entries" => [] }],
       [200, { "entries" => [] }]
     ]
     stub = HttpStoreStub.new(responses)
@@ -1061,7 +1178,7 @@ class HttpBackendSelectionTest < HttpEnvTestCase # rubocop:disable Metrics/Class
   # so the HTTP backend displaced a configured legacy GitHub backend in silence
   # while every other configured-tier pair announced which side won.
   def test_configured_api_url_warns_when_it_shadows_a_configured_backend
-    stub = HttpStoreStub.new(Array.new(4) { [200, { "entries" => [] }] })
+    stub = HttpStoreStub.new(Array.new(5) { [200, { "entries" => [] }] })
     with_env("AGENT_COORD_API_URL" => stub.base_url, "AGENT_COORD_API_TOKEN" => "tok",
              "AGENT_COORD_BACKEND" => "acme/legacy-repo") do
       code, _, err = run_cli(["status"], {})
@@ -1078,7 +1195,7 @@ class HttpBackendSelectionTest < HttpEnvTestCase # rubocop:disable Metrics/Class
   # next-highest keeps one decision to one warning; the backend conflict
   # surfaces on the next run once the state root is removed.
   def test_all_three_configured_selectors_warn_once_naming_the_state_root
-    stub = HttpStoreStub.new(Array.new(4) { [200, { "entries" => [] }] })
+    stub = HttpStoreStub.new(Array.new(5) { [200, { "entries" => [] }] })
     with_env("AGENT_COORD_API_URL" => stub.base_url, "AGENT_COORD_API_TOKEN" => "tok",
              "AGENT_COORD_STATE_ROOT" => "/tmp/nonexistent-root",
              "AGENT_COORD_BACKEND" => "acme/legacy-repo") do
@@ -1093,6 +1210,7 @@ class HttpBackendSelectionTest < HttpEnvTestCase # rubocop:disable Metrics/Class
 
   def test_api_url_flag_warning_names_flag_when_state_root_env_set
     responses = [
+      [200, { "entries" => [] }],
       [200, { "entries" => [] }],
       [200, { "entries" => [] }],
       [200, { "entries" => [] }],

@@ -1371,6 +1371,26 @@ class AgentCoordLogSyncTest < AgentCoordLogTestCase
     assert_includes line, "closed_by_machine=m1"
   end
 
+  def test_log_sync_mirrors_a_gc_expired_claim_snapshot
+    write_claim("shakacode/example", "404", "status" => "expired", "agent_id" => "worker",
+                                            "updated_at" => "2026-08-03T03:00:00Z",
+                                            "expires_at" => "2026-08-02T03:00:00Z",
+                                            "reaped_at" => "2026-08-04T03:00:00.123456789Z",
+                                            "expired_event_pending" => true,
+                                            "expired_event_id" => "claim-expired-abc123",
+                                            "expired_event_batch_id" => "batch-1",
+                                            "expired_event_at" => "2026-08-04T03:00:00.123456789Z")
+
+    result = run_log("--sync")
+    line = File.read(File.join(@state_root, "log.tsv"), encoding: "UTF-8")
+
+    assert_equal 0, result.status.exitstatus, result.stderr
+    assert_includes line, "status=expired"
+    assert_includes line, "reaped_at=2026-08-04T03:00:00.123456789Z"
+    assert_includes line, "expired_event_pending=true"
+    assert_includes line, "expired_event_id=claim-expired-abc123"
+  end
+
   def test_log_sync_fingerprints_same_timestamp_release_attribution_changes
     first = AgentCoord::StoredJson.new(
       path: "claims/shakacode/example/404.json",
@@ -2542,6 +2562,18 @@ class AgentCoordLogClaimRecordResilienceTest < AgentCoordLogTestCase
 
     assert_equal 2, result.status.exitstatus, result.stderr
     assert_includes result.stderr, "unsupported status"
+    assert_includes result.stderr, "refusing to sync an incomplete trail: claims"
+    refute_path_exists File.join(@state_root, "log.tsv")
+  end
+
+  def test_log_refuses_to_sync_an_expired_claim_without_reaped_at
+    write_raw_claim("invalid-expired", { "status" => "expired", "agent_id" => "worker",
+                                         "updated_at" => "2026-08-03T03:00:00Z" })
+
+    result = run_log("--sync")
+
+    assert_equal 2, result.status.exitstatus, result.stderr
+    assert_includes result.stderr, "missing reaped_at"
     assert_includes result.stderr, "refusing to sync an incomplete trail: claims"
     refute_path_exists File.join(@state_root, "log.tsv")
   end

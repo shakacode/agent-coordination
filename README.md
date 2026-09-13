@@ -195,7 +195,10 @@ does not accept an empty prefix as a shortcut; all-state access must use the
 explicit flag. A directory scope such as
 `claims/shakacode/react_on_rails` covers descendant paths. A valid record-path
 scope such as `heartbeats/m5-codex.json` covers exactly that flat record. The
-Worker enforces read scopes for `GET /v1/state/<path>` and
+same rules cover `host_limits/` and `archive/host_limits/`; workspace and
+machine components use the uppercase percent-encoded storage-key form described
+under [Manual host-limit runtime](#manual-host-limit-runtime). The Worker
+enforces read scopes for `GET /v1/state/<path>` and
 `GET /v1/state?prefix=...`, write scopes for `PUT /v1/state/<path>`, and records
 the authenticated machine as `updated_by` on each state write. Active-path
 `DELETE` requires write coverage for both the active path and its
@@ -532,11 +535,13 @@ bin/agent-coord attention-upsert --record-json PATH|- [--json]
 bin/agent-coord attention-resolve --workspace WORKSPACE --repo OWNER/REPO --attention-id ID --source-generation N [--json]
 bin/agent-coord attention-get --workspace WORKSPACE --repo OWNER/REPO --attention-id ID [--json]
 bin/agent-coord attention-list --workspace WORKSPACE --repo OWNER/REPO [--include-resolved] [--limit N] [--json]
+bin/agent-coord report-host-limit --machine MACHINE --quota-host HOST --scope SCOPE [--workspace WORKSPACE] [--resets-at TIME] [--json]
+bin/agent-coord clear-host-limit --machine MACHINE --quota-host HOST --scope SCOPE [--workspace WORKSPACE] [--json]
 bin/agent-coord log [OWNER/REPO#TARGET] [--since VALUE] [--machine ID] [--host codex|claude] [--type TYPE] [--limit N] [--format text|tsv] [--json] [--sync] [--include-synthetic]
 bin/agent-coord version [--json]
 bin/agent-coord config [show] [--json]
 bin/agent-coord doctor [--json|--stack-json] [--deep] [--doctor-prefix PREFIX] [--state-root PATH|--api-url URL|--backend OWNER/REPO]
-bin/agent-coord gc (--dry-run|--execute) [--json] [--hot-days DAYS] [--archive-days DAYS] [--synthetic-hot-days DAYS]
+bin/agent-coord gc (--dry-run|--execute) [--json] [--hot-days DAYS] [--archive-days DAYS] [--synthetic-hot-days DAYS] [--lease-grace-days DAYS]
 bin/agent-coord bootstrap [--install-dir PATH] [--profile PATH] [--no-profile]
 bin/agent-coord demo
 ```
@@ -777,8 +782,14 @@ appended. Rather than reporting a bare "no events" and hiding live custody, `log
 reports the claim record, labelled as one, whenever it is the latest thing known
 about the work item. That covers an empty trail and also a trail whose events are
 all older than the claim — `claim` permits omitting `--batch-id`, and no
-lifecycle event is emitted without a batch, so stale events and a live claim can
-coexist. The claim is never reported when a filter emptied the trail, since it is
+acquisition lifecycle event is emitted without a batch, so stale events and a
+live claim can coexist. GC is the exception: reaping an unbatched claim writes
+its immutable `claim.expired` event under a collision-resistant internal event
+namespace that is valid on every storage backend but reserved from all public
+producers, before that claim can be reused. The historical
+`unbatched-claim-expirations` batch spelling remains readable for compatibility
+but is also reserved against new writes. The
+claim is never reported when a filter emptied the trail, since it is
 not evaluated against `--since`, `--machine`, `--host`, or `--type`:
 
 ```text
@@ -969,7 +980,7 @@ Exit codes let closeout gate on the result:
 | 1    | `incomplete` | At least one lane is missing a signal; closeout should fail-closed.      |
 | 2    | `unknown`    | Coordination state is UNKNOWN — the batch id is unregistered, invalid/unsafe, a non-object batch record, a batch registering no lanes, an event trail only partially visible to a scoped token (filtered listing), or the batch/events are unreadable. A malformed id returns `unknown` (exit 2), never `incomplete` (exit 1). Never reported as a false `complete`. |
 
-### Host-limit contract foundation
+### Manual host-limit runtime
 
 The published
 [`schema/state/v1/host-limit.schema.json`](schema/state/v1/host-limit.schema.json)
@@ -978,15 +989,29 @@ defines a shared usage-limit record keyed by
 identifier deliberately distinct from existing lane
 `host` app/wrapper metadata; runtime mapping between them remains `UNKNOWN`. The
 contract includes active and explicitly cleared states, known or unknown reset
-times, and an optional `host_limits` status projection from which
+times, and a `host_limits` status projection from which
 consumers may derive `blocked-on-limit` for lanes carrying a matching explicit
 `quota_host`. Positive, negative, procedural, and two-lane replay fixtures live
 under [`schema/state/v1/fixtures/`](schema/state/v1/fixtures/).
 
-This is a schema-only foundation. The CLI and Worker do not yet report, persist,
-clear, or project these records, and provider message/probe facts remain
-`UNKNOWN`. See [ADR 0007](docs/adr/0007-host-limit-state-contract.md) for
-canonical quota-host, reset, clear, workspace-key, composite uniqueness, and
+`report-host-limit` and `clear-host-limit` are explicit manual operations. A
+new report normalizes `quota_host` by trimming and lowercasing it, writes
+`source: "manual"`, and stores `resets_at: null` when `--resets-at` is omitted.
+Updates and clears preserve the original `observed_at` and source; every
+mutation uses the selected store's compare-and-swap token. Workspace and machine are encoded from
+UTF-8 bytes in the reserved key
+`host_limits/<workspace>/<machine>/<quota_host>/<scope>.json`, leaving only
+ASCII alphanumerics, `_`, and `-` literal and using uppercase percent escapes
+for all other bytes.
+
+Unscoped `status` text and JSON include every record and its existing v1 fields.
+Text output also labels each record's current effectiveness. Cleared records are
+ineffective. An active record with a null reset remains effective; a known reset
+is effective only while it is later than the projection time. Elapsed-reset
+records remain stored, remain visible, and become ineffective without a write.
+These commands never infer `quota_host` from lane `host`, and no provider-message,
+hook, or probe producer is enabled. See
+[ADR 0007](docs/adr/0007-host-limit-state-contract.md) for the contract and
 non-goal semantics.
 
 ### Capacity reservation contract foundation
@@ -1141,35 +1166,121 @@ moment `gc` runs — see
 [Reading the trail](#reading-the-trail-where-is-the-work-on-an-issue-or-pr) —
 but the mirror `--sync` writes is the only copy that outlives both.
 
+A claim whose lease elapsed but was never released has its own disposition.
+Nothing else transitions such a record, so without this pass it stays `active`
+forever and `status` stops being a usable signal. `gc` reaps it: the record is
+rewritten in place to the terminal `expired` status with a `reaped_at` stamp, and an
+immutable `claim.expired` lifecycle event records that distinct outcome. Any stale
+clean-closeout fields are removed rather than letting an expired claim also read as
+done, merged, or cleanly released. The plan names the `reap` action and the
+`expired_lease` reason. The reap is
+deliberately not an archive. `expired` is terminal but distinct from `released`,
+so an abandoned lane stays countable rather than being laundered into a clean
+handoff, and it stays visible to `status`, `log`, and scorecards for the normal
+hot window before the ordinary `terminal_claim` path archives it. That hot
+window starts at `reaped_at`; `updated_at` and `expires_at` are left as the
+holder wrote them, so a long-abandoned lane keeps reading as long abandoned. A
+record already carrying `expired` is not reaped again.
+
+For a batch-owned claim, the expired record carries a pending event marker until
+the immutable event is confirmed. If the event backend fails after the claim CAS,
+the next GC plans `reconcile_expired_event`; its deterministic event identity makes
+retries exactly-once. The marker is cleared only after the event exists with the
+expected payload. This recovery action records history only—it is not a release,
+lane close, or batch-completion signal.
+
+A reap requires both that the holder is gone and that the lease has been over
+for a while. The holder test is the takeover rule, unchanged: a `live` or
+`stale` holder heartbeat still owns the lane even past its lease and is never
+reaped, while a `dead` or absent heartbeat falls through to the lease itself.
+The holder heartbeat is read again immediately before the reap is applied, so a
+worker that resumes after planning keeps its claim; live, stale, and unreadable
+apply-time evidence all fail closed.
+
+The lease test is `expires_at` plus `--lease-grace-days`
+(default 1), so a slow renewal on a paused or throttled machine does not cost a
+lane its claim. A claim with no `expires_at` never recorded a lease and is left
+hot.
+
+The reaper is fail-closed about holder evidence, because a holder wrongly judged
+gone costs a working lane its live claim. Reaping therefore needs `heartbeats`
+and `events` among the selected prefixes: without either supporting prefix it
+withdraws instead of reading outside the requested scope, plans no reaps, and reports on stderr how
+many expired-lease claims it left alone and which prefix to add. A heartbeat that
+cannot be read — a scoped token refusing one holder, an unreachable backend — is
+not evidence of absence either, so that holder's claims are reported and left
+alone while the rest of the run proceeds. Likewise a present but unparseable
+`expires_at` is a corrupt record: it is never reaped and is reported with its
+path, but it does not deny GC to every other record, since the lease is read for
+every active claim rather than only for records already found eligible. A
+non-string lease is named by type so a nested value is not spilled into the
+warning.
+
+Each record gets at most one action per plan. A claim that is still `active`
+while carrying a terminal marker is eligible for both the archive pass and the
+reaper, and the reap wins: archiving a claim nobody released would file it away
+still reading `active` and lose the abandonment the reap exists to record. The
+reaped record reaches the archive on a later run through the ordinary
+`terminal_claim` path, so nothing is stranded and `--dry-run` still describes
+exactly what `--execute` attempts. If a holder becomes live before apply, the
+execute response keeps the planned reap but marks it `outcome: skipped` with
+`skip_reason: holder_present_at_apply`; the claim remains active.
+
 | Record state | Hot retention | Archive retention | Result |
 | --- | ---: | ---: | --- |
+| Active claim past its lease, holder heartbeat not live or stale | lease + 1 day | n/a | Reap to `expired` in place |
 | Released/terminal claim | 7 days | 30 days | Archive, then delete |
 | Dead or terminal heartbeat | 7 days | 30 days | Archive, then delete |
+| Aged heartbeat with unknown liveness | 7 days | 30 days after no active claim depends on it | Archive as `aged_heartbeat`; retain its fail-closed evidence while referenced |
 | Completed batch | 7 days | 30 days | Archive, then delete |
+| Cleared host limit (from `cleared_at`) | 7 days | 30 days | Archive, then delete |
 | Events for a terminal target | 7 days | 30 days | Compact, then delete |
 | Eligible claim/heartbeat/batch with `synthetic: true` | 1 day | 30 days | Aggressive archive, then delete |
 | Fully synthetic orphan event generation | 1 day per event | 30 days | Compact, then delete |
 
-`--hot-days`, `--archive-days`, and `--synthetic-hot-days` override those
-defaults. Archive retention starts at `archived_at`, so the default lifecycle
-is 7 hot days followed by 30 archive days. Producers mark non-production state
+`--hot-days`, `--archive-days`, `--synthetic-hot-days`, and
+`--lease-grace-days` override those defaults; each rejects a negative value.
+Archive retention starts at `archived_at`, so the default lifecycle
+is 7 hot days followed by 30 archive days. A reaped claim then follows the
+ordinary claim lifecycle from its reap, including the synthetic window.
+An old malformed heartbeat is archive-eligible without being classified as a
+dead holder. While an active claim still names that holder, GC consults the
+exact `aged_heartbeat` archive mirror for fail-closed liveness and withholds
+deletion of that mirror; once no active claim depends on it, ordinary archive
+deletion resumes.
+The effective policy, `--lease-grace-days` included, is echoed in the `policy`
+block of every plan, so a `--dry-run --json` plan is self-describing and
+`--execute` applies exactly the actions the dry run listed. Producers mark non-production state
 with `--synthetic --synthetic-kind simulation|smoke`; batch manifests may carry
 the same fields. The marker shortens retention only after normal family
 eligibility: active claims, live heartbeats, and incomplete batches remain hot.
 This protects scripted workers that claim once and refresh only their heartbeat.
 Synthetic events without a valid terminal marker compact as an orphan
 generation only after every event independently passes the synthetic window;
+GC-generated unbatched `claim.expired` events compact after the normal hot
+window into the same immutable archive-envelope lifecycle as other event
+generations.
 missing repository or target metadata uses the batch/lane/available-provenance
 identity rather than blocking cleanup. Metadata-less legacy events remain in
 their own absent-lane group, and non-synthetic orphan events remain untouched.
 Run `ruby sim/bin/graveyard` for a deterministic dry-run,
 execute, compaction, and idempotent replay check.
-Repeat `--prefix claims|heartbeats|batches|events` to restrict hot-family scans;
-without it GC scans all four families. Archive expiry is always scanned. For
+Repeat `--prefix claims|heartbeats|batches|host_limits|events` to restrict hot-family scans;
+without it GC scans all five families. Active host-limit records, including
+ones with elapsed reset times, are never GC candidates; only an explicit clear
+starts their hot-retention window at `cleared_at`. Archive expiry is always scanned. For
 example, `agent-coord gc --execute --prefix claims` works with a
 least-privileged token that can read the selected claims subtree plus its
 archive mirror and can write/delete both. Forbidden selected prefixes remain an
 operational error; GC never silently widens or skips requested scope.
+Expired-lease reaping is the one disposition that needs supporting prefixes: it
+must read holder heartbeats to tell an abandoned lane from a working one and write
+the immutable outcome. Unbatched claims also need `batches` so GC can fail closed
+if its reserved internal history identity collides with a pre-existing manifest.
+Run `--prefix claims --prefix heartbeats --prefix events --prefix batches`, or
+the default all-family scan, to reap both batched and unbatched claims. Without
+`--prefix batches`, eligible unbatched claims remain unreaped with a warning;
+ordinary batched expiry reconciliation remains available.
 Scoped HTTP tokens used for GC need read and write coverage for each selected
 hot prefix and `archive`; use `--all-state` only for a trusted operator machine.
 `release` marks a claim released while preserving the record for auditability.
@@ -1179,7 +1290,8 @@ old holder's record. For planned ownership moves, include `--handoff-to` and
 `--handoff-note` on the original release, then have the next worker claim the
 same repo/target and continue on the recorded branch/PR.
 `version` prints the CLI contract version. `config show --json` prints runtime
-defaults, machine-readable exit codes, and a `coordination` object containing
+defaults, including `retention_policy.lease_grace_days`, machine-readable exit
+codes, and a `coordination` object containing
 the effective `policy`, selected `backend`, `configured` state, source
 provenance, and `available: null`. Configuration inspection never performs a
 network probe, so consumers must run `doctor` before treating the backend as
@@ -1383,10 +1495,12 @@ heartbeats/<agent-id>.json
 batches/<batch-id>.json
 events/<batch-id>/<event-id>.json
 attention/<workspace>/<owner>/<repo>/<attention-id>.json
+host_limits/<encoded-workspace>/<encoded-machine>/<quota-host>/<scope>.json
 archive/claims/<owner>/<repo>/<issue-or-pr>.json
 archive/heartbeats/<agent-id>.json
 archive/batches/<batch-id>.json
 archive/events/<batch-id>/<event-or-compaction-id>.json
+archive/host_limits/<encoded-workspace>/<encoded-machine>/<quota-host>/<scope>.json
 ```
 
 The checked-in `.gitkeep` files only preserve the directories. Schema examples
@@ -1454,8 +1568,15 @@ unrelated coordination work.
 Required fields: `schema_version`, `repo`, `target`, `agent_id`, `status`,
 `claimed_at`, `updated_at`, `expires_at`.
 
-Allowed claim `status` values are `active` and `released`. A released claim may
-also carry terminal `done`, `abandoned`, or `superseded` semantics. For lane
+Allowed claim `status` values are `active`, `released`, and `expired`. A
+released claim may also carry terminal `done`, `abandoned`, or `superseded`
+semantics. `expired` is written only by `gc`, when a lease elapsed and nobody
+released it; it is terminal like `released` but deliberately distinct from it,
+so an abandoned lane stays countable. An expired claim carries the `reaped_at`
+stamp of that write and keeps the `expires_at` and `updated_at` the holder left
+behind. It never carries a `terminal` state: `done`, `abandoned`, and
+`superseded` are protocol-declared lane outcomes, and an unreleased lease is not
+a declaration. For lane
 status, protocol-declared terminal state wins over heartbeat or GitHub-derived
 state; consumers derive from GitHub only when terminal protocol state is absent.
 Coordinators should treat a claim holder with a `dead` heartbeat as recoverable
