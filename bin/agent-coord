@@ -7079,7 +7079,10 @@ module AgentCoord
     end
 
     def log_sync_claim_fields_valid!(data)
-      missing = %w[status agent_id updated_at].select { |field| data[field].to_s.strip.empty? }
+      missing = %w[status agent_id updated_at].select do |field|
+        value = data[field].to_s
+        field == "agent_id" ? value.empty? : value.strip.empty?
+      end
       raise ArgumentError, "missing #{missing.join(', ')}" unless missing.empty?
 
       nonstrings = %w[status agent_id updated_at].reject { |field| data[field].is_a?(String) }

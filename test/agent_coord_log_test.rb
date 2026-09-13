@@ -1499,6 +1499,19 @@ class AgentCoordLogSyncTest < AgentCoordLogTestCase
     assert_includes File.read(File.join(@state_root, "log.tsv")), "agent_id=bad/holder"
   end
 
+  def test_log_sync_accepts_a_whitespace_holder_identity_that_claim_can_persist
+    claim = run_command(
+      COMMAND_ENV, "ruby", BIN, "claim", "--agent-id", " ", "--repo", "shakacode/example",
+      "--target", "404", "--state-root", @state_root
+    )
+
+    result = run_log("--sync")
+
+    assert_equal 0, claim.status.exitstatus, claim.stderr
+    assert_equal 0, result.status.exitstatus, result.stderr
+    assert_includes File.read(File.join(@state_root, "log.tsv")), "agent_id= "
+  end
+
   def test_log_sync_accepts_a_negative_generation_that_claim_can_persist
     claim = run_command(
       COMMAND_ENV, "ruby", BIN, "claim", "--agent-id", "worker", "--repo", "shakacode/example",
