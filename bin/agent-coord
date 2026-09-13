@@ -7430,7 +7430,10 @@ module AgentCoord
       lines = rows.map { |row| log_tsv_line(row) }
       snapshot_versions = rows.each_with_index.with_object({}) do |(row, index), versions|
         version = row["_claim_store_version"]
-        versions[lines.fetch(index)] = version unless version.nil?
+        next if version.nil?
+
+        line = lines.fetch(index)
+        versions[line] = [versions[line], version].compact.max
       end
       fresh = log_sync_append(path, lines, observed_snapshot_versions: snapshot_versions)
       if options[:json]

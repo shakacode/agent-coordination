@@ -1539,25 +1539,32 @@ class AgentCoordLogSyncTest < AgentCoordLogTestCase
   end
 
   def test_log_sync_deduplicates_identical_projected_rows_within_one_listing
-    legacy = log_claim_entry(
+    legacy_v1 = log_claim_entry(
       path: "claims/shakacode/example/404.json", repo: "shakacode/example", target: "404",
       agent_id: "worker", updated_at: "2026-08-03T03:00:00Z"
     )
-    legacy.data.delete("repo")
-    legacy.data.delete("target")
-    upgraded = AgentCoord::StoredJson.new(
-      path: legacy.path, data: legacy.data.merge("repo" => "shakacode/example", "target" => "404")
+    legacy_v1.sha = "1"
+    legacy_v1.data.delete("repo")
+    legacy_v1.data.delete("target")
+    released_v2 = AgentCoord::StoredJson.new(
+      path: legacy_v1.path,
+      data: legacy_v1.data.merge("repo" => "shakacode/example", "target" => "404", "status" => "released"),
+      sha: "2"
+    )
+    active_v3 = AgentCoord::StoredJson.new(
+      path: legacy_v1.path,
+      data: released_v2.data.merge("status" => "active"),
+      sha: "3"
     )
     runner = AgentCoord::Runner.new([])
-    rows = runner.send(:log_claim_snapshot_rows, [legacy, upgraded])
-    lines = rows.map { |row| runner.send(:log_tsv_line, row) }
+    rows = runner.send(:log_claim_snapshot_rows, [active_v3, released_v2, legacy_v1])
     path = File.join(@state_root, "log.tsv")
 
-    fresh = runner.send(:log_sync_append, path, lines)
+    runner.send(:log_sync_write, path, rows, {})
+    statuses = File.readlines(path, chomp: true).map { |line| line[/status=(\w+)/, 1] }
 
-    assert_equal 2, rows.length
-    assert_equal 1, fresh.length
-    assert_equal 1, File.readlines(path).length
+    assert_equal 3, rows.length
+    assert_equal %w[released active], statuses
   end
 
   def test_log_sync_accepts_a_negative_generation_that_claim_can_persist
