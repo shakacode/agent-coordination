@@ -1268,6 +1268,54 @@ class AgentCoordLogSyncTest < AgentCoordLogTestCase
     assert_equal %w[active released], ordered_statuses
   end
 
+  def test_log_sync_orders_same_timestamp_claim_snapshots_by_generation
+    released = AgentCoord::StoredJson.new(
+      path: "claims/shakacode/example/404.json",
+      data: { "repo" => "shakacode/example", "target" => "404", "agent_id" => "worker",
+              "status" => "released", "generation" => 1, "updated_at" => "2026-08-03T03:00:00Z" }
+    )
+    active = AgentCoord::StoredJson.new(
+      path: released.path,
+      data: released.data.merge("status" => "active", "generation" => 2)
+    )
+    runner = AgentCoord::Runner.new([])
+
+    rows = runner.send(:log_claim_snapshot_rows, [active, released])
+    lines = rows.map { |row| runner.send(:log_tsv_line, row) }
+    generations = rows.to_h { |row| [runner.send(:log_tsv_line, row), row.fetch("_claim_generation")] }
+    ordered = runner.send(
+      :log_sync_ordered, lines, observed_lines: lines, observed_snapshot_generations: generations
+    )
+
+    ordered_statuses = ordered.map { |line| line[/status=(\w+)/, 1] }
+    assert_equal %w[released active], ordered_statuses
+  end
+
+  def test_log_sync_preserves_observation_order_when_a_tied_snapshot_has_no_generation
+    active = AgentCoord::StoredJson.new(
+      path: "claims/shakacode/example/404.json",
+      data: { "repo" => "shakacode/example", "target" => "404", "agent_id" => "worker",
+              "status" => "active", "generation" => 2, "updated_at" => "2026-08-03T03:00:00Z" }
+    )
+    released = AgentCoord::StoredJson.new(
+      path: active.path,
+      data: active.data.merge("status" => "released").except("generation")
+    )
+    runner = AgentCoord::Runner.new([])
+
+    rows = runner.send(:log_claim_snapshot_rows, [active, released])
+    lines = rows.map { |row| runner.send(:log_tsv_line, row) }
+    generations = rows.to_h do |row|
+      [runner.send(:log_tsv_line, row), row["_claim_generation"]]
+    end.compact
+    ordered = runner.send(
+      :log_sync_ordered, lines, observed_lines: lines, observed_snapshot_generations: generations
+    )
+
+    ordered_statuses = ordered.map { |line| line[/status=(\w+)/, 1] }
+    assert_equal %w[active released], ordered_statuses
+  end
+
   def test_log_sync_preserves_release_then_reacquire_observation_order_without_generation
     released = AgentCoord::StoredJson.new(
       path: "claims/shakacode/example/404.json",
@@ -1303,6 +1351,27 @@ class AgentCoordLogSyncTest < AgentCoordLogTestCase
 
     assert_empty fresh
     assert_equal %w[active released], statuses
+  end
+
+  def test_log_sync_skips_the_full_sort_when_an_unchanged_mirror_is_already_ordered
+    runner_class = Class.new(AgentCoord::Runner) do
+      def log_sync_ordered(*)
+        raise "an ordered no-op sync must not sort"
+      end
+    end
+    runner = runner_class.new([])
+    row = runner.send(
+      :log_row,
+      "at" => "2026-08-03T03:00:00Z", "repo" => "shakacode/example", "target" => "404",
+      "type" => "phase.changed", "event_id" => "event-1"
+    )
+    line = runner.send(:log_tsv_line, row)
+    path = File.join(@state_root, "log.tsv")
+    File.write(path, "#{line}\n")
+
+    fresh = runner.send(:log_sync_append, path, [line])
+
+    assert_empty fresh
   end
 
   def test_live_claim_view_collapses_same_timestamp_history_variants

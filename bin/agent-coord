@@ -7306,7 +7306,7 @@ module AgentCoord
           "agent_id" => data["agent_id"], "batch_id" => data["batch_id"],
           "message" => detail, "event_id" => "claim-snapshot-#{digest}",
           "synthetic" => data["synthetic"], "synthetic_kind" => data["synthetic_kind"]
-        )
+        ).merge("_claim_generation" => data["generation"])
       end
     end
 
@@ -7377,7 +7377,12 @@ module AgentCoord
 
     def log_sync_write(path, rows, options)
       FileUtils.mkdir_p(File.dirname(path))
-      fresh = log_sync_append(path, rows.map { |row| log_tsv_line(row) })
+      lines = rows.map { |row| log_tsv_line(row) }
+      snapshot_generations = rows.each_with_index.with_object({}) do |(row, index), generations|
+        generation = row["_claim_generation"]
+        generations[lines.fetch(index)] = generation unless generation.nil?
+      end
+      fresh = log_sync_append(path, lines, observed_snapshot_generations: snapshot_generations)
       if options[:json]
         @stdout.puts JSON.pretty_generate({ "synced" => fresh.length, "path" => path })
       else
@@ -7393,13 +7398,20 @@ module AgentCoord
     # backfill -- so the merged set is rewritten in timestamp order rather than
     # appended blindly. Nothing already recorded is ever dropped, and the rewrite
     # happens under the same exclusive lock as the read.
-    def log_sync_append(path, lines)
+    def log_sync_append(path, lines, observed_snapshot_generations: {})
       File.open("#{path}#{LOG_SYNC_LOCK_SUFFIX}", File::RDWR | File::CREAT, 0o600) do |lock|
         lock.flock(File::LOCK_EX)
         existing = log_sync_existing(path)
         seen = existing.to_h { |line| [line, true] }
         fresh = lines.reject { |line| seen.key?(line) }
-        ordered = log_sync_ordered(existing + fresh, observed_lines: lines)
+        combined = existing + fresh
+        return fresh if fresh.empty? && log_sync_sorted?(
+          combined, observed_lines: lines, observed_snapshot_generations: observed_snapshot_generations
+        )
+
+        ordered = log_sync_ordered(
+          combined, observed_lines: lines, observed_snapshot_generations: observed_snapshot_generations
+        )
         log_sync_replace(path, ordered) unless ordered == existing
         fresh
       end
@@ -7434,23 +7446,62 @@ module AgentCoord
       FileUtils.rm_f(temp) if temp && File.exist?(temp)
     end
 
-    # Event ties break on stable event id. Snapshot ties preserve observation
-    # order within each literal work item because same-second release/reacquire
-    # pairs can have no generation to establish causality; work-item ordering
-    # keeps independent snapshots deterministic. Events precede snapshots so the
-    # current mutable claim observation remains the final fact for that instant.
-    def log_sync_ordered(lines, observed_lines: [])
+    # Event ties break on stable event id. Snapshot ties use generation when the
+    # writer supplied it, making paginated backend order irrelevant, then retain
+    # observation order for legacy claims that carry no generation. Events
+    # precede snapshots so the current mutable claim remains the final fact for
+    # that instant.
+    def log_sync_ordered(lines, observed_lines: [], observed_snapshot_generations: {})
       observed_at = observed_lines.each_with_index.to_h
+      generation_groups = log_sync_generation_groups(lines, observed_snapshot_generations)
       lines.sort_by.with_index do |line, index|
-        fields = line.split("\t")
-        type = fields[LOG_TSV_FIELDS.index("type")].to_s
-        event_id = fields[LOG_TSV_FIELDS.index("event_id")].to_s
-        work_item = fields[LOG_TSV_FIELDS.index("work_item")].to_s
-        observed_index = observed_at[line]
-        snapshot_order = observed_index.nil? ? [0, index] : [1, observed_index]
-        tie = type == "claim.snapshot" ? [1, work_item, *snapshot_order] : [0, event_id, index]
-        [log_at_key(fields.first), *tie]
+        log_sync_order_key(line, index, observed_at, observed_snapshot_generations, generation_groups)
       end
+    end
+
+    # Most syncs add nothing. A linear check avoids repeatedly sorting an
+    # unbounded durable mirror while still detecting observation-order changes
+    # for tied legacy snapshots.
+    def log_sync_sorted?(lines, observed_lines: [], observed_snapshot_generations: {})
+      observed_at = observed_lines.each_with_index.to_h
+      generation_groups = log_sync_generation_groups(lines, observed_snapshot_generations)
+      previous = nil
+      lines.each_with_index do |line, index|
+        current = log_sync_order_key(
+          line, index, observed_at, observed_snapshot_generations, generation_groups
+        )
+        return false if previous && (previous <=> current) == 1
+
+        previous = current
+      end
+      true
+    end
+
+    def log_sync_generation_groups(lines, observed_snapshot_generations)
+      groups = Hash.new { |hash, key| hash[key] = [] }
+      lines.each do |line|
+        fields = line.split("\t")
+        next unless fields[LOG_TSV_FIELDS.index("type")].to_s == "claim.snapshot"
+
+        groups[[log_at_key(fields.first), fields[LOG_TSV_FIELDS.index("work_item")].to_s]] << line
+      end
+      groups.each_with_object({}) do |(key, snapshots), complete|
+        complete[key] = true if snapshots.all? { |line| observed_snapshot_generations.key?(line) }
+      end
+    end
+
+    def log_sync_order_key(line, index, observed_at, observed_snapshot_generations, generation_groups)
+      fields = line.split("\t")
+      type = fields[LOG_TSV_FIELDS.index("type")].to_s
+      event_id = fields[LOG_TSV_FIELDS.index("event_id")].to_s
+      work_item = fields[LOG_TSV_FIELDS.index("work_item")].to_s
+      observed_index = observed_at[line]
+      snapshot_order = observed_index.nil? ? [0, index] : [1, observed_index]
+      generation_group = generation_groups[[log_at_key(fields.first), work_item]]
+      generation = observed_snapshot_generations[line] if generation_group
+      generation_order = generation_group ? [1, generation, *snapshot_order] : [0, *snapshot_order]
+      tie = type == "claim.snapshot" ? [1, work_item, *generation_order] : [0, event_id, index]
+      [log_at_key(fields.first), *tie]
     end
 
     def log_sync_path(options)
