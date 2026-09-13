@@ -35,7 +35,7 @@ module AgentCoord
       # constrains the character set but applies no allowlist and no length
       # bound, so an arbitrary -- and arbitrarily long -- type can reach ingest.
       # That is why `event_type_raw` has to sanitize rather than reject.
-      CLI_LIFECYCLE_EVENT_TYPES = %w[claim.acquired claim.released phase.changed].freeze
+      CLI_LIFECYCLE_EVENT_TYPES = %w[claim.acquired claim.expired claim.released phase.changed].freeze
       CLI_TERMINAL_EVENT_TYPES = %w[lane_closed].freeze
       CLI_TYPED_EVENT_TYPES = %w[help_requested escalation_requested error human_intervention].freeze
       CLI_EVENT_TYPES = (CLI_LIFECYCLE_EVENT_TYPES + CLI_TERMINAL_EVENT_TYPES + CLI_TYPED_EVENT_TYPES).freeze
@@ -175,13 +175,14 @@ module AgentCoord
       ].freeze
       EFFORTS = %w[low medium high xhigh max ultra].freeze
       PRICING_PROFILES = %w[standard].freeze
-      EXCEPTIONAL_OUTCOMES = %w[blocked-user-input no-pr-evidence failed abandoned superseded].freeze
+      EXCEPTIONAL_OUTCOMES = %w[blocked-user-input no-pr-evidence failed expired abandoned superseded].freeze
       STATUS_OUTCOMES = {
         "blocked" => "blocked",
         "blocked-user-input" => "blocked-user-input",
         "completed" => "done",
         "done" => "done",
         "failed" => "failed",
+        "expired" => "expired",
         "abandoned" => "abandoned",
         "superseded" => "superseded",
         "in_progress" => "in-progress",
@@ -609,7 +610,7 @@ module AgentCoord
           "batch_id" => batch_id,
           "lane_id" => lane_id,
           "owner_ref" => opaque_value(lane["owner"]),
-          "status" => enum(lane["status"], STRUCTURED_STATUSES),
+          "status" => non_expiry_status(lane["status"]),
           "host_family" => enum(lane["host"], HOST_FAMILIES),
           "session_ref" => opaque_value(lane["session_id"])
         }
@@ -623,7 +624,7 @@ module AgentCoord
             "lane_id" => lane_id,
             "repo" => repo(lane["repo"]) || batch_repo,
             "target" => known(target_value),
-            "status" => enum(lane["status"], STRUCTURED_STATUSES),
+            "status" => non_expiry_status(lane["status"]),
             "pr_url" => github_url(lane["pr_url"]),
             "join_status" => join_status(batch_id, repo(lane["repo"]) || batch_repo, known(target_value)),
             "source_ordinal" => [lane_index, target_index]
@@ -670,7 +671,7 @@ module AgentCoord
           "repo" => repo(claim["repo"]),
           "target" => known(claim["target"]),
           "status" => enum(claim["status"], STRUCTURED_STATUSES),
-          "terminal" => enum(claim["terminal"], STRUCTURED_STATUSES),
+          "terminal" => non_expiry_status(claim["terminal"]),
           "pr_url" => github_url(claim["pr_url"]),
           "join_status" => join_status(known(claim["batch_id"]), repo(claim["repo"]), known(claim["target"])),
           "source_artifact_id" => source_artifact_id,
@@ -730,18 +731,34 @@ module AgentCoord
         batch_id = known(event["batch_id"])
         event_repo = repo(event["repo"])
         target = known(event["target"])
+        event_type = enum(event["type"], EVENT_TYPES)
+        # Lifecycle labels participate in current-outcome ordering only when
+        # their optional/required status agrees with the transition. Keep
+        # malformed/manual rows visible to drift reporting through
+        # event_type_raw, but do not let a conflicting label supersede valid
+        # immutable history.
+        event_type = case event_type
+                     when "claim.acquired"
+                       event_type unless event.key?("status") && event["status"] != "active"
+                     when "claim.released"
+                       event_type unless event.key?("status") && event["status"] != "released"
+                     when "claim.expired"
+                       event_type if event["status"] == "expired"
+                     else
+                       event_type
+                     end
         {
           "event_ref" => opaque_value(event["id"]) || "record-#{index}",
           "batch_id" => batch_id,
           "repo" => event_repo,
           "target" => target,
-          "event_type" => enum(event["type"], EVENT_TYPES),
+          "event_type" => event_type,
           # unknown_is_value: this column is the raw type string, so a literal
           # "unknown" -- which the CLI writes for a type-less record -- is a real
           # observation to keep, not an absent value. Contrast `category` below.
           "event_type_raw" => bounded_signal(event["type"], unknown_is_value: true),
-          "observed_at" => timestamp(event["at"] || event["timestamp"]),
-          "terminal" => enum(event["terminal"], STRUCTURED_STATUSES),
+          "observed_at" => precise_timestamp(event["at"] || event["timestamp"]),
+          "terminal" => non_expiry_status(event["terminal"]),
           "join_status" => join_status(batch_id, event_repo, target),
           "source_artifact_id" => source_artifact_id,
           "source_ordinal" => index
@@ -978,12 +995,39 @@ module AgentCoord
         )
         terminal_statuses = claims.filter_map { |row| STATUS_OUTCOMES[row["terminal"]] }
         claim_statuses = claims.filter_map { |row| STATUS_OUTCOMES[row["status"]] }
-        terminal_statuses.concat(
-          @ledger.rows(
-            "SELECT terminal FROM events WHERE batch_id = ? AND repo = ? AND target = ?", target_key
-          ).filter_map { |row| STATUS_OUTCOMES[row["terminal"]] }
+        event_rows = @ledger.rows(
+          "SELECT id, event_type, observed_at, terminal FROM events " \
+          "WHERE batch_id = ? AND repo = ? AND target = ?", target_key
         )
-        [claim_statuses + terminal_statuses, terminal_statuses]
+        terminal_statuses.concat(event_rows.filter_map { |row| STATUS_OUTCOMES[row["terminal"]] })
+        # A current non-expired mutable claim necessarily follows the reap that
+        # emitted claim.expired. Once that mutable row is archived, the ordered
+        # immutable lifecycle remains: a later acquire/release supersedes an old
+        # expiry without deleting it from the ledger.
+        current_claim_is_nonexpired = claims.any? { |row| row["status"] != "expired" }
+        latest_lifecycle = latest_ordered_lifecycle(event_rows)
+        event_statuses = if !current_claim_is_nonexpired && latest_lifecycle&.fetch("event_type") == "claim.expired"
+                           ["expired"]
+                         else
+                           []
+                         end
+        [claim_statuses + terminal_statuses + event_statuses, terminal_statuses]
+      end
+
+      def latest_ordered_lifecycle(event_rows)
+        lifecycle_types = %w[claim.acquired claim.expired claim.released]
+        lifecycle_rows = event_rows.select { |row| lifecycle_types.include?(row["event_type"]) }
+        return unless lifecycle_rows.all? { |row| row["observed_at"] }
+
+        timed_rows = lifecycle_rows.map { |row| [row, Time.iso8601(row.fetch("observed_at"))] }
+        latest_at = timed_rows.map(&:last).max
+        latest_rows = timed_rows.select { |_row, at| at == latest_at }
+        latest_rows.one? ? latest_rows.first.first : nil
+      end
+
+      def non_expiry_status(value)
+        status = enum(value, STRUCTURED_STATUSES)
+        status unless status == "expired"
       end
 
       def outcome_for(statuses, pr_states, terminal_statuses)
@@ -1240,6 +1284,15 @@ module AgentCoord
 
       def timestamp(value)
         Time.iso8601(value.to_s).utc.iso8601
+      rescue ArgumentError
+        nil
+      end
+
+      def precise_timestamp(value)
+        parsed = Time.iso8601(value.to_s).utc
+        return parsed.iso8601 if parsed.nsec.zero?
+
+        parsed.iso8601(9).sub(/0+Z\z/, "Z")
       rescue ArgumentError
         nil
       end

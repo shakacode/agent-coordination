@@ -790,6 +790,380 @@ class TelemetryHarvesterTest < Minitest::Test # rubocop:disable Metrics/ClassLen
     end
   end
 
+  def test_expired_event_is_retained_without_overriding_a_reused_active_claim
+    Dir.mktmpdir("agent-coordination-ledger-expired") do |dir| # rubocop:disable Metrics/BlockLength
+      source_path = File.join(dir, "coordination.json")
+      ledger_path = File.join(dir, "telemetry.sqlite3")
+      coordination = JSON.parse(File.read(File.join(FIXTURES, "coordination.json")))
+      claim = coordination.fetch("claims").find { |row| row["target"] == "78" }
+      # The target was reclaimed before harvest, so the mutable claim row is
+      # authoritative for current outcome while the immutable event retains the
+      # historical expiry for audit and scorecard consumers.
+      claim["status"] = "active"
+      claim.delete("terminal")
+      coordination.fetch("batches").first.fetch("lanes").each do |lane|
+        lane["status"] = "in_progress" if lane.fetch("targets", []).include?("78")
+      end
+      coordination.fetch("events") << {
+        "schema_version" => 1,
+        "id" => "expired-78",
+        "batch_id" => "batch-fixture",
+        "type" => "claim.expired",
+        "agent_id" => "maker",
+        "repo" => "shakacode/agent-coordination",
+        "target" => "78",
+        "status" => "expired",
+        "at" => "2026-07-18T04:00:00Z"
+      }
+      File.write(source_path, JSON.pretty_generate(coordination))
+
+      _stdout, stderr, status = Open3.capture3(
+        CLI, "harvest", "--ledger", ledger_path,
+        "--coordination-json", source_path, "--batch-id", "batch-fixture"
+      )
+      assert status.success?, stderr
+      assert_equal ["in-progress"], sqlite_query(
+        ledger_path, "SELECT outcome FROM target_units WHERE target = '78'"
+      )
+      assert_equal ["claim.expired"], sqlite_query(
+        ledger_path, "SELECT event_type FROM events WHERE event_type = 'claim.expired'"
+      )
+    end
+  end
+
+  def test_expired_status_only_classifies_claim_lifecycle_evidence
+    Dir.mktmpdir("agent-coordination-ledger-expired-qualification") do |dir| # rubocop:disable Metrics/BlockLength
+      source_path = File.join(dir, "coordination.json")
+      ledger_path = File.join(dir, "telemetry.sqlite3")
+      coordination = JSON.parse(File.read(File.join(FIXTURES, "coordination.json")))
+      lanes = coordination.fetch("batches").first.fetch("lanes")
+      lanes << { "name" => "invalid-expired-lane", "targets" => ["80"], "status" => "expired" }
+      lanes << { "name" => "event-terminal-control", "targets" => ["81"], "status" => "waiting" }
+      coordination.fetch("events") << {
+        "id" => "unrelated-expired-terminal", "batch_id" => "batch-fixture",
+        "repo" => "shakacode/agent-coordination", "target" => "81",
+        "type" => "error", "terminal" => "expired", "at" => "2026-07-18T03:00:00Z"
+      }
+      File.write(source_path, JSON.pretty_generate(coordination))
+
+      _stdout, stderr, status = Open3.capture3(
+        CLI, "harvest", "--ledger", ledger_path,
+        "--coordination-json", source_path, "--batch-id", "batch-fixture"
+      )
+      assert status.success?, stderr
+      assert_equal ["80||unknown", "81|waiting|exact"], sqlite_query(
+        ledger_path,
+        "SELECT target, COALESCE(outcome, ''), COALESCE(outcome_evidence_status, '') " \
+        "FROM target_units WHERE target IN ('80', '81') ORDER BY target"
+      )
+      assert_equal ["invalid-expired-lane|", "invalid-expired-lane|"], sqlite_query(
+        ledger_path,
+        "SELECT lane_id, COALESCE(status, '') FROM lanes WHERE lane_id = 'invalid-expired-lane' " \
+        "UNION ALL SELECT lane_id, COALESCE(status, '') FROM target_observations " \
+        "WHERE lane_id = 'invalid-expired-lane'"
+      )
+      assert_equal [""], sqlite_query(
+        ledger_path,
+        "SELECT COALESCE(terminal, '') FROM events WHERE target = '81'"
+      )
+    end
+  end
+
+  def test_later_immutable_acquire_and_release_prevent_old_expiry_resurfacing_after_claim_archive # rubocop:disable Metrics/MethodLength
+    Dir.mktmpdir("agent-coordination-ledger-expired-history") do |dir| # rubocop:disable Metrics/BlockLength
+      source_path = File.join(dir, "coordination.json")
+      ledger_path = File.join(dir, "telemetry.sqlite3")
+      coordination = coordination_fixture
+      coordination["claims"] = []
+      coordination["events"] = [
+        {
+          "id" => "expired-old", "batch_id" => "batch-fixture", "type" => "claim.expired",
+          "status" => "expired", "repo" => "shakacode/agent-coordination", "target" => "78",
+          "at" => "2026-07-18T01:00:00Z"
+        },
+        {
+          "id" => "acquired-new", "batch_id" => "batch-fixture", "type" => "claim.acquired",
+          "repo" => "shakacode/agent-coordination", "target" => "78", "at" => "2026-07-18T02:00:00Z"
+        },
+        {
+          "id" => "released-new", "batch_id" => "batch-fixture", "type" => "claim.released",
+          "repo" => "shakacode/agent-coordination", "target" => "78", "at" => "2026-07-18T03:00:00Z"
+        }
+      ]
+      File.write(source_path, JSON.generate(coordination))
+
+      _stdout, stderr, status = Open3.capture3(
+        CLI, "harvest", "--ledger", ledger_path,
+        "--coordination-json", source_path, "--batch-id", "batch-fixture"
+      )
+
+      assert status.success?, stderr
+      assert_equal ["done"], sqlite_query(ledger_path, "SELECT outcome FROM target_units WHERE target = '78'")
+      assert_equal ["claim.acquired", "claim.expired", "claim.released"], sqlite_query(
+        ledger_path, "SELECT event_type FROM events ORDER BY event_type"
+      )
+
+      coordination.fetch("events") << {
+        "id" => "expired-current", "batch_id" => "batch-fixture", "type" => "claim.expired",
+        "status" => "expired", "repo" => "shakacode/agent-coordination", "target" => "78",
+        "at" => "2026-07-18T04:00:00Z"
+      }
+      File.write(source_path, JSON.generate(coordination))
+      _stdout, stderr, status = Open3.capture3(
+        CLI, "harvest", "--ledger", ledger_path,
+        "--coordination-json", source_path, "--batch-id", "batch-fixture"
+      )
+      assert status.success?, stderr
+      assert_equal ["expired"], sqlite_query(ledger_path, "SELECT outcome FROM target_units WHERE target = '78'")
+
+      coordination.fetch("events") << {
+        "id" => "release-unorderable", "batch_id" => "batch-fixture", "type" => "claim.released",
+        "repo" => "shakacode/agent-coordination", "target" => "78", "at" => "not-a-time"
+      }
+      File.write(source_path, JSON.generate(coordination))
+      _stdout, stderr, status = Open3.capture3(
+        CLI, "harvest", "--ledger", ledger_path,
+        "--coordination-json", source_path, "--batch-id", "batch-fixture"
+      )
+      assert status.success?, stderr
+      assert_equal ["done"], sqlite_query(ledger_path, "SELECT outcome FROM target_units WHERE target = '78'")
+    end
+  end
+
+  def test_malformed_lifecycle_statuses_cannot_supersede_a_valid_expiry
+    Dir.mktmpdir("agent-coordination-ledger-lifecycle-status") do |dir| # rubocop:disable Metrics/BlockLength
+      source_path = File.join(dir, "coordination.json")
+      ledger_path = File.join(dir, "telemetry.sqlite3")
+      coordination = coordination_fixture
+      coordination["claims"] = []
+      coordination["events"] = [
+        {
+          "id" => "expired-valid", "batch_id" => "batch-fixture", "type" => "claim.expired",
+          "status" => "expired", "repo" => "shakacode/agent-coordination", "target" => "78",
+          "at" => "2026-07-18T01:00:00Z"
+        },
+        {
+          "id" => "acquired-failed", "batch_id" => "batch-fixture", "type" => "claim.acquired",
+          "status" => "failed", "repo" => "shakacode/agent-coordination", "target" => "78",
+          "at" => "2026-07-18T02:00:00Z"
+        },
+        {
+          "id" => "released-active", "batch_id" => "batch-fixture", "type" => "claim.released",
+          "status" => "active", "repo" => "shakacode/agent-coordination", "target" => "78",
+          "at" => "2026-07-18T03:00:00Z"
+        }
+      ]
+      File.write(source_path, JSON.generate(coordination))
+
+      _stdout, stderr, status = Open3.capture3(
+        CLI, "harvest", "--ledger", ledger_path,
+        "--coordination-json", source_path, "--batch-id", "batch-fixture"
+      )
+
+      assert status.success?, stderr
+      assert_equal ["expired"], sqlite_query(ledger_path, "SELECT outcome FROM target_units WHERE target = '78'")
+      assert_equal ["claim.expired|claim.expired", "|claim.acquired", "|claim.released"], sqlite_query(
+        ledger_path,
+        "SELECT COALESCE(event_type, ''), event_type_raw FROM events ORDER BY event_ref"
+      )
+    end
+  end
+
+  def test_same_second_lifecycle_events_do_not_manufacture_current_expiry_from_ingestion_order
+    Dir.mktmpdir("agent-coordination-ledger-same-second-history") do |dir| # rubocop:disable Metrics/BlockLength
+      source_path = File.join(dir, "coordination.json")
+      ledger_path = File.join(dir, "telemetry.sqlite3")
+      coordination = coordination_fixture
+      coordination["claims"] = []
+      coordination["events"] = [
+        {
+          "id" => "acquired", "batch_id" => "batch-fixture", "type" => "claim.acquired",
+          "repo" => "shakacode/agent-coordination", "target" => "78", "at" => "2026-07-18T03:00:00Z"
+        },
+        {
+          "id" => "released", "batch_id" => "batch-fixture", "type" => "claim.released",
+          "repo" => "shakacode/agent-coordination", "target" => "78", "at" => "2026-07-18T03:00:00Z"
+        },
+        {
+          "id" => "expired-ingested-last", "batch_id" => "batch-fixture", "type" => "claim.expired",
+          "status" => "expired", "repo" => "shakacode/agent-coordination", "target" => "78",
+          "at" => "2026-07-18T03:00:00Z"
+        }
+      ]
+      File.write(source_path, JSON.generate(coordination))
+
+      _stdout, stderr, status = Open3.capture3(
+        CLI, "harvest", "--ledger", ledger_path,
+        "--coordination-json", source_path, "--batch-id", "batch-fixture"
+      )
+
+      assert status.success?, stderr
+      assert_equal ["done"], sqlite_query(ledger_path, "SELECT outcome FROM target_units WHERE target = '78'")
+    end
+  end
+
+  def test_subsecond_lifecycle_order_survives_harvest
+    Dir.mktmpdir("agent-coordination-ledger-subsecond-history") do |dir|
+      source_path = File.join(dir, "coordination.json")
+      ledger_path = File.join(dir, "telemetry.sqlite3")
+      coordination = coordination_fixture
+      coordination["claims"] = []
+      coordination["events"] = [
+        {
+          "id" => "acquired-first", "batch_id" => "batch-fixture", "type" => "claim.acquired",
+          "repo" => "shakacode/agent-coordination", "target" => "78",
+          "at" => "2026-07-18T03:00:00.100000001Z"
+        },
+        {
+          "id" => "expired-later", "batch_id" => "batch-fixture", "type" => "claim.expired",
+          "status" => "expired", "repo" => "shakacode/agent-coordination", "target" => "78",
+          "at" => "2026-07-18T03:00:00.200000002Z"
+        }
+      ]
+      File.write(source_path, JSON.generate(coordination))
+
+      _stdout, stderr, status = Open3.capture3(
+        CLI, "harvest", "--ledger", ledger_path,
+        "--coordination-json", source_path, "--batch-id", "batch-fixture"
+      )
+
+      assert status.success?, stderr
+      assert_equal ["expired"], sqlite_query(ledger_path, "SELECT outcome FROM target_units WHERE target = '78'")
+      assert_equal ["2026-07-18T03:00:00.100000001Z", "2026-07-18T03:00:00.200000002Z"],
+                   sqlite_query(ledger_path, "SELECT observed_at FROM events ORDER BY observed_at")
+    end
+  end
+
+  def test_whole_second_event_orders_before_a_later_fractional_event
+    Dir.mktmpdir("agent-coordination-ledger-mixed-precision") do |dir|
+      source_path = File.join(dir, "coordination.json")
+      ledger_path = File.join(dir, "telemetry.sqlite3")
+      coordination = coordination_fixture
+      coordination["claims"] = []
+      coordination["events"] = [
+        {
+          "id" => "acquired-whole", "batch_id" => "batch-fixture", "type" => "claim.acquired",
+          "repo" => "shakacode/agent-coordination", "target" => "78", "at" => "2026-07-18T03:00:00Z"
+        },
+        {
+          "id" => "expired-fraction", "batch_id" => "batch-fixture", "type" => "claim.expired",
+          "status" => "expired", "repo" => "shakacode/agent-coordination", "target" => "78",
+          "at" => "2026-07-18T03:00:00.200000002Z"
+        }
+      ]
+      File.write(source_path, JSON.generate(coordination))
+
+      _stdout, stderr, status = Open3.capture3(
+        CLI, "harvest", "--ledger", ledger_path,
+        "--coordination-json", source_path, "--batch-id", "batch-fixture"
+      )
+
+      assert status.success?, stderr
+      assert_equal ["expired"], sqlite_query(ledger_path, "SELECT outcome FROM target_units WHERE target = '78'")
+    end
+  end
+
+  def test_old_lifecycle_tie_does_not_hide_a_unique_later_expiry
+    Dir.mktmpdir("agent-coordination-ledger-old-tie") do |dir| # rubocop:disable Metrics/BlockLength
+      source_path = File.join(dir, "coordination.json")
+      ledger_path = File.join(dir, "telemetry.sqlite3")
+      coordination = coordination_fixture
+      coordination["claims"] = []
+      coordination["events"] = [
+        {
+          "id" => "acquired-tied", "batch_id" => "batch-fixture", "type" => "claim.acquired",
+          "repo" => "shakacode/agent-coordination", "target" => "78", "at" => "2026-07-18T03:00:00Z"
+        },
+        {
+          "id" => "released-tied", "batch_id" => "batch-fixture", "type" => "claim.released",
+          "repo" => "shakacode/agent-coordination", "target" => "78", "at" => "2026-07-18T03:00:00Z"
+        },
+        {
+          "id" => "expired-unique-later", "batch_id" => "batch-fixture", "type" => "claim.expired",
+          "status" => "expired", "repo" => "shakacode/agent-coordination", "target" => "78",
+          "at" => "2026-07-18T03:00:01Z"
+        }
+      ]
+      File.write(source_path, JSON.generate(coordination))
+
+      _stdout, stderr, status = Open3.capture3(
+        CLI, "harvest", "--ledger", ledger_path,
+        "--coordination-json", source_path, "--batch-id", "batch-fixture"
+      )
+
+      assert status.success?, stderr
+      assert_equal ["expired"], sqlite_query(ledger_path, "SELECT outcome FROM target_units WHERE target = '78'")
+    end
+  end
+
+  def test_internal_unbatched_expiry_event_does_not_join_a_preexisting_reserved_batch
+    Dir.mktmpdir("agent-coordination-ledger-disjoint-expiry") do |dir|
+      source_path = File.join(dir, "coordination.json")
+      ledger_path = File.join(dir, "telemetry.sqlite3")
+      coordination = coordination_fixture
+      reserved = "unbatched-claim-expirations"
+      coordination.fetch("batches").first["batch_id"] = reserved
+      coordination.fetch("events") << {
+        "id" => "legacy-event", "batch_id" => reserved, "type" => "phase",
+        "repo" => "shakacode/agent-coordination", "target" => "78",
+        "at" => "2026-07-18T03:00:00Z"
+      }
+      coordination.fetch("events") << {
+        "id" => "claim-expired-disjoint",
+        "batch_id" => "agent-coord-internal-unbatched-expiry-v1-7e4c9a2d",
+        "type" => "claim.expired", "status" => "expired",
+        "repo" => "shakacode/agent-coordination", "target" => "78",
+        "at" => "2026-07-18T04:00:00Z"
+      }
+      File.write(source_path, JSON.generate(coordination))
+
+      _stdout, stderr, status = Open3.capture3(
+        CLI, "harvest", "--ledger", ledger_path,
+        "--coordination-json", source_path, "--batch-id", reserved
+      )
+
+      assert status.success?, stderr
+      assert_equal ["phase"], sqlite_query(ledger_path, "SELECT event_type_raw FROM events")
+      assert_empty sqlite_query(ledger_path, "SELECT event_type FROM events WHERE event_type = 'claim.expired'")
+    end
+  end
+
+  def test_claim_expired_event_without_expired_status_cannot_derive_expired_outcome
+    Dir.mktmpdir("agent-coordination-ledger-unqualified-expired") do |dir| # rubocop:disable Metrics/BlockLength
+      source_path = File.join(dir, "coordination.json")
+      ledger_path = File.join(dir, "telemetry.sqlite3")
+      coordination = JSON.parse(File.read(File.join(FIXTURES, "coordination.json")))
+      claim = coordination.fetch("claims").find { |row| row["target"] == "78" }
+      claim["status"] = "active"
+      claim.delete("terminal")
+      coordination.fetch("events") << {
+        "schema_version" => 1,
+        "id" => "unqualified-expired-78",
+        "batch_id" => "batch-fixture",
+        "type" => "claim.expired",
+        "agent_id" => "maker",
+        "repo" => "shakacode/agent-coordination",
+        "target" => "78",
+        "at" => "2026-07-18T04:00:00Z"
+      }
+      File.write(source_path, JSON.pretty_generate(coordination))
+
+      _stdout, stderr, status = Open3.capture3(
+        CLI, "harvest", "--ledger", ledger_path,
+        "--coordination-json", source_path, "--batch-id", "batch-fixture"
+      )
+
+      assert status.success?, stderr
+      refute_equal ["expired"], sqlite_query(
+        ledger_path, "SELECT outcome FROM target_units WHERE target = '78'"
+      )
+      assert_equal ["|claim.expired"], sqlite_query(
+        ledger_path,
+        "SELECT COALESCE(event_type, ''), event_type_raw FROM events WHERE event_type_raw = 'claim.expired'"
+      )
+    end
+  end
+
   def test_named_batch_harvest_recomputes_outcomes_for_all_refreshed_github_rows # rubocop:disable Metrics/MethodLength
     Dir.mktmpdir("agent-coordination-ledger-github-refresh") do |dir| # rubocop:disable Metrics/BlockLength
       source_path = File.join(dir, "coordination.json")
@@ -2869,11 +3243,30 @@ class TelemetryHarvesterTest < Minitest::Test # rubocop:disable Metrics/ClassLen
                          ))
     run_coord(env, "register-batch", "--state-root", state, "--file", manifest)
     corpus_commands(state).each { |args| run_coord(env, *args) }
+    seed_expired_corpus_claim(state)
+    run_coord(env, "gc", "--state-root", state, "--execute", "--json", "--lease-grace-days", "0")
 
     source_path = File.join(dir, "coordination.json")
     status_json = run_coord(env, "status", "--state-root", state, "--json")
     File.write(source_path, status_json)
     [JSON.parse(status_json).fetch("events").map { |event| event.fetch("type") }.sort, source_path]
+  end
+
+  def seed_expired_corpus_claim(state)
+    load_agent_coord_cli
+    path = File.join(state, AgentCoord.claim_path(CORPUS_REPO, CORPUS_TARGET))
+    FileUtils.mkdir_p(File.dirname(path))
+    File.write(path, JSON.generate(
+                       "schema_version" => 1,
+                       "batch_id" => CORPUS_BATCH,
+                       "repo" => CORPUS_REPO,
+                       "target" => CORPUS_TARGET,
+                       "agent_id" => "expired-corpus-worker",
+                       "status" => "active",
+                       "claimed_at" => "2026-01-01T00:00:00Z",
+                       "updated_at" => "2026-01-01T00:00:00Z",
+                       "expires_at" => "2026-01-01T00:01:00Z"
+                     ))
   end
 
   def corpus_commands(state)

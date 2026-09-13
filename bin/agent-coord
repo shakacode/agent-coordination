@@ -41,6 +41,41 @@ module AgentCoord
   DEFAULT_HOT_DAYS = 7
   DEFAULT_ARCHIVE_DAYS = 30
   DEFAULT_SYNTHETIC_HOT_DAYS = 1
+  # Margin gc adds to a claim's lease before reaping it, so a slow renewal on a
+  # paused or throttled machine does not cost a lane its live claim. One day is
+  # six times the default four-hour lease and far longer than any renewal
+  # cadence a working agent keeps.
+  DEFAULT_LEASE_GRACE_DAYS = 1
+  # Terminal claim status gc writes when a lease elapsed and nobody released
+  # it. Deliberately distinct from "released" so an abandoned lane stays
+  # countable instead of being laundered into a clean handoff.
+  CLAIM_EXPIRED_STATUS = "expired"
+  UNBATCHED_CLAIM_EXPIRY_BATCH_ID = "unbatched-claim-expirations"
+  # Generated unbatched expiry history must not share lineage with any normal
+  # batch, including a pre-existing batch that used the later-reserved name.
+  # This fresh, collision-resistant batch-shaped identity is storage-valid for
+  # both local and HTTP backends but reserved below from every public producer.
+  INTERNAL_UNBATCHED_CLAIM_EXPIRY_BATCH_ID = "agent-coord-internal-unbatched-expiry-v1-7e4c9a2d"
+  INTERNAL_UNBATCHED_CLAIM_EXPIRY_EVENT_PREFIX =
+    "events/#{INTERNAL_UNBATCHED_CLAIM_EXPIRY_BATCH_ID}".freeze
+  CLAIM_CLOSEOUT_FIELDS = %w[
+    terminal pr_state evidence_url closed_by released_by released_at release_mode handoff_to handoff_note
+  ].freeze
+  EXPIRED_EVENT_PENDING_FIELDS = %w[
+    expired_event_pending expired_event_id expired_event_batch_id expired_event_at expired_event_replay
+  ].freeze
+  # gc plans each disposition in an independent pass, so nothing structural
+  # stops two passes from selecting the same record: a claim that is still
+  # active while carrying a terminal marker is both archive-eligible and
+  # reap-eligible. Two actions on one path cannot both be applied — the first
+  # write moves the record and the second fails its compare-and-swap, aborting
+  # the run after a partial apply and printing no plan at all. One record
+  # therefore gets exactly one action per run, chosen in this order. Reap
+  # outranks archive because archiving a claim nobody released would file it
+  # away still reading "active" and lose the abandonment the reap exists to
+  # record; the reaped record reaches the archive on a later run through the
+  # ordinary terminal-claim path, so nothing is stranded.
+  GC_ACTION_PRECEDENCE = %w[reap reconcile_expired_event replace_archive archive compact delete].freeze
   MAX_ARCHIVE_STATE_BYTES = 1024 * 1024
   STATUS_STATE_ROOT_ENV = "AGENT_COORD_STATUS_STATE_ROOT"
   # Explicit operator opt-in to the implicit local backend; suppresses the
@@ -228,6 +263,10 @@ module AgentCoord
     thread_handle chat_handle host pr_url dashboard_url operator phase generation instance_id
     synthetic synthetic_kind
   ].freeze
+  CLAIM_EXPIRED_EVENT_REQUIRED_FIELDS = %w[event_id batch_id agent_id repo target at].freeze
+  CLAIM_EXPIRED_EVENT_FIELDS = (
+    %w[schema_version event_id batch_id type agent_id repo target branch status at] + METADATA_OPTION_FIELDS
+  ).freeze
   HANDOFF_STATE_FIELDS = %w[
     release_mode handoff_to handoff_note
   ].freeze
@@ -306,7 +345,7 @@ module AgentCoord
     batch_id lane agent_id branch pr_url pr_state evidence_url
   ].freeze
   BATCH_AUDIT_ORDINARY_LIFECYCLE_TYPES = %w[
-    claim.acquired claim.released phase.changed
+    claim.acquired claim.expired claim.released phase.changed
   ].freeze
   BATCH_AUDIT_ORDINARY_REQUIRED_FACT_FIELDS = %w[event_id batch_id agent_id at].freeze
   BATCH_AUDIT_ORDINARY_OPTIONAL_IDENTITY_FIELDS = %w[lane repo target].freeze
@@ -1288,6 +1327,10 @@ module AgentCoord
               "days synthetic state remains hot (default: #{DEFAULT_SYNTHETIC_HOT_DAYS})") do |value|
         options[:synthetic_hot_days] = value
       end
+      opts.on("--lease-grace-days DAYS", Integer,
+              "days past a claim lease before it is reaped (default: #{DEFAULT_LEASE_GRACE_DAYS})") do |value|
+        options[:lease_grace_days] = value
+      end
       opts.on("--prefix PREFIX", "hot family to scan: claims, heartbeats, batches, or events (repeatable)") do |value|
         (options[:prefixes] ||= []) << value
       end
@@ -1381,6 +1424,7 @@ module AgentCoord
       validate_register_batch_option_usage!(command, options)
       validate_config_set_backend_option_usage!(command, options)
       validate_user_config_bypass_option_usage!(command, options)
+      validate_write_batch_id!(command, options)
 
       if backend_command?(command)
         resolve_backend_env(options)
@@ -1390,6 +1434,23 @@ module AgentCoord
       end
       emit_user_config_bypass_notice(options)
       options
+    end
+
+    def validate_write_batch_id!(command, options)
+      return unless split_brain_write_command?(command) && options[:batch_id]
+
+      validate_producer_batch_id!(options.fetch(:batch_id))
+    end
+
+    def validate_producer_batch_id!(batch_id)
+      AgentCoord.validate_segment!(batch_id, "batch-id")
+      return unless reserved_claim_expiry_batch_id?(batch_id)
+
+      raise Error, "batch-id #{batch_id.inspect} is reserved for unbatched claim expiry history"
+    end
+
+    def reserved_claim_expiry_batch_id?(batch_id)
+      [UNBATCHED_CLAIM_EXPIRY_BATCH_ID, INTERNAL_UNBATCHED_CLAIM_EXPIRY_BATCH_ID].include?(batch_id)
     end
 
     def validate_user_config_bypass_option_usage!(command, options)
@@ -1972,6 +2033,8 @@ module AgentCoord
       opts.separator "    --hot-days DAYS      hot retention (default: #{DEFAULT_HOT_DAYS})"
       opts.separator "    --archive-days DAYS  archive retention (default: #{DEFAULT_ARCHIVE_DAYS})"
       opts.separator "    --synthetic-hot-days DAYS  synthetic hot retention (default: #{DEFAULT_SYNTHETIC_HOT_DAYS})"
+      opts.separator "    --lease-grace-days DAYS  grace past a claim lease before reaping " \
+                     "(default: #{DEFAULT_LEASE_GRACE_DAYS})"
       opts.separator "    --prefix PREFIX  scan one hot family; repeat for claims, heartbeats, batches, events"
       opts.separator "Exactly one mode is required."
       opts.separator ""
@@ -1986,12 +2049,20 @@ module AgentCoord
         options[:synthetic_hot_days] || DEFAULT_SYNTHETIC_HOT_DAYS,
         "--synthetic-hot-days"
       )
+      lease_grace_days = nonnegative_days(
+        options[:lease_grace_days] || DEFAULT_LEASE_GRACE_DAYS,
+        "--lease-grace-days"
+      )
       prefixes = gc_prefixes(options[:prefixes])
       now = now_utc
       store = build_store(options)
+      @gc_holder_liveness_warnings = {}
       candidates = gc_candidates(store, now, hot_days, synthetic_hot_days, prefixes)
+      candidates.concat(gc_reap_candidates(store, now, lease_grace_days, prefixes))
+      candidates.concat(gc_expired_event_candidates(store, prefixes))
+      candidates = gc_one_action_per_source(candidates)
       validate_gc_archive_sizes!(candidates, now, archive_days)
-      candidates.each { |candidate| execute_gc_candidate(store, candidate, now, archive_days) } if options[:execute]
+      execute_gc_candidates(store, candidates, now, archive_days) if options[:execute]
       candidates.sort_by! do |candidate|
         action = candidate.fetch(:action)
         action["source_path"] || Array(action["source_paths"]).first || action.fetch("archive_path", "")
@@ -2002,7 +2073,8 @@ module AgentCoord
         "policy" => {
           "hot_days" => hot_days,
           "archive_days" => archive_days,
-          "synthetic_hot_days" => synthetic_hot_days
+          "synthetic_hot_days" => synthetic_hot_days,
+          "lease_grace_days" => lease_grace_days
         }, "prefixes" => prefixes,
         "actions" => actions
       }
@@ -2036,10 +2108,28 @@ module AgentCoord
       protected_destinations = (archive_candidates + compaction_candidates).to_h do |candidate|
         [candidate.dig(:action, "archive_path"), true]
       end
-      delete_candidates = gc_delete_candidates(store, now).reject do |candidate|
+      delete_candidates = gc_delete_candidates(store, now, prefixes).reject do |candidate|
         protected_destinations[candidate.dig(:action, "source_path")]
       end
       archive_candidates + compaction_candidates + delete_candidates
+    end
+
+    # Enforces the one-action-per-record invariant behind GC_ACTION_PRECEDENCE,
+    # so a dry-run plan describes exactly what execute applies. Candidates with
+    # no single source path are event compaction generations, which consume
+    # disjoint entry sets by construction and pass through untouched. Ties are
+    # broken by first appearance, so identical state always plans identically.
+    def gc_one_action_per_source(candidates)
+      indexed = candidates.each_with_index.to_a
+      kept = indexed.group_by { |candidate, _index| candidate.dig(:action, "source_path") }
+                    .flat_map do |source_path, group|
+        source_path.nil? ? group : [group.min_by { |candidate, index| [gc_action_rank(candidate), index] }]
+      end
+      kept.sort_by { |_candidate, index| index }.map(&:first)
+    end
+
+    def gc_action_rank(candidate)
+      GC_ACTION_PRECEDENCE.index(candidate.dig(:action, "action")) || GC_ACTION_PRECEDENCE.length
     end
 
     def execute_gc_candidate(store, candidate, now, archive_days)
@@ -2048,6 +2138,26 @@ module AgentCoord
       when "replace_archive" then gc_replace_archive_record(store, candidate, now, archive_days)
       when "compact" then gc_compact_events(store, candidate, now, archive_days)
       when "delete" then gc_delete_archive(store, candidate)
+      when "reap" then gc_reap_claim(store, candidate, now)
+      when "reconcile_expired_event" then gc_reconcile_expired_event(store, candidate)
+      end
+    end
+
+    def execute_gc_candidates(store, candidates, now, archive_days)
+      candidates.sort_by { |candidate| gc_action_rank(candidate) }.each do |candidate|
+        outcome = execute_gc_candidate(store, candidate, now, archive_days)
+        action = candidate.fetch(:action)
+        skipped = %i[
+          claim_changed_at_apply claim_identity_mismatch_at_apply
+          holder_present_at_apply holder_liveness_unknown_at_apply
+          invalid_claim_path_at_apply invalid_expired_event_destination_at_apply
+          aged_heartbeat_referenced_at_apply
+        ]
+        if skipped.include?(outcome)
+          action.merge!("outcome" => "skipped", "skip_reason" => outcome.to_s)
+        elsif outcome == :expired_event_pending || (action["action"] == "reconcile_expired_event" && !outcome)
+          action.merge!("outcome" => "pending", "skip_reason" => "expired_event_pending")
+        end
       end
     end
 
@@ -2065,6 +2175,7 @@ module AgentCoord
             "reason" => reason,
             "eligible_at" => timestamp(eligible_at)
           }
+          archive_reason = reason
           existing = store.read_json(action.fetch("archive_path"))
           if existing && !gc_same_archived_record?(existing.data, { "source_path" => entry.path, "data" => entry.data })
             next if gc_archive_delete_after(existing) > now
@@ -2072,14 +2183,24 @@ module AgentCoord
             action["action"] = "replace_archive"
             action["reason"] = "expired_archive_replacement"
           end
-          { entry: entry, existing_archive: existing, action: action }
+          { entry: entry, existing_archive: existing, archive_reason:, action: action }
         end
       end
       candidates.sort_by { |candidate| candidate.dig(:action, "source_path") }
     end
 
-    def gc_delete_candidates(store, now)
+    def gc_delete_candidates(store, now, prefixes)
+      active_claim_holders = gc_visible_active_claim_holders(store, prefixes)
       store.list_json("archive").filter_map do |entry|
+        internal_batch_archive = AgentCoord.archive_path(
+          AgentCoord.batch_path(INTERNAL_UNBATCHED_CLAIM_EXPIRY_BATCH_ID)
+        )
+        # Older versions may already have archived the collision sentinel.
+        # Retain that exact archive record so namespace reuse never becomes
+        # possible merely because its ordinary delete window elapsed.
+        next if entry.path == internal_batch_archive
+        next if gc_preserve_aged_heartbeat_archive?(entry, active_claim_holders)
+
         delete_after = gc_archive_delete_after(entry)
         next if delete_after > now
 
@@ -2093,6 +2214,221 @@ module AgentCoord
           }
         }
       end
+    end
+
+    def gc_visible_active_claim_holders(store, prefixes)
+      return unless prefixes.include?("claims")
+
+      claims = store.list_json("claims")
+      return if store.respond_to?(:filtered_list?) && store.filtered_list?("claims")
+
+      claims.each_with_object({}) do |claim, holders|
+        holders[claim.data["agent_id"]] = true if active_claim_record?(claim.data)
+      end
+    end
+
+    def gc_preserve_aged_heartbeat_archive?(entry, active_claim_holders)
+      envelope = entry.data
+      return false unless envelope["record_family"] == "archived_record"
+      return false unless envelope["reason"] == "aged_heartbeat"
+
+      holder = gc_archived_heartbeat_holder(envelope)
+      return true unless active_claim_holders && holder
+
+      active_claim_holders[holder]
+    rescue TypeError
+      true
+    end
+
+    def gc_archived_heartbeat_holder(envelope)
+      gc_heartbeat_holder_from_path(envelope["source_path"])
+    end
+
+    def gc_heartbeat_holder_from_path(path)
+      source_path = path.to_s
+      match = source_path.match(%r{\Aheartbeats/([^/]+)\.json\z})
+      return unless match
+
+      holder = match[1]
+      holder if AgentCoord.heartbeat_path(holder) == source_path
+    rescue Error
+      nil
+    end
+
+    # An active claim whose lease elapsed is never transitioned by anything
+    # else: expiry is advisory state the takeover path consults, and no writer
+    # stamps it back onto the record. Without this pass a claim that was never
+    # released stays active forever and status stops being a usable signal.
+    # gc reaps it in place to the terminal expired status rather than archiving
+    # it directly, so the abandoned lane stays visible to status, log, and
+    # scorecards for the normal hot window before the ordinary terminal-claim
+    # path collects it.
+    def gc_reap_candidates(store, now, lease_grace_days, prefixes)
+      return [] unless prefixes.include?("claims")
+
+      expired = store.list_json("claims").filter_map do |entry|
+        next if entry.data["expired_event_pending"] == true
+        next unless active_claim_record?(entry.data)
+
+        lease_ended_at = gc_claim_lease_expiry(entry.data, entry.path)
+        next unless lease_ended_at && lease_ended_at + (lease_grace_days * 86_400) <= now
+
+        [entry, lease_ended_at]
+      end
+      missing_prefixes = %w[heartbeats events].reject { |prefix| prefixes.include?(prefix) }
+      return gc_report_unreapable_without_supporting_prefixes(expired, missing_prefixes) unless missing_prefixes.empty?
+
+      expired = gc_withhold_unbatched_reaps_without_batches(expired, prefixes)
+
+      holder_heartbeats = {}
+      expired.filter_map do |entry, lease_ended_at|
+        next unless gc_claim_holder_gone?(store, entry.data, now, holder_heartbeats)
+
+        {
+          entry: entry,
+          action: {
+            "action" => "reap", "source_path" => entry.path,
+            "reason" => "expired_lease", "eligible_at" => timestamp(lease_ended_at)
+          }
+        }
+      end
+    end
+
+    # Reaping needs holder evidence, and holder evidence lives under heartbeats.
+    # Reading it anyway would silently widen a scoped run past the prefixes the
+    # operator selected, which a least-privileged token answers with a 403 that
+    # would abort archiving and deletion too. So an unselected heartbeats prefix
+    # withdraws the reaper rather than the run, and says so, because "gc planned
+    # nothing" and "gc could not look" are different answers.
+    def gc_report_unreapable_without_supporting_prefixes(expired, missing_prefixes)
+      unless expired.empty?
+        switches = missing_prefixes.map { |prefix| "--prefix #{prefix}" }.join(" and ")
+        @stderr.puts "warning: gc left #{expired.length} expired-lease claim(s) unreaped: reaping reads holder " \
+                     "heartbeats and records immutable events, so it needs #{switches} alongside --prefix claims"
+      end
+      []
+    end
+
+    def gc_withhold_unbatched_reaps_without_batches(expired, prefixes)
+      return expired if prefixes.include?("batches")
+
+      unbatched, supported = expired.partition { |entry, _lease_ended_at| entry.data["batch_id"].to_s.empty? }
+      unless unbatched.empty?
+        @stderr.puts "warning: gc left #{unbatched.length} unbatched expired-lease claim(s) unreaped: " \
+                     "immutable history collision checks need --prefix batches alongside --prefix claims"
+      end
+      supported
+    end
+
+    # The reaper borrows the takeover rule instead of restating it. A holder
+    # whose heartbeat is live or stale still owns the lane even past its lease,
+    # and reaping that lane would prune genuinely active work; only a dead or
+    # absent heartbeat falls through to the lease itself. A heartbeat gc is not
+    # permitted to read is not evidence of absence, so it fails closed on the
+    # claim alone: the holder is treated as present, the run keeps planning
+    # every other family, and the memo remembers the refusal so one unreadable
+    # holder costs one round trip and one warning.
+    def gc_claim_holder_gone?(store, claim, now, holder_heartbeats, fresh: false)
+      gc_claim_holder_disposition(store, claim, now, holder_heartbeats, fresh:) == :gone
+    end
+
+    def gc_claim_holder_disposition(store, claim, now, holder_heartbeats, fresh: false)
+      holder = claim["agent_id"].to_s
+      return :unknown if holder_heartbeats[holder] == :unreadable
+
+      holder_state = claim_holder_state(store, claim, now, holder_heartbeats, fresh:)
+      if holder_state.fetch(:liveness) == "missing" && gc_archived_unknown_holder_heartbeat?(store, holder, fresh:)
+        holder_state = fallback_holder_state(claim, now, "unknown")
+      end
+      if %w[invalid unknown].include?(holder_state.fetch(:liveness))
+        unless (@gc_holder_liveness_warnings ||= {})[holder]
+          @stderr.puts "warning: gc cannot establish liveness for claim holder #{holder.inspect}; " \
+                       "not reaping its claims"
+          @gc_holder_liveness_warnings[holder] = true
+        end
+        return :unknown
+      end
+
+      takeover_allowed?(holder_state) ? :gone : :present
+    rescue OperationalError => e
+      holder_heartbeats[holder] = :unreadable
+      @stderr.puts "warning: gc cannot read the heartbeat for claim holder #{holder.inspect}; " \
+                   "not reaping its claims: #{e.message}"
+      :unknown
+    end
+
+    def gc_archived_unknown_holder_heartbeat?(store, holder, fresh: false)
+      path = AgentCoord.archive_path(AgentCoord.heartbeat_path(holder))
+      method = fresh && store.respond_to?(:read_json_fresh) ? :read_json_fresh : :read_json
+      entry = store.public_send(method, path)
+      return false unless entry
+
+      envelope = entry.data
+      envelope.is_a?(Hash) && envelope["record_family"] == "archived_record" &&
+        envelope["source_path"] == AgentCoord.heartbeat_path(holder) && envelope["reason"] == "aged_heartbeat"
+    rescue OperationalError
+      raise
+    rescue JSON::ParserError, Error
+      true
+    end
+
+    def gc_expired_event_candidates(store, prefixes)
+      return [] unless prefixes.include?("claims")
+
+      pending = store.list_json("claims").select { |entry| entry.data["expired_event_pending"] == true }
+      unless prefixes.include?("events")
+        unless pending.empty?
+          @stderr.puts "warning: gc left #{pending.length} pending claim.expired event(s) unreconciled: " \
+                       "reconciliation needs --prefix events alongside --prefix claims"
+        end
+        return []
+      end
+
+      unless prefixes.include?("batches")
+        internal, pending = pending.partition do |entry|
+          entry.data["expired_event_batch_id"] == INTERNAL_UNBATCHED_CLAIM_EXPIRY_BATCH_ID
+        end
+        unless internal.empty?
+          @stderr.puts "warning: gc left #{internal.length} pending unbatched claim.expired event(s) unreconciled: " \
+                       "collision checks need --prefix batches alongside --prefix claims and --prefix events"
+        end
+      end
+
+      pending.map do |entry|
+        {
+          entry: entry,
+          action: {
+            "action" => "reconcile_expired_event",
+            "source_path" => entry.path,
+            "reason" => "missing_claim_expired_event",
+            "eligible_at" => entry.data["expired_event_at"]
+          }
+        }
+      end
+    end
+
+    # Reaping turns on the lease itself, so unlike gc_record_time it cannot fall
+    # back to the other retention timestamps. A claim with no expires_at never
+    # recorded a lease, so there is no expiry to act on and it stays hot. A
+    # present but unparseable one is a corrupt record: it is never reaped, but
+    # it also cannot deny gc to the rest of the fleet the way a raise here
+    # would, since this runs against every active claim rather than only records
+    # already found eligible. It is reported instead and the run continues.
+    def gc_claim_lease_expiry(data, path)
+      value = data["expires_at"]
+      return nil if value.nil?
+
+      parse_time(value)
+    rescue ArgumentError, TypeError
+      @stderr.puts "warning: gc claim has invalid expires_at at #{path}: #{gc_lease_value_label(value)}; not reaped"
+      nil
+    end
+
+    # A corrupt lease can hold any JSON value, and interpolating one raw would
+    # spill a whole nested record into the warning. Strings are quoted and
+    # escaped; anything else is named by type only.
+    def gc_lease_value_label(value)
+      value.is_a?(String) ? value.inspect : "non-string #{value.class}"
     end
 
     def gc_compaction_candidates(store, now, hot_days, synthetic_hot_days)
@@ -2118,6 +2454,7 @@ module AgentCoord
       lane = data["lane"]
       lanes = terminal_lanes[provenance]
       lane = lanes.first if lane.to_s.empty? && lanes&.one?
+      lane = "claim-expiration:#{data.fetch('event_id')}" if gc_generated_claim_expiration_event?(entry)
       [*provenance, lane]
     end
 
@@ -2185,9 +2522,26 @@ module AgentCoord
         return unless gc_hot_window_elapsed?(terminal, now, hot_days, synthetic_hot_days)
 
         ["terminal_target_events", gc_record_time(terminal.data, nil, terminal.path)]
+      elsif entries.all? { |entry| gc_unbatched_claim_expiration_event?(entry) }
+        ["unbatched_claim_expirations", entries.map { |entry| gc_record_time(entry.data, nil, entry.path) }.max]
+      elsif entries.all? { |entry| gc_generated_claim_expiration_event?(entry) }
+        ["claim_expirations", entries.map { |entry| gc_record_time(entry.data, nil, entry.path) }.max]
       elsif entries.all? { |entry| entry.data["synthetic"] == true }
         ["synthetic_orphan_events", entries.map { |entry| gc_record_time(entry.data, nil, entry.path) }.max]
       end
+    end
+
+    def gc_unbatched_claim_expiration_event?(entry)
+      data = entry.data
+      entry.path.start_with?("#{INTERNAL_UNBATCHED_CLAIM_EXPIRY_EVENT_PREFIX}/") &&
+        data["batch_id"] == INTERNAL_UNBATCHED_CLAIM_EXPIRY_BATCH_ID &&
+        gc_generated_claim_expiration_event?(entry)
+    end
+
+    def gc_generated_claim_expiration_event?(entry)
+      data = entry.data
+      data["type"] == "claim.expired" && data["status"] == CLAIM_EXPIRED_STATUS &&
+        data["event_id"].to_s.start_with?("claim-expired-")
     end
 
     def gc_compaction_archive_path(batch_id, lane, repo, target, entries)
@@ -2362,16 +2716,285 @@ module AgentCoord
 
     def gc_delete_archive(store, candidate)
       entry = candidate.fetch(:entry)
+      holder = gc_archived_heartbeat_holder(entry.data) if entry.data["reason"] == "aged_heartbeat"
+      return :aged_heartbeat_referenced_at_apply if holder && gc_active_claim_holder?(store, holder)
+
       store.delete_json(entry.path, message: "Delete expired archive #{entry.path}", sha: entry.sha)
     rescue Conflict => e
       raise OperationalError, "gc archive changed at #{entry.path}; #{e.message}"
+    end
+
+    def gc_active_claim_holder?(store, holder)
+      method = store.respond_to?(:list_json_fresh) ? :list_json_fresh : :list_json
+      claims = store.public_send(method, "claims")
+      return true if store.respond_to?(:filtered_list?) && store.filtered_list?("claims")
+
+      claims.any? do |claim|
+        active_claim_record?(claim.data) && claim.data["agent_id"] == holder
+      end
+    end
+
+    # updated_at is left alone on purpose: it records when the holder last
+    # touched the lane, and restamping it would make a seven-week-old
+    # abandonment read as fresh custody in status and log. reaped_at carries
+    # the gc write instead, and the archive pass reads the hot window from it.
+    def gc_reap_claim(store, candidate, now)
+      entry = candidate.fetch(:entry)
+      path_identity = gc_canonical_claim_identity(entry.path)
+      return :invalid_claim_path_at_apply unless path_identity
+
+      read_method = store.respond_to?(:read_json_fresh) ? :read_json_fresh : :read_json
+      current_entry = store.public_send(read_method, entry.path)
+      return :claim_changed_at_apply unless current_entry&.sha == entry.sha
+
+      entry = current_entry
+      path_repo, path_target = path_identity
+      identity_mismatch = { "repo" => path_repo, "target" => path_target }.any? do |field, path_value|
+        !entry.data[field].to_s.empty? && entry.data[field].to_s != path_value
+      end
+      return :claim_identity_mismatch_at_apply if identity_mismatch
+
+      holder = gc_claim_holder_disposition(store, entry.data, now, {}, fresh: true)
+      return :holder_present_at_apply if holder == :present
+      return :holder_liveness_unknown_at_apply if holder == :unknown
+
+      event_at = precise_timestamp(now)
+      payload = entry.data.except(*CLAIM_CLOSEOUT_FIELDS).merge(
+        "status" => CLAIM_EXPIRED_STATUS,
+        "reaped_at" => event_at
+      )
+      # Claim paths remain the authoritative identity for supported records
+      # written before repo/target were duplicated into the payload. Preserve
+      # that identity in immutable expiry history rather than emitting an
+      # unjoinable event.
+      payload["repo"] = path_repo
+      payload["target"] = path_target
+      expired_event_batch_id = if payload["batch_id"].to_s.empty?
+                                 INTERNAL_UNBATCHED_CLAIM_EXPIRY_BATCH_ID
+                               else
+                                 payload.fetch("batch_id")
+                               end
+      payload.merge!(
+        "expired_event_id" => gc_claim_expired_event_id(entry.path, entry.data),
+        "expired_event_batch_id" => expired_event_batch_id,
+        "expired_event_at" => event_at,
+        "expired_event_pending" => true
+      )
+      unless gc_expired_event_destination_valid?(store, payload, entry.path)
+        return :invalid_expired_event_destination_at_apply
+      end
+
+      store.write_json(entry.path, payload, message: "Reap expired claim #{entry.path}", sha: entry.sha)
+      current = store.read_json(entry.path)
+      reconciled = gc_finish_reap_reconciliation(store, current, payload, entry.path)
+      reconciled ? :applied : :expired_event_pending
+    rescue Conflict
+      :claim_changed_at_apply
+    end
+
+    def gc_claim_expired_event_id(path, claim)
+      identity = {
+        "path" => path,
+        "agent_id" => claim["agent_id"],
+        "generation" => claim["generation"],
+        "instance_id" => claim["instance_id"],
+        "claimed_at" => claim["claimed_at"],
+        "expires_at" => claim["expires_at"]
+      }
+      "claim-expired-#{Digest::SHA256.hexdigest(gc_canonical_json(identity))[0, 16]}"
+    end
+
+    def gc_canonical_claim_identity(path)
+      repo = AgentCoord.repo_from_claim_path(path)
+      target = AgentCoord.target_from_path(path)
+      [repo, target] if AgentCoord.claim_path(repo, target) == path
+    rescue Error, ArgumentError
+      nil
+    end
+
+    def gc_expired_event_destination_valid?(store, claim, claim_path)
+      event = gc_claim_expired_event_payload(claim, claim_path)
+      AgentCoord.event_path(event.fetch("batch_id"), event.fetch("event_id"))
+      gc_assert_internal_expiry_namespace_available!(store, event)
+      true
+    rescue Error, KeyError, TypeError => e
+      @stderr.puts "warning: invalid claim.expired event destination; claim not reaped: #{log_scrub(e.message)}"
+      false
+    end
+
+    def gc_finish_reap_reconciliation(store, current, payload, claim_path)
+      return true if current&.data == payload.except("expired_event_pending")
+      if current&.data&.fetch("expired_event_pending", false) == true
+        return gc_reconcile_expired_event(store, { entry: current })
+      end
+
+      event_recorded = gc_expired_event_recorded?(store, payload, claim_path)
+      return event_recorded unless current
+
+      event_recorded || gc_reconcile_expired_event(store, { entry: current })
+    end
+
+    def gc_reconcile_expired_event(store, candidate)
+      entry = candidate.fetch(:entry)
+      claim = entry.data
+      return gc_expired_event_already_settled?(store, entry) unless claim["expired_event_pending"] == true
+
+      event = gc_claim_expired_event_payload(claim, entry.path)
+      gc_assert_internal_expiry_namespace_available!(store, event)
+      path = AgentCoord.event_path(event.fetch("batch_id"), event.fetch("event_id"))
+      begin
+        store.write_json(path, event, message: "Record expired claim #{entry.path}", create: true)
+      rescue Conflict
+        existing = store.read_json(path)
+        raise OperationalError, "claim.expired event conflict at #{path}" unless existing && existing.data == event
+      end
+      current = store.read_json(entry.path)
+      current_matches = current && current.data["expired_event_id"] == event.fetch("event_id") &&
+                        gc_claim_expired_event_payload(current.data, entry.path) == event
+      unless current_matches
+        return true if gc_expired_event_settled_after_claim_advanced?(store, current, claim, entry.path)
+
+        @stderr.puts "warning: claim.expired event identity changed for #{entry.path}; history remains pending"
+        return false
+      end
+
+      settled = gc_clear_expired_event_pending(current.data)
+      begin
+        store.write_json(entry.path, settled, message: "Confirm expired claim event #{entry.path}", sha: current.sha)
+      rescue Conflict
+        latest = store.read_json(entry.path)
+        exact_settled = latest&.data == settled
+        raise unless exact_settled || gc_expired_event_settled_after_claim_advanced?(store, latest, claim, entry.path)
+      end
+      true
+    rescue Error, KeyError, TypeError, SystemCallError => e
+      @stderr.puts "warning: claim.expired event pending for #{entry.path}: #{e.message}"
+      false
+    end
+
+    def gc_expired_event_settled_after_claim_advanced?(store, current, claim, claim_path)
+      current&.data&.fetch("expired_event_pending", false) != true &&
+        gc_expired_event_recorded?(store, claim, claim_path)
+    end
+
+    def gc_clear_expired_event_pending(claim)
+      fields = if claim["status"] == CLAIM_EXPIRED_STATUS
+                 %w[expired_event_pending expired_event_replay]
+               else
+                 EXPIRED_EVENT_PENDING_FIELDS
+               end
+      claim.except(*fields)
+    end
+
+    def gc_expired_event_already_settled?(store, entry)
+      claim = entry.data
+      return false unless claim["status"] == CLAIM_EXPIRED_STATUS && claim["expired_event_pending"].nil?
+
+      current = store.read_json(entry.path)
+      current&.data == claim && gc_expired_event_recorded?(store, claim, entry.path)
+    rescue Error, KeyError, TypeError, SystemCallError
+      false
+    end
+
+    def gc_expired_event_recorded?(store, claim, claim_path)
+      event = gc_claim_expired_event_payload(claim, claim_path)
+      gc_assert_internal_expiry_namespace_available!(store, event)
+      event_path = AgentCoord.event_path(event.fetch("batch_id"), event.fetch("event_id"))
+      immutable = store.read_json(event_path)
+      immutable&.data == event
+    rescue Error, KeyError, TypeError, SystemCallError
+      false
+    end
+
+    def gc_assert_internal_expiry_namespace_available!(store, event)
+      batch_id = event.fetch("batch_id")
+      return unless batch_id == INTERNAL_UNBATCHED_CLAIM_EXPIRY_BATCH_ID
+
+      batch_path = AgentCoord.batch_path(batch_id)
+      archived_path = AgentCoord.archive_path(batch_path)
+      return unless store.read_json(batch_path) || store.read_json(archived_path)
+
+      raise OperationalError, "internal claim expiry namespace collides with existing batch #{batch_id}"
+    end
+
+    def gc_claim_expired_event_payload(claim, claim_path)
+      payload = claim["expired_event_replay"] || {
+        "schema_version" => SCHEMA_VERSION,
+        "event_id" => claim.fetch("expired_event_id"),
+        "batch_id" => claim.fetch("expired_event_batch_id", claim.fetch("batch_id", nil)).to_s,
+        "type" => "claim.expired",
+        "agent_id" => claim["agent_id"],
+        "repo" => claim["repo"],
+        "target" => claim["target"]&.to_s,
+        "branch" => claim["branch"],
+        "status" => CLAIM_EXPIRED_STATUS,
+        "at" => claim.fetch("expired_event_at")
+      }
+      unless claim["expired_event_replay"]
+        METADATA_OPTION_FIELDS.each do |field|
+          payload[field] = claim[field] if claim.key?(field) && !claim[field].nil?
+        end
+      end
+      payload = payload.compact if payload.is_a?(Hash)
+      gc_validate_expired_event_replay!(claim, payload, claim_path)
+    rescue KeyError, TypeError => e
+      raise OperationalError, "claim.expired event pending replay is malformed: #{e.message}"
+    end
+
+    def gc_validate_expired_event_replay!(claim, event, claim_path)
+      raise OperationalError, "claim.expired event pending replay must be an object" unless event.is_a?(Hash)
+
+      if event["batch_id"] == UNBATCHED_CLAIM_EXPIRY_BATCH_ID
+        raise OperationalError, "legacy unbatched claim expiry destination is unsupported"
+      end
+
+      unless gc_valid_expired_event_shape?(event) && gc_expired_event_matches_claim_path?(event, claim_path)
+        raise OperationalError, "claim.expired event pending replay has an invalid generated event shape"
+      end
+
+      expected = {
+        "event_id" => claim.fetch("expired_event_id"),
+        "batch_id" => claim.fetch("expired_event_batch_id", claim.fetch("batch_id", nil)).to_s,
+        "at" => claim.fetch("expired_event_at")
+      }
+      valid = event["type"] == "claim.expired" && event["status"] == CLAIM_EXPIRED_STATUS &&
+              expected.all? { |field, value| event[field] == value }
+      raise OperationalError, "claim.expired event pending replay does not match its marker" unless valid
+
+      AgentCoord.event_path(event.fetch("batch_id"), event.fetch("event_id"))
+      event
+    rescue KeyError, TypeError => e
+      raise OperationalError, "claim.expired event pending replay is malformed: #{e.message}"
+    end
+
+    def gc_valid_expired_event_shape?(event)
+      return false unless valid_stored_json_encoding?(event)
+      return false unless event["schema_version"] == SCHEMA_VERSION
+      return false unless (event.keys - CLAIM_EXPIRED_EVENT_FIELDS).empty?
+      return false unless CLAIM_EXPIRED_EVENT_REQUIRED_FIELDS.all? do |field|
+        gc_valid_expired_event_string?(event[field])
+      end
+      return false unless gc_valid_datetime?(event["at"])
+
+      !event.key?("branch") || gc_valid_expired_event_string?(event["branch"])
+    end
+
+    def gc_valid_expired_event_string?(value)
+      value.is_a?(String) && value.valid_encoding? && !value.strip.empty?
+    end
+
+    def gc_expired_event_matches_claim_path?(event, claim_path)
+      repo, target = gc_canonical_claim_identity(claim_path)
+      event["repo"] == repo && event["target"] == target
+    rescue TypeError
+      false
     end
 
     def gc_archive_record(store, candidate, now, archive_days)
       entry = candidate.fetch(:entry)
       action = candidate.fetch(:action)
       archive_path = action.fetch("archive_path")
-      envelope = gc_archive_envelope(entry, action, now, archive_days)
+      envelope = gc_archive_envelope(entry, action, now, archive_days, reason: candidate.fetch(:archive_reason))
       begin
         store.write_json(archive_path, envelope, message: "Archive #{entry.path}", create: true)
       rescue Conflict
@@ -2391,19 +3014,19 @@ module AgentCoord
       action = candidate.fetch(:action)
       archive_path = action.fetch("archive_path")
       store.delete_json(archive_path, message: "Replace expired archive #{archive_path}", sha: existing.sha)
-      envelope = gc_archive_envelope(entry, action, now, archive_days)
+      envelope = gc_archive_envelope(entry, action, now, archive_days, reason: candidate.fetch(:archive_reason))
       store.write_json(archive_path, envelope, message: "Replace archive #{entry.path}", create: true)
       store.delete_json(entry.path, message: "Archive #{entry.path}", sha: entry.sha)
     rescue Conflict => e
       raise OperationalError, "gc archive replacement changed at #{archive_path}; #{e.message}"
     end
 
-    def gc_archive_envelope(entry, action, now, archive_days)
+    def gc_archive_envelope(entry, action, now, archive_days, reason: action.fetch("reason"))
       {
         "schema_version" => SCHEMA_VERSION,
         "record_family" => "archived_record",
         "source_path" => entry.path,
-        "reason" => action.fetch("reason"),
+        "reason" => reason,
         "synthetic" => entry.data["synthetic"] == true,
         "archived_at" => timestamp(now),
         "delete_after" => timestamp(now + (archive_days * 86_400)),
@@ -2416,7 +3039,10 @@ module AgentCoord
         action = candidate.fetch(:action)
         envelope = case action.fetch("action")
                    when "archive", "replace_archive"
-                     gc_archive_envelope(candidate.fetch(:entry), action, now, archive_days)
+                     gc_archive_envelope(
+                       candidate.fetch(:entry), action, now, archive_days,
+                       reason: candidate.fetch(:archive_reason)
+                     )
                    when "compact"
                      entries = candidate.fetch(:entries)
                      gc_compaction_envelope(entries, gc_compacted_entries(entries), action, now, archive_days)
@@ -2441,16 +3067,22 @@ module AgentCoord
 
       case prefix
       when "claims"
+        return if data["expired_event_pending"] == true
+
+        # A reaped claim is terminal like a released one, so it keeps the same
+        # archive reason code; only its hot window starts at the reap rather
+        # than at the lease it outlived.
+        return ["terminal_claim", gc_record_time(data, "reaped_at", path)] if data["status"] == CLAIM_EXPIRED_STATUS
         return unless data["status"] == "released" || TERMINAL_STATES.include?(data["terminal"])
 
         ["terminal_claim", gc_record_time(data, nil, path)]
       when "heartbeats"
-        if HEARTBEAT_TERMINAL_STATUSES.include?(data["status"])
-          ["terminal_heartbeat", gc_record_time(data, nil, path)]
-        elsif heartbeat_liveness(data, now) == "dead"
-          ["dead_heartbeat", gc_heartbeat_dead_at(data, path)]
-        end
+        gc_heartbeat_archive_eligibility(data, path, now)
       when "batches"
+        # A pre-existing manifest at the reserved internal ID is a permanent
+        # collision sentinel. Archiving it would let a later GC run reuse its
+        # event namespace while the older lineage still exists.
+        return if path == AgentCoord.batch_path(INTERNAL_UNBATCHED_CLAIM_EXPIRY_BATCH_ID)
         return unless data["status"] == "completed"
 
         ["completed_batch", gc_record_time(data, "completed_at", path)]
@@ -2477,10 +3109,46 @@ module AgentCoord
       gc_record_time(data, nil, path)
     end
 
+    def gc_heartbeat_archive_eligibility(data, path, now)
+      holder = gc_heartbeat_holder_from_path(path)
+      liveness = if holder && data["agent_id"] == holder
+                   heartbeat_liveness(data, now)
+                 else
+                   "unknown"
+                 end
+      if liveness != "unknown" && HEARTBEAT_TERMINAL_STATUSES.include?(data["status"])
+        return ["terminal_heartbeat", gc_record_time(data, nil, path)]
+      end
+
+      case liveness
+      when "dead"
+        ["dead_heartbeat", gc_heartbeat_dead_at(data, path)]
+      when "unknown"
+        # Retention may retire an old malformed heartbeat without claiming its
+        # holder is dead. Claim reaping independently treats the same record as
+        # unknown and therefore fails closed.
+        retention_at = gc_heartbeat_retention_time(data)
+        ["aged_heartbeat", retention_at] if retention_at
+      end
+    end
+
+    def gc_heartbeat_retention_time(data)
+      %w[updated_at expires_at at].each do |field|
+        value = data[field]
+        next unless value
+
+        return Time.iso8601(value).utc
+      rescue ArgumentError, TypeError
+        next
+      end
+      nil
+    end
+
     def render_gc_text(payload)
       @stdout.puts "gc #{payload.fetch('mode')} hot=#{payload.dig('policy', 'hot_days')}d " \
                    "archive=#{payload.dig('policy', 'archive_days')}d " \
-                   "synthetic_hot=#{payload.dig('policy', 'synthetic_hot_days')}d"
+                   "synthetic_hot=#{payload.dig('policy', 'synthetic_hot_days')}d " \
+                   "lease_grace=#{payload.dig('policy', 'lease_grace_days')}d"
       if payload.fetch("actions").empty?
         @stdout.puts "- no actions"
       else
@@ -2491,7 +3159,12 @@ module AgentCoord
     def gc_action_text(action)
       source = action["source_path"] || Array(action["source_paths"]).join(",")
       destination = action["archive_path"] ? " -> #{action['archive_path']}" : ""
-      "#{action.fetch('action')} #{source}#{destination} (#{action.fetch('reason')})"
+      outcome = case action["outcome"]
+                when "skipped" then " [skipped: #{action.fetch('skip_reason')}]"
+                when "pending" then " [pending: #{action.fetch('skip_reason')}]"
+                else ""
+                end
+      "#{action.fetch('action')} #{source}#{destination} (#{action.fetch('reason')})#{outcome}"
     end
 
     def deep_option_token?(argv, command:)
@@ -2578,6 +3251,7 @@ module AgentCoord
       path = AgentCoord.claim_path(options.fetch(:repo), options.fetch(:target))
       store = build_store(options)
       existing = store.read_json(path)
+      pending_expired_event = claim_pending_expired_event(existing)
 
       if existing && active_claim_record?(existing.data) && existing.data["agent_id"] != options[:agent_id]
         holder_state = claim_holder_state(store, existing.data, now)
@@ -2586,35 +3260,49 @@ module AgentCoord
         end
       end
 
-      claim_updates = {
-        "schema_version" => SCHEMA_VERSION,
-        "repo" => options.fetch(:repo),
-        "target" => options.fetch(:target).to_s,
-        "agent_id" => options.fetch(:agent_id),
-        "batch_id" => options[:batch_id],
-        "branch" => options[:branch],
-        "status" => "active",
-        "claimed_at" => claim_timestamp(existing, options, now),
-        "updated_at" => timestamp(now),
-        "expires_at" => timestamp(expires_at)
-      }.compact
-      payload = preserved_payload(existing, claim_preserved_fields(existing, options))
-                .merge(claim_updates)
-                .merge(metadata_payload(options))
-                .merge(environment_identity_payload(existing&.data))
-                .compact
+      payload = claim_payload(existing, options, now, expires_at, pending_expired_event)
+      records_acquisition = claim_acquired_event?(existing, options)
+      validate_lifecycle_batch_id!(payload["batch_id"]) if records_acquisition
 
       begin
         write_with_cas(store, path, payload, existing, "Claim #{options[:repo]}##{options[:target]}")
       rescue Conflict => e
         raise OperationalError, "claim write contention for #{options[:repo]}##{options[:target]}; #{e.message}"
       end
-      record_claim_acquired_event(store, payload, now) if claim_acquired_event?(existing, options)
+      record_claim_acquired_event(store, payload, now) if records_acquisition
       @stdout.puts "claimed #{options[:repo]}##{options[:target]} by #{options[:agent_id]} " \
                    "until #{timestamp(expires_at)}"
       0
     ensure
       close_store(store)
+    end
+
+    def claim_pending_expired_event(existing)
+      return unless existing&.data&.fetch("expired_event_pending", false) == true
+
+      gc_claim_expired_event_payload(existing.data, existing.path)
+    end
+
+    def claim_payload(existing, options, now, expires_at, pending_expired_event)
+      updates = {
+        "schema_version" => SCHEMA_VERSION, "repo" => options.fetch(:repo),
+        "target" => options.fetch(:target).to_s, "agent_id" => options.fetch(:agent_id),
+        "batch_id" => options[:batch_id], "branch" => options[:branch], "status" => "active",
+        "claimed_at" => claim_timestamp(existing, options, now), "updated_at" => timestamp(now),
+        "expires_at" => timestamp(expires_at)
+      }.compact
+      payload = preserved_payload(existing, claim_preserved_fields(existing, options))
+                .merge(updates).merge(metadata_payload(options))
+                .merge(environment_identity_payload(existing&.data)).compact
+      return payload unless pending_expired_event
+
+      payload.merge(
+        "expired_event_pending" => true,
+        "expired_event_id" => pending_expired_event.fetch("event_id"),
+        "expired_event_batch_id" => pending_expired_event.fetch("batch_id"),
+        "expired_event_at" => pending_expired_event.fetch("at"),
+        "expired_event_replay" => pending_expired_event
+      )
     end
 
     def release(options)
@@ -2625,6 +3313,9 @@ module AgentCoord
       store = build_store(options)
       existing = store.read_json(path)
       raise Error, "no claim exists for #{options[:repo]}##{options[:target]}" unless existing
+      if existing.data["status"] == CLAIM_EXPIRED_STATUS
+        raise Error, "expired claim must be reacquired before it can be released"
+      end
 
       holder = existing.data["agent_id"]
       if holder && holder != options[:agent_id]
@@ -2646,6 +3337,7 @@ module AgentCoord
       payload["branch"] = options[:branch] if options[:branch]
       payload = terminal_release_payload(payload, options)
       validate_terminal_contract_payload!(payload) if options[:terminal]
+      validate_lifecycle_batch_id!(payload["batch_id"]) unless handoff_release?(options)
 
       if options[:terminal]
         close_terminal_release(store, existing, payload, now, options)
@@ -2691,7 +3383,8 @@ module AgentCoord
         @stdout.puts "retention_policy: " \
                      "hot=#{payload.dig('retention_policy', 'hot_days')}d," \
                      "archive=#{payload.dig('retention_policy', 'archive_days')}d," \
-                     "synthetic_hot=#{payload.dig('retention_policy', 'synthetic_hot_days')}d"
+                     "synthetic_hot=#{payload.dig('retention_policy', 'synthetic_hot_days')}d," \
+                     "lease_grace=#{payload.dig('retention_policy', 'lease_grace_days')}d"
         @stdout.puts "dependency_terminal_statuses: #{payload.fetch('dependency_terminal_statuses').join(',')}"
         @stdout.puts "heartbeat_working_statuses: #{payload.dig('heartbeat_status_vocabulary', 'working').join(',')}"
         @stdout.puts "heartbeat_terminal_statuses: #{payload.dig('heartbeat_status_vocabulary', 'terminal').join(',')}"
@@ -3846,12 +4539,14 @@ module AgentCoord
       prior_record = nil
       upsert_json(store, path, message: "Heartbeat #{options[:agent_id]}") do |existing|
         prior_record = existing&.data
-        preserved_payload(existing, heartbeat_preserved_fields(existing, options))
-          .merge(payload)
-          .merge(metadata_payload(options))
-          .merge(environment_identity_payload(existing&.data))
-          .merge(status_attribution_payload(options))
-          .compact
+        next_payload = preserved_payload(existing, heartbeat_preserved_fields(existing, options))
+                       .merge(payload)
+                       .merge(metadata_payload(options))
+                       .merge(environment_identity_payload(existing&.data))
+                       .merge(status_attribution_payload(options))
+                       .compact
+        validate_phase_change_batch_id!(options, prior_record)
+        next_payload
       end
       record_phase_change_event(store, options, prior_record, now)
       @stdout.puts "heartbeat #{options[:agent_id]} #{timestamp(now)}"
@@ -3890,6 +4585,20 @@ module AgentCoord
 
       options[:status_raw] = canonical == raw ? nil : raw
       options[:status] = canonical
+    end
+
+    # claim.expired is a closed lifecycle fact rather than a heartbeat status.
+    # Give it the same case/hyphen folding and raw-spelling attribution as the
+    # shared vocabulary without warning that its one valid status is unknown.
+    def normalize_claim_expired_status_option!(options)
+      raw = options[:status]
+      return if raw.nil?
+
+      canonical = raw.downcase.tr("-", "_")
+      return unless canonical == CLAIM_EXPIRED_STATUS
+
+      options[:status] = canonical
+      options[:status_raw] = canonical == raw ? nil : raw
     end
 
     def warn_unknown_status(raw)
@@ -4057,6 +4766,8 @@ module AgentCoord
         raise Error, "--batch-id does not match batch manifest batch_id"
       end
 
+      validate_producer_batch_id!(batch_id)
+
       now = now_utc
       path = AgentCoord.batch_path(batch_id)
       payload = manifest.merge(
@@ -4095,6 +4806,7 @@ module AgentCoord
 
     def record_event(options)
       require_options(options, :batch_id, :type)
+      normalize_claim_expired_status_option!(options) if options[:type] == "claim.expired" && options[:status_given]
       validate_record_event_options!(options)
 
       store = build_store(options)
@@ -4103,7 +4815,7 @@ module AgentCoord
         close_terminal_event(store, options, now, output: true)
         return 0
       end
-      normalize_status_option!(options) if options[:status_given]
+      normalize_status_option!(options) if options[:status_given] && options[:type] != "claim.expired"
       write_event_record(store, options, now, output: true)
       0
     ensure
@@ -4260,7 +4972,7 @@ module AgentCoord
                           existing.fetch("created_at")].compact.max_by { |value| parse_time(value) }
       now = now_utc
       refreshed_at = if now > parse_time(latest_stored_at)
-                       attention_timestamp(now)
+                       precise_timestamp(now)
                      else
                        latest_stored_at
                      end
@@ -4331,6 +5043,7 @@ module AgentCoord
     end
 
     def write_event_record(store, options, now, output:)
+      validate_lifecycle_batch_id!(options.fetch(:batch_id))
       3.times do
         event_id = build_event_id(now)
         path = AgentCoord.event_path(options.fetch(:batch_id), event_id)
@@ -4446,6 +5159,23 @@ module AgentCoord
     # assignment (no prior phase) is captured by claim.acquired instead, so it is
     # not treated as a transition here; repeated same-phase beats emit nothing.
     def record_phase_change_event(store, options, prior_record, now)
+      context = phase_change_event_context(options, prior_record)
+      return unless context
+
+      batch_id, prior_phase, prior_data = context
+
+      event_options = phase_change_event_options(options, batch_id, prior_phase, prior_data)
+      write_event_record(store, event_options, now, output: false)
+    rescue Error, SystemCallError => e
+      @stderr.puts "warning: phase.changed event not recorded: #{e.message}"
+    end
+
+    def validate_phase_change_batch_id!(options, prior_record)
+      context = phase_change_event_context(options, prior_record)
+      validate_lifecycle_batch_id!(context.first) if context
+    end
+
+    def phase_change_event_context(options, prior_record)
       new_phase = options[:phase]
       return if new_phase.nil?
 
@@ -4459,12 +5189,13 @@ module AgentCoord
       return if heartbeat_lane_changed?(options, prior_data)
 
       batch_id = options[:batch_id] || prior_data["batch_id"]
-      return if batch_id.to_s.empty?
+      [batch_id, prior_phase, prior_data] unless batch_id.to_s.empty?
+    end
 
-      event_options = phase_change_event_options(options, batch_id, prior_phase, prior_data)
-      write_event_record(store, event_options, now, output: false)
-    rescue Error, SystemCallError => e
-      @stderr.puts "warning: phase.changed event not recorded: #{e.message}"
+    def validate_lifecycle_batch_id!(batch_id)
+      return unless reserved_claim_expiry_batch_id?(batch_id)
+
+      raise Error, "batch-id #{batch_id.inspect} is reserved for unbatched claim expiry history"
     end
 
     def phase_change_event_options(options, batch_id, prior_phase, prior_data)
@@ -4489,6 +5220,10 @@ module AgentCoord
     def validate_record_event_options!(options)
       AgentCoord.batch_path(options.fetch(:batch_id))
       AgentCoord.validate_segment!(options.fetch(:type), "event type")
+      if options[:type] == "claim.expired" && (!options[:status_given] || options[:status] != CLAIM_EXPIRED_STATUS)
+        raise Error, "claim.expired requires --status expired"
+      end
+
       validate_terminal_options!(options, event: true) if options[:type] == "lane_closed"
       validate_typed_event_options!(options)
       return unless options.key?(:lane)
@@ -4562,7 +5297,7 @@ module AgentCoord
         "evidence_url" => options[:evidence_url],
         "workspace" => terminal_event?(options) ? options.fetch(:workspace, DEFAULT_WORKSPACE) : options[:workspace],
         "closed_by" => terminal_event?(options) ? closed_by_payload(options) : nil,
-        "at" => timestamp(now)
+        "at" => precise_timestamp(now)
       }
       payload["status"] = options[:status] if options[:status_given]
       payload["status_raw"] = options[:status_raw] if options[:status_given] && options[:status_raw]
@@ -6631,6 +7366,8 @@ module AgentCoord
         !event.key?("status") || event["status"] == "active"
       when "claim.released"
         !event.key?("status") || event["status"] == "released"
+      when "claim.expired"
+        event["status"] == CLAIM_EXPIRED_STATUS
       when "phase.changed"
         batch_audit_valid_phase_change?(event)
       end
@@ -7812,16 +8549,29 @@ module AgentCoord
       claim["status"] == "active"
     end
 
-    def claim_holder_state(store, claim, now)
+    def claim_holder_state(store, claim, now, holder_heartbeats = nil, fresh: false)
       holder = claim["agent_id"].to_s
-      heartbeat = holder.empty? ? nil : read_holder_heartbeat(store, holder)
+      return fallback_holder_state(claim, now, "unknown") unless valid_claim_holder_identity?(holder)
+
+      heartbeat = holder.empty? ? nil : holder_heartbeat(store, holder, holder_heartbeats, fresh:)
       return fallback_holder_state(claim, now, "invalid") if heartbeat == :invalid
+      return fallback_holder_state(claim, now, "invalid") if heartbeat && !heartbeat.data.is_a?(Hash)
+      return fallback_holder_state(claim, now, "unknown") if heartbeat && heartbeat.data["agent_id"] != holder
 
       liveness = heartbeat && heartbeat_liveness(heartbeat.data, now)
 
       return { liveness: liveness } if %w[live stale dead].include?(liveness)
 
       fallback_holder_state(claim, now, heartbeat ? "unknown" : "missing")
+    end
+
+    def valid_claim_holder_identity?(holder)
+      return false if holder.empty?
+
+      AgentCoord.validate_segment!(holder, "agent-id")
+      true
+    rescue Error
+      false
     end
 
     def fallback_holder_state(claim, now, liveness)
@@ -7832,8 +8582,19 @@ module AgentCoord
       }
     end
 
-    def read_holder_heartbeat(store, holder)
-      store.read_json(AgentCoord.heartbeat_path(holder))
+    # gc inspects every claim in one pass and the fleet concentrates claims on
+    # a handful of holders, so a caller may hand in a memo to keep one gc run
+    # from issuing one heartbeat round trip per claim. The memo belongs to the
+    # caller and dies with the run; nothing here is global.
+    def holder_heartbeat(store, holder, memo = nil, fresh: false)
+      return read_holder_heartbeat(store, holder, fresh:) unless memo
+
+      memo.fetch(holder) { memo[holder] = read_holder_heartbeat(store, holder, fresh:) }
+    end
+
+    def read_holder_heartbeat(store, holder, fresh: false)
+      method = fresh && store.respond_to?(:read_json_fresh) ? :read_json_fresh : :read_json
+      store.public_send(method, AgentCoord.heartbeat_path(holder))
     rescue OperationalError
       raise
     rescue JSON::ParserError
@@ -7871,7 +8632,7 @@ module AgentCoord
       updated_at = parse_time(heartbeat.fetch("updated_at"))
       expires_at = parse_time(heartbeat.fetch("expires_at"))
       ttl = expires_at - updated_at
-      return "dead" unless ttl.positive?
+      return "unknown" unless ttl.positive?
       return "live" if now < expires_at
       return "stale" if now < updated_at + (HEARTBEAT_DEAD_AFTER_TTL_MULTIPLIER * ttl)
 
@@ -8176,7 +8937,7 @@ module AgentCoord
       time.utc.iso8601
     end
 
-    def attention_timestamp(time)
+    def precise_timestamp(time)
       utc = time.utc
       return utc.iso8601 if utc.nsec.zero?
 
@@ -8201,7 +8962,8 @@ module AgentCoord
         "retention_policy" => {
           "hot_days" => DEFAULT_HOT_DAYS,
           "archive_days" => DEFAULT_ARCHIVE_DAYS,
-          "synthetic_hot_days" => DEFAULT_SYNTHETIC_HOT_DAYS
+          "synthetic_hot_days" => DEFAULT_SYNTHETIC_HOT_DAYS,
+          "lease_grace_days" => DEFAULT_LEASE_GRACE_DAYS
         },
         "dependency_terminal_statuses" => DEPENDENCY_DONE_STATUSES,
         "heartbeat_status_vocabulary" => {
@@ -8805,6 +9567,21 @@ module AgentCoord
 
         raise OperationalError, "state layout invalid: #{prefix} is not a directory"
       end
+    end
+
+    # GC's apply boundary must not reuse the planning read. This explicit public
+    # seam keeps cache management inside GitHubStore while preserving ordinary
+    # cached reads everywhere else.
+    def read_json_fresh(path)
+      invalidate_read_cache(path)
+      read_json(path)
+    end
+
+    def list_json_fresh(prefix, maximum: nil, status: nil, &on_error)
+      AgentCoord.safe_path!(prefix)
+      @json_cache.delete_if { |path, _entry| path.start_with?("#{prefix}/") }
+      remove_instance_variable(:@tree_nodes) if defined?(@tree_nodes)
+      list_json(prefix, maximum:, status:, &on_error)
     end
 
     private
