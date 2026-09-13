@@ -137,6 +137,7 @@ module AgentCoord
   MACHINE_MATCH_UNVERIFIED = "unverified"
   LANE_IDENTITY_UNKNOWN = "UNKNOWN"
   JSON_PREFIXES = %w[claims heartbeats batches].freeze
+  HOST_LIMIT_PREFIX = "host_limits"
   STATE_PREFIXES = (JSON_PREFIXES + %w[events attention archive]).freeze
   ATTENTION_PRIORITIES = %w[urgent-risk unblocks-work current-head-merge product-architecture].freeze
   ATTENTION_CAPABILITY_STATES = %w[available unavailable unknown].freeze
@@ -147,17 +148,36 @@ module AgentCoord
   MAX_ATTENTION_RECORD_BYTES = 256 * 1024
   MAX_ATTENTION_KEY_COMPONENT_LENGTH = 160
   MAX_ATTENTION_TIMESTAMP_LENGTH = 64
+  MAX_ACTIVE_STATE_PATH_BYTES = 512
+  MAX_ARCHIVE_STATE_PATH_BYTES = 520
+  HOST_LIMIT_CANONICAL_PATTERN = /\A[a-z0-9](?:[a-z0-9._-]{0,126}[a-z0-9])?\z/
+  HOST_LIMIT_CANONICAL_COMPONENT = /[a-z0-9](?:[a-z0-9._-]{0,126}[a-z0-9])?/
+  HOST_LIMIT_SOURCES = %w[manual host-message hook probe].freeze
+  HOST_LIMIT_ENCODED_COMPONENT = /(?:[A-Za-z0-9_-]|%[0-9A-F]{2})+/
+  HOST_LIMIT_RECORD_PATH = %r{
+    host_limits/
+    #{HOST_LIMIT_ENCODED_COMPONENT}/#{HOST_LIMIT_ENCODED_COMPONENT}/
+    #{HOST_LIMIT_CANONICAL_COMPONENT}/#{HOST_LIMIT_CANONICAL_COMPONENT}\.json
+  }x
+  HOST_LIMIT_DIRECTORY_PREFIX = %r{
+    host_limits
+    (?:/#{HOST_LIMIT_ENCODED_COMPONENT}
+      (?:/#{HOST_LIMIT_ENCODED_COMPONENT}(?:/#{HOST_LIMIT_CANONICAL_COMPONENT})?)?
+    )?
+  }x
   STATE_PATH_PATTERN = %r{\A(?:
     claims/[A-Za-z0-9_.:-]+/[A-Za-z0-9_.:-]+/[A-Za-z0-9_.:-]+\.json |
     heartbeats/[A-Za-z0-9_.:-]+\.json |
     batches/[A-Za-z0-9_.:-]+\.json |
     events/[A-Za-z0-9_.:-]+/[A-Za-z0-9_.:-]+\.json |
+    #{HOST_LIMIT_RECORD_PATH} |
     attention/[A-Za-z0-9_.:-]+/[A-Za-z0-9_.:-]+/[A-Za-z0-9_.:-]+/[A-Za-z0-9_.:-]+\.json |
     archive/(?:(?:
       claims/[A-Za-z0-9_.:-]+/[A-Za-z0-9_.:-]+/[A-Za-z0-9_.:-]+\.json |
       heartbeats/[A-Za-z0-9_.:-]+\.json |
       batches/[A-Za-z0-9_.:-]+\.json |
-      events/[A-Za-z0-9_.:-]+/[A-Za-z0-9_.:-]+\.json
+      events/[A-Za-z0-9_.:-]+/[A-Za-z0-9_.:-]+\.json |
+      #{HOST_LIMIT_RECORD_PATH}
     ))
   )\z}x
   STATE_DIRECTORY_PREFIX_PATTERN = %r{\A(?:
@@ -165,12 +185,14 @@ module AgentCoord
     heartbeats |
     batches |
     events(?:/[A-Za-z0-9_.:-]+)? |
+    #{HOST_LIMIT_DIRECTORY_PREFIX} |
     attention(?:/[A-Za-z0-9_.:-]+(?:/[A-Za-z0-9_.:-]+(?:/[A-Za-z0-9_.:-]+)?)?)? |
     archive(?:/(?:
       claims(?:/[A-Za-z0-9_.:-]+(?:/[A-Za-z0-9_.:-]+)?)? |
       heartbeats |
       batches |
-      events(?:/[A-Za-z0-9_.:-]+)?
+      events(?:/[A-Za-z0-9_.:-]+)? |
+      #{HOST_LIMIT_DIRECTORY_PREFIX}
     ))?
   )\z}x
   # Canonical heartbeat/event status vocabulary. Multi-word values are
@@ -501,6 +523,7 @@ module AgentCoord
     KNOWN_COMMANDS = %w[
       claim release heartbeat register-batch record-event status log batch-audit
       attention-upsert attention-resolve attention-get attention-list
+      report-host-limit clear-host-limit
       gc version config doctor bootstrap demo
     ].freeze
 
@@ -535,6 +558,10 @@ module AgentCoord
         attention_get(parse_options(command, @argv))
       when "attention-list"
         attention_list(parse_options(command, @argv))
+      when "report-host-limit"
+        report_host_limit(parse_options(command, @argv))
+      when "clear-host-limit"
+        clear_host_limit(parse_options(command, @argv))
       when "gc"
         gc(parse_options(command, @argv))
       when "version"
@@ -1065,6 +1092,10 @@ module AgentCoord
                      read one exact attention record
           attention-list
                      list a bounded repository attention view
+          report-host-limit
+                     manually report a machine and quota-host limit
+          clear-host-limit
+                     manually clear a reported host limit
           gc         archive and purge terminal coordination state
           version    print CLI contract version
           config     inspect or safely persist global user configuration
@@ -1141,6 +1172,7 @@ module AgentCoord
       add_status_options(opts, options, command)
       add_log_options(opts, options, command)
       add_attention_options(opts, options, command)
+      add_host_limit_options(opts, options, command)
       add_bootstrap_options(opts, options)
       add_config_set_options(opts, options, command)
       add_help_option(opts)
@@ -1331,7 +1363,8 @@ module AgentCoord
               "days past a claim lease before it is reaped (default: #{DEFAULT_LEASE_GRACE_DAYS})") do |value|
         options[:lease_grace_days] = value
       end
-      opts.on("--prefix PREFIX", "hot family to scan: claims, heartbeats, batches, or events (repeatable)") do |value|
+      opts.on("--prefix PREFIX",
+              "hot family to scan: claims, heartbeats, batches, host_limits, or events (repeatable)") do |value|
         (options[:prefixes] ||= []) << value
       end
     end
@@ -1385,6 +1418,19 @@ module AgentCoord
       end
     end
 
+    def add_host_limit_options(opts, options, command)
+      return unless %w[report-host-limit clear-host-limit].include?(command)
+
+      opts.on("--machine MACHINE", "stable coordination-machine identifier") { |value| options[:machine] = value }
+      opts.on("--quota-host HOST", "provider-neutral quota-pool identifier") { |value| options[:quota_host] = value }
+      opts.on("--scope SCOPE", "quota window or limit class") { |value| options[:host_limit_scope] = value }
+      return unless command == "report-host-limit"
+
+      opts.on("--resets-at TIME", "known RFC 3339 reset time; omit when unknown") do |value|
+        options[:resets_at] = value
+      end
+    end
+
     def add_bootstrap_options(opts, options)
       opts.on("--install-dir PATH", "bootstrap install directory") { |value| options[:install_dir] = value }
       opts.on("--status-state-root PATH", "install agent-coord with a local status state root") do |value|
@@ -1421,6 +1467,7 @@ module AgentCoord
       validate_doctor_prefix!(command, options)
       validate_closeout_option_usage!(command, options)
       validate_attention_option_usage!(command, options)
+      validate_host_limit_option_usage!(command, options)
       validate_register_batch_option_usage!(command, options)
       validate_config_set_backend_option_usage!(command, options)
       validate_user_config_bypass_option_usage!(command, options)
@@ -1499,7 +1546,9 @@ module AgentCoord
       return unless options[:stack_json]
 
       family = prefix.split("/", 2).first
-      raise PathValidationError, "unknown doctor prefix family: #{family}" unless STATE_PREFIXES.include?(family)
+      unless (STATE_PREFIXES + [HOST_LIMIT_PREFIX]).include?(family)
+        raise PathValidationError, "unknown doctor prefix family: #{family}"
+      end
       return if AgentCoord.state_directory_prefix?(prefix) || AgentCoord.state_record_path?(prefix)
 
       raise PathValidationError, "invalid doctor prefix shape: #{prefix}"
@@ -1514,7 +1563,8 @@ module AgentCoord
 
     def validate_closeout_option_usage!(command, options)
       fields = %i[terminal pr_state evidence_url workspace]
-      fields -= [:workspace] if command.start_with?("attention-")
+      fields -= [:workspace] if command.start_with?("attention-") ||
+                                %w[report-host-limit clear-host-limit].include?(command)
       supplied = fields.select { |field| options.key?(field) }
       return if supplied.empty?
 
@@ -1541,9 +1591,17 @@ module AgentCoord
       raise Error, "--#{flag} is not valid for attention-upsert; #{flag} comes from --record-json"
     end
 
+    def validate_host_limit_option_usage!(command, options)
+      return if %w[report-host-limit clear-host-limit].include?(command)
+      return unless options.key?(:quota_host) || options.key?(:host_limit_scope) || options.key?(:resets_at)
+
+      raise Error, "host-limit options are only valid for report-host-limit or clear-host-limit"
+    end
+
     def backend_command?(command)
       %w[claim release heartbeat register-batch record-event status log batch-audit gc doctor
-         attention-upsert attention-resolve attention-get attention-list].include?(command)
+         attention-upsert attention-resolve attention-get attention-list
+         report-host-limit clear-host-limit].include?(command)
     end
 
     def default_options
@@ -1749,7 +1807,8 @@ module AgentCoord
     # Commands that mutate coordination state. gc only prunes an already chosen
     # root, and read commands keep the advisory warning, so neither hard stops.
     def split_brain_write_command?(command)
-      %w[claim release heartbeat record-event register-batch attention-upsert attention-resolve].include?(command)
+      %w[claim release heartbeat record-event register-batch attention-upsert attention-resolve
+         report-host-limit clear-host-limit].include?(command)
     end
 
     # Commands that surface the split-brain condition themselves, and so must not
@@ -1951,8 +2010,24 @@ module AgentCoord
         opts.separator "    --terminal STATE            close as done, abandoned, or superseded"
         opts.separator "    --pr-state STATE            final pull request state"
         opts.separator ""
+      when "report-host-limit", "clear-host-limit"
+        add_host_limit_command_help(opts, command)
       end
       add_split_brain_command_help(opts) if split_brain_write_command?(command)
+    end
+
+    def add_host_limit_command_help(opts, command)
+      opts.separator ""
+      opts.separator "Manual host-limit state:"
+      opts.separator "    --workspace WORKSPACE  workspace (default: #{DEFAULT_WORKSPACE})"
+      opts.separator "    --machine MACHINE      stable coordination-machine identifier"
+      opts.separator "    --quota-host HOST      provider-neutral quota-pool identifier"
+      opts.separator "    --scope SCOPE          quota window or limit class"
+      if command == "report-host-limit"
+        opts.separator "    --resets-at TIME       known RFC 3339 reset time; omit when unknown"
+      end
+      opts.separator "Source is always manual; lane --host is never used as quota_host."
+      opts.separator ""
     end
 
     def add_split_brain_command_help(opts)
@@ -2035,7 +2110,8 @@ module AgentCoord
       opts.separator "    --synthetic-hot-days DAYS  synthetic hot retention (default: #{DEFAULT_SYNTHETIC_HOT_DAYS})"
       opts.separator "    --lease-grace-days DAYS  grace past a claim lease before reaping " \
                      "(default: #{DEFAULT_LEASE_GRACE_DAYS})"
-      opts.separator "    --prefix PREFIX  scan one hot family; repeat for claims, heartbeats, batches, events"
+      opts.separator "    --prefix PREFIX  scan one hot family; repeat for claims, heartbeats, batches, " \
+                     "host_limits, events"
       opts.separator "Exactly one mode is required."
       opts.separator ""
     end
@@ -2091,15 +2167,17 @@ module AgentCoord
     end
 
     def gc_prefixes(values)
-      prefixes = values || (JSON_PREFIXES + ["events"])
-      invalid = prefixes.reject { |value| (JSON_PREFIXES + ["events"]).include?(value) }
-      raise Error, "--prefix must be one of: claims, heartbeats, batches, events" unless invalid.empty?
+      allowed = JSON_PREFIXES + [HOST_LIMIT_PREFIX, "events"]
+      prefixes = values || allowed
+      invalid = prefixes.reject { |value| allowed.include?(value) }
+      raise Error, "--prefix must be one of: claims, heartbeats, batches, host_limits, events" unless invalid.empty?
 
       prefixes.uniq
     end
 
     def gc_candidates(store, now, hot_days, synthetic_hot_days, prefixes)
-      archive_candidates = gc_archive_candidates(store, now, hot_days, synthetic_hot_days, prefixes & JSON_PREFIXES)
+      record_prefixes = JSON_PREFIXES + [HOST_LIMIT_PREFIX]
+      archive_candidates = gc_archive_candidates(store, now, hot_days, synthetic_hot_days, prefixes & record_prefixes)
       compaction_candidates = if prefixes.include?("events")
                                 gc_compaction_candidates(store, now, hot_days, synthetic_hot_days)
                               else
@@ -3086,6 +3164,11 @@ module AgentCoord
         return unless data["status"] == "completed"
 
         ["completed_batch", gc_record_time(data, "completed_at", path)]
+      when "host_limits"
+        validate_stored_host_limit!(entry)
+        return unless data["status"] == "cleared"
+
+        ["cleared_host_limit", gc_record_time(data, "cleared_at", path)]
       end
     end
 
@@ -4942,6 +5025,135 @@ module AgentCoord
       0
     ensure
       close_store(store) if store
+    end
+
+    def report_host_limit(options)
+      require_options(options, :machine, :quota_host, :host_limit_scope)
+      workspace = options.fetch(:workspace, DEFAULT_WORKSPACE)
+      quota_host = canonical_host_limit_value(options.fetch(:quota_host), "quota-host", normalize: true)
+      scope = canonical_host_limit_value(options.fetch(:host_limit_scope), "scope")
+      path = AgentCoord.host_limit_path(workspace, options.fetch(:machine), quota_host, scope)
+      resets_at = options[:resets_at] && host_limit_timestamp!(options[:resets_at], "resets-at")
+      store = build_store(options)
+      existing = store.read_json(path)
+      validate_stored_host_limit!(existing) if existing
+      payload = {
+        "schema_version" => SCHEMA_VERSION,
+        "workspace" => workspace,
+        "machine" => options.fetch(:machine),
+        "quota_host" => quota_host,
+        "scope" => scope,
+        "status" => "active",
+        "observed_at" => existing&.data&.fetch("observed_at", nil) || timestamp(now_utc),
+        "resets_at" => resets_at,
+        "source" => existing&.data&.fetch("source", nil) || "manual"
+      }
+      validate_host_limit_record!(payload)
+      write_with_cas(store, path, payload, existing, "Report host limit #{quota_host}/#{scope}")
+      emit_payload({ "record" => payload }, options) do
+        @stdout.puts "reported host limit #{quota_host}/#{scope} on #{log_scrub(options.fetch(:machine))}"
+      end
+      0
+    ensure
+      close_store(store) if store
+    end
+
+    def clear_host_limit(options)
+      require_options(options, :machine, :quota_host, :host_limit_scope)
+      workspace = options.fetch(:workspace, DEFAULT_WORKSPACE)
+      quota_host = canonical_host_limit_value(options.fetch(:quota_host), "quota-host", normalize: true)
+      scope = canonical_host_limit_value(options.fetch(:host_limit_scope), "scope")
+      path = AgentCoord.host_limit_path(workspace, options.fetch(:machine), quota_host, scope)
+      store = build_store(options)
+      existing = store.read_json(path)
+      raise OperationalError, "host-limit record not found: #{quota_host}/#{scope}" unless existing
+
+      validate_stored_host_limit!(existing)
+      if existing.data.fetch("status") == "cleared"
+        emit_payload({ "record" => existing.data }, options) do
+          @stdout.puts "cleared host limit #{quota_host}/#{scope} on #{log_scrub(options.fetch(:machine))}"
+        end
+        return 0
+      end
+
+      cleared_at = now_utc
+      observed_at = Time.iso8601(existing.data.fetch("observed_at")).utc
+      raise OperationalError, "cannot clear host-limit record before observed_at" if cleared_at < observed_at
+
+      payload = existing.data.merge("status" => "cleared", "cleared_at" => timestamp(cleared_at))
+      validate_host_limit_record!(payload)
+      write_with_cas(store, path, payload, existing, "Clear host limit #{quota_host}/#{scope}")
+      emit_payload({ "record" => payload }, options) do
+        @stdout.puts "cleared host limit #{quota_host}/#{scope} on #{log_scrub(options.fetch(:machine))}"
+      end
+      0
+    ensure
+      close_store(store) if store
+    end
+
+    def canonical_host_limit_value(value, field, normalize: false)
+      text = value.to_s
+      text = text.strip.downcase if normalize
+      return text if text.match?(HOST_LIMIT_CANONICAL_PATTERN)
+
+      raise Error, "invalid host-limit #{field}: #{log_scrub(value)}"
+    end
+
+    def host_limit_timestamp!(value, field)
+      raise Error, "host-limit #{field} must be an RFC 3339 timestamp" unless gc_valid_datetime?(value)
+
+      timestamp(Time.iso8601(value).utc)
+    end
+
+    def validate_stored_host_limit!(entry)
+      stored_path = log_scrub(entry.path)
+      validate_host_limit_record!(entry.data)
+      expected = AgentCoord.host_limit_path(
+        entry.data.fetch("workspace"), entry.data.fetch("machine"), entry.data.fetch("quota_host"),
+        entry.data.fetch("scope")
+      )
+      unless entry.path == expected
+        raise OperationalError,
+              "stored host-limit identity does not match path #{stored_path}"
+      end
+    rescue Error, KeyError, TypeError => e
+      raise OperationalError, "invalid stored host-limit record at #{stored_path}: #{log_scrub(e.message)}"
+    end
+
+    def validate_host_limit_record!(record)
+      raise Error, "host-limit record must be a JSON object" unless record.is_a?(Hash)
+
+      required = %w[schema_version workspace machine quota_host scope status observed_at resets_at source]
+      allowed = required + ["cleared_at"]
+      missing = required.reject { |field| record.key?(field) }
+      unknown = record.keys - allowed
+      raise Error, "host-limit record missing #{missing.first}" unless missing.empty?
+      raise Error, "host-limit record contains unknown field #{log_scrub(unknown.first)}" unless unknown.empty?
+      raise Error, "host-limit schema_version must be 1" unless record["schema_version"] == SCHEMA_VERSION
+
+      AgentCoord.host_limit_path(
+        record.fetch("workspace"), record.fetch("machine"), record.fetch("quota_host"), record.fetch("scope")
+      )
+      raise Error, "host-limit status must be active or cleared" unless %w[active cleared].include?(record["status"])
+      raise Error, "invalid host-limit source" unless HOST_LIMIT_SOURCES.include?(record["source"])
+
+      host_limit_timestamp!(record["observed_at"], "observed-at")
+      host_limit_timestamp!(record["resets_at"], "resets-at") unless record["resets_at"].nil?
+      validate_host_limit_clear!(record)
+      record
+    end
+
+    def validate_host_limit_clear!(record)
+      if record["status"] == "cleared"
+        raise Error, "cleared host-limit record requires cleared_at" unless record.key?("cleared_at")
+
+        host_limit_timestamp!(record["cleared_at"], "cleared-at")
+        if Time.iso8601(record.fetch("cleared_at")) < Time.iso8601(record.fetch("observed_at"))
+          raise Error, "host-limit cleared_at must not precede observed_at"
+        end
+      elsif record.key?("cleared_at")
+        raise Error, "active host-limit record must not contain cleared_at"
+      end
     end
 
     def attention_upsert_payload(requested, existing)
@@ -7128,7 +7340,7 @@ module AgentCoord
       if options[:json]
         @stdout.puts JSON.pretty_generate(payload)
       else
-        render_status_text(payload)
+        render_status_text(payload, now)
       end
       0
     rescue JSON::ParserError => e
@@ -7552,8 +7764,9 @@ module AgentCoord
       malformed_names = malformed_batch_lane_names(grouped.fetch("batches"))
       section_notes["lanes"] = "malformed lane names: #{malformed_names.join(', ')}" unless malformed_names.empty?
       event_entries = status_event_entries(store, "events", section_notes)
+      host_limit_entries = status_host_limit_entries(store, section_notes)
 
-      status_payload(
+      payload = status_payload(
         scope: { "kind" => "all" },
         section_notes: section_notes,
         claim_entries: grouped.fetch("claims"),
@@ -7564,6 +7777,8 @@ module AgentCoord
         lane_states: lane_states,
         now: now
       )
+      payload["host_limits"] = host_limit_status_records(host_limit_entries)
+      payload
     end
 
     def target_status_payload(store, options, now)
@@ -8007,7 +8222,7 @@ module AgentCoord
     end
     # rubocop:enable Metrics/ParameterLists
 
-    def render_status_text(payload)
+    def render_status_text(payload, now)
       @stdout.puts "claims"
       if payload.fetch("claims").empty?
         @stdout.puts "- #{status_section_note(payload, 'claims') || 'none'}"
@@ -8034,6 +8249,8 @@ module AgentCoord
                        "#{heartbeat.fetch('target')} updated #{heartbeat.fetch('updated_at')}"
         end
       end
+
+      render_status_host_limits(payload, now)
 
       @stdout.puts "batches"
       if payload.fetch("batches").to_a.empty?
@@ -8066,6 +8283,35 @@ module AgentCoord
         "archived_at" => data.fetch("archived_at", "UNKNOWN"),
         "delete_after" => data.fetch("delete_after", "UNKNOWN")
       }.compact
+    end
+
+    def render_status_host_limits(payload, now)
+      return unless payload.key?("host_limits")
+
+      @stdout.puts "host_limits"
+      records = payload.fetch("host_limits", [])
+      if records.empty?
+        @stdout.puts "- #{status_section_note(payload, 'host_limits') || 'none'}"
+        return
+      end
+
+      records.each do |record|
+        reset = record["resets_at"] || "unknown"
+        details = [
+          "- schema_version #{record.fetch('schema_version')}",
+          "workspace #{log_scrub(record.fetch('workspace'))}",
+          "machine #{log_scrub(record.fetch('machine'))}",
+          "quota_host #{record.fetch('quota_host')}",
+          "scope #{record.fetch('scope')}",
+          "status #{record.fetch('status')}",
+          "effective #{host_limit_effective?(record, now)}",
+          "observed_at #{record.fetch('observed_at')}",
+          "resets_at #{reset}",
+          "source #{record.fetch('source')}"
+        ]
+        details << "cleared_at #{record.fetch('cleared_at')}" if record.key?("cleared_at")
+        @stdout.puts details.join(" ")
+      end
     end
 
     def render_status_archive(payload)
@@ -8112,6 +8358,21 @@ module AgentCoord
         "target" => target,
         "updated_at" => data.fetch("updated_at", "UNKNOWN")
       }.merge(status_metadata(data, STATUS_HEARTBEAT_METADATA_FIELDS))
+    end
+
+    def host_limit_status_records(entries)
+      records = entries.map do |entry|
+        validate_stored_host_limit!(entry)
+        entry.data.dup
+      end
+      records.sort_by { |record| %w[workspace machine quota_host scope].map { |field| record.fetch(field) } }
+    end
+
+    def host_limit_effective?(record, now)
+      return false unless record.fetch("status") == "active"
+
+      resets_at = record.fetch("resets_at")
+      resets_at.nil? || Time.iso8601(resets_at).utc > now
     end
 
     def batch_status_hash(entry, heartbeats_by_agent, lane_states, now)
@@ -8229,6 +8490,25 @@ module AgentCoord
           "events not readable by scoped token"
         else
           "event state not supported by backend"
+        end
+      []
+    end
+
+    def status_host_limit_entries(store, section_notes)
+      entries = store.list_json(HOST_LIMIT_PREFIX)
+      if filtered_status_list?(store, HOST_LIMIT_PREFIX)
+        section_notes[HOST_LIMIT_PREFIX] = "host_limits filtered by scoped token"
+      end
+      entries
+    rescue OperationalError => e
+      degradation = listing_degradation(e, HOST_LIMIT_PREFIX)
+      raise unless store.is_a?(HttpStore) && degradation
+
+      section_notes[HOST_LIMIT_PREFIX] =
+        if degradation == :forbidden
+          "host_limits not readable by scoped token"
+        else
+          "host-limit state not supported by backend"
         end
       []
     end
@@ -10125,6 +10405,9 @@ module AgentCoord
   def self.state_record_path?(path)
     value = path.to_s
     return attention_record_path?(value) if value.start_with?("attention/")
+    if value.start_with?("host_limits/") || value.start_with?("archive/host_limits/")
+      return host_limit_record_path?(value)
+    end
 
     value.match?(STATE_PATH_PATTERN)
   end
@@ -10132,8 +10415,41 @@ module AgentCoord
   def self.state_directory_prefix?(path)
     value = path.to_s
     return attention_directory_prefix?(value) if value == "attention" || value.start_with?("attention/")
+    if value == HOST_LIMIT_PREFIX || value.start_with?("#{HOST_LIMIT_PREFIX}/") ||
+       value == "archive/#{HOST_LIMIT_PREFIX}" || value.start_with?("archive/#{HOST_LIMIT_PREFIX}/")
+      return host_limit_directory_prefix?(value)
+    end
 
     value.match?(STATE_DIRECTORY_PREFIX_PATTERN)
+  end
+
+  def self.host_limit_record_path?(path)
+    archived = path.start_with?("archive/")
+    relative_path = archived ? path.delete_prefix("archive/") : path
+    return false unless relative_path.match?(/\A#{HOST_LIMIT_RECORD_PATH}\z/x)
+    return false if path.bytesize > (archived ? MAX_ARCHIVE_STATE_PATH_BYTES : MAX_ACTIVE_STATE_PATH_BYTES)
+
+    workspace, machine = relative_path.split("/", -1).values_at(1, 2)
+    canonical_host_limit_component?(workspace) && canonical_host_limit_component?(machine)
+  end
+
+  def self.host_limit_directory_prefix?(path)
+    archived = path.start_with?("archive/")
+    relative_path = archived ? path.delete_prefix("archive/") : path
+    return false unless relative_path.match?(/\A#{HOST_LIMIT_DIRECTORY_PREFIX}\z/x)
+    return false if path.bytesize > MAX_ACTIVE_STATE_PATH_BYTES
+
+    workspace, machine = relative_path.split("/", -1).values_at(1, 2)
+    [workspace, machine].compact.all? { |component| canonical_host_limit_component?(component) }
+  end
+
+  def self.canonical_host_limit_component?(component)
+    return false unless component.match?(/\A#{HOST_LIMIT_ENCODED_COMPONENT}\z/)
+
+    decoded = component.gsub(/%([0-9A-F]{2})/) { Regexp.last_match(1).to_i(16).chr }.b.force_encoding(Encoding::UTF_8)
+    decoded.valid_encoding? && encode_host_limit_component(decoded, "component") == component
+  rescue PathValidationError
+    false
   end
 
   def self.attention_record_path?(path)
@@ -10304,13 +10620,48 @@ module AgentCoord
     "attention/#{workspace}/#{repo}"
   end
 
+  def self.host_limit_path(workspace, machine, quota_host, scope)
+    encoded_workspace = encode_host_limit_component(workspace, "workspace")
+    encoded_machine = encode_host_limit_component(machine, "machine")
+    unless quota_host.is_a?(String) && quota_host.match?(HOST_LIMIT_CANONICAL_PATTERN)
+      raise PathValidationError, "invalid host-limit quota-host: #{utf8_diagnostic(quota_host)}"
+    end
+    unless scope.is_a?(String) && scope.match?(HOST_LIMIT_CANONICAL_PATTERN)
+      raise PathValidationError, "invalid host-limit scope: #{utf8_diagnostic(scope)}"
+    end
+
+    path = "host_limits/#{encoded_workspace}/#{encoded_machine}/#{quota_host}/#{scope}.json"
+    if path.bytesize > MAX_ACTIVE_STATE_PATH_BYTES
+      raise PathValidationError, "host-limit state path exceeds #{MAX_ACTIVE_STATE_PATH_BYTES} bytes"
+    end
+
+    path
+  end
+
+  def self.encode_host_limit_component(value, field)
+    unless value.is_a?(String) && value.valid_encoding? && !value.empty?
+      raise PathValidationError, "host-limit #{field} must be a non-empty UTF-8 string"
+    end
+
+    value.encode(Encoding::UTF_8).bytes.map do |byte|
+      if byte.between?(48, 57) || byte.between?(65, 90) || byte.between?(97, 122) || [45, 95].include?(byte)
+        byte.chr
+      else
+        format("%%%02X", byte)
+      end
+    end.join
+  rescue EncodingError
+    raise PathValidationError, "host-limit #{field} must be a non-empty UTF-8 string"
+  end
+
   def self.event_batch_from_path(path)
     parts = path.split("/")
     parts.length >= 3 ? parts[1] : "UNKNOWN"
   end
 
   def self.archive_path(source_path)
-    unless source_path.to_s.match?(%r{\A(?:claims|heartbeats|batches|events)/}) && state_record_path?(source_path)
+    unless source_path.to_s.match?(%r{\A(?:claims|heartbeats|batches|events|host_limits)/}) &&
+           state_record_path?(source_path)
       raise PathValidationError, "invalid archive source path: #{source_path}"
     end
 

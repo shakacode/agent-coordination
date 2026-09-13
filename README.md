@@ -195,7 +195,10 @@ does not accept an empty prefix as a shortcut; all-state access must use the
 explicit flag. A directory scope such as
 `claims/shakacode/react_on_rails` covers descendant paths. A valid record-path
 scope such as `heartbeats/m5-codex.json` covers exactly that flat record. The
-Worker enforces read scopes for `GET /v1/state/<path>` and
+same rules cover `host_limits/` and `archive/host_limits/`; workspace and
+machine components use the uppercase percent-encoded storage-key form described
+under [Manual host-limit runtime](#manual-host-limit-runtime). The Worker
+enforces read scopes for `GET /v1/state/<path>` and
 `GET /v1/state?prefix=...`, write scopes for `PUT /v1/state/<path>`, and records
 the authenticated machine as `updated_by` on each state write. Active-path
 `DELETE` requires write coverage for both the active path and its
@@ -532,6 +535,8 @@ bin/agent-coord attention-upsert --record-json PATH|- [--json]
 bin/agent-coord attention-resolve --workspace WORKSPACE --repo OWNER/REPO --attention-id ID --source-generation N [--json]
 bin/agent-coord attention-get --workspace WORKSPACE --repo OWNER/REPO --attention-id ID [--json]
 bin/agent-coord attention-list --workspace WORKSPACE --repo OWNER/REPO [--include-resolved] [--limit N] [--json]
+bin/agent-coord report-host-limit --machine MACHINE --quota-host HOST --scope SCOPE [--workspace WORKSPACE] [--resets-at TIME] [--json]
+bin/agent-coord clear-host-limit --machine MACHINE --quota-host HOST --scope SCOPE [--workspace WORKSPACE] [--json]
 bin/agent-coord log [OWNER/REPO#TARGET] [--since VALUE] [--machine ID] [--host codex|claude] [--type TYPE] [--limit N] [--format text|tsv] [--json] [--sync] [--include-synthetic]
 bin/agent-coord version [--json]
 bin/agent-coord config [show] [--json]
@@ -968,7 +973,7 @@ Exit codes let closeout gate on the result:
 | 1    | `incomplete` | At least one lane is missing a signal; closeout should fail-closed.      |
 | 2    | `unknown`    | Coordination state is UNKNOWN — the batch id is unregistered, invalid/unsafe, a non-object batch record, a batch registering no lanes, an event trail only partially visible to a scoped token (filtered listing), or the batch/events are unreadable. A malformed id returns `unknown` (exit 2), never `incomplete` (exit 1). Never reported as a false `complete`. |
 
-### Host-limit contract foundation
+### Manual host-limit runtime
 
 The published
 [`schema/state/v1/host-limit.schema.json`](schema/state/v1/host-limit.schema.json)
@@ -977,15 +982,29 @@ defines a shared usage-limit record keyed by
 identifier deliberately distinct from existing lane
 `host` app/wrapper metadata; runtime mapping between them remains `UNKNOWN`. The
 contract includes active and explicitly cleared states, known or unknown reset
-times, and an optional `host_limits` status projection from which
+times, and a `host_limits` status projection from which
 consumers may derive `blocked-on-limit` for lanes carrying a matching explicit
 `quota_host`. Positive, negative, procedural, and two-lane replay fixtures live
 under [`schema/state/v1/fixtures/`](schema/state/v1/fixtures/).
 
-This is a schema-only foundation. The CLI and Worker do not yet report, persist,
-clear, or project these records, and provider message/probe facts remain
-`UNKNOWN`. See [ADR 0007](docs/adr/0007-host-limit-state-contract.md) for
-canonical quota-host, reset, clear, workspace-key, composite uniqueness, and
+`report-host-limit` and `clear-host-limit` are explicit manual operations. A
+new report normalizes `quota_host` by trimming and lowercasing it, writes
+`source: "manual"`, and stores `resets_at: null` when `--resets-at` is omitted.
+Updates and clears preserve the original `observed_at` and source; every
+mutation uses the selected store's compare-and-swap token. Workspace and machine are encoded from
+UTF-8 bytes in the reserved key
+`host_limits/<workspace>/<machine>/<quota_host>/<scope>.json`, leaving only
+ASCII alphanumerics, `_`, and `-` literal and using uppercase percent escapes
+for all other bytes.
+
+Unscoped `status` text and JSON include every record and its existing v1 fields.
+Text output also labels each record's current effectiveness. Cleared records are
+ineffective. An active record with a null reset remains effective; a known reset
+is effective only while it is later than the projection time. Elapsed-reset
+records remain stored, remain visible, and become ineffective without a write.
+These commands never infer `quota_host` from lane `host`, and no provider-message,
+hook, or probe producer is enabled. See
+[ADR 0007](docs/adr/0007-host-limit-state-contract.md) for the contract and
 non-goal semantics.
 
 ### Capacity reservation contract foundation
@@ -1207,6 +1226,7 @@ execute response keeps the planned reap but marks it `outcome: skipped` with
 | Dead or terminal heartbeat | 7 days | 30 days | Archive, then delete |
 | Aged heartbeat with unknown liveness | 7 days | 30 days after no active claim depends on it | Archive as `aged_heartbeat`; retain its fail-closed evidence while referenced |
 | Completed batch | 7 days | 30 days | Archive, then delete |
+| Cleared host limit (from `cleared_at`) | 7 days | 30 days | Archive, then delete |
 | Events for a terminal target | 7 days | 30 days | Compact, then delete |
 | Eligible claim/heartbeat/batch with `synthetic: true` | 1 day | 30 days | Aggressive archive, then delete |
 | Fully synthetic orphan event generation | 1 day per event | 30 days | Compact, then delete |
@@ -1238,8 +1258,10 @@ identity rather than blocking cleanup. Metadata-less legacy events remain in
 their own absent-lane group, and non-synthetic orphan events remain untouched.
 Run `ruby sim/bin/graveyard` for a deterministic dry-run,
 execute, compaction, and idempotent replay check.
-Repeat `--prefix claims|heartbeats|batches|events` to restrict hot-family scans;
-without it GC scans all four families. Archive expiry is always scanned. For
+Repeat `--prefix claims|heartbeats|batches|host_limits|events` to restrict hot-family scans;
+without it GC scans all five families. Active host-limit records, including
+ones with elapsed reset times, are never GC candidates; only an explicit clear
+starts their hot-retention window at `cleared_at`. Archive expiry is always scanned. For
 example, `agent-coord gc --execute --prefix claims` works with a
 least-privileged token that can read the selected claims subtree plus its
 archive mirror and can write/delete both. Forbidden selected prefixes remain an
@@ -1466,10 +1488,12 @@ heartbeats/<agent-id>.json
 batches/<batch-id>.json
 events/<batch-id>/<event-id>.json
 attention/<workspace>/<owner>/<repo>/<attention-id>.json
+host_limits/<encoded-workspace>/<encoded-machine>/<quota-host>/<scope>.json
 archive/claims/<owner>/<repo>/<issue-or-pr>.json
 archive/heartbeats/<agent-id>.json
 archive/batches/<batch-id>.json
 archive/events/<batch-id>/<event-or-compaction-id>.json
+archive/host_limits/<encoded-workspace>/<encoded-machine>/<quota-host>/<scope>.json
 ```
 
 The checked-in `.gitkeep` files only preserve the directories. Schema examples

@@ -11058,6 +11058,7 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     assert_includes stdout.string, "shakacode/react_on_rails#4150"
     assert_includes stdout.string, "worker-4150 in_progress live"
     assert_includes stdout.string, "not checked in target scope"
+    refute_includes stdout.string, "host_limits\n"
   end
 
   # The load-bearing property of target scope: it costs a fixed number of point
@@ -14992,6 +14993,7 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     assert_includes stdout.string, "lane docs owner worker-docs targets 4150 status blocked live"
     assert_includes stdout.string, "deps batch-a:backend blocked_on -"
     assert_includes stdout.string, "not checked in batch scope"
+    refute_includes stdout.string, "host_limits\n"
   end
 
   def test_status_renders_lane_dependencies_and_blocked_lanes

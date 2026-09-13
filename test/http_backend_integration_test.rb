@@ -15,7 +15,7 @@ def cli(*)
   [status.exitstatus, stdout, stderr]
 end
 
-class HttpBackendIntegrationTest < Minitest::Test
+class HttpBackendIntegrationTest < Minitest::Test # rubocop:disable Metrics/ClassLength
   def test_attention_lifecycle_and_scoped_authorization_match_the_local_store
     token = ENV.fetch("ATTENTION_AGENT_COORD_API_TOKEN")
     record = attention_record
@@ -299,6 +299,66 @@ class HttpBackendIntegrationTest < Minitest::Test
       assert_equal 400, code, path
       assert_equal "invalid_path", body.fetch("error"), path
     end
+  end
+
+  def test_worker_accepts_host_limit_paths_and_rejects_noncanonical_variants
+    token = ENV.fetch("AGENT_COORD_API_TOKEN")
+    prefix = "host_limits/team%2F%E6%9D%B1%E4%BA%AC/mac%25%2F%C3%A9/quota-host-a"
+    path = "#{prefix}/five-hour.json"
+    record = {
+      "schema_version" => 1, "workspace" => "team/東京", "machine" => "mac%/é",
+      "quota_host" => "quota-host-a", "scope" => "five-hour", "status" => "active",
+      "observed_at" => "2026-09-12T10:00:00Z", "resets_at" => nil, "source" => "manual"
+    }
+
+    code, body = http_json(
+      "PUT", state_path(path), token: token, headers: { "If-None-Match" => "*" }, body: { "data" => record }
+    )
+    assert_equal 201, code, body.inspect
+    code, body = http_json("GET", "/v1/state?#{URI.encode_www_form(prefix: prefix)}", token: token)
+    assert_equal 200, code, body.inspect
+    assert_equal([path], body.fetch("entries").map { |entry| entry.fetch("path") })
+
+    [
+      "host_limits/team%41/mac/quota-host-a/five-hour.json",
+      "host_limits/team%FF/mac/quota-host-a/five-hour.json",
+      "host_limits/team%2f/mac/quota-host-a/five-hour.json",
+      "host_limits/default/mac/Quota-Host-A/five-hour.json",
+      "host_limits/default/mac/quota-host-a/Five-Hour.json"
+    ].each do |invalid|
+      code, body = http_json("GET", state_path(invalid), token: token)
+      assert_equal 400, code, invalid
+      assert_equal "invalid_path", body.fetch("error"), invalid
+    end
+  end
+
+  def test_worker_host_limit_scope_length_boundaries_distinguish_records_from_directories
+    token = ENV.fetch("AGENT_COORD_API_TOKEN")
+    directory_stem = "archive/host_limits/"
+    directory512 = "#{directory_stem}#{'w' * (512 - directory_stem.bytesize)}"
+    directory513 = "#{directory512}w"
+    record_stem = "archive/host_limits/default/"
+    record_suffix = "/quota-host-a/five-hour.json"
+    record520 = "#{record_stem}#{'m' * (520 - record_stem.bytesize - record_suffix.bytesize)}#{record_suffix}"
+    record521 = record520.sub("/quota-host-a/", "m/quota-host-a/")
+    assert_equal [512, 513, 520, 521],
+                 [directory512, directory513, record520, record521].map(&:bytesize)
+
+    code, body = http_json(
+      "GET", "/v1/state?#{URI.encode_www_form(prefix: directory512)}", token: token
+    )
+    assert_equal 200, code, body.inspect
+    code, body = http_json("GET", state_path(record520), token: token)
+    assert_equal 404, code, body.inspect
+
+    code, body = http_json(
+      "GET", "/v1/state?#{URI.encode_www_form(prefix: directory513)}", token: token
+    )
+    assert_equal 400, code, directory513
+    assert_equal "invalid_prefix", body.fetch("error"), directory513
+    code, body = http_json("GET", state_path(record521), token: token)
+    assert_equal 400, code, record521
+    assert_equal "invalid_path", body.fetch("error"), record521
   end
 
   def test_full_claim_lifecycle_and_contention
