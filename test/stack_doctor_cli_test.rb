@@ -1107,6 +1107,21 @@ class StackDoctorCliTest < Minitest::Test
     end
   end
 
+  def test_stack_report_rejects_noncanonical_host_limit_component_encodings
+    Dir.mktmpdir("agent-coord-stack-doctor") do |state_root|
+      ["%41", "%FF", "%2f"].each do |component|
+        prefix = "host_limits/team#{component}/mac/quota-host-a"
+        result = run_doctor(
+          "--stack-json", "--deep", "--state-root", state_root, "--doctor-prefix", prefix
+        )
+
+        assert_equal 64, result.fetch(:status).exitstatus, prefix
+        assert_empty result.fetch(:stdout), prefix
+        assert_equal "invalid doctor prefix shape: #{prefix}\n", result.fetch(:stderr)
+      end
+    end
+  end
+
   def test_stack_json_token_used_as_an_option_value_does_not_enable_stack_output
     result = run_doctor("--state-root", "--stack-json")
 

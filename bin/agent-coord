@@ -149,6 +149,7 @@ module AgentCoord
   MAX_ATTENTION_KEY_COMPONENT_LENGTH = 160
   MAX_ATTENTION_TIMESTAMP_LENGTH = 64
   MAX_ACTIVE_STATE_PATH_BYTES = 512
+  MAX_ARCHIVE_STATE_PATH_BYTES = 520
   HOST_LIMIT_CANONICAL_PATTERN = /\A[a-z0-9](?:[a-z0-9._-]{0,126}[a-z0-9])?\z/
   HOST_LIMIT_CANONICAL_COMPONENT = /[a-z0-9](?:[a-z0-9._-]{0,126}[a-z0-9])?/
   HOST_LIMIT_SOURCES = %w[manual host-message hook probe].freeze
@@ -1363,7 +1364,7 @@ module AgentCoord
         options[:lease_grace_days] = value
       end
       opts.on("--prefix PREFIX",
-               "hot family to scan: claims, heartbeats, batches, host_limits, or events (repeatable)") do |value|
+              "hot family to scan: claims, heartbeats, batches, host_limits, or events (repeatable)") do |value|
         (options[:prefixes] ||= []) << value
       end
     end
@@ -10394,6 +10395,9 @@ module AgentCoord
   def self.state_record_path?(path)
     value = path.to_s
     return attention_record_path?(value) if value.start_with?("attention/")
+    if value.start_with?("host_limits/") || value.start_with?("archive/host_limits/")
+      return host_limit_record_path?(value)
+    end
 
     value.match?(STATE_PATH_PATTERN)
   end
@@ -10401,8 +10405,41 @@ module AgentCoord
   def self.state_directory_prefix?(path)
     value = path.to_s
     return attention_directory_prefix?(value) if value == "attention" || value.start_with?("attention/")
+    if value == HOST_LIMIT_PREFIX || value.start_with?("#{HOST_LIMIT_PREFIX}/") ||
+       value == "archive/#{HOST_LIMIT_PREFIX}" || value.start_with?("archive/#{HOST_LIMIT_PREFIX}/")
+      return host_limit_directory_prefix?(value)
+    end
 
     value.match?(STATE_DIRECTORY_PREFIX_PATTERN)
+  end
+
+  def self.host_limit_record_path?(path)
+    archived = path.start_with?("archive/")
+    relative_path = archived ? path.delete_prefix("archive/") : path
+    return false unless relative_path.match?(/\A#{HOST_LIMIT_RECORD_PATH}\z/x)
+    return false if path.bytesize > (archived ? MAX_ARCHIVE_STATE_PATH_BYTES : MAX_ACTIVE_STATE_PATH_BYTES)
+
+    workspace, machine = relative_path.split("/", -1).values_at(1, 2)
+    canonical_host_limit_component?(workspace) && canonical_host_limit_component?(machine)
+  end
+
+  def self.host_limit_directory_prefix?(path)
+    archived = path.start_with?("archive/")
+    relative_path = archived ? path.delete_prefix("archive/") : path
+    return false unless relative_path.match?(/\A#{HOST_LIMIT_DIRECTORY_PREFIX}\z/x)
+    return false if path.bytesize > MAX_ACTIVE_STATE_PATH_BYTES
+
+    workspace, machine = relative_path.split("/", -1).values_at(1, 2)
+    [workspace, machine].compact.all? { |component| canonical_host_limit_component?(component) }
+  end
+
+  def self.canonical_host_limit_component?(component)
+    return false unless component.match?(/\A#{HOST_LIMIT_ENCODED_COMPONENT}\z/)
+
+    decoded = component.gsub(/%([0-9A-F]{2})/) { Regexp.last_match(1).to_i(16).chr }.b.force_encoding(Encoding::UTF_8)
+    decoded.valid_encoding? && encode_host_limit_component(decoded, "component") == component
+  rescue PathValidationError
+    false
   end
 
   def self.attention_record_path?(path)

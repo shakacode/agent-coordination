@@ -7,6 +7,8 @@ require "open3"
 require "time"
 require "tmpdir"
 
+load File.expand_path("../bin/agent-coord", __dir__)
+
 class HostLimitCliTest < Minitest::Test
   ROOT = File.expand_path("..", __dir__)
   BIN = File.join(ROOT, "bin", "agent-coord")
@@ -172,6 +174,41 @@ class HostLimitCliTest < Minitest::Test
     assert_equal 1, effective.length
     assert_equal replay.dig("expected", "lane_statuses"), lane_statuses
     assert(replay.fetch("lanes").all? { |lane| lane.fetch("host") != lane.fetch("quota_host") })
+  end
+
+  # A regex-only classifier would accept a second spelling for the same storage
+  # key, letting doctor classify paths the Worker refuses.
+  def test_host_limit_path_classifiers_require_canonical_component_encoding_and_exact_byte_limits
+    canonical_record = "host_limits/team%2F%E6%9D%B1/mac%25%C3%A9/quota-host-a/five-hour.json"
+    canonical_directory = "host_limits/team%2F%E6%9D%B1/mac%25%C3%A9/quota-host-a"
+    assert AgentCoord.state_record_path?(canonical_record)
+    assert AgentCoord.state_directory_prefix?(canonical_directory)
+    assert AgentCoord.state_record_path?("archive/#{canonical_record}")
+    assert AgentCoord.state_directory_prefix?("archive/#{canonical_directory}")
+
+    [
+      "host_limits/team%41/mac/quota-host-a/five-hour.json",
+      "host_limits/team%FF/mac/quota-host-a/five-hour.json",
+      "host_limits/team%2f/mac/quota-host-a/five-hour.json"
+    ].each do |path|
+      refute AgentCoord.state_record_path?(path), path
+      refute AgentCoord.state_directory_prefix?(path.delete_suffix("/five-hour.json")), path
+    end
+
+    directory_stem = "host_limits/"
+    directory512 = "#{directory_stem}#{'w' * (512 - directory_stem.bytesize)}"
+    record_stem = "host_limits/default/"
+    record_suffix = "/quota-host-a/five-hour.json"
+    record512 = "#{record_stem}#{'m' * (512 - record_stem.bytesize - record_suffix.bytesize)}#{record_suffix}"
+    archive_record520 = "archive/#{record512}"
+    assert_equal [512, 512, 520], [directory512, record512, archive_record520].map(&:bytesize)
+
+    assert AgentCoord.state_directory_prefix?(directory512)
+    assert AgentCoord.state_record_path?(record512)
+    assert AgentCoord.state_record_path?(archive_record520)
+    refute AgentCoord.state_directory_prefix?("#{directory512}w")
+    refute AgentCoord.state_record_path?(record512.sub("/quota-host-a/", "m/quota-host-a/"))
+    refute AgentCoord.state_record_path?(archive_record520.sub("/quota-host-a/", "m/quota-host-a/"))
   end
 
   private
