@@ -189,6 +189,8 @@ class ProvisionTokenTest < Minitest::Test
     assert_includes stdout, "writes:   [\"#{path}\"]"
 
     [
+      "host_limits/team%41/mac/quota-host-a/five-hour.json",
+      "host_limits/team%FF/mac/quota-host-a/five-hour.json",
       "host_limits/team%2f/mac/quota-host-a/five-hour.json",
       "host_limits/team%ZZ/mac/quota-host-a/five-hour.json",
       "host_limits/default/mac/Quota-Host-A/five-hour.json",
@@ -197,6 +199,28 @@ class ProvisionTokenTest < Minitest::Test
       _, rejected_stderr, rejected_status = run_script("m5", "--local", "--read-prefix", invalid)
       refute rejected_status.success?, invalid
       assert_includes rejected_stderr, "invalid read prefix", invalid
+    end
+  end
+
+  def test_host_limit_archive_scope_matches_worker_record_and_directory_length_boundaries
+    directory_stem = "archive/host_limits/"
+    directory512 = "#{directory_stem}#{'w' * (512 - directory_stem.bytesize)}"
+    directory513 = "#{directory512}w"
+    record_stem = "archive/host_limits/default/"
+    record_suffix = "/quota-host-a/five-hour.json"
+    record520 = "#{record_stem}#{'m' * (520 - record_stem.bytesize - record_suffix.bytesize)}#{record_suffix}"
+    record521 = record520.sub("/quota-host-a/", "m/quota-host-a/")
+    assert_equal [512, 513, 520, 521],
+                 [directory512, directory513, record520, record521].map(&:bytesize)
+
+    [directory512, record520].each do |scope|
+      _, stderr, status = run_script("m5", "--local", "--read-prefix", scope)
+      assert status.success?, stderr
+    end
+    [directory513, record521].each do |scope|
+      _, stderr, status = run_script("m5", "--local", "--read-prefix", scope)
+      refute status.success?, scope
+      assert_includes stderr, "invalid read prefix", scope
     end
   end
 

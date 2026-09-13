@@ -7331,7 +7331,7 @@ module AgentCoord
       if options[:json]
         @stdout.puts JSON.pretty_generate(payload)
       else
-        render_status_text(payload)
+        render_status_text(payload, now)
       end
       0
     rescue JSON::ParserError => e
@@ -7768,7 +7768,7 @@ module AgentCoord
         lane_states: lane_states,
         now: now
       )
-      payload["host_limits"] = effective_host_limit_status_records(host_limit_entries, now)
+      payload["host_limits"] = host_limit_status_records(host_limit_entries)
       payload
     end
 
@@ -8213,7 +8213,7 @@ module AgentCoord
     end
     # rubocop:enable Metrics/ParameterLists
 
-    def render_status_text(payload)
+    def render_status_text(payload, now)
       @stdout.puts "claims"
       if payload.fetch("claims").empty?
         @stdout.puts "- #{status_section_note(payload, 'claims') || 'none'}"
@@ -8241,7 +8241,7 @@ module AgentCoord
         end
       end
 
-      render_status_host_limits(payload)
+      render_status_host_limits(payload, now)
 
       @stdout.puts "batches"
       if payload.fetch("batches").to_a.empty?
@@ -8276,7 +8276,7 @@ module AgentCoord
       }.compact
     end
 
-    def render_status_host_limits(payload)
+    def render_status_host_limits(payload, now)
       @stdout.puts "host_limits"
       records = payload.fetch("host_limits", [])
       if records.empty?
@@ -8286,8 +8286,20 @@ module AgentCoord
 
       records.each do |record|
         reset = record["resets_at"] || "unknown"
-        @stdout.puts "- #{record.fetch('machine')} #{record.fetch('quota_host')} #{record.fetch('scope')} " \
-                     "#{record.fetch('status')} observed #{record.fetch('observed_at')} resets #{reset}"
+        details = [
+          "- schema_version #{record.fetch('schema_version')}",
+          "workspace #{record.fetch('workspace')}",
+          "machine #{record.fetch('machine')}",
+          "quota_host #{record.fetch('quota_host')}",
+          "scope #{record.fetch('scope')}",
+          "status #{record.fetch('status')}",
+          "effective #{host_limit_effective?(record, now)}",
+          "observed_at #{record.fetch('observed_at')}",
+          "resets_at #{reset}",
+          "source #{record.fetch('source')}"
+        ]
+        details << "cleared_at #{record.fetch('cleared_at')}" if record.key?("cleared_at")
+        @stdout.puts details.join(" ")
       end
     end
 
@@ -8337,18 +8349,19 @@ module AgentCoord
       }.merge(status_metadata(data, STATUS_HEARTBEAT_METADATA_FIELDS))
     end
 
-    def effective_host_limit_status_records(entries, now)
-      effective = entries.filter_map do |entry|
+    def host_limit_status_records(entries)
+      records = entries.map do |entry|
         validate_stored_host_limit!(entry)
-        record = entry.data
-        next unless record.fetch("status") == "active"
-
-        resets_at = record.fetch("resets_at")
-        next if resets_at && Time.iso8601(resets_at).utc <= now
-
-        record.dup
+        entry.data.dup
       end
-      effective.sort_by { |record| %w[workspace machine quota_host scope].map { |field| record.fetch(field) } }
+      records.sort_by { |record| %w[workspace machine quota_host scope].map { |field| record.fetch(field) } }
+    end
+
+    def host_limit_effective?(record, now)
+      return false unless record.fetch("status") == "active"
+
+      resets_at = record.fetch("resets_at")
+      resets_at.nil? || Time.iso8601(resets_at).utc > now
     end
 
     def batch_status_hash(entry, heartbeats_by_agent, lane_states, now)

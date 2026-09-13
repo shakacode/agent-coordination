@@ -997,12 +997,13 @@ UTF-8 bytes in the reserved key
 ASCII alphanumerics, `_`, and `-` literal and using uppercase percent escapes
 for all other bytes.
 
-Unscoped `status` text and JSON include every effective record and its existing
-v1 fields. Cleared records are ineffective. An active record with a null reset
-remains effective; a known reset is effective only while it is later than the
-projection time. Elapsed-reset records remain stored and become ineffective
-without a write. These commands never infer `quota_host` from lane `host`, and
-no provider-message, hook, or probe producer is enabled. See
+Unscoped `status` text and JSON include every record and its existing v1 fields.
+Text output also labels each record's current effectiveness. Cleared records are
+ineffective. An active record with a null reset remains effective; a known reset
+is effective only while it is later than the projection time. Elapsed-reset
+records remain stored, remain visible, and become ineffective without a write.
+These commands never infer `quota_host` from lane `host`, and no provider-message,
+hook, or probe producer is enabled. See
 [ADR 0007](docs/adr/0007-host-limit-state-contract.md) for the contract and
 non-goal semantics.
 

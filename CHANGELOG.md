@@ -12,8 +12,8 @@ when releases begin.
 - Manual `report-host-limit` and `clear-host-limit` commands now persist the
   existing workspace-aware v1 host-limit record through LocalStore or the
   generic HTTP state routes with compare-and-swap protection. Unscoped status
-  projects effective records in text and JSON without mutating elapsed-reset
-  state or inferring quota identity from lane `host`; cleared records enter the
+  projects every record in text and JSON, with text marking current effectiveness
+  without mutating elapsed-reset state or inferring quota identity from lane `host`; cleared records enter the
   existing archive-first GC lifecycle from `cleared_at`. Worker paths and token
   scopes now include `host_limits/` and its archive mirror (issue #8).
 

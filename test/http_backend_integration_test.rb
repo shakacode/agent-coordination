@@ -320,6 +320,8 @@ class HttpBackendIntegrationTest < Minitest::Test # rubocop:disable Metrics/Clas
     assert_equal([path], body.fetch("entries").map { |entry| entry.fetch("path") })
 
     [
+      "host_limits/team%41/mac/quota-host-a/five-hour.json",
+      "host_limits/team%FF/mac/quota-host-a/five-hour.json",
       "host_limits/team%2f/mac/quota-host-a/five-hour.json",
       "host_limits/default/mac/Quota-Host-A/five-hour.json",
       "host_limits/default/mac/quota-host-a/Five-Hour.json"
@@ -328,6 +330,35 @@ class HttpBackendIntegrationTest < Minitest::Test # rubocop:disable Metrics/Clas
       assert_equal 400, code, invalid
       assert_equal "invalid_path", body.fetch("error"), invalid
     end
+  end
+
+  def test_worker_host_limit_scope_length_boundaries_distinguish_records_from_directories
+    token = ENV.fetch("AGENT_COORD_API_TOKEN")
+    directory_stem = "archive/host_limits/"
+    directory512 = "#{directory_stem}#{'w' * (512 - directory_stem.bytesize)}"
+    directory513 = "#{directory512}w"
+    record_stem = "archive/host_limits/default/"
+    record_suffix = "/quota-host-a/five-hour.json"
+    record520 = "#{record_stem}#{'m' * (520 - record_stem.bytesize - record_suffix.bytesize)}#{record_suffix}"
+    record521 = record520.sub("/quota-host-a/", "m/quota-host-a/")
+    assert_equal [512, 513, 520, 521],
+                 [directory512, directory513, record520, record521].map(&:bytesize)
+
+    code, body = http_json(
+      "GET", "/v1/state?#{URI.encode_www_form(prefix: directory512)}", token: token
+    )
+    assert_equal 200, code, body.inspect
+    code, body = http_json("GET", state_path(record520), token: token)
+    assert_equal 404, code, body.inspect
+
+    code, body = http_json(
+      "GET", "/v1/state?#{URI.encode_www_form(prefix: directory513)}", token: token
+    )
+    assert_equal 400, code, directory513
+    assert_equal "invalid_prefix", body.fetch("error"), directory513
+    code, body = http_json("GET", state_path(record521), token: token)
+    assert_equal 400, code, record521
+    assert_equal "invalid_path", body.fetch("error"), record521
   end
 
   def test_full_claim_lifecycle_and_contention

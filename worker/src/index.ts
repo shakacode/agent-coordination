@@ -46,6 +46,28 @@ const ACTIVE_PREFIX = ARCHIVABLE_PREFIX;
 const ARCHIVE_PREFIX = `archive(?:/${ARCHIVABLE_PREFIX})?`;
 const STATE_PREFIX = new RegExp(`^(?:${ACTIVE_PREFIX}|${ARCHIVE_PREFIX})$`);
 
+function canonicalHostLimitEncodedComponent(value: string): boolean {
+  try {
+    const decoded = decodeURIComponent(value);
+    const canonical = [...new TextEncoder().encode(decoded)].map((byte) => {
+      const literal = (byte >= 48 && byte <= 57) || (byte >= 65 && byte <= 90)
+        || (byte >= 97 && byte <= 122) || byte === 45 || byte === 95;
+      return literal ? String.fromCharCode(byte) : `%${byte.toString(16).toUpperCase().padStart(2, "0")}`;
+    }).join("");
+    return canonical === value;
+  } catch {
+    return false;
+  }
+}
+
+function validHostLimitEncodedComponents(path: string): boolean {
+  const activePath = path.startsWith("archive/") ? path.slice("archive/".length) : path;
+  const parts = activePath.split("/");
+  if (parts[0] !== "host_limits") return true;
+  return (parts.length < 2 || canonicalHostLimitEncodedComponent(parts[1]))
+    && (parts.length < 3 || canonicalHostLimitEncodedComponent(parts[2]));
+}
+
 function validAttentionComponent(value: string): boolean {
   return value.length <= 160 && /^[A-Za-z0-9_:-]+(?:\.[A-Za-z0-9_:-]+)*$/.test(value);
 }
@@ -324,6 +346,7 @@ function validPath(path: string): boolean {
   return encoder.encode(path).byteLength <= maxPathBytes
     && encoder.encode(activePath).byteLength <= MAX_ACTIVE_STATE_PATH_BYTES
     && (STATE_PATH.test(path) || validAttentionPath(path))
+    && validHostLimitEncodedComponents(path)
     && !path.includes("..")
     && !path.includes("//");
 }
@@ -331,6 +354,7 @@ function validPath(path: string): boolean {
 function validPrefix(prefix: string): boolean {
   return new TextEncoder().encode(prefix).byteLength <= MAX_ACTIVE_STATE_PATH_BYTES
     && (STATE_PREFIX.test(prefix) || validAttentionPrefix(prefix))
+    && validHostLimitEncodedComponents(prefix)
     && !prefix.includes("..")
     && !prefix.includes("//");
 }

@@ -39,7 +39,11 @@ valid_prefix() {
     [[ "$prefix" == "$active_prefix" || "$prefix" == "archive/$active_prefix" ]] || return 1
     valid_host_limit_prefix "$active_prefix" || return 1
     if [[ "$prefix" == archive/* ]]; then
-      [[ "${#active_prefix}" -le 512 ]] && [[ "${#prefix}" -le 520 ]]
+      if host_limit_record_path "$active_prefix"; then
+        [[ "${#active_prefix}" -le 512 ]] && [[ "${#prefix}" -le 520 ]]
+      else
+        [[ "${#prefix}" -le 512 ]]
+      fi
     else
       [[ "${#prefix}" -le 512 ]]
     fi
@@ -70,26 +74,87 @@ valid_prefix() {
 valid_host_limit_prefix() {
   local prefix="$1"
   local parts=()
-  local encoded_component='^([A-Za-z0-9_-]|%[0-9A-F]{2})+$'
   local canonical='^[a-z0-9]([a-z0-9._-]{0,126}[a-z0-9])?$'
   IFS=/ read -r -a parts <<< "$prefix"
   [[ "${parts[0]}" == "host_limits" ]] || return 1
   case "${#parts[@]}" in
     1) return 0 ;;
-    2) [[ "${parts[1]}" =~ $encoded_component ]] ;;
-    3) [[ "${parts[1]}" =~ $encoded_component ]] && [[ "${parts[2]}" =~ $encoded_component ]] ;;
+    2) valid_host_limit_encoded_component "${parts[1]}" ;;
+    3) valid_host_limit_encoded_component "${parts[1]}" && valid_host_limit_encoded_component "${parts[2]}" ;;
     4)
-      [[ "${parts[1]}" =~ $encoded_component ]] && [[ "${parts[2]}" =~ $encoded_component ]] &&
+      valid_host_limit_encoded_component "${parts[1]}" && valid_host_limit_encoded_component "${parts[2]}" &&
         [[ "${parts[3]}" =~ $canonical ]]
       ;;
     5)
       [[ "${parts[4]}" == *.json ]] || return 1
       local scope="${parts[4]%.json}"
-      [[ "${parts[1]}" =~ $encoded_component ]] && [[ "${parts[2]}" =~ $encoded_component ]] &&
+      valid_host_limit_encoded_component "${parts[1]}" && valid_host_limit_encoded_component "${parts[2]}" &&
         [[ "${parts[3]}" =~ $canonical ]] && [[ "$scope" =~ $canonical ]]
       ;;
     *) return 1 ;;
   esac
+}
+
+host_limit_record_path() {
+  local parts=()
+  IFS=/ read -r -a parts <<< "$1"
+  [[ "${#parts[@]}" -eq 5 ]] && [[ "${parts[4]}" == *.json ]]
+}
+
+valid_host_limit_encoded_component() {
+  local value="$1"
+  local encoded_component='^([A-Za-z0-9_-]|%[0-9A-F]{2})+$'
+  [[ "$value" =~ $encoded_component ]] || return 1
+
+  local index=0 length=${#value}
+  while [[ "$index" -lt "$length" ]]; do
+    if [[ "${value:index:1}" != "%" ]]; then
+      index=$((index + 1))
+      continue
+    fi
+
+    local hex="${value:index+1:2}"
+    local byte=$((16#$hex))
+    # ADR 0007 leaves these ASCII bytes literal, so an encoded spelling is not canonical.
+    if (( (byte >= 48 && byte <= 57) || (byte >= 65 && byte <= 90) ||
+          (byte >= 97 && byte <= 122) || byte == 45 || byte == 95 )); then
+      return 1
+    fi
+    if (( byte <= 127 )); then
+      index=$((index + 3))
+      continue
+    fi
+
+    local continuation_count first_min=128 first_max=191
+    if (( byte >= 194 && byte <= 223 )); then
+      continuation_count=1
+    elif (( byte >= 224 && byte <= 239 )); then
+      continuation_count=2
+      (( byte == 224 )) && first_min=160
+      (( byte == 237 )) && first_max=159
+    elif (( byte >= 240 && byte <= 244 )); then
+      continuation_count=3
+      (( byte == 240 )) && first_min=144
+      (( byte == 244 )) && first_max=143
+    else
+      return 1
+    fi
+
+    local offset continuation_hex continuation_byte
+    for ((offset = 1; offset <= continuation_count; offset++)); do
+      local continuation_index=$((index + offset * 3))
+      [[ "${value:continuation_index:1}" == "%" ]] || return 1
+      continuation_hex="${value:continuation_index+1:2}"
+      [[ "$continuation_hex" =~ ^[0-9A-F]{2}$ ]] || return 1
+      continuation_byte=$((16#$continuation_hex))
+      if (( offset == 1 )); then
+        (( continuation_byte >= first_min && continuation_byte <= first_max )) || return 1
+      else
+        (( continuation_byte >= 128 && continuation_byte <= 191 )) || return 1
+      fi
+    done
+    index=$((index + (continuation_count + 1) * 3))
+  done
 }
 
 valid_attention_component() {

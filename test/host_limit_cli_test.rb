@@ -54,7 +54,7 @@ class HostLimitCliTest < Minitest::Test
     assert_equal record, JSON.parse(File.read(path))
   end
 
-  def test_status_projects_only_effective_records_and_renders_simultaneous_scopes
+  def test_status_shows_every_record_field_and_marks_ineffective_records
     write_host_limit("five-hour", "active", "2999-01-01T00:00:00Z")
     write_host_limit("weekly", "active", nil)
     write_host_limit("elapsed", "active", "2000-01-01T00:00:00Z")
@@ -64,16 +64,22 @@ class HostLimitCliTest < Minitest::Test
 
     assert_success json
     records = JSON.parse(json.stdout).fetch("host_limits")
-    assert_equal(%w[five-hour weekly], records.map { |record| record.fetch("scope") })
-    assert(records.all? { |record| record.keys.sort == host_limit_record_keys.sort })
+    assert_equal(%w[cleared elapsed five-hour weekly], records.map { |record| record.fetch("scope") })
+    assert(records.all? { |record| (host_limit_record_keys - record.keys).empty? })
+    assert_equal "2026-01-02T00:00:00Z", records.first.fetch("cleared_at")
 
     text = run_cli("status")
     assert_success text
     assert_includes text.stdout, "host_limits\n"
-    assert_includes text.stdout, "quota-host-a five-hour active"
-    assert_includes text.stdout, "quota-host-a weekly active"
-    refute_includes text.stdout, "quota-host-a elapsed"
-    refute_includes text.stdout, "quota-host-a cleared"
+    assert_includes text.stdout,
+                    "schema_version 1 workspace default machine build-mac-01 quota_host quota-host-a " \
+                    "scope five-hour status active effective true observed_at 2026-01-01T00:00:00Z " \
+                    "resets_at 2999-01-01T00:00:00Z source manual"
+    assert_includes text.stdout, "scope weekly status active effective true"
+    assert_includes text.stdout, "scope elapsed status active effective false"
+    assert_includes text.stdout,
+                    "scope cleared status cleared effective false observed_at 2026-01-01T00:00:00Z " \
+                    "resets_at unknown source manual cleared_at 2026-01-02T00:00:00Z"
   end
 
   def test_clear_preserves_observation_and_report_reactivates_same_record
@@ -89,7 +95,9 @@ class HostLimitCliTest < Minitest::Test
     assert_equal "cleared", cleared_record.fetch("status")
     assert_operator Time.iso8601(cleared_record.fetch("cleared_at")), :>=,
                     Time.iso8601(cleared_record.fetch("observed_at"))
-    assert_empty JSON.parse(run_cli("status", "--json").stdout).fetch("host_limits")
+    status_record = JSON.parse(run_cli("status", "--json").stdout).fetch("host_limits").fetch(0)
+    assert_equal "cleared", status_record.fetch("status")
+    assert_equal cleared_record.fetch("cleared_at"), status_record.fetch("cleared_at")
 
     reported = run_cli(
       "report-host-limit", "--workspace", "default", "--machine", "build-mac-01",
