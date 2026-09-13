@@ -5685,9 +5685,13 @@ module AgentCoord
         raise Error, "batch #{batch_id} not found for terminal closeout" unless existing
 
         lane = terminal_batch_lane(store, payload, batch: existing.data)
-        return false if terminal_lane_replay?(lane, payload)
-
+        replay = terminal_lane_replay?(lane, payload)
         updated = terminal_batch_payload(store, existing.data, payload, now)
+        if replay && existing.data["status"] == updated["status"] &&
+           existing.data["completed_at"] == updated["completed_at"]
+          return false
+        end
+
         begin
           store.write_json(batch_path, updated, message: "Close lane in batch #{batch_id}", sha: existing.sha)
           return true

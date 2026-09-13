@@ -13236,6 +13236,15 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     refute first_batch.key?("status")
     assert_equal "done", first_batch.fetch("lanes").fetch(0).fetch("terminal")
 
+    first_replay = run_agent_coord(
+      "record-event", "--batch-id", "batch-close-events", "--type", "lane_closed",
+      "--lane", "code", "--agent-id", "worker-a", "--repo", "shakacode/react_on_rails",
+      "--target", "3981", "--host", "codex", "--terminal", "done"
+    )
+    assert_equal 0, first_replay.status.exitstatus, first_replay.stderr
+    refute JSON.parse(File.read(batch_path)).key?("status"),
+           "an authoritative replay must not complete a batch with a nonterminal sibling"
+
     second = run_agent_coord(
       "record-event", "--batch-id", "batch-close-events", "--type", "lane_closed",
       "--lane", "docs", "--agent-id", "worker-b", "--repo", "shakacode/react_on_rails",
@@ -13560,6 +13569,42 @@ class AgentCoordTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     batch = JSON.parse(File.read(File.join(@state_root, "batches", "batch-seeded-event.json")))
     assert_equal "completed", batch.fetch("status")
     assert_equal "done", batch.fetch("lanes").fetch(0).fetch("terminal")
+  end
+
+  def test_lane_closed_replay_repairs_missing_batch_completion_once_all_lanes_are_terminal
+    write_batch(
+      "batch-missing-completion",
+      lanes: [{ "name" => "code", "owner" => "worker-a", "targets" => ["4015"] }]
+    )
+    args = [
+      "record-event", "--batch-id", "batch-missing-completion", "--type", "lane_closed",
+      "--lane", "code", "--agent-id", "worker-a", "--repo", "shakacode/react_on_rails",
+      "--target", "4015", "--host", "codex", "--terminal", "done"
+    ]
+    first = run_agent_coord(*args)
+    assert_equal 0, first.status.exitstatus, first.stderr
+
+    batch_path = File.join(@state_root, "batches", "batch-missing-completion.json")
+    incomplete = JSON.parse(File.read(batch_path)).except("status", "completed_at")
+    File.write(batch_path, JSON.pretty_generate(incomplete))
+    event_path = Dir.glob(File.join(@state_root, "events", "batch-missing-completion", "*.json")).fetch(0)
+    authoritative_event = File.read(event_path)
+
+    repair = run_agent_coord(*args)
+
+    assert_equal 0, repair.status.exitstatus, repair.stderr
+    assert_includes repair.stdout, "reconciled terminal closeout"
+    repaired = JSON.parse(File.read(batch_path))
+    assert_equal "completed", repaired.fetch("status")
+    refute_empty repaired.fetch("completed_at")
+    assert_equal authoritative_event, File.read(event_path), "the first closeout event must stay authoritative"
+
+    repaired_batch = File.read(batch_path)
+    repeated_replay = run_agent_coord(*args)
+    assert_equal 0, repeated_replay.status.exitstatus, repeated_replay.stderr
+    assert_includes repeated_replay.stdout, "already closed"
+    assert_equal repaired_batch, File.read(batch_path)
+    assert_equal authoritative_event, File.read(event_path)
   end
 
   def test_concurrent_identical_terminal_releases_converge_same_claim
