@@ -5069,6 +5069,13 @@ module AgentCoord
       raise OperationalError, "host-limit record not found: #{quota_host}/#{scope}" unless existing
 
       validate_stored_host_limit!(existing)
+      if existing.data.fetch("status") == "cleared"
+        emit_payload({ "record" => existing.data }, options) do
+          @stdout.puts "cleared host limit #{quota_host}/#{scope} on #{log_scrub(options.fetch(:machine))}"
+        end
+        return 0
+      end
+
       cleared_at = now_utc
       observed_at = Time.iso8601(existing.data.fetch("observed_at")).utc
       raise OperationalError, "cannot clear host-limit record before observed_at" if cleared_at < observed_at

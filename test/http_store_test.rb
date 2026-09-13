@@ -492,6 +492,42 @@ class HttpHostLimitCliTest < HttpStoreTestCase
     end
   end
 
+  def test_clear_twice_preserves_cleared_at_without_a_second_write
+    path = "host_limits/default/build-mac-01/quota-host-a/five-hour.json"
+    active = {
+      "schema_version" => 1, "workspace" => "default", "machine" => "build-mac-01",
+      "quota_host" => "quota-host-a", "scope" => "five-hour", "status" => "active",
+      "observed_at" => "2026-09-12T10:00:00Z", "resets_at" => nil, "source" => "manual"
+    }
+    cleared = active.merge(
+      "status" => "cleared",
+      "cleared_at" => "2026-09-12T10:02:00Z"
+    )
+    options = { machine: "build-mac-01", quota_host: "quota-host-a", host_limit_scope: "five-hour", json: true }
+
+    responses = [
+      [200, { "path" => path, "data" => active, "version" => 3 }],
+      [200, { "path" => path, "version" => 4 }],
+      [200, { "path" => path, "data" => cleared, "version" => 4 }]
+    ]
+
+    with_stub(responses) do |store, stub|
+      first_output = StringIO.new
+      first = AgentCoord::Runner.new([], stdout: first_output, clock: Clock.new(Time.iso8601("2026-09-12T10:02:00Z")))
+      first.define_singleton_method(:build_store) { |_options| store }
+      first.send(:clear_host_limit, options)
+
+      second_output = StringIO.new
+      second = AgentCoord::Runner.new([], stdout: second_output, clock: Clock.new(Time.iso8601("2026-09-12T10:03:00Z")))
+      second.define_singleton_method(:build_store) { |_options| store }
+      second.send(:clear_host_limit, options)
+
+      assert_equal(%w[GET PUT GET], stub.requests.map { |request| request.fetch(:method) })
+      assert_equal cleared, JSON.parse(first_output.string).fetch("record")
+      assert_equal cleared, JSON.parse(second_output.string).fetch("record")
+    end
+  end
+
   def test_report_and_clear_surface_compare_and_swap_conflicts
     path = "host_limits/default/build-mac-01/quota-host-a/five-hour.json"
     existing = {
