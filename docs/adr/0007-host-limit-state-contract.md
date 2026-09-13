@@ -94,3 +94,14 @@ to the existing `/v1/state` and CLI status contracts.
 - Runtime work must verify the currently `UNKNOWN` provider facts, including
   wrapper-to-quota-host mapping, before implementing host-message, hook, or probe
   producers.
+
+## Implementation update (2026-09-12)
+
+The manual runtime slice now implements `report-host-limit` and
+`clear-host-limit`, the reserved workspace-aware storage key, effective-record
+projection in unscoped status, Worker path/scope authorization through the
+generic `/v1/state` routes, and archive-first GC for cleared records using
+`cleared_at`. Active records are not GC candidates, even after `resets_at` has
+elapsed. Provider-message parsing, hooks, probes, and lane-level
+`blocked-on-limit` annotation remain outside this slice; runtime still never
+infers `quota_host` from lane `host`.

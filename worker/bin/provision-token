@@ -34,6 +34,17 @@ fi
 
 valid_prefix() {
   local prefix="$1"
+  local active_prefix="${prefix#archive/}"
+  if [[ "$active_prefix" == host_limits || "$active_prefix" == host_limits/* ]]; then
+    [[ "$prefix" == "$active_prefix" || "$prefix" == "archive/$active_prefix" ]] || return 1
+    valid_host_limit_prefix "$active_prefix" || return 1
+    if [[ "$prefix" == archive/* ]]; then
+      [[ "${#active_prefix}" -le 512 ]] && [[ "${#prefix}" -le 520 ]]
+    else
+      [[ "${#prefix}" -le 512 ]]
+    fi
+    return
+  fi
   [[ "$prefix" =~ ^[A-Za-z0-9_./:-]+$ ]] || return 1
   [[ "$prefix" != *..* ]] || return 1
   [[ "$prefix" != *//* ]] || return 1
@@ -54,6 +65,31 @@ valid_prefix() {
   else
     [[ "${#prefix}" -le 512 ]]
   fi
+}
+
+valid_host_limit_prefix() {
+  local prefix="$1"
+  local parts=()
+  local encoded_component='^([A-Za-z0-9_-]|%[0-9A-F]{2})+$'
+  local canonical='^[a-z0-9]([a-z0-9._-]{0,126}[a-z0-9])?$'
+  IFS=/ read -r -a parts <<< "$prefix"
+  [[ "${parts[0]}" == "host_limits" ]] || return 1
+  case "${#parts[@]}" in
+    1) return 0 ;;
+    2) [[ "${parts[1]}" =~ $encoded_component ]] ;;
+    3) [[ "${parts[1]}" =~ $encoded_component ]] && [[ "${parts[2]}" =~ $encoded_component ]] ;;
+    4)
+      [[ "${parts[1]}" =~ $encoded_component ]] && [[ "${parts[2]}" =~ $encoded_component ]] &&
+        [[ "${parts[3]}" =~ $canonical ]]
+      ;;
+    5)
+      [[ "${parts[4]}" == *.json ]] || return 1
+      local scope="${parts[4]%.json}"
+      [[ "${parts[1]}" =~ $encoded_component ]] && [[ "${parts[2]}" =~ $encoded_component ]] &&
+        [[ "${parts[3]}" =~ $canonical ]] && [[ "$scope" =~ $canonical ]]
+      ;;
+    *) return 1 ;;
+  esac
 }
 
 valid_attention_component() {

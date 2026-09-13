@@ -29,13 +29,19 @@ const REQUEST_ENVELOPE_BYTES = 4096;
 const MAX_ACTIVE_STATE_PATH_BYTES = 512;
 const MAX_ARCHIVE_STATE_PATH_BYTES = MAX_ACTIVE_STATE_PATH_BYTES + "archive/".length;
 const MAX_LIST_LIMIT = 1000;
+const HOST_LIMIT_ENCODED_COMPONENT = "(?:[A-Za-z0-9_-]|%[0-9A-F]{2})+";
+const HOST_LIMIT_CANONICAL_COMPONENT = "[a-z0-9](?:[a-z0-9._-]{0,126}[a-z0-9])?";
 const ARCHIVABLE_RECORD_PATH = "(?:claims/[A-Za-z0-9_.:-]+/[A-Za-z0-9_.:-]+/[A-Za-z0-9_.:-]+\\.json"
   + "|heartbeats/[A-Za-z0-9_.:-]+\\.json"
   + "|batches/[A-Za-z0-9_.:-]+\\.json"
-  + "|events/[A-Za-z0-9_.:-]+/[A-Za-z0-9_.:-]+\\.json)";
+  + "|events/[A-Za-z0-9_.:-]+/[A-Za-z0-9_.:-]+\\.json"
+  + `|host_limits/${HOST_LIMIT_ENCODED_COMPONENT}/${HOST_LIMIT_ENCODED_COMPONENT}`
+  + `/${HOST_LIMIT_CANONICAL_COMPONENT}/${HOST_LIMIT_CANONICAL_COMPONENT}\\.json)`;
 const STATE_PATH = new RegExp(`^(?:${ARCHIVABLE_RECORD_PATH}|archive/${ARCHIVABLE_RECORD_PATH})$`);
 const ARCHIVABLE_PREFIX = "(?:claims(?:/[A-Za-z0-9_.:-]+(?:/[A-Za-z0-9_.:-]+)?)?"
-  + "|heartbeats|batches|events(?:/[A-Za-z0-9_.:-]+)?)";
+  + "|heartbeats|batches|events(?:/[A-Za-z0-9_.:-]+)?"
+  + `|host_limits(?:/${HOST_LIMIT_ENCODED_COMPONENT}(?:/${HOST_LIMIT_ENCODED_COMPONENT}`
+  + `(?:/${HOST_LIMIT_CANONICAL_COMPONENT})?)?)?)`;
 const ACTIVE_PREFIX = ARCHIVABLE_PREFIX;
 const ARCHIVE_PREFIX = `archive(?:/${ARCHIVABLE_PREFIX})?`;
 const STATE_PREFIX = new RegExp(`^(?:${ACTIVE_PREFIX}|${ARCHIVE_PREFIX})$`);
@@ -350,6 +356,8 @@ function exactStatePathScope(scope: string): boolean {
       return parts.length === 2;
     case "events":
       return parts.length === 3;
+    case "host_limits":
+      return parts.length === 5;
     case "attention":
       return parts.length === 5;
     default:

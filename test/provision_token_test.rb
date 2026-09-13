@@ -177,6 +177,29 @@ class ProvisionTokenTest < Minitest::Test
     assert_includes stdout, "writes:   [\"attention/default/shakacode/agent-coordination/decision-1.json\"]"
   end
 
+  def test_provisions_host_limit_directory_and_exact_encoded_record_scopes
+    prefix = "host_limits/team%2F%E6%9D%B1%E4%BA%AC/mac%25%2F%C3%A9/quota-host-a"
+    path = "#{prefix}/five-hour.json"
+    stdout, stderr, status = run_script(
+      "host-limit-writer", "--local", "--read-prefix", prefix, "--write-prefix", path
+    )
+
+    assert status.success?, stderr
+    assert_includes stdout, "reads:    [\"#{prefix}\"]"
+    assert_includes stdout, "writes:   [\"#{path}\"]"
+
+    [
+      "host_limits/team%2f/mac/quota-host-a/five-hour.json",
+      "host_limits/team%ZZ/mac/quota-host-a/five-hour.json",
+      "host_limits/default/mac/Quota-Host-A/five-hour.json",
+      "host_limits/default/mac/quota-host-a/Five-Hour.json"
+    ].each do |invalid|
+      _, rejected_stderr, rejected_status = run_script("m5", "--local", "--read-prefix", invalid)
+      refute rejected_status.success?, invalid
+      assert_includes rejected_stderr, "invalid read prefix", invalid
+    end
+  end
+
   def test_attention_scope_enforces_storage_key_component_contract
     accepted = "attention/#{'w' * 160}/owner/repo/#{'i' * 160}.json"
     invalid = [
