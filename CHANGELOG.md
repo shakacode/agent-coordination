@@ -9,6 +9,13 @@ when releases begin.
 
 ### Added
 
+- `agent-coord log --sync` now mirrors readable live claims as deterministic
+  `claim.snapshot` rows, so an unbatched claim with no lifecycle events is not
+  absent from the durable mirror. Snapshots preserve the literal lease target,
+  holder, status, expiry, generation, and related claim facts; unchanged
+  observations deduplicate while changed observations remain timestamped
+  history. Incomplete or malformed claim listings continue to fail closed.
+
 - Manual `report-host-limit` and `clear-host-limit` commands now persist the
   existing workspace-aware v1 host-limit record through LocalStore or the
   generic HTTP state routes with compare-and-swap protection. Unscoped status

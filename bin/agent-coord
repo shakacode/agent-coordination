@@ -5929,10 +5929,11 @@ module AgentCoord
 
         # Claims are the final completeness check. Do not let a failed claims
         # probe mask an already-conclusive refusal for the event trail.
-        log_claim_entries(store, context: :sync)
+        claims = log_claim_entries(store, context: :sync)
         raise OperationalError, "refusing to sync an incomplete trail: #{log_incomplete_prefixes}" if @log_incomplete
 
-        return log_sync(log_options, rows)
+        snapshots = log_claim_snapshot_rows(claims, include_synthetic: options[:include_synthetic])
+        return log_sync(log_options, rows + snapshots)
       end
 
       claims = log_claim_for(store, options, rows)
@@ -7048,21 +7049,85 @@ module AgentCoord
         "warning: claims #{reason}; #{subject} would not be reported"
       end
       claims.select do |candidate|
-        next true if candidate.data.is_a?(Hash)
+        candidate_identity = log_claim_path_identity(candidate) || log_claim_payload_identity(candidate)
+        if wanted_identity && candidate_identity &&
+           !log_identity_match?(candidate_identity, wanted_identity, lane_exact: true)
+          next false
+        end
+
+        log_validate_record_encoding!(candidate)
+        next context != :sync || log_sync_claim_valid?(candidate) if candidate.data.is_a?(Hash)
 
         # A malformed sibling cannot shorten a scoped answer when its path
         # proves that it belongs to a different work item. Unscoped --sync
         # deliberately keeps the fleet-wide completeness check.
-        path_identity = log_claim_path_identity(candidate)
-        if wanted_identity && path_identity &&
-           !log_identity_match?(path_identity, wanted_identity, lane_exact: true)
-          next false
-        end
-
         message = "warning: live claim record is not an object at #{candidate.path}; " \
                   "this trail may be incomplete"
         log_note_incomplete("claims", log_scrub(message))
         false
+      end
+    end
+
+    def log_sync_claim_valid?(entry)
+      data = entry.data
+      log_sync_claim_fields_valid!(data)
+      log_sync_claim_path_valid!(entry)
+      log_sync_pending_expiry_valid!(entry)
+      Time.iso8601(data.fetch("updated_at"))
+      true
+    rescue AgentCoord::Error, ArgumentError, TypeError => e
+      message = "warning: malformed live claim record at #{entry.path}: #{e.message}; " \
+                "claim data would not be reported"
+      log_note_incomplete("claims", log_scrub(message))
+      false
+    end
+
+    def log_sync_claim_fields_valid!(data)
+      missing = %w[status agent_id updated_at].select do |field|
+        value = data[field].to_s
+        field == "agent_id" ? value.empty? : value.strip.empty?
+      end
+      raise ArgumentError, "missing #{missing.join(', ')}" unless missing.empty?
+
+      nonstrings = %w[status agent_id updated_at].reject { |field| data[field].is_a?(String) }
+      raise ArgumentError, "non-string #{nonstrings.join(', ')}" unless nonstrings.empty?
+
+      raise ArgumentError, "closed_by is not an object" if data.key?("closed_by") && !data["closed_by"].is_a?(Hash)
+
+      valid_status = %w[active released expired].include?(data["status"])
+      raise ArgumentError, "unsupported status #{data['status'].inspect}" unless valid_status
+
+      if data["status"] == "expired"
+        raise ArgumentError, "missing reaped_at" if data["reaped_at"].to_s.strip.empty?
+        raise ArgumentError, "non-string reaped_at" unless data["reaped_at"].is_a?(String)
+
+        Time.iso8601(data["reaped_at"])
+      end
+
+      valid_generation = !data.key?("generation") || data["generation"].is_a?(Integer)
+      raise ArgumentError, "generation is not an integer" unless valid_generation
+    end
+
+    def log_sync_pending_expiry_valid!(entry)
+      data = entry.data
+      pending = data["expired_event_pending"]
+      raise ArgumentError, "expired_event_pending is not true" if data.key?("expired_event_pending") && pending != true
+      if data.key?("expired_event_replay") && pending != true
+        raise ArgumentError, "expired_event_replay exists without a pending marker"
+      end
+
+      gc_claim_expired_event_payload(data, entry.path) if pending
+    end
+
+    def log_sync_claim_path_valid!(entry)
+      data = entry.data
+      path_repo = AgentCoord.repo_from_claim_path(entry.path)
+      path_target = AgentCoord.target_from_path(entry.path)
+      canonical_path = AgentCoord.claim_path(path_repo, path_target)
+      raise ArgumentError, "noncanonical storage path" unless entry.path == canonical_path
+
+      if (data.key?("repo") && data["repo"] != path_repo) || (data.key?("target") && data["target"].to_s != path_target)
+        raise ArgumentError, "payload identity does not match storage path"
       end
     end
 
@@ -7085,22 +7150,11 @@ module AgentCoord
 
         log_identity_match?(log_claim_identity(candidate), wanted_identity, lane_exact: true)
       end
-      # A listing can return one lease more than once, including two reads around
-      # a renewal, so group on the immutable identity the record names and retain
-      # its newest snapshot. Repo and target stay exact: case variants are separate
-      # literal keys on case-sensitive stores, and collapsing them would conceal
-      # double custody. A different holder also stays visible because two reads
-      # around a takeover are genuinely ambiguous. Lanes remain exact because each
-      # lane holds its own lease.
-      matches.group_by { |candidate| claim_lease_key(candidate) }
-             .values
-             .map { |variants| variants.max_by { |candidate| log_at_key(candidate.data["updated_at"]) } }
-             .sort_by { |candidate| log_at_key(candidate.data["updated_at"]) }
-             .map do |candidate|
-               { "record" => log_claim_record(candidate.data, now_utc, log_claim_target(candidate)),
-                 "target" => log_claim_target(candidate),
-                 "identity" => log_claim_identity(candidate) }
-             end
+      log_unique_claim_entries(matches).map do |candidate|
+        { "record" => log_claim_record(candidate.data, now_utc, log_claim_target(candidate)),
+          "target" => log_claim_target(candidate),
+          "identity" => log_claim_identity(candidate) }
+      end
     end
 
     def log_claim_identity(entry)
@@ -7111,8 +7165,24 @@ module AgentCoord
       path = entry.path
       return unless path.is_a?(String) && path.valid_encoding?
 
-      log_identity(AgentCoord.repo_from_claim_path(path), AgentCoord.target_from_path(path))
-    rescue ArgumentError
+      repo = AgentCoord.repo_from_claim_path(path)
+      target = AgentCoord.target_from_path(path)
+      return unless AgentCoord.claim_path(repo, target) == path
+
+      log_identity(repo, target)
+    rescue AgentCoord::Error, ArgumentError
+      nil
+    end
+
+    def log_claim_payload_identity(entry)
+      data = entry.data
+      return unless data.is_a?(Hash)
+
+      repo, target = data.values_at("repo", "target")
+      return unless [repo, target].all? { |value| value.is_a?(String) && value.valid_encoding? }
+
+      log_identity(repo.strip, target.strip)
+    rescue AgentCoord::Error, ArgumentError
       nil
     end
 
@@ -7135,6 +7205,62 @@ module AgentCoord
       return entry.path if data["target"].to_s.empty? || data["agent_id"].to_s.empty?
 
       [log_claim_repo(entry), data["target"], data["agent_id"]]
+    end
+
+    # A listing can return one lease more than once, including two reads around
+    # a renewal, so group on the immutable identity the record names and retain
+    # every distinct snapshot at its newest timestamp. Claim timestamps have
+    # second precision, so choosing one tied variant could discard a release or
+    # renewal observed later in the same second. Repo and target stay exact:
+    # case variants are separate
+    # literal keys on case-sensitive stores, and collapsing them would conceal
+    # double custody. A different holder also stays visible because two reads
+    # around a takeover are genuinely ambiguous. Lanes remain exact because each
+    # lane holds its own lease.
+    def log_latest_duplicate_claim_entry(duplicates, observed_at)
+      versions = duplicates.to_h { |candidate| [candidate, log_numeric_store_version(candidate)] }
+      return duplicates.max_by { |candidate| observed_at.fetch(candidate) } unless versions.values.all?
+
+      duplicates.max_by { |candidate| versions.fetch(candidate) }
+    end
+
+    def log_newest_claim_variants(variants, observed_at)
+      newest_at = variants.map { |candidate| log_at_key(candidate.data["updated_at"]) }.max
+      variants.select { |candidate| log_at_key(candidate.data["updated_at"]) == newest_at }
+              .group_by(&:data).values
+              .map { |duplicates| log_latest_duplicate_claim_entry(duplicates, observed_at) }
+    end
+
+    def log_unique_claim_entries(entries, preserve_ties: false)
+      observed_at = {}.compare_by_identity
+      entries.each_with_index { |candidate, index| observed_at[candidate] = index }
+      newest = entries.group_by { |candidate| claim_lease_key(candidate) }.values.flat_map do |variants|
+        tied = log_newest_claim_variants(variants, observed_at)
+        next tied if preserve_ties
+
+        canonical = ->(candidate) { JSON.generate(candidate.data.sort.to_h) }
+        versions = tied.to_h { |candidate| [candidate, log_numeric_store_version(candidate)] }
+        selected = if versions.values.all?
+                     tied.max_by { |candidate| [versions.fetch(candidate), canonical.call(candidate)] }
+                   else
+                     tied.max_by(&canonical)
+                   end
+        [selected]
+      end
+      newest.sort_by do |candidate|
+        tie_key = preserve_ties ? observed_at.fetch(candidate) : JSON.generate(candidate.data.sort.to_h)
+        [log_at_key(candidate.data["updated_at"]), tie_key]
+      end
+    end
+
+    # HTTP state versions are monotonic decimal counters. Local and GitHub
+    # stores use content hashes instead, so they retain observation-order
+    # fallback rather than pretending a digest establishes causality.
+    def log_numeric_store_version(entry)
+      value = entry.sha.to_s
+      return unless value.match?(/\A(?:0|[1-9]\d{0,18})\z/)
+
+      Integer(value, 10)
     end
 
     # Built from claim fields directly rather than through log_row, whose "phase"
@@ -7171,6 +7297,71 @@ module AgentCoord
          "synthetic" => data["synthetic"] ? true : false,
          "synthetic_kind" => log_scrub(log_present(data["synthetic_kind"]))
        )
+    end
+
+    # Claims are mutable state, not events. The durable mirror nevertheless needs
+    # an observation for a live unbatched claim, because that claim may be the only
+    # evidence of custody and can disappear before the next sync. Snapshot rows
+    # use the event-shaped TSV contract so existing consumers remain readable,
+    # while their type and deterministic id make the distinction explicit.
+    def log_claim_snapshot_fields(entry, target)
+      data = entry.data
+      fields = {
+        "repo" => log_claim_repo(entry), "target" => target,
+        "status" => data["status"], "phase" => data["phase"],
+        "agent_id" => data["agent_id"], "machine_id" => data["machine_id"],
+        "host" => data["host"], "session_id" => data["session_id"],
+        "session_source" => data["session_source"], "instance_id" => data["instance_id"],
+        "thread_handle" => data["thread_handle"], "chat_handle" => data["chat_handle"],
+        "batch_id" => data["batch_id"], "branch" => data["branch"],
+        "claimed_at" => data["claimed_at"], "updated_at" => data["updated_at"],
+        "expires_at" => data["expires_at"], "generation" => data["generation"],
+        "operator" => data["operator"], "pr_url" => data["pr_url"],
+        "dashboard_url" => data["dashboard_url"], "release_mode" => data["release_mode"],
+        "handoff_to" => data["handoff_to"], "handoff_note" => data["handoff_note"],
+        "terminal" => data["terminal"], "pr_state" => data["pr_state"],
+        "evidence_url" => data["evidence_url"], "workspace" => data["workspace"],
+        "released_by" => data["released_by"], "released_at" => data["released_at"],
+        "reaped_at" => data["reaped_at"], "expired_event_pending" => data["expired_event_pending"],
+        "expired_event_id" => data["expired_event_id"],
+        "expired_event_batch_id" => data["expired_event_batch_id"],
+        "expired_event_at" => data["expired_event_at"],
+        "closed_by_agent_id" => data.dig("closed_by", "agent_id"),
+        "closed_by_machine" => data.dig("closed_by", "machine"),
+        "synthetic" => data["synthetic"], "synthetic_kind" => data["synthetic_kind"]
+      }
+      replay = data["expired_event_replay"]
+      return fields unless replay.is_a?(Hash)
+
+      fields.merge(replay.sort.to_h do |key, value|
+        ["expired_event_replay_#{key}", value]
+      end)
+    end
+
+    def log_claim_snapshot_rows(entries, include_synthetic: false)
+      log_unique_claim_entries(entries, preserve_ties: true).filter_map do |entry|
+        data = entry.data
+        next if data["synthetic"] && !include_synthetic
+
+        target = log_claim_target(entry)
+        snapshot_fields = log_claim_snapshot_fields(entry, target)
+        digest = Digest::SHA256.hexdigest(JSON.generate(snapshot_fields.sort.to_h))[0, 16]
+        detail = snapshot_fields.sort_by { |key, _| key }.filter_map do |key, value|
+          next if value.nil? || value.to_s.empty? || key == "repo" || key == "target"
+
+          "#{key}=#{value}"
+        end.join(" ")
+        snapshot_at = data["status"] == "expired" ? data.fetch("reaped_at") : data["updated_at"]
+        snapshot_version = data["status"] == "expired" ? "-v2" : ""
+        log_row(
+          "at" => snapshot_at, "machine_id" => data["machine_id"],
+          "host" => data["host"], "repo" => snapshot_fields["repo"],
+          "target" => target, "type" => "claim.snapshot", "phase" => data["phase"],
+          "agent_id" => data["agent_id"], "batch_id" => data["batch_id"],
+          "message" => detail, "event_id" => "claim-snapshot#{snapshot_version}-#{digest}",
+          "synthetic" => data["synthetic"], "synthetic_kind" => data["synthetic_kind"]
+        ).merge("_claim_store_version" => log_numeric_store_version(entry))
+      end
     end
 
     # The fleet carries claims left active with a lease long past, so a claim
@@ -7240,7 +7431,15 @@ module AgentCoord
 
     def log_sync_write(path, rows, options)
       FileUtils.mkdir_p(File.dirname(path))
-      fresh = log_sync_append(path, rows.map { |row| log_tsv_line(row) })
+      lines = rows.map { |row| log_tsv_line(row) }
+      snapshot_versions = rows.each_with_index.with_object({}) do |(row, index), versions|
+        version = row["_claim_store_version"]
+        next if version.nil?
+
+        line = lines.fetch(index)
+        versions[line] = [versions[line], version].compact.max
+      end
+      fresh = log_sync_append(path, lines, observed_snapshot_versions: snapshot_versions)
       if options[:json]
         @stdout.puts JSON.pretty_generate({ "synced" => fresh.length, "path" => path })
       else
@@ -7256,13 +7455,21 @@ module AgentCoord
     # backfill -- so the merged set is rewritten in timestamp order rather than
     # appended blindly. Nothing already recorded is ever dropped, and the rewrite
     # happens under the same exclusive lock as the read.
-    def log_sync_append(path, lines)
+    def log_sync_append(path, lines, observed_snapshot_versions: {})
       File.open("#{path}#{LOG_SYNC_LOCK_SUFFIX}", File::RDWR | File::CREAT, 0o600) do |lock|
         lock.flock(File::LOCK_EX)
         existing = log_sync_existing(path)
         seen = existing.to_h { |line| [line, true] }
-        fresh = lines.reject { |line| seen.key?(line) }
-        log_sync_replace(path, log_sync_ordered(existing + fresh)) unless fresh.empty?
+        fresh = lines.reject { |line| seen.key?(line) }.uniq
+        combined = existing + fresh
+        return fresh if fresh.empty? && log_sync_sorted?(
+          combined, observed_lines: lines, observed_snapshot_versions: observed_snapshot_versions
+        )
+
+        ordered = log_sync_ordered(
+          combined, observed_lines: lines, observed_snapshot_versions: observed_snapshot_versions
+        )
+        log_sync_replace(path, ordered) unless ordered == existing
         fresh
       end
     end
@@ -7296,13 +7503,61 @@ module AgentCoord
       FileUtils.rm_f(temp) if temp && File.exist?(temp)
     end
 
-    # Ties break on event id exactly as log_rows does, so a grep of the mirror and
-    # a `log` invocation cannot disagree about what happened last.
-    def log_sync_ordered(lines)
+    # Event ties break on stable event id. Snapshot ties use a monotonic numeric
+    # store version when every row in the tie has one, making HTTP pagination
+    # order irrelevant, then retain observation order for other stores. Events
+    # precede snapshots so the current mutable claim remains the final fact.
+    def log_sync_ordered(lines, observed_lines: [], observed_snapshot_versions: {})
+      observed_at = observed_lines.each_with_index.to_h
+      version_groups = log_sync_version_groups(lines, observed_snapshot_versions)
       lines.sort_by.with_index do |line, index|
-        fields = line.split("\t")
-        [log_at_key(fields.first), fields[LOG_TSV_FIELDS.index("event_id")].to_s, index]
+        log_sync_order_key(line, index, observed_at, observed_snapshot_versions, version_groups)
       end
+    end
+
+    # Most syncs add nothing. A linear check avoids repeatedly sorting an
+    # unbounded durable mirror while still detecting observation-order changes
+    # for tied legacy snapshots.
+    def log_sync_sorted?(lines, observed_lines: [], observed_snapshot_versions: {})
+      observed_at = observed_lines.each_with_index.to_h
+      version_groups = log_sync_version_groups(lines, observed_snapshot_versions)
+      previous = nil
+      lines.each_with_index do |line, index|
+        current = log_sync_order_key(
+          line, index, observed_at, observed_snapshot_versions, version_groups
+        )
+        return false if previous && (previous <=> current) == 1
+
+        previous = current
+      end
+      true
+    end
+
+    def log_sync_version_groups(lines, observed_snapshot_versions)
+      groups = Hash.new { |hash, key| hash[key] = [] }
+      lines.each do |line|
+        fields = line.split("\t")
+        next unless fields[LOG_TSV_FIELDS.index("type")].to_s == "claim.snapshot"
+
+        groups[[log_at_key(fields.first), fields[LOG_TSV_FIELDS.index("work_item")].to_s]] << line
+      end
+      groups.each_with_object({}) do |(key, snapshots), complete|
+        complete[key] = true if snapshots.all? { |line| observed_snapshot_versions.key?(line) }
+      end
+    end
+
+    def log_sync_order_key(line, index, observed_at, observed_snapshot_versions, version_groups)
+      fields = line.split("\t")
+      type = fields[LOG_TSV_FIELDS.index("type")].to_s
+      event_id = fields[LOG_TSV_FIELDS.index("event_id")].to_s
+      work_item = fields[LOG_TSV_FIELDS.index("work_item")].to_s
+      observed_index = observed_at[line]
+      snapshot_order = observed_index.nil? ? [0, index] : [1, observed_index]
+      version_group = version_groups[[log_at_key(fields.first), work_item]]
+      version = observed_snapshot_versions[line] if version_group
+      version_order = version_group ? [1, version, *snapshot_order] : [0, *snapshot_order]
+      tie = type == "claim.snapshot" ? [1, work_item, *version_order] : [0, event_id, index]
+      [log_at_key(fields.first), *tie]
     end
 
     def log_sync_path(options)
